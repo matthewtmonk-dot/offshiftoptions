@@ -1,0 +1,20 @@
+{
+  "name": "LST Buddy",
+  "short_name": "LST Buddy",
+  "description": "Private demo/manual cash-secured-put research and tracking app.",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#090d0b",
+  "theme_color": "#0a0f0d",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "productivity", "education"]
+}
