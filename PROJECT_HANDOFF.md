@@ -17,13 +17,14 @@ This is the **canonical single source of truth** for the current state of Off Sh
 9. Never put secrets, passwords, API keys, OAuth secrets, access/refresh tokens, session secrets, VAPID private keys, database connection strings, or other credentials in this file. Document environment variable **names** and purposes only.
 10. Do not silently reverse the architectural decisions recorded below. If a requested change conflicts with one, explain the conflict before making a major reversal.
 11. Never run destructive production database operations (`prisma migrate reset`, `db:reset`, the destructive `prisma/seed.ts`, anything using `deleteMany` as a reset) unless Matt explicitly understands and authorizes exactly what data would be lost.
-12. Keep brokerage integration read-only. Never implement automated order submission merely because an API supports it, unless Matt explicitly authorizes changing that requirement.
-13. **Do not blindly implement Matt's requested technical approach if a clearly better, safer, more secure, more maintainable, or more conventional solution exists.** Evaluate significant requests for security, data safety, maintainability, production reliability, deployment compatibility, privacy, and standard best practices. If there's a better approach, explain it and recommend it before implementing the weaker one. Default to the safer/better implementation unless Matt explicitly says he understands the tradeoffs and wants the original approach anyway.
-14. Proactively protect against: committed secrets, insecure authentication, weak authorization, IDOR/cross-user access, destructive database operations, accidental production data loss, unsafe API credential handling, client-side exposure of private keys/tokens, insecure OAuth redirects/callbacks, weak session handling, missing input validation, unsafe file uploads, insecure dependency use, fragile deployment shortcuts, dev/production environment confusion, hard-coded production URLs/secrets, unnecessary public exposure of services, overcomplicated infrastructure, misleading financial data, and accidental trading/order execution.
-15. Security-sensitive changes (authentication, authorization, database access, financial data, OAuth, brokerage APIs, deployment secrets, production infrastructure) require an explicit focused security review of the affected code before the task is done.
-16. If a secret is ever found committed to Git, do not just delete it. Report the exposure (file, type, whether it's in history) and recommend proper credential rotation.
-17. Never assume hiding a UI element provides authorization — authorization must be enforced server-side.
-18. Never claim mock, cached, stale, demo, or manual financial information is live/current market data.
+12. **Database schema changes require special care.** Hostinger cannot reliably run `prisma migrate deploy` in production (see Production/Deployment). Never assume pushing a migration to `main` applies it. Do not push application code that depends on a new migration until that migration has been applied to Supabase and verified out-of-band, per the workflow in Production/Deployment.
+13. Keep brokerage integration read-only. Never implement automated order submission merely because an API supports it, unless Matt explicitly authorizes changing that requirement.
+14. **Do not blindly implement Matt's requested technical approach if a clearly better, safer, more secure, more maintainable, or more conventional solution exists.** Evaluate significant requests for security, data safety, maintainability, production reliability, deployment compatibility, privacy, and standard best practices. If there's a better approach, explain it and recommend it before implementing the weaker one. Default to the safer/better implementation unless Matt explicitly says he understands the tradeoffs and wants the original approach anyway.
+15. Proactively protect against: committed secrets, insecure authentication, weak authorization, IDOR/cross-user access, destructive database operations, accidental production data loss, unsafe API credential handling, client-side exposure of private keys/tokens, insecure OAuth redirects/callbacks, weak session handling, missing input validation, unsafe file uploads, insecure dependency use, fragile deployment shortcuts, dev/production environment confusion, hard-coded production URLs/secrets, unnecessary public exposure of services, overcomplicated infrastructure, misleading financial data, and accidental trading/order execution.
+16. Security-sensitive changes (authentication, authorization, database access, financial data, OAuth, brokerage APIs, deployment secrets, production infrastructure) require an explicit focused security review of the affected code before the task is done.
+17. If a secret is ever found committed to Git, do not just delete it. Report the exposure (file, type, whether it's in history) and recommend proper credential rotation.
+18. Never assume hiding a UI element provides authorization — authorization must be enforced server-side.
+19. Never claim mock, cached, stale, demo, or manual financial information is live/current market data.
 
 ---
 
@@ -62,13 +63,15 @@ Verified from repository state (`package.json`, `Dockerfile`, `next.config.ts`):
 | Hosting | Hostinger managed Node.js hosting |
 | Local containers | Docker Compose (`compose.yaml`) — `db` (Postgres) + `app` (Node 24 Alpine, see `Dockerfile`) |
 | GitHub | https://github.com/matthewtmonk-dot/offshiftoptions.git, branch `main` |
-| Production domain | https://offshiftoptions.com (externally reported as connected — see Hosting/Domain section) |
+| Production domain | https://offshiftoptions.com — connected and live (externally confirmed; see Hosting/Domain section) |
 
 **Hostinger's actual configured Node.js version is externally managed** (Hostinger control panel) and not verifiable from this repository — there is no `.nvmrc`/`engines` field pinning it. The Docker image and local dev use Node 24.
 
 ---
 
 ## Production / Deployment
+
+> **⚠ DATABASE SCHEMA CHANGES REQUIRE SPECIAL CARE.** Hostinger auto-deploys every push to `main`, but its managed Node environment cannot reliably execute Prisma's schema engine, so it does **not** apply migrations during deployment (see Migration strategy below). **Never push code to `main` that depends on a new migration until that migration has been applied to Supabase and verified**, per the workflow below. Never run `prisma migrate reset`, the destructive `prisma/seed.ts`, or any other destructive reset against production.
 
 **Deployment model:**
 
@@ -115,7 +118,7 @@ Names and purposes only — **never values**.
 **PRODUCTION REQUIRED**
 - `DATABASE_URL` — Supabase Postgres connection string.
 - `LST_SESSION_SECRET` — HMAC key used to hash session tokens before storing/looking them up (name predates the "Off Shift Options" rebrand; not yet renamed — see Known Issues).
-- `NEXT_PUBLIC_APP_URL` — used for `metadataBase` (canonical/Open Graph URL resolution). Should be set to `https://offshiftoptions.com` in Hostinger now that the domain is connected (externally reported — confirm the actual value in Hostinger's dashboard, not verifiable from this repo).
+- `NEXT_PUBLIC_APP_URL` — used for `metadataBase` (canonical/Open Graph URL resolution). Already set in Hostinger to `https://offshiftoptions.com`, with a redeployment completed afterward (externally confirmed; not independently verifiable from this repo).
 
 **DEVELOPMENT ONLY**
 - `DEV_SEED_PASSWORD` — initial password used by `prisma/seed.ts` and (only for user creation) `prisma/bootstrap-production.ts`. Was required once in Hostinger's env for the one-time production bootstrap; not needed for routine deploys now that Matt/Eric already exist.
@@ -189,11 +192,11 @@ Names and purposes only — **never values**.
 
 ## Hosting / Domain
 
-- **Production domain:** https://offshiftoptions.com — externally reported as purchased and connected. Not independently verifiable from this repository; if canonical/OG URLs look wrong in production, check the actual `NEXT_PUBLIC_APP_URL` value in Hostinger's dashboard.
+- **Production domain:** https://offshiftoptions.com — connected to the Hostinger Node application and live (externally confirmed: purchased, connected, `NEXT_PUBLIC_APP_URL` updated in Hostinger to this URL, and Hostinger redeployed afterward). Not independently verifiable from this repository.
 - **Hosting:** Hostinger managed Node.js hosting, deployed via GitHub auto-deploy from `main`.
 - **Database:** Supabase PostgreSQL (production).
-- Cookies, the service worker scope, and the PWA manifest's `start_url`/`scope` are all relative (`/`) — no hardcoded domain anywhere in the app, so no code change is needed when the domain changes; only the `NEXT_PUBLIC_APP_URL` environment variable in Hostinger needs to be updated/confirmed.
-- The original temporary Hostinger-provided URL may still work as a fallback host but is no longer the intended production domain once `offshiftoptions.com` is confirmed live.
+- Cookies, the service worker scope, and the PWA manifest's `start_url`/`scope` are all relative (`/`) — no hardcoded domain anywhere in the app, so no further code change was needed for the domain cutover.
+- The old temporary Hostinger-provided URL is no longer the primary production URL now that `offshiftoptions.com` is connected and confirmed live.
 
 ---
 
@@ -307,7 +310,7 @@ Future AI agents should not casually reverse these:
 - **Web Push is unfinished** — documented no-op, real implementation deferred (see PWA section).
 - **`LST_SESSION_SECRET` env var name predates the "Off Shift Options" rebrand.** Cosmetic only (it's an internal config key, not user-visible), but renaming it later requires coordinating the Hostinger env var change with a deploy — not urgent.
 - **CSP allows `script-src`/`style-src` `'unsafe-inline'`** because Next's App Router needs it without a nonce-based setup. A stricter nonce-based CSP is a possible future hardening step, not currently required.
-- **No CI-automated migration deploy** — the Supabase migration workflow (see Deployment section) is currently a manual runbook, not automated. Reasonable to automate later, not done yet.
+- **No CI-automated migration deploy** — Hostinger cannot run `prisma migrate deploy` (see the warning in Production / Deployment). The Supabase migration workflow is currently a manual runbook: apply and verify a migration against Supabase *before* pushing dependent code to `main`. Reasonable to automate in CI later; not done yet, and not to be implemented as a side effect of an unrelated task.
 - **Scanner data is entirely demo/mock** until Schwab access is approved and integrated — expected, not a bug, but worth remembering it's the single biggest "not real yet" surface in the app.
 - A handful of older docs (e.g. `docs/SCHWAB_INTEGRATION.md`) still say "LST Buddy" in prose; harmless, not yet swept for the rebrand since it doesn't affect any user-visible surface.
 
@@ -318,7 +321,7 @@ Future AI agents should not casually reverse these:
 - Off Shift Options is live on Hostinger, deployed via GitHub `main` auto-deploy.
 - Supabase production PostgreSQL is live and reachable; `/api/health` has reported healthy.
 - Production Matt/Eric accounts have been bootstrapped via the safe, non-destructive bootstrap script and login has been verified in production.
-- `offshiftoptions.com` has been purchased and connected as the production domain (externally reported; confirm `NEXT_PUBLIC_APP_URL` in Hostinger matches).
+- `offshiftoptions.com` has been purchased, connected as the production domain, and confirmed live; `NEXT_PUBLIC_APP_URL` has already been updated in Hostinger to `https://offshiftoptions.com` and Hostinger redeployed afterward (externally confirmed). The old temporary Hostinger URL is no longer primary.
 - Schwab Trader API Individual access has been requested; approval is still pending. No Schwab code exists yet.
 - Just completed: a full pre-Schwab production hardening pass — rebrand to "Off Shift Options", real PWA icons, a self-service Change Password screen, live (polling) chat, visible demo-data labeling on the scanner, production security headers, and fixes to `/api/health` and `/api/push-subscriptions`. All changes committed and pushed to `main`; nothing was run against Supabase or Hostinger directly from this machine.
 - This continuity system (`PROJECT_HANDOFF.md`, `AGENTS.md` update, `CLAUDE.md`) is being created now so any AI can resume by reading this file.
