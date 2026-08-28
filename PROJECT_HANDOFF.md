@@ -34,6 +34,7 @@ This is the **canonical single source of truth** for the current state of Off Sh
 - **Users:** Private two-user application — Matt and Eric. No public signup exists or is planned.
 - **Purpose:** A mobile-friendly app for two firefighter friends to run a disciplined, low-stress cash-secured-put options workflow: track trades/positions, scan candidates against personal criteria, share recommendations, chat, and build toward additional family income and long-term financial flexibility (including reduced dependence on firefighting work if health/life circumstances make that desirable).
 - **This is NOT:** a brokerage, a public trading platform, a financial advisory service, or an automated trading bot.
+- **`PRODUCT_VISION.md`** (repo root) is the long-term north-star document — product areas, principles, and future direction. It is distinct from this file: `PRODUCT_VISION.md` rarely changes and is not a changelog; `PROJECT_HANDOFF.md` is the operational current-state snapshot that changes with every meaningful task.
 
 ## Core Product Principles
 
@@ -109,6 +110,8 @@ GitHub main → Hostinger auto-deploy → Next.js app → Supabase PostgreSQL
 
 **Never run against production:** `prisma migrate reset`, `db:reset`, `pnpm db:seed`, or any ad hoc `deleteMany`-based reset logic — unless Matt explicitly understands and authorizes exactly what data would be lost. If any AI is ever asked to run a destructive database command, it must first explain exactly what data would be lost and get explicit confirmation.
 
+**Pending production migration:** `prisma/migrations/20260828215700_campaign_tracker_foundation/` (adds the Campaign Tracker schema — see Campaign Tracker section) has been created and applied to local Docker Postgres only. **It has NOT been applied to production Supabase.** Follow the migration runbook in Production / Deployment before or alongside the Hostinger deploy that ships this code — do not push the campaign tracker code to `main` until this migration is applied and verified against Supabase.
+
 ---
 
 ## Environment Variables / Secrets
@@ -154,13 +157,14 @@ Names and purposes only — **never values**.
 | Feature | Status | Notes |
 |---|---|---|
 | Dashboard | WORKING | Aggregates account snapshot, open trades, watchlist, recommendations, latest scan, recent chat. All values marked demo/manual where applicable. |
-| Scanner (results) | DEMO/MOCK | `src/domain/scanner` — real PASS/FAIL/UNKNOWN evaluation engine, but against a fixed demo candidate list (CORZ/SOFI/AMD/IONQ), not live market data. Visibly labeled with a banner + DEMO badges. |
+| Scanner (results) | DEMO/MOCK | `src/domain/scanner` — real PASS/FAIL/UNKNOWN evaluation engine with setup scores, near-match detection, exclusion diagnostics, sortable/quick-filtered results, and expandable stock/option inspectors. The current universe is a deterministic 13-candidate demo set, not live market data. Visibly labeled with demo warnings and DEMO badges. |
 | My LST scanner settings | WORKING (per-user) | `/scanner/settings` — each user edits their own `ScannerProfile`/`ScannerRule` rows; proven isolated per-user by DB integration tests. |
 | Watchlist | WORKING | Private/shared items, Pro/Con/General notes (owner-only edit), buddy comments (shared, read-access-gated). |
 | Recommendations | WORKING | Send/receive between Matt and Eric, reason tags, status lifecycle (`NEW`/`WATCHING`/`PASSED`/`ARCHIVED`), participant-gated comments. |
 | Buddy chat | WORKING (polling-live) | Membership-gated conversation; new messages/read-receipts appear without a manual reload via a 4s `router.refresh()` poll while the tab is visible (`src/components/live-refresh.tsx`) — not WebSockets/Realtime. |
 | Notifications | WORKING (in-app only) | In-app notification model/UI/provider works. External Web Push is a documented no-op (see PWA section). |
-| Trades / Positions | DEMO/MANUAL | Seeded demo CSP positions; all financial values explicitly labeled demo/manual, never presented as live. |
+| Tracker (accounts + campaigns) | WORKING (manual/demo) | `/positions` (nav label "Tracker") — manual accounts and full CSP/wheel campaign lifecycles (open → roll → assign → covered call → close) with SHARED/PRIVATE/INHERIT visibility and Mine/Eric/Both filtering. See Campaign Tracker section. |
+| Legacy Trade/TradeLeg positions | DEMO/MANUAL | The original per-trade position model still renders (as "Legacy open CSP snapshots") below the campaign list on `/positions` for continuity; new work should use campaigns, not this model. |
 | Cash-secured put calculations | WORKING | `src/domain/finance/calculations.ts` — real, tested per-share vs. per-contract math (premium capture, ROR, annualized ROR, break-even, position health status). Deterministic, not dependent on live data. |
 | PWA / installation | WORKING | Manifest, service worker, install prompt, real 192/512 PNG icons (any + maskable) and Apple touch icon. |
 | Health endpoint | WORKING | See Deployment section. |
@@ -173,10 +177,35 @@ Names and purposes only — **never values**.
 
 ## Scanner
 
-- Engine: `src/domain/scanner/scanner.ts` — criterion-level evaluation. Each criterion produces `PASS` / `FAIL` / `UNKNOWN` with an actual value, operator, desired value/range, and explanation. Overall result: `FAIL` if any criterion fails, else `UNKNOWN` if any is unknown, else `PASS`.
+- Engine: `src/domain/scanner/scanner.ts` — criterion-level evaluation. Each criterion produces `PASS` / `FAIL` / `UNKNOWN` with an actual value, operator, desired value/range, and explanation. Overall result: `FAIL` if any criterion fails, else `UNKNOWN` if any is unknown, else `PASS`. The engine also calculates a criteria/setup score (not profit probability), labels score quality, identifies near misses, surfaces a primary concern, and summarizes first-rule exclusions for the "why is the list thin?" diagnostic.
 - Rule catalog: `src/domain/scanner/profile.ts` (`SCANNER_RULE_DEFINITIONS`) — stock price range, RSI, Bollinger %, DTE, absolute delta, put ROR, annualized ROR, option bid, bid/ask spread %, open interest, option volume, earnings distance, Do Not Trade filter (fixed desired value, not user-editable), debt/equity.
 - Per-user settings: `/scanner/settings` edits a user's own `ScannerProfile`/`ScannerRule` rows (enable/disable + desired value(s) per rule); `@@unique([profileId, key])` prevents duplicate rule keys per profile. Verified isolated per user (Matt editing his settings never changes Eric's) by `src/lib/workflows.integration.test.ts`.
-- **Data is demo/mock**: `DEMO_SCAN_CANDIDATES` in `profile.ts` is a fixed list (CORZ, SOFI, AMD, IONQ) with hand-entered values, not a live feed. This is visibly labeled in the UI (banner + per-card DEMO badge) and must stay labeled until real Schwab option-chain data replaces it.
+- Scanner page UI: `/scanner` now has Score and Filter modes, quick filters (Strongest, Best premium, Most liquid, Lowest RSI, Far from earnings, Near matches, Watchlist only), query-string sorting, desktop table layout, mobile cards, native expandable inspectors, visual status tiles, and a `Refresh demo scan` server action that reruns the deterministic demo scanner for the signed-in user without seeding or resetting data.
+- **Data is demo/mock**: `DEMO_SCAN_CANDIDATES` in `profile.ts` is a fixed 13-candidate universe (including IONQ, HOOD, PLTR, RIVN, AAP, SNAP, F, CORZ, SOFI, AMD, ROKU, T, WBD) with hand-entered stock/option/technical/earnings/liquidity values, not a live feed. This is visibly labeled in the UI and must stay labeled until real Schwab option-chain data replaces it.
+- Demo provider names: `src/providers/market-data/mock.ts` exports `DemoMarketDataProvider` plus backward-compatible `MockMarketDataProvider`; the demo market provider reads from the same deterministic scanner demo universe for quotes and option-chain snapshots. `src/providers/broker-read/mock.ts` exports `DemoBrokerReadProvider` plus backward-compatible `MockBrokerReadProvider`. These providers remain read-only test/development boundaries.
+
+---
+
+## Campaign Tracker
+
+`/positions` (nav label "Tracker") is a manual account + campaign lifecycle tracker — the direct implementation of the "Tracker" product area in `PRODUCT_VISION.md`. It models a whole trading idea (a "campaign") from the first cash-secured put through rolls, assignment, covered calls, and eventual close as one continuous, inspectable history — not isolated trade rows.
+
+**Schema** (`prisma/schema.prisma`, migration `prisma/migrations/20260828215700_campaign_tracker_foundation/`, **not yet applied to production** — see Database / Seed / Bootstrap Safety):
+- `RecordVisibility` enum: `INHERIT | PRIVATE | SHARED` — used by `Campaign.visibility`.
+- `Campaign` model: owner, account, ticker, `CampaignStrategy` (`CASH_SECURED_PUT | WHEEL`), `CampaignStatus` (`OPEN | ASSIGNED | CLOSED`), visibility, opened/closed dates, thesis text, and an `entrySnapshotJson` (the owner's own scanner result at entry time, for context — not a live query).
+- `CampaignEvent` model: append-only lifecycle events (`SELL_PUT`, `CLOSE_PUT`, `ROLL_PUT_CLOSE`, `ROLL_PUT_OPEN`, `ASSIGNMENT`, `SELL_COVERED_CALL`, `CLOSE_COVERED_CALL`, `COVERED_CALL_EXPIRED`, `STOCK_SALE`, `NOTE`), each with its own contracts/shares/strike/premium/fees/underlying price. A roll writes a `ROLL_PUT_CLOSE` + `ROLL_PUT_OPEN` pair sharing a `groupKey`; **no workflow ever updates or deletes an existing event** — the full history is always reconstructible.
+- `TradingAccount` gained `startingBalance`/`manualBalance` (manual, not synced) and its default `visibility` changed from `PRIVATE` to `SHARED`.
+
+**Visibility model:** a `Campaign.visibility` of `INHERIT` resolves to its parent account's `Visibility` (`resolveInheritedVisibility` in `src/lib/privacy.ts`); `SHARED`/`PRIVATE` on the campaign itself always override the account. Server-side query logic (`getTrackerPageData` in `src/lib/app-data.ts`) filters buddy-visible campaigns with `visibility = SHARED OR (visibility = INHERIT AND account.visibility = SHARED)` — a buddy never receives a row for a private campaign or an inherited campaign under a private account, regardless of the `mine`/`buddy`/`both` scope requested. Proven by `src/lib/workflows.integration.test.ts` (inherited/explicit-shared/explicit-private transitions, including an account later flipped to SHARED while its campaign is explicitly PRIVATE, which must still block) and by a Playwright test that logs in as both users. All campaign mutations (`closeCampaignPutForUser`, `rollCampaignPutForUser`, `assignCampaignPutForUser`, `toggleCampaignVisibilityForUser`, etc., in `src/lib/workflows.ts`) re-read ownership from the database by ID before acting — a tampered form ID cannot mutate another user's campaign.
+- One narrow leak was found and fixed during this session: a buddy viewing an explicitly-SHARED campaign whose parent account is PRIVATE previously saw that private account's name on the campaign card. `CampaignCard` in `src/app/(app)/positions/page.tsx` now shows "Private account" instead unless the viewer can actually read the account (owner or account itself SHARED).
+
+**Financial calculations** (`src/domain/finance/campaigns.ts`, `summarizeCampaign()`): sums option credits/debits (including roll legs, at the 100-share multiplier) into `totalPremiumReceived`/`optionDebitsPaid`/`netOptionPremium`, tracks `rollCredits`/`rollDebits`/`netRollPremium` for roll-specific display, and computes `realizedPL` as `premium credits − premium debits − realized stock cost basis + stock sale proceeds − fees`, unconditionally (not branched on share-holding state). A proportional (average-cost) allocation splits assigned-share cost basis between shares already sold and shares still held, so a **partial** stock sale's realized gain/loss is captured immediately rather than silently dropped until the whole position closes — this was a real gap found and fixed this session, with two new regression tests (`campaigns.test.ts`) proving it. `unrealizedPL`/`totalCampaignPL` require a supplied current stock price for any still-held shares and stay `null` (never fabricated) without one. `finalResult` is `GAIN`/`LOSS`/`BREAKEVEN`/`OPEN`/`UNKNOWN` — never dressed up. Verified against the task's own worked roll example (sell +$48, roll −$71/+$102 ⇒ net roll +$31, total option cash flow +$79) both in unit tests and live in the demo UI.
+
+**UI** (`src/app/(app)/positions/page.tsx`): a stat strip (campaign count, known realized P/L, net option premium, visible accounts), collapsible "New Campaign" and "New Account" panels, a Mine/`<buddy name>`/Both segmented control (`?scope=`), a Campaigns/Accounts tab (`?view=`), and one `<details>` card per campaign with lifecycle timeline, result breakdown, and (owner-only) action forms — Close Put, Roll, Mark Assigned. Progressive disclosure throughout; verified overflow-free on a 390px mobile viewport via Playwright and manual screenshots (`test-results/visual-qa/`).
+
+**Demo data** (`prisma/seed.ts`, local dev only): 3 accounts (Matt IRA — SHARED, Eric IRA — SHARED, Matt's Playground/Paper — PRIVATE) and 8 campaigns covering: a simple profitable closed CSP (BROS), an open CSP (IONQ), a single roll (AAP), multiple rolls closing positive (SOFI), an assigned CSP that continues through covered calls including one expiring worthless (F, `WHEEL` strategy), a losing closed CSP (ROKU), an explicitly-PRIVATE campaign under a private account (WBD, Matt), and a SHARED campaign owned by Eric (HOOD) so both users have visible history.
+
+**Known limitation (intentional, not a bug):** there is no UI action yet to sell/close a covered call or record a stock sale — an `ASSIGNED` campaign shows an honest in-app note ("Covered call and stock-sale events are modeled now; manual buttons for that phase are a clean next slice.") rather than a broken control. The finance engine and schema already fully support these event types (exercised by seed data and tests); only the create-event UI/workflow/action for that phase is missing. This is the recommended next slice — see Next Tasks.
 
 ---
 
@@ -239,19 +268,21 @@ Names and purposes only — **never values**.
 
 ## Testing
 
-Last verified (this session, against local Docker Postgres only — nothing run against Supabase):
+Last verified (August 28, 2026, against local Docker Postgres/rebuilt Docker app container only — nothing run against Supabase):
 
 | Check | Command | Result |
 |---|---|---|
-| Prisma validate | `pnpm prisma validate` | ✅ passed |
-| Prisma generate | `pnpm prisma generate` | ✅ passed |
-| TypeScript | `pnpm typecheck` | ✅ passed |
-| ESLint | `pnpm lint` | ✅ passed, no warnings |
-| Vitest unit tests | `pnpm test` | ✅ 19 passed / 10 skipped (DB tests skip without `RUN_DB_TESTS`) |
-| Vitest incl. DB integration | `RUN_DB_TESTS=1 DATABASE_URL=... pnpm test` | ✅ 36/36 passed (9 files) against local Docker Postgres |
-| Playwright e2e | `pnpm exec playwright test` | ✅ 5/5 passed against a rebuilt local Docker app container |
-| Production build | `pnpm build` (clean, `rm -rf .next` first) | ✅ passed |
-| Production-mode smoke test | `next build && PORT=3100 next start` | ✅ dev-login hidden, security headers present, icons/manifest/health correct |
+| Prisma validate | `corepack pnpm prisma validate` | passed |
+| Prisma generate | `corepack pnpm prisma generate` | passed |
+| TypeScript | `corepack pnpm typecheck` | passed |
+| ESLint | `corepack pnpm lint` | passed, no warnings |
+| Vitest unit tests | `corepack pnpm test` | 35 passed / 18 skipped (DB tests skip without `RUN_DB_TESTS`) |
+| Vitest incl. DB integration | `RUN_DB_TESTS=1 corepack pnpm test` | 53/53 passed (10 files) against local Docker Postgres, including new campaign finance/privacy/roll-preservation cases |
+| Playwright e2e | `corepack pnpm exec playwright test` | 6/6 passed against a rebuilt local Docker app container, including the new Tracker privacy/lifecycle test |
+| Production build | `corepack pnpm build` (clean, `rm -rf .next` first) | passed |
+| Visual QA | manual desktop (1440px) + mobile (390px) screenshots via a throwaway Playwright script | saved under `test-results/visual-qa/` (9 screenshots: Tracker mine/both/accounts, rolled + assigned campaign detail, New Campaign form, mobile list/detail/creation) |
+
+One real defect was found via this pass and fixed with a regression test: `summarizeCampaign()` dropped realized P/L from a **partial** stock sale (some assigned shares sold, some still held) until the whole position closed. One Playwright test bug was also found and fixed: `getByText("Lifecycle").first()` matched the first (closed) campaign card in DOM order instead of the one actually clicked open, since every card renders the same static heading text — now scoped to the clicked card's locator.
 
 DB-integration tests always use disposable test users with cleanup in `afterAll` — they never touch Matt/Eric's real seeded credentials. Nothing in this repository's test suite is designed to run against Supabase; do not point it there.
 
@@ -260,13 +291,14 @@ DB-integration tests always use disposable test users with cleanup in `afterAll`
 ## Important File Map
 
 - `PROJECT_HANDOFF.md` — this file; canonical current-state document.
+- `PRODUCT_VISION.md` — long-term product north-star (areas, principles, non-goals); not a changelog.
 - `docs/HANDOFF.md` — older chronological session-by-session log (kept for detailed history); this file is now canonical for *current* state.
 - `AGENTS.md` — general agent operating instructions.
 - `CLAUDE.md` — Claude-specific entry pointer to this file.
 - `README.md` — human/developer-facing docs, local setup, scripts.
 - `package.json` — scripts and dependencies.
 - `prisma/schema.prisma` — database model.
-- `prisma/migrations/` — production migrations (currently `20260828114500_init`, `20260828132500_phase_1b_hardening`).
+- `prisma/migrations/` — migrations: `20260828114500_init`, `20260828132500_phase_1b_hardening` (both live in production), `20260828215700_campaign_tracker_foundation` (local Docker only — **not yet applied to production**, see Database / Seed / Bootstrap Safety).
 - `prisma/seed.ts` — **destructive** development/demo seed. Never production.
 - `prisma/bootstrap-production.ts` — safe production bootstrap CLI.
 - `src/lib/bootstrap.ts` — safe bootstrap logic (idempotent, non-destructive).
@@ -275,7 +307,8 @@ DB-integration tests always use disposable test users with cleanup in `afterAll`
 - `src/lib/privacy.ts` — `PRIVATE`/`SHARED` authorization helpers.
 - `src/lib/workflows.ts` — server-side mutation/authorization logic for every server action.
 - `src/domain/scanner/` — scanner engine (`scanner.ts`) and rule catalog/demo data (`profile.ts`).
-- `src/domain/finance/` — financial calculations.
+- `src/domain/finance/calculations.ts` — legacy per-trade financial calculations.
+- `src/domain/finance/campaigns.ts` — campaign lifecycle financial summaries (`summarizeCampaign`).
 - `src/domain/social/` — recommendation reason tags/statuses.
 - `src/components/live-refresh.tsx` — chat's polling live-update mechanism.
 - `src/app/(app)/` — authenticated Next.js routes (dashboard, positions, scanner, scanner/settings, watchlist, recommendations, chat, notifications, account, install).
@@ -301,6 +334,8 @@ Future AI agents should not casually reverse these:
 - Mobile-first PWA remains a core requirement.
 - Chat updates via simple client-side polling (`router.refresh()`), not WebSockets/Realtime — deliberately the simplest option for a two-user app.
 - Watchlist Pro/Con/General notes are owner-only; buddy interaction on shared items happens through comments instead.
+- Campaigns model a whole trading idea as an append-only event history (`CampaignEvent`), never overwriting or deleting a prior event — a roll always writes new `ROLL_PUT_CLOSE`/`ROLL_PUT_OPEN` rows, it never edits the original `SELL_PUT`. Do not "simplify" this into a mutable current-state-only model.
+- Campaign visibility defaults to `INHERIT` from its account, but an explicit `SHARED`/`PRIVATE` on the campaign itself always overrides the account — this lets one campaign be shared out of an otherwise-private account (or vice versa) without changing the account's own visibility.
 - Prefer secure, conventional, maintainable implementation choices; do not blindly implement a technically weaker approach when a clearly better one exists (see AI Continuity Rules above).
 
 ---
@@ -313,6 +348,9 @@ Future AI agents should not casually reverse these:
 - **No CI-automated migration deploy** — Hostinger cannot run `prisma migrate deploy` (see the warning in Production / Deployment). The Supabase migration workflow is currently a manual runbook: apply and verify a migration against Supabase *before* pushing dependent code to `main`. Reasonable to automate in CI later; not done yet, and not to be implemented as a side effect of an unrelated task.
 - **Scanner data is entirely demo/mock** until Schwab access is approved and integrated — expected, not a bug, but worth remembering it's the single biggest "not real yet" surface in the app.
 - A handful of older docs (e.g. `docs/SCHWAB_INTEGRATION.md`) still say "LST Buddy" in prose; harmless, not yet swept for the rebrand since it doesn't affect any user-visible surface.
+- **Campaign Tracker migration (`20260828215700_campaign_tracker_foundation`) has not been applied to production Supabase yet.** Do not push this code to `main` until it has been (see Production / Deployment runbook and Database / Seed / Bootstrap Safety).
+- **No UI action yet for covered-call sell/close or stock sale** on an `ASSIGNED` campaign — intentionally deferred, honestly labeled in the UI, and is the recommended next slice (see Next Tasks). The finance/schema layer already supports these event types.
+- Everything in the Tracker is still fully manual entry; there is no Schwab sync of accounts/positions yet (blocked on Schwab approval).
 
 ---
 
@@ -323,15 +361,24 @@ Future AI agents should not casually reverse these:
 - Production Matt/Eric accounts have been bootstrapped via the safe, non-destructive bootstrap script and login has been verified in production.
 - `offshiftoptions.com` has been purchased, connected as the production domain, and confirmed live; `NEXT_PUBLIC_APP_URL` has already been updated in Hostinger to `https://offshiftoptions.com` and Hostinger redeployed afterward (externally confirmed). The old temporary Hostinger URL is no longer primary.
 - Schwab Trader API Individual access has been requested; approval is still pending. No Schwab code exists yet.
-- Just completed: a full pre-Schwab production hardening pass — rebrand to "Off Shift Options", real PWA icons, a self-service Change Password screen, live (polling) chat, visible demo-data labeling on the scanner, production security headers, and fixes to `/api/health` and `/api/push-subscriptions`. All changes committed and pushed to `main`; nothing was run against Supabase or Hostinger directly from this machine.
-- This continuity system (`PROJECT_HANDOFF.md`, `AGENTS.md` update, `CLAUDE.md`) is being created now so any AI can resume by reading this file.
-- **Nothing is currently blocked** except Schwab approval, which is external and has no ETA.
+- Earlier completed work: a full pre-Schwab production hardening pass (rebrand, PWA icons, Change Password, live chat, security headers, `/api/health` fix) and a scanner demo-quality pass (setup scoring, near-match detection, exclusion diagnostics, Score/Filter modes, quick filters, `Demo*Provider` naming).
+- **Most recent completed work: the Campaign Tracker foundation** — `PRODUCT_VISION.md`, the `Campaign`/`CampaignEvent`/`RecordVisibility` schema and migration, `src/domain/finance/campaigns.ts` lifecycle math, INHERIT/SHARED/PRIVATE visibility with Mine/Eric/Both filtering, the `/positions` "Tracker" UI (accounts + campaign cards, New Campaign/New Account, Close/Roll/Assign actions), realistic demo data, and full test coverage (unit, DB integration, Playwright). Picked up mid-implementation after a prior session ran out of usage during final validation; this session verified everything against the actual repository, fixed one real financial-calculation gap (partial stock sale realized P/L) and one real privacy leak (a private account's name showing through an explicitly-shared campaign), fixed one Playwright test bug, and ran the full validation suite plus manual visual QA to completion. **Committed locally; not yet pushed** — see Git/Deployment State below.
+- This continuity system (`PROJECT_HANDOFF.md`, `AGENTS.md` update, `CLAUDE.md`) is in place so any AI can resume by reading this file.
+- **Nothing is currently blocked** except Schwab approval (external, no ETA) and the production migration step, which is a deliberate manual gate, not a stall.
+
+### Git / Deployment State (as of this session)
+
+- Both the scanner enhancement work (already-complete, inherited from an earlier session) and the Campaign Tracker foundation are now **committed locally** on `main` as three commits: `4cba783` (scanner), `648c970` (campaign tracker), `868e250` (campaign tracker tests) — see Recent Relevant Commits.
+- **Nothing has been pushed.** `origin/main` is still at `ff413e8`. Hostinger has not been deployed with any of this work.
+- **Before pushing:** apply and verify migration `20260828215700_campaign_tracker_foundation` against production Supabase using the runbook in Production / Deployment, since Hostinger auto-deploys on push to `main` and the app would otherwise run new code against an old schema. Only push once that migration is confirmed applied.
 
 ---
 
 ## Next Tasks
 
 **NOW** (no external blocker)
+- Apply migration `20260828215700_campaign_tracker_foundation` to production Supabase (per the Production / Deployment runbook), then push the Campaign Tracker commit(s) to `main`.
+- **Recommended next implementation slice:** finish the wheel lifecycle UI — a "Sell Covered Call" action, a "Close Covered Call"/"Expire Covered Call" action, and a "Record Stock Sale" action for `ASSIGNED` campaigns, mirroring the existing `closeCampaignPutForUser`/`rollCampaignPutForUser` pattern (ownership re-checked server-side, event appended, never mutating prior events). The finance math and schema already support this; only the create-event workflows/actions/forms are missing.
 - Sweep remaining "LST Buddy" prose mentions in older docs (`docs/SCHWAB_INTEGRATION.md`, etc.) for full branding consistency — cosmetic, low priority.
 - Consider automating the Supabase migration-deploy step in CI instead of the manual runbook.
 - Consider renaming `LST_SESSION_SECRET` to something brand-neutral (coordinate with a Hostinger env var update — not urgent).
@@ -351,11 +398,12 @@ Future AI agents should not casually reverse these:
 
 ## Recent Relevant Commits
 
+- `868e250` — test: cover campaign visibility, roll history, and lifecycle math
+- `648c970` — feat: add campaign tracker foundation (accounts, campaigns, lifecycle, visibility)
+- `4cba783` — feat: enhance scanner with setup scoring, quick filters, and diagnostics
+- `ff413e8` — docs: clarify production migration and domain state (last commit pushed to `origin/main`)
 - `7d847e4` — docs: document pre-Schwab production hardening
-- `24158e8` — fix: make chat live, label demo scanner data, harden health/push endpoints
 - `32d3578` — feat: add self-service change password screen
 - `6e92f8b` — feat: rebrand to Off Shift Options with production PWA icons
-- `76189b1` — chore: finalize Hostinger production build (removed temporary first-deploy workaround)
-- `94355d5` — feat: add safe non-destructive production bootstrap for first deploy
 
 Full history is in Git — this list is only enough to orient a new AI, not a complete log.
