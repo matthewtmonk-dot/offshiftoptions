@@ -4,6 +4,7 @@ import {
   ChartNoAxesCombined,
   Download,
   HeartHandshake,
+  KeyRound,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -26,6 +27,7 @@ const navItems = [
   { href: "/recommendations", label: "Recs", icon: Send },
   { href: "/chat", label: "Chat", icon: MessageSquareText },
   { href: "/notifications", label: "Alerts", icon: Bell },
+  { href: "/account", label: "Account", icon: KeyRound },
   { href: "/install", label: "Install", icon: Download },
 ];
 
@@ -38,9 +40,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col md:flex-row">
         <aside className="hidden w-64 shrink-0 border-r border-zinc-800 bg-zinc-950/95 px-4 py-5 md:block">
           <div className="mb-7 flex items-center gap-3">
-            <Initials name="LST Buddy" />
+            <Initials name="Off Shift Options" />
             <div>
-              <div className="text-lg font-semibold text-zinc-50">LST Buddy</div>
+              <div className="text-lg font-semibold text-zinc-50">Off Shift Options</div>
               <div className="text-xs text-zinc-500">Demo/manual Phase 1</div>
             </div>
           </div>
@@ -89,7 +91,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <HeartHandshake className="size-5 text-emerald-300" aria-hidden />
-                <span className="font-semibold">LST Buddy</span>
+                <span className="font-semibold">Off Shift Options</span>
               </div>
               <div className="flex items-center gap-2 text-sm text-zinc-300">
                 <Initials name={user.name} />

@@ -3,7 +3,8 @@
 import type { ReactionTargetType } from "@/generated/prisma/enums";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { requireCurrentUser, signOut } from "@/lib/auth";
+import { getCurrentSessionTokenHash, requireCurrentUser, signOut } from "@/lib/auth";
+import { changePasswordForUser } from "@/lib/account";
 import {
   addReactionForUser,
   addRecommendationCommentForUser,
@@ -217,4 +218,26 @@ export async function updateScannerSettingsAction(formData: FormData) {
   revalidatePath("/scanner");
   revalidatePath("/dashboard");
   redirect("/scanner/settings?saved=1");
+}
+
+export async function changePasswordAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  try {
+    const currentSessionTokenHash = await getCurrentSessionTokenHash();
+    await changePasswordForUser(
+      user.id,
+      String(formData.get("currentPassword") ?? ""),
+      String(formData.get("newPassword") ?? ""),
+      String(formData.get("confirmPassword") ?? ""),
+      currentSessionTokenHash,
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/account", error.message);
+    }
+    throw error;
+  }
+
+  redirect("/account?saved=1");
 }

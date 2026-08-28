@@ -89,6 +89,12 @@ export async function requireCurrentUser() {
   return user;
 }
 
+export async function getCurrentSessionTokenHash() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  return token ? hashSessionToken(token) : null;
+}
+
 export async function signOut() {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
