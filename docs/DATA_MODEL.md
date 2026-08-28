@@ -31,7 +31,7 @@ Rolled trades should be modeled by closing the old trade/leg and creating a new 
 
 ## Recommendations And Chat
 
-- `Recommendation` stores sender, recipient, ticker, message, reason tags, visibility, and status.
+- `Recommendation` stores sender, recipient, ticker, message, reason tags, visibility, and status. `RecommendationStatus` is `NEW | WATCHING | PASSED | ARCHIVED` (renamed from `DISMISSED`/`DONE` in the Phase 1B hardening migration, which converts existing rows).
 - `Conversation`, `ConversationMember`, `ChatMessage`, and `ChatMessageRead` support simple private/group chat.
 
 ## Notifications
@@ -42,7 +42,7 @@ Rolled trades should be modeled by closing the old trade/leg and creating a new 
 ## Scanner And Market Data
 
 - `ScannerProfile` belongs to a user and can differ per user.
-- `ScannerRule` stores configurable rule metadata.
+- `ScannerRule` stores configurable rule metadata and is editable per user at `/scanner/settings`. `@@unique([profileId, key])` (added in the Phase 1B hardening migration) prevents duplicate rule keys within one profile.
 - `ScanRun`, `ScanResult`, and `ScanCriterionResult` preserve criterion-level PASS/FAIL/UNKNOWN explanations.
 - `MarketQuoteCache`, `PriceCandle`, and `OptionContractSnapshot` prepare for read-only market data ingestion.
 - `BrokerConnection` stores future provider state and encrypted-token placeholders.

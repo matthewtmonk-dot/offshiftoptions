@@ -46,9 +46,26 @@ Useful scripts:
 - `pnpm lint`
 - `pnpm typecheck`
 - `pnpm test`
+- `pnpm test:e2e`
 - `pnpm db:migrate`
 - `pnpm db:seed`
 - `pnpm db:reset`
+
+`pnpm build` runs `prisma generate && prisma migrate deploy && next build`. It applies existing migrations before building; it never seeds or resets data. Point `DATABASE_URL` at a real database (Docker/dev or Supabase/production) before building.
+
+## Database Integration Tests
+
+`pnpm test` runs the unit suite and skips database-backed tests by default. To run the opt-in integration tests in `src/lib/workflows.integration.test.ts` against a live PostgreSQL instance (for example the Docker Compose database), set both `RUN_DB_TESTS=1` and `DATABASE_URL`:
+
+```bash
+RUN_DB_TESTS=1 DATABASE_URL="postgresql://lst_buddy:lst_buddy_dev@localhost:5432/lst_buddy?schema=public" pnpm test
+```
+
+These tests require Matt and Eric to already be seeded.
+
+## End-To-End Tests
+
+`pnpm test:e2e` runs the Playwright suite in `tests/e2e` against a running app (default `http://localhost:3000`, override with `PLAYWRIGHT_BASE_URL`). Start the Docker stack (or `pnpm dev` against a seeded database) first, then run `pnpm exec playwright install chromium` once per machine before the first run.
 
 ## PWA Notes
 

@@ -23,3 +23,23 @@ Create read-oriented provider interfaces only. Do not add order placement method
 ## 2026-08-28: Scanner Criteria Preserve Explanations
 
 Model scanner results as criterion-level records with PASS/FAIL/UNKNOWN and explanations, then derive the summary from those rows.
+
+## 2026-08-28: Phase 1B — Workflows Module Owns Mutations
+
+Move server action bodies out of `src/app/(app)/actions.ts` into `src/lib/workflows.ts` so authorization, validation, and notification logic are unit- and integration-testable independent of Next.js server action wiring. Actions stay thin: parse `FormData`, call a workflow function, map `ValidationError` to a redirect-with-error.
+
+## 2026-08-28: Phase 1B — Recommendation Status Rename
+
+Rename `RecommendationStatus` values `DISMISSED`/`DONE` to `PASSED`/`ARCHIVED` for clearer buddy-facing language. The hardening migration converts existing rows rather than dropping data.
+
+## 2026-08-28: Phase 1B — Notes Are Owner-Only, Comments Are Shared
+
+Watchlist Pro/Con/General notes are structured, single-per-category-per-owner records editable only by the owning user. Buddy interaction on a shared watchlist item happens through `Comment`, which remains readable/writable by anyone who can read the item. This keeps a user's own structured research separate from open buddy discussion.
+
+## 2026-08-28: Phase 1B — Database-Level Ticker Constraints
+
+Add `CHECK` constraints on ticker columns (`WatchlistItem`, `StockNote`, `Recommendation`, `ChatMessage`, `Activity`) as a defense-in-depth backstop behind the existing server-side `src/lib/tickers.ts` validation.
+
+## 2026-08-28: Production Build Applies Migrations, Never Seeds
+
+`pnpm build` runs `prisma generate && prisma migrate deploy && next build` so a Hostinger/Supabase deployment applies pending migrations automatically. The production build intentionally never runs `prisma db seed`, `migrate dev`, `db push`, or `migrate reset` — seeding a production database is a deliberate, separate, one-time action.

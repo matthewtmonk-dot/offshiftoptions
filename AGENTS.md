@@ -30,10 +30,12 @@ This application does not place trades. Do not add buy, sell, place order, submi
 ## Commands
 
 - `pnpm dev`
-- `pnpm build`
+- `pnpm build` (runs `prisma generate && prisma migrate deploy && next build` — never seeds)
 - `pnpm lint`
 - `pnpm typecheck`
 - `pnpm test`
+- `RUN_DB_TESTS=1 DATABASE_URL=... pnpm test` (opt-in database integration tests)
+- `pnpm test:e2e` (Playwright smoke tests against a running app)
 - `pnpm db:migrate`
 - `pnpm db:seed`
 - `pnpm db:reset`

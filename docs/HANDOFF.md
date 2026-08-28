@@ -150,3 +150,61 @@ Time: 2026-08-28 12:03:12 -04:00
 - Added GitHub remote `origin`: `https://github.com/matthewtmonk-dot/offshiftoptions.git`
 - Intended push target: `main`
 - Follow-up verification: confirm the remote repository shows all local commits after push.
+
+## 2026-08-28 Phase 1B Completion + Deployment Prep (Claude takeover)
+
+Time: 2026-08-28
+
+Codex began Phase 1B (database verification, end-to-end workflow verification, scanner settings, hardening) and left substantial uncommitted work before hitting its usage limit while starting Docker. Claude took over to review, verify, finish, and commit that work, then made one additional deployment-prep change.
+
+### What Codex Had Already Built (uncommitted, inherited as-is)
+
+- Refactored server action bodies out of `src/app/(app)/actions.ts` into a new `src/lib/workflows.ts`, with authorization/validation/notification logic centralized there.
+- Tightened watchlist ownership: Pro/Con/General notes are now owner-only (`assertCanMutateRecord`); buddy interaction on shared items happens through comments instead.
+- Renamed `RecommendationStatus` values `DISMISSED`/`DONE` to `PASSED`/`ARCHIVED`, with a migration that converts existing rows.
+- Added recommendation reason tags (`src/domain/social/recommendations.ts`).
+- Added an editable scanner rule catalog (`src/domain/scanner/profile.ts`) and a new `/scanner/settings` page for per-user scanner configuration, backed by `@@unique([profileId, key])` on `ScannerRule`.
+- Added database-level ticker `CHECK` constraints on `WatchlistItem`, `StockNote`, `Recommendation`, `ChatMessage`, `Activity`.
+- Improved scanner result cards (per-criterion detail, snapshot values), mobile layouts, buddy chat read/unread state, and notifications.
+- Corrected CSP math to be explicit about per-share vs. per-contract values (`optionContractValue`, `premiumCaptureSummary`), and added `positionHealthSummary`.
+- Added unit tests for the above, an opt-in database integration test suite (`src/lib/workflows.integration.test.ts`, gated by `RUN_DB_TESTS=1`), and a Playwright suite (`tests/e2e/phase1b.spec.ts`) with Chromium already installed.
+- Created the `20260828132500_phase_1b_hardening` migration (not yet applied to any database).
+
+### Review Findings
+
+Reviewed the full diff for auth, authorization, privacy, migration correctness, and per-share/per-contract math. No security defects found; the note-ownership change and status rename are intentional design decisions (confirmed by matching page/test changes), not bugs.
+
+One real defect found and fixed: `src/lib/notifications.ts` imports the `server-only` guard package, which is not a real dependency — it works only through Next.js's bundler-level alias. Once `workflows.ts` (and therefore `notifications.ts`) was imported by a plain-Node Vitest test, it failed. Fixed by (1) adding `server-only` as a real npm dependency so Next.js/production behavior is unchanged, and (2) aliasing `server-only` to a no-op stub (`test/stubs/server-only.ts`) in `vitest.config.mts` so tests can import server code without a bundler. This is the standard pattern for testing code that uses the `server-only` guard.
+
+### Docker / PostgreSQL / Verification
+
+- Docker Desktop was installed but not running; started it, then ran `docker compose up --build -d` successfully.
+- `docker compose ps`: both `db` (postgres:17-alpine, healthy) and `app` came up.
+- Migrations: both `20260828114500_init` and `20260828132500_phase_1b_hardening` applied cleanly against a fresh volume.
+- Seed: ran successfully, confirmed Matt (`matt@lst.local`) and Eric (`eric@lst.local`) exist via `psql`.
+- Health: `GET /api/health` returned `200 {"app":"ok","database":"ok",...}`.
+- Persistence: ran `docker compose restart` (no volume deleted); confirmed "No pending migrations to apply", seed re-ran idempotently, watchlist demo data (CORZ/SOFI/AMD/IONQ) was unchanged after restart, and `/api/health` still returned healthy.
+- Database integration tests: `RUN_DB_TESTS=1 DATABASE_URL=... pnpm test` — all 6 integration tests passed after the `server-only` fix (private/shared watchlist protection, unauthorized mutation rejection, recommendation notification, chat membership protection, notification ownership, per-user scanner settings isolation).
+- Playwright: `pnpm exec playwright test` — all 5 tests passed against the live Docker app (Matt/Eric login, private watchlist isolation, recommendation delivery across users, per-user scanner settings, mobile layout with no horizontal overflow on 8 routes).
+- Static checks: `pnpm prisma validate`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (unit only), and `pnpm build` all passed, both before and after the `server-only` fix and the package.json build-script change.
+
+### Deployment Prep (Hostinger + Supabase)
+
+Changed `package.json`'s `build` script from `prisma generate && next build` to `prisma generate && prisma migrate deploy && next build`, so a Hostinger deployment applies pending Prisma migrations against the Supabase database automatically before building. Verified `pnpm build` runs `prisma migrate deploy` safely against the local Docker dev database ("No pending migrations to apply") — no seed command was added, and no destructive Prisma command (`db push`, `migrate dev`, `migrate reset`) was introduced. Production seeding remains a separate, manual, one-time action against the real Supabase database.
+
+### Not Done / Deferred
+
+- No Schwab integration work was started or touched.
+- No brokerage order-placement code exists anywhere in the repo (confirmed by the existing forbidden-method boundary in `src/providers/schwab`).
+- The Hostinger deployment itself was not performed; Supabase production data was not touched; production seed was not run.
+- `docs/ROADMAP.md` and `docs/PWA_AND_NOTIFICATIONS.md` were reviewed and left unchanged — still accurate for Phase 1B scope.
+
+### Known Problems / Technical Debt
+
+- The `RUN_DB_TESTS=1` convenience relies on `DATABASE_URL` being exported in the same shell; Vitest does not auto-load `.env`, so both variables must be set explicitly (documented in README).
+- Positions page includes a small "Remaining/contract" metric that shows single-contract ask value alongside per-position totals; not incorrect, but potentially confusing next to `Estimated BTC` — worth revisiting for clarity, not urgent.
+- Same outstanding items as Phase 1: replace SVG placeholder app icon, expand broker/account CRUD, Web Push delivery still deferred until HTTPS + VAPID.
+
+### Git State
+
+See commits below. Working tree was clean after the final push (`git status`), branch `main` tracking `origin/main`.
