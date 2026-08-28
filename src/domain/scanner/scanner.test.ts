@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { defaultScannerRules, evaluateDemoScan, parseScannerDesiredFromForm } from "./profile";
-import { evaluateCandidate, evaluateCriterion, type ScannerRule } from "./scanner";
+import {
+  buildExclusionDiagnostics,
+  evaluateCandidate,
+  evaluateCriterion,
+  getNearMisses,
+  setupScore,
+  setupScoreLabel,
+  type ScannerRule,
+} from "./scanner";
 
 const rules: ScannerRule[] = [
   { key: "price", name: "Price", operator: "BETWEEN", desired: [10, 80] },
@@ -43,10 +51,50 @@ describe("scanner engine", () => {
   it("evaluates the shared My LST demo profile with pass/fail/unknown results", () => {
     const results = evaluateDemoScan(defaultScannerRules());
     const amd = results.find((result) => result.ticker === "AMD");
+    const ionq = results.find((result) => result.ticker === "IONQ");
+    const aap = results.find((result) => result.ticker === "AAP");
 
-    expect(results).toHaveLength(4);
+    expect(results).toHaveLength(13);
+    expect(ionq?.summary.status).toBe("PASS");
+    expect(aap).toBeDefined();
+    expect(getNearMisses(aap!.summary.results)).toHaveLength(1);
     expect(amd?.summary.results.some((result) => result.status === "UNKNOWN")).toBe(true);
     expect(amd?.summary.status).toBe("FAIL");
+  });
+
+  it("scores setup quality without treating it as profit probability", () => {
+    const pass = evaluateCandidate(rules, {
+      price: 16.89,
+      rsi: 48,
+      openInterest: 500,
+    });
+    const near = evaluateCandidate(rules, {
+      price: 16.89,
+      rsi: 56,
+      openInterest: 500,
+    });
+    const poor = evaluateCandidate(rules, {
+      price: 125,
+      rsi: 76,
+      openInterest: 12,
+    });
+
+    expect(setupScore(pass)).toBe(100);
+    expect(setupScore(near)).toBe(91);
+    expect(setupScoreLabel(setupScore(near))).toBe("Excellent");
+    expect(setupScore(poor)).toBe(0);
+  });
+
+  it("summarizes first-rule scanner exclusions", () => {
+    const candidates = evaluateDemoScan(defaultScannerRules()).map((result) => ({
+      ticker: result.ticker,
+      summary: result.summary,
+    }));
+    const diagnostics = buildExclusionDiagnostics(candidates);
+
+    expect(diagnostics.startingUniverse).toBe(13);
+    expect(diagnostics.finalMatches).toBeGreaterThan(0);
+    expect(diagnostics.removals.some((removal) => removal.criterionName === "RSI")).toBe(true);
   });
 
   it("parses editable scanner setting ranges independently", () => {

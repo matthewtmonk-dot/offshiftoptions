@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { CheckCircle2, CircleAlert, CircleHelp, XCircle } from "lucide-react";
 
 type Tone = "neutral" | "good" | "bad" | "warn" | "info";
 
@@ -43,8 +44,14 @@ export function Badge({ children, tone = "neutral" }: { children: ReactNode; ton
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  const tone = status === "PASS" ? "good" : status === "FAIL" ? "bad" : status === "UNKNOWN" ? "warn" : "neutral";
-  return <Badge tone={tone}>{status}</Badge>;
+  const tone = status === "PASS" ? "good" : status === "FAIL" ? "bad" : "neutral";
+  const Icon = status === "PASS" ? CheckCircle2 : status === "FAIL" ? XCircle : status === "UNKNOWN" ? CircleHelp : CircleAlert;
+  return (
+    <Badge tone={tone}>
+      <Icon className="mr-1 size-3.5" aria-hidden />
+      {status}
+    </Badge>
+  );
 }
 
 export function Initials({ name }: { name: string }) {

@@ -15,7 +15,7 @@ const accounts: BrokerAccount[] = [
   },
 ];
 
-export class MockBrokerReadProvider implements BrokerReadProvider {
+export class DemoBrokerReadProvider implements BrokerReadProvider {
   async getAccounts() {
     return accounts;
   }
@@ -60,3 +60,5 @@ export class MockBrokerReadProvider implements BrokerReadProvider {
     ];
   }
 }
+
+export class MockBrokerReadProvider extends DemoBrokerReadProvider {}
