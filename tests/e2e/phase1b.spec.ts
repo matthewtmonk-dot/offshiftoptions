@@ -8,7 +8,7 @@ async function loginAs(page: Page, name: "Matt" | "Eric") {
 
 async function signOut(page: Page) {
   await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByRole("heading", { name: "LST Buddy" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Off Shift Options" })).toBeVisible();
 }
 
 test("Matt and Eric can authenticate to their own dashboard", async ({ page }) => {
@@ -40,18 +40,20 @@ test("Matt private watchlist items are not visible to Eric", async ({ page }) =>
 });
 
 test("recommendations persist for the buddy recipient", async ({ page }) => {
+  const message = `E2E recommendation for CORZ ${Date.now()}`;
+
   await loginAs(page, "Matt");
   await page.goto("/recommendations");
   await page.getByPlaceholder("Ticker").fill("CORZ");
   await page.locator('select[name="recipientId"]').selectOption({ label: "Eric" });
-  await page.getByPlaceholder("Message").fill("E2E recommendation for CORZ");
+  await page.getByPlaceholder("Message").fill(message);
   await page.getByRole("button", { name: "Send" }).click();
 
   await signOut(page);
   await loginAs(page, "Eric");
   await page.goto("/recommendations");
-  await expect(page.getByText("E2E recommendation for CORZ")).toBeVisible();
-  await expect(page.locator("article").filter({ hasText: "CORZ" }).first()).toContainText("NEW");
+  await expect(page.getByText(message)).toBeVisible();
+  await expect(page.locator("article").filter({ hasText: message }).first()).toContainText("NEW");
 });
 
 test("scanner settings are editable per user", async ({ page }) => {
@@ -82,6 +84,7 @@ test("major app pages render at mobile width without horizontal overflow", async
     "/chat",
     "/notifications",
     "/positions",
+    "/account",
   ]) {
     await page.goto(route);
     await expect(page.locator("h1").first()).toBeVisible();
