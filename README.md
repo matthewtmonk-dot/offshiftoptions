@@ -74,8 +74,17 @@ The app includes a web app manifest, service worker shell, install prompt compon
 
 External mobile Web Push is not active in Phase 1. Push subscriptions can be stored, but delivery is deferred until HTTPS hosting and VAPID key management are configured.
 
+## AI / Developer Continuity
+
+For the current project state, architecture decisions, production status, security rules, and next development tasks, read:
+
+`PROJECT_HANDOFF.md`
+
+AI coding agents should read that file before beginning work and update it automatically after meaningful changes.
+
 ## Documentation
 
+- `PROJECT_HANDOFF.md` — canonical current-state document
 - `AGENTS.md`
 - `docs/ARCHITECTURE.md`
 - `docs/DATA_MODEL.md`

@@ -8,6 +8,18 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 <!-- END:nextjs-agent-rules -->
 
+# IMPORTANT — Project Continuity and Engineering Rules
+
+Before doing meaningful work in this repository, read `PROJECT_HANDOFF.md`.
+
+If Matt explicitly says **"Read PROJECT_HANDOFF.md"**: read it in full, read this file, and verify enough repository context to understand the current state. If there are no critical blockers, respond with only `Ready.` — no summary, no recap, no next-steps list.
+
+`PROJECT_HANDOFF.md` is the canonical current-state document (architecture, deployment, database/seed safety, environment variables, features, security, testing, known issues, and next tasks). This `AGENTS.md` file covers general operating notes; `PROJECT_HANDOFF.md` is authoritative for project state.
+
+**After every meaningful project change, update `PROJECT_HANDOFF.md` automatically before considering the task complete.** Matt should never need to ask. "Meaningful" includes changes to application behavior, architecture, database/schema, auth, deployment, environment variables, hosting/domain, external integrations, scanner, market-data behavior, Schwab status, security, PWA, chat, notifications, production status, known issues, technical debt, test status, or important decisions. Never put secrets into `PROJECT_HANDOFF.md` or any other tracked file.
+
+Do not blindly implement a technically weaker approach just because Matt requested it. Evaluate significant technical requests for security, data safety, maintainability, production reliability, deployment compatibility, and standard best practices. When a clearly better solution exists, recommend and prefer it unless Matt explicitly says he understands the tradeoffs and wants the original approach anyway.
+
 # Off Shift Options Agent Notes
 
 Off Shift Options (formerly "LST Buddy") is a private, fun, educational trading research and tracking PWA for Matt and Eric. It helps with conservative cash-secured-put research, manual/demo tracking, watchlists, recommendations, chat, notifications, and rule-following. The "My LST" scanner profile name refers to the underlying Low Stress Trading strategy, not the app's product name.
@@ -50,7 +62,7 @@ This application does not place trades. Do not add buy, sell, place order, submi
 - Treat Phase 1 financial values as DEMO or MANUAL.
 - Use record-level `Visibility` for shareable records.
 - Keep UI friendly and dark with restrained green accents. Use red/green mainly for fail/pass states.
-- Update `docs/HANDOFF.md` at the end of every session.
+- Update `PROJECT_HANDOFF.md` automatically after every meaningful change (see top of this file). `docs/HANDOFF.md` is an older chronological session log kept for detailed history.
 
 ## Key Docs
 
