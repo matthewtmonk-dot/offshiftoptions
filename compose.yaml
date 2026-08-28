@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lst_buddy
+      POSTGRES_USER: lst_buddy
+      POSTGRES_PASSWORD: lst_buddy_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lst_buddy -d lst_buddy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://lst_buddy:lst_buddy_dev@db:5432/lst_buddy?schema=public
+      LST_SESSION_SECRET: local-docker-development-secret-change-me
+      DEV_SEED_PASSWORD: ${DEV_SEED_PASSWORD:-lstbuddy-dev-only}
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    command: sh -c "pnpm prisma migrate deploy && pnpm db:seed && pnpm dev"
+
+volumes:
+  postgres_data:

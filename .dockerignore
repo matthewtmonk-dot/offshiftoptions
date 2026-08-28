@@ -1,0 +1,10 @@
+.git
+.next
+node_modules
+coverage
+.env
+.env.*
+!.env.example
+postgres-data
+data
+lst-buddy
