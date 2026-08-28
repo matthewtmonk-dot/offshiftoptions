@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
     "build": "prisma generate && prisma migrate deploy && next build",
+    "build:first-deploy": "prisma generate && prisma migrate deploy && pnpm run bootstrap:production && next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "prisma generate && tsc --noEmit",
@@ -13,6 +14,7 @@
     "db:migrate": "prisma migrate dev",
     "db:seed": "prisma generate && tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset",
+    "bootstrap:production": "prisma generate && tsx prisma/bootstrap-production.ts",
     "prisma:generate": "prisma generate"
   },
   "dependencies": {
