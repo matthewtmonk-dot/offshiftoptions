@@ -142,3 +142,11 @@ After that, verify Matt/Eric login, shared/private watchlist access, dashboard d
 - What exact development password should be used for Matt and Eric in local `.env`?
 - Should Phase 1 add editable scanner thresholds now or keep thresholds seeded until after DB verification?
 - What private/shared defaults should Matt and Eric use for account balance, dollar P/L, percentage P/L, and achievements?
+
+## 2026-08-28 GitHub Remote
+
+Time: 2026-08-28 12:03:12 -04:00
+
+- Added GitHub remote `origin`: `https://github.com/matthewtmonk-dot/offshiftoptions.git`
+- Intended push target: `main`
+- Follow-up verification: confirm the remote repository shows all local commits after push.
