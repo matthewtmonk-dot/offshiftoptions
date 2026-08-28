@@ -13,6 +13,9 @@ import {
   distanceToStrikePercent,
   estimatedBuyToCloseCost,
   historicalVolatility,
+  optionContractValue,
+  positionHealthSummary,
+  premiumCaptureSummary,
   premiumCapturedPercent,
   remainingPremium,
   wilderRsi,
@@ -56,5 +59,58 @@ describe("financial calculations", () => {
     expect(bidAskSpreadDollars(0.04, 0.06)).toBe(0.02);
     expect(bidAskSpreadPercent(0.04, 0.06)).toBe(40);
     expect(estimatedBuyToCloseCost(1, 0.06, 0.65)).toBe(6.65);
+  });
+
+  it("keeps per-share quotes separate from per-contract CSP money", () => {
+    expect(optionContractValue(0.26, 1)).toBe(26);
+    expect(premiumCaptureSummary(0.26, 0.06, 1)).toEqual({
+      originalPremium: 26,
+      estimatedBuyToClose: 6,
+      grossPremiumProfit: 20,
+      capturedPercent: 76.92,
+      remainingPremium: 6,
+    });
+  });
+
+  it("assigns transparent non-prescriptive position health statuses", () => {
+    expect(
+      positionHealthSummary({
+        status: "OPEN",
+        dte: 21,
+        distanceDollars: 1.4,
+        distancePercent: 8,
+        absoluteDelta: 0.18,
+      }).status,
+    ).toBe("COMFORTABLE");
+
+    expect(
+      positionHealthSummary({
+        status: "OPEN",
+        dte: 5,
+        distanceDollars: 0.8,
+        distancePercent: 4,
+        absoluteDelta: 0.22,
+      }).status,
+    ).toBe("WATCH");
+
+    expect(
+      positionHealthSummary({
+        status: "OPEN",
+        dte: 12,
+        distanceDollars: 0.12,
+        distancePercent: 1.2,
+        absoluteDelta: 0.48,
+      }).status,
+    ).toBe("NEAR_STRIKE");
+
+    expect(
+      positionHealthSummary({
+        status: "OPEN",
+        dte: 12,
+        distanceDollars: -0.2,
+        distancePercent: -1,
+        absoluteDelta: 0.52,
+      }).status,
+    ).toBe("IN_THE_MONEY");
   });
 });

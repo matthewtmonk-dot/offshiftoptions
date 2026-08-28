@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { defaultScannerRules, evaluateDemoScan, parseScannerDesiredFromForm } from "./profile";
 import { evaluateCandidate, evaluateCriterion, type ScannerRule } from "./scanner";
 
 const rules: ScannerRule[] = [
@@ -37,5 +38,34 @@ describe("scanner engine", () => {
 
     expect(summary.status).toBe("FAIL");
     expect(summary.passed).toBe(2);
+  });
+
+  it("evaluates the shared My LST demo profile with pass/fail/unknown results", () => {
+    const results = evaluateDemoScan(defaultScannerRules());
+    const amd = results.find((result) => result.ticker === "AMD");
+
+    expect(results).toHaveLength(4);
+    expect(amd?.summary.results.some((result) => result.status === "UNKNOWN")).toBe(true);
+    expect(amd?.summary.status).toBe("FAIL");
+  });
+
+  it("parses editable scanner setting ranges independently", () => {
+    const formData = new FormData();
+    formData.set("price:min", "12");
+    formData.set("price:max", "60");
+
+    expect(
+      parseScannerDesiredFromForm(
+        {
+          key: "price",
+          name: "Stock price",
+          operator: "BETWEEN",
+          defaultDesired: [10, 80],
+          explanation: "Test",
+          input: { kind: "range", minLabel: "Min", maxLabel: "Max" },
+        },
+        formData,
+      ),
+    ).toEqual([12, 60]);
   });
 });

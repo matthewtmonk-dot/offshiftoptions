@@ -1,0 +1,94 @@
+import { expect, test, type Page } from "@playwright/test";
+
+async function loginAs(page: Page, name: "Matt" | "Eric") {
+  await page.goto("/login");
+  await page.getByRole("button", { name: `Login as ${name}` }).click();
+  await expect(page.getByRole("heading", { name: new RegExp(`Hey ${name}`) })).toBeVisible();
+}
+
+async function signOut(page: Page) {
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "LST Buddy" })).toBeVisible();
+}
+
+test("Matt and Eric can authenticate to their own dashboard", async ({ page }) => {
+  await loginAs(page, "Matt");
+  await expect(page.getByText("Current user only")).toBeVisible();
+  await signOut(page);
+
+  await loginAs(page, "Eric");
+  await expect(page.getByText("Current user only")).toBeVisible();
+});
+
+test("Matt private watchlist items are not visible to Eric", async ({ page }) => {
+  await loginAs(page, "Matt");
+  await page.goto("/watchlist");
+  await page.getByPlaceholder("Ticker").fill("TST3");
+  await page.getByRole("button", { name: "Add" }).click();
+
+  const mattCard = page.locator("article").filter({ hasText: "TST3" }).first();
+  await expect(mattCard).toBeVisible();
+  if ((await mattCard.getByText("SHARED").count()) > 0) {
+    await mattCard.getByRole("button", { name: "Private" }).click();
+  }
+  await expect(page.locator("article").filter({ hasText: "TST3" }).first().getByText("PRIVATE")).toBeVisible();
+
+  await signOut(page);
+  await loginAs(page, "Eric");
+  await page.goto("/watchlist");
+  await expect(page.locator("article").filter({ hasText: "TST3" })).toHaveCount(0);
+});
+
+test("recommendations persist for the buddy recipient", async ({ page }) => {
+  await loginAs(page, "Matt");
+  await page.goto("/recommendations");
+  await page.getByPlaceholder("Ticker").fill("CORZ");
+  await page.locator('select[name="recipientId"]').selectOption({ label: "Eric" });
+  await page.getByPlaceholder("Message").fill("E2E recommendation for CORZ");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await signOut(page);
+  await loginAs(page, "Eric");
+  await page.goto("/recommendations");
+  await expect(page.getByText("E2E recommendation for CORZ")).toBeVisible();
+  await expect(page.locator("article").filter({ hasText: "CORZ" }).first()).toContainText("NEW");
+});
+
+test("scanner settings are editable per user", async ({ page }) => {
+  await loginAs(page, "Matt");
+  await page.goto("/scanner/settings");
+  await page.locator('input[name="price:min"]').fill("12");
+  await page.locator('input[name="price:max"]').fill("60");
+  await page.getByRole("button", { name: "Save Settings" }).click();
+  await expect(page.getByText("Scanner settings saved.")).toBeVisible();
+
+  await signOut(page);
+  await loginAs(page, "Eric");
+  await page.goto("/scanner/settings");
+  await expect(page.locator('input[name="price:min"]')).toHaveValue("10");
+  await expect(page.locator('input[name="price:max"]')).toHaveValue("80");
+});
+
+test("major app pages render at mobile width without horizontal overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loginAs(page, "Matt");
+
+  for (const route of [
+    "/dashboard",
+    "/scanner",
+    "/scanner/settings",
+    "/watchlist",
+    "/recommendations",
+    "/chat",
+    "/notifications",
+    "/positions",
+  ]) {
+    await page.goto(route);
+    await expect(page.locator("h1").first()).toBeVisible();
+    await expect
+      .poll(async () =>
+        page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2),
+      )
+      .toBe(true);
+  }
+});

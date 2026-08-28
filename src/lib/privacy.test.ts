@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AuthorizationError, assertCanReadRecord, canReadRecord } from "./privacy";
+import { AuthorizationError, assertCanMutateRecord, assertCanReadRecord, canMutateRecord, canReadRecord } from "./privacy";
 
 describe("privacy and server-side authorization helpers", () => {
   const matt = "matt";
@@ -19,5 +19,11 @@ describe("privacy and server-side authorization helpers", () => {
     expect(canReadRecord(eric, matt, "PRIVATE")).toBe(false);
     expect(canReadRecord(matt, eric, "PRIVATE")).toBe(false);
     expect(() => assertCanReadRecord(eric, matt, "PRIVATE")).toThrow(AuthorizationError);
+  });
+
+  it("allows mutation only for the record owner", () => {
+    expect(canMutateRecord(matt, matt)).toBe(true);
+    expect(canMutateRecord(eric, matt)).toBe(false);
+    expect(() => assertCanMutateRecord(eric, matt)).toThrow(AuthorizationError);
   });
 });
