@@ -1,21 +1,27 @@
 import { Eye, EyeOff, MessageCircle, Plus, Save, Send, ThumbsUp, Trash2 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel, Initials, Panel } from "@/components/ui";
+import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
 import { requireCurrentUser } from "@/lib/auth";
 import { getWatchlistPageData } from "@/lib/app-data";
 import {
   addReactionAction,
-  addStockNoteAction,
   addWatchlistCommentAction,
   addWatchlistItemAction,
   recommendStockAction,
   removeWatchlistItemAction,
+  saveStockNoteAction,
   toggleWatchlistItemVisibilityAction,
 } from "../actions";
 
 export const dynamic = "force-dynamic";
 
-export default async function WatchlistPage() {
+export default async function WatchlistPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
   const user = await requireCurrentUser();
+  const params = await searchParams;
   const { users, ownWatchlist, visibleItems } = await getWatchlistPageData(user.id);
 
   return (
@@ -26,9 +32,12 @@ export default async function WatchlistPage() {
           <h1 className="text-3xl font-semibold text-zinc-50">Watchlist</h1>
         </div>
         <form action={addWatchlistItemAction} className="flex w-full gap-2 sm:w-auto">
+          <input type="hidden" name="returnTo" value="/watchlist" />
           <input
             name="ticker"
             placeholder="Ticker"
+            pattern="[A-Za-z][A-Za-z0-9.-]{0,9}"
+            title="Use 1-10 ticker characters: letters, numbers, dot, or dash."
             className="min-h-11 min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400 sm:w-40"
             required
           />
@@ -41,6 +50,12 @@ export default async function WatchlistPage() {
           </button>
         </form>
       </div>
+
+      {params.error ? (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
+          {params.error}
+        </div>
+      ) : null}
 
       <Panel title={ownWatchlist?.name ?? "My Watchlist"}>
         <div className="grid gap-4 xl:grid-cols-2">
@@ -141,23 +156,15 @@ function WatchlistCard({ item, buddies, currentUserId, canEdit = false }: Watchl
       </div>
 
       <div className="mt-4 grid gap-3 lg:grid-cols-2">
-        <form action={addStockNoteAction} className="space-y-2">
-          <input type="hidden" name="itemId" value={item.id} />
-          <select name="category" className="min-h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm">
-            <option value="PRO">Pro</option>
-            <option value="CON">Con</option>
-            <option value="GENERAL">General</option>
-          </select>
-          <div className="flex gap-2">
-            <input name="body" placeholder="Add note" className="min-h-10 min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm" />
-            <button type="submit" className="inline-flex min-h-10 items-center justify-center rounded-md border border-zinc-700 px-3 text-zinc-300 hover:border-zinc-500" aria-label={`Save note for ${item.ticker}`}>
-              <Save className="size-4" aria-hidden />
-            </button>
-          </div>
-        </form>
+        {canEdit ? (
+          <>
+            <NoteEditor itemId={item.id} ticker={item.ticker} category="PRO" label="Edit Pro notes" notes={proNotes.map((note) => note.body)} />
+            <NoteEditor itemId={item.id} ticker={item.ticker} category="CON" label="Edit Con notes" notes={conNotes.map((note) => note.body)} />
+          </>
+        ) : null}
         <form action={recommendStockAction} className="space-y-2">
           <input type="hidden" name="ticker" value={item.ticker} />
-          <input type="hidden" name="reasonTags" value="Watchlist,Worth researching" />
+          <input type="hidden" name="returnTo" value="/watchlist" />
           <select name="recipientId" className="min-h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm">
             {buddies
               .filter((buddy) => buddy.id !== currentUserId)
@@ -167,6 +174,20 @@ function WatchlistCard({ item, buddies, currentUserId, canEdit = false }: Watchl
                 </option>
               ))}
           </select>
+          <div className="grid grid-cols-2 gap-2">
+            {RECOMMENDATION_REASON_TAGS.slice(3).map((tag) => (
+              <label key={tag} className="flex min-h-9 items-center gap-2 rounded-md border border-zinc-800 px-2 text-xs text-zinc-300">
+                <input
+                  type="checkbox"
+                  name="reasonTags"
+                  value={tag}
+                  defaultChecked={tag === "Worth researching"}
+                  className="size-3.5 accent-emerald-400"
+                />
+                {tag}
+              </label>
+            ))}
+          </div>
           <button type="submit" className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-zinc-950 hover:bg-emerald-300">
             <Send className="size-4" aria-hidden />
             Recommend
@@ -181,6 +202,53 @@ function WatchlistCard({ item, buddies, currentUserId, canEdit = false }: Watchl
           <MessageCircle className="size-4" aria-hidden />
         </button>
       </form>
+
+      {item.comments.length ? (
+        <div className="mt-3 space-y-2">
+          {item.comments.map((comment) => (
+            <div key={comment.id} className="rounded-md border border-zinc-800 bg-zinc-950 p-3 text-sm">
+              <div className="font-medium text-zinc-200">{comment.author.name}</div>
+              <div className="mt-1 text-zinc-400">{comment.body}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </article>
+  );
+}
+
+function NoteEditor({
+  itemId,
+  ticker,
+  category,
+  label,
+  notes,
+}: {
+  itemId: string;
+  ticker: string;
+  category: "PRO" | "CON";
+  label: string;
+  notes: string[];
+}) {
+  return (
+    <form action={saveStockNoteAction} className="space-y-2">
+      <input type="hidden" name="itemId" value={itemId} />
+      <input type="hidden" name="category" value={category} />
+      <FieldLabel>{label}</FieldLabel>
+      <div className="flex gap-2">
+        <textarea
+          name="body"
+          defaultValue={notes.join("\n")}
+          className="min-h-20 min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-2 text-sm text-zinc-100"
+        />
+        <button
+          type="submit"
+          className="inline-flex min-h-10 items-center justify-center self-start rounded-md border border-zinc-700 px-3 text-zinc-300 hover:border-zinc-500"
+          aria-label={`Save ${category.toLowerCase()} note for ${ticker}`}
+        >
+          <Save className="size-4" aria-hidden />
+        </button>
+      </div>
+    </form>
   );
 }

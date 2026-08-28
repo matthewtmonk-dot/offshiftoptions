@@ -16,6 +16,8 @@ export default async function LoginPage({
   }
 
   const params = await searchParams;
+  const showDevLogin = process.env.NODE_ENV !== "production";
+  const devPassword = process.env.DEV_SEED_PASSWORD ?? "lstbuddy-dev-only";
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,rgba(52,211,153,0.16),transparent_34%),linear-gradient(135deg,#090d0b,#18181b_58%,#0f1720)] px-4 py-10">
@@ -73,8 +75,33 @@ export default async function LoginPage({
           </button>
         </form>
 
+        {showDevLogin ? (
+          <div className="mt-5 grid gap-2 sm:grid-cols-2">
+            <form action={signInAction}>
+              <input type="hidden" name="email" value="matt@lst.local" />
+              <input type="hidden" name="password" value={devPassword} />
+              <button
+                type="submit"
+                className="min-h-11 w-full rounded-md border border-zinc-700 px-3 text-sm font-medium text-zinc-200 transition hover:border-emerald-400/60 hover:text-emerald-200"
+              >
+                Login as Matt
+              </button>
+            </form>
+            <form action={signInAction}>
+              <input type="hidden" name="email" value="eric@lst.local" />
+              <input type="hidden" name="password" value={devPassword} />
+              <button
+                type="submit"
+                className="min-h-11 w-full rounded-md border border-zinc-700 px-3 text-sm font-medium text-zinc-200 transition hover:border-emerald-400/60 hover:text-emerald-200"
+              >
+                Login as Eric
+              </button>
+            </form>
+          </div>
+        ) : null}
+
         <div className="mt-6 rounded-md border border-zinc-800 bg-zinc-900/70 p-3 text-sm text-zinc-400">
-          Seed users are Matt and Eric. The password comes from `DEV_SEED_PASSWORD`.
+          Seed users are Matt and Eric. The password comes from DEV_SEED_PASSWORD.
         </div>
       </section>
     </main>

@@ -11,9 +11,9 @@ import {
   daysToExpiration,
   distanceToStrikeDollars,
   distanceToStrikePercent,
-  estimatedBuyToCloseCost,
-  premiumCapturedPercent,
-  remainingPremium,
+  positionHealthSummary,
+  premiumCaptureSummary,
+  securedCapital,
 } from "@/domain/finance/calculations";
 import { addReactionAction } from "../actions";
 
@@ -44,10 +44,19 @@ export default async function PositionsPage() {
           const bid = toNumber(snapshot.optionBid);
           const ask = toNumber(snapshot.optionAsk);
           const mark = toNumber(snapshot.optionMark);
-          const dte = daysToExpiration(leg.expiration, new Date("2026-08-28T12:00:00Z"));
-          const ror = cashSecuredReturnOnRisk(premium, strike, leg.contracts, toNumber(leg.fees));
-          const captured = premiumCapturedPercent(premium, mark);
-          const btc = estimatedBuyToCloseCost(leg.contracts, ask, toNumber(leg.fees));
+          const fees = toNumber(leg.fees);
+          const dte = daysToExpiration(leg.expiration);
+          const distanceDollars = distanceToStrikeDollars(stockPrice, strike);
+          const distancePercent = distanceToStrikePercent(stockPrice, strike);
+          const ror = cashSecuredReturnOnRisk(premium, strike, leg.contracts, fees);
+          const capture = premiumCaptureSummary(premium, ask, leg.contracts, fees);
+          const health = positionHealthSummary({
+            status: trade.status,
+            dte,
+            distanceDollars,
+            distancePercent,
+            absoluteDelta: snapshot.delta === null ? null : Math.abs(toNumber(snapshot.delta)),
+          });
 
           return (
             <Panel
@@ -71,23 +80,46 @@ export default async function PositionsPage() {
                     <Metric label="Current stock" value={money(stockPrice)} />
                     <Metric label="Strike" value={money(strike)} />
                     <Metric label="DTE" value={dte} subtext="Days to expiration" />
-                    <Metric label="Break-even" value={money(cspBreakEven(strike, premium))} />
-                    <Metric label="Distance $" value={money(distanceToStrikeDollars(stockPrice, strike))} />
-                    <Metric label="Distance %" value={percent(distanceToStrikePercent(stockPrice, strike) ?? 0)} />
+                    <Metric label="Break-even" value={money(cspBreakEven(strike, premium))} subtext="Strike minus per-share premium" />
+                    <Metric label="Distance $" value={money(distanceDollars)} />
+                    <Metric label="Distance %" value={distancePercent === null ? "N/A" : percent(distancePercent)} />
                   </div>
                 </div>
 
                 <div className="space-y-3">
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm font-semibold uppercase tracking-normal text-zinc-300">Position Health</h2>
+                      <Badge tone={healthTone(health.status)}>{health.status.replaceAll("_", " ")}</Badge>
+                    </div>
+                    <ul className="space-y-1 text-sm text-zinc-400">
+                      {health.reasons.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+
                   <div className="grid gap-3 sm:grid-cols-3">
-                    <Metric label="Premium received" value={money(premium)} />
-                    <Metric label="BTC estimate" value={money(btc)} subtext="Uses current ask plus fees" />
-                    <Metric label="Captured" value={captured === null ? "N/A" : percent(captured)} />
+                    <Metric label="Received" value={money(capture.originalPremium)} subtext={`${money(premium, 2)} per share`} />
+                    <Metric label="Estimated BTC" value={money(capture.estimatedBuyToClose)} subtext="Uses current ask plus fees" />
+                    <Metric label="Captured $" value={money(capture.grossPremiumProfit)} />
                   </div>
                   <div className="grid gap-3 sm:grid-cols-3">
-                    <Metric label="Remaining premium" value={money(remainingPremium(premium, mark), 2)} />
+                    <Metric label="Captured %" value={capture.capturedPercent === null ? "N/A" : percent(capture.capturedPercent)} />
+                    <Metric label="Remaining" value={money(capture.remainingPremium)} />
+                    <Metric label="Secured capital" value={money(securedCapital(strike, leg.contracts))} />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Metric label="Current bid" value={money(bid, 2)} />
+                    <Metric label="Current ask" value={money(ask, 2)} />
+                    <Metric label="Current mark" value={money(mark, 2)} />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-3">
                     <Metric label="Return on risk" value={ror === null ? "N/A" : percent(ror)} />
                     <Metric label="Bid/ask spread" value={money(bidAskSpreadDollars(bid, ask), 2)} subtext={percent(bidAskSpreadPercent(bid, ask) ?? 0)} />
+                    <Metric label="Remaining/contract" value={money(ask * 100, 2)} />
                   </div>
+
                   <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
                     <h2 className="mb-3 text-sm font-semibold uppercase tracking-normal text-zinc-300">Option Details</h2>
                     <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
@@ -95,29 +127,29 @@ export default async function PositionsPage() {
                         <dt className="text-zinc-500">
                           <Definition term="Delta">How sensitive the option is to changes in the underlying stock.</Definition>
                         </dt>
-                        <dd className="font-medium">{toNumber(snapshot.delta).toFixed(2)}</dd>
+                        <dd className="font-medium">{snapshot.delta === null ? "N/A" : toNumber(snapshot.delta).toFixed(2)}</dd>
                       </div>
                       <div>
                         <dt className="text-zinc-500">
                           <Definition term="Gamma">How quickly delta changes.</Definition>
                         </dt>
-                        <dd className="font-medium">{toNumber(snapshot.gamma).toFixed(3)}</dd>
+                        <dd className="font-medium">{snapshot.gamma === null ? "N/A" : toNumber(snapshot.gamma).toFixed(3)}</dd>
                       </div>
                       <div>
                         <dt className="text-zinc-500">
                           <Definition term="Theta">Time decay.</Definition>
                         </dt>
-                        <dd className="font-medium">{toNumber(snapshot.theta).toFixed(3)}</dd>
+                        <dd className="font-medium">{snapshot.theta === null ? "N/A" : toNumber(snapshot.theta).toFixed(3)}</dd>
                       </div>
                       <div>
                         <dt className="text-zinc-500">
                           <Definition term="Vega">Sensitivity to implied volatility.</Definition>
                         </dt>
-                        <dd className="font-medium">{toNumber(snapshot.vega).toFixed(3)}</dd>
+                        <dd className="font-medium">{snapshot.vega === null ? "N/A" : toNumber(snapshot.vega).toFixed(3)}</dd>
                       </div>
                       <div>
                         <dt className="text-zinc-500">IV</dt>
-                        <dd className="font-medium">{percent(toNumber(snapshot.impliedVolatility) * 100)}</dd>
+                        <dd className="font-medium">{snapshot.impliedVolatility === null ? "N/A" : percent(toNumber(snapshot.impliedVolatility) * 100)}</dd>
                       </div>
                       <div>
                         <dt className="text-zinc-500">Open interest</dt>
@@ -128,8 +160,8 @@ export default async function PositionsPage() {
                         <dd className="font-medium">{snapshot.optionVolume ?? "N/A"}</dd>
                       </div>
                       <div>
-                        <dt className="text-zinc-500">Mark</dt>
-                        <dd className="font-medium">{money(mark, 2)}</dd>
+                        <dt className="text-zinc-500">Bid/ask spread %</dt>
+                        <dd className="font-medium">{percent(bidAskSpreadPercent(bid, ask) ?? 0)}</dd>
                       </div>
                     </dl>
                   </div>
@@ -153,4 +185,17 @@ export default async function PositionsPage() {
       </div>
     </div>
   );
+}
+
+function healthTone(status: string) {
+  if (status === "COMFORTABLE") {
+    return "good";
+  }
+  if (status === "IN_THE_MONEY" || status === "NEAR_STRIKE") {
+    return "bad";
+  }
+  if (status === "WATCH" || status === "EXPIRED") {
+    return "warn";
+  }
+  return "neutral";
 }

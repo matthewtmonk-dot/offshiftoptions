@@ -1,3 +1,5 @@
+import { normalizeTicker } from "./tickers";
+
 export function toNumber(value: unknown): number {
   if (typeof value === "number") {
     return value;
@@ -41,9 +43,16 @@ export function shortDate(value: Date | string) {
   }).format(new Date(value));
 }
 
+export function shortDateTime(value: Date | string) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
 export function upperTicker(value: FormDataEntryValue | null) {
-  return String(value ?? "")
-    .trim()
-    .replace(/^\$/, "")
-    .toUpperCase();
+  return normalizeTicker(value);
 }

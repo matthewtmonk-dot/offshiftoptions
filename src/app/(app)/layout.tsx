@@ -9,6 +9,7 @@ import {
   LogOut,
   MessageSquareText,
   Send,
+  SlidersHorizontal,
   WalletCards,
 } from "lucide-react";
 import { Initials } from "@/components/ui";
@@ -20,6 +21,7 @@ const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/positions", label: "Positions", icon: WalletCards },
   { href: "/scanner", label: "Scanner", icon: ChartNoAxesCombined },
+  { href: "/scanner/settings", label: "Settings", icon: SlidersHorizontal },
   { href: "/watchlist", label: "Watchlist", icon: ListChecks },
   { href: "/recommendations", label: "Recs", icon: Send },
   { href: "/chat", label: "Chat", icon: MessageSquareText },
@@ -95,7 +97,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               </div>
             </div>
             <nav className="grid grid-cols-4 gap-2">
-              {navItems.slice(0, 8).map((item) => {
+              {navItems.map((item) => {
                 const Icon = item.icon;
                 return (
                   <Link

@@ -7,6 +7,21 @@ export type BollingerBands = {
   upper: number;
 };
 
+export type PositionHealthStatus = "COMFORTABLE" | "WATCH" | "NEAR_STRIKE" | "IN_THE_MONEY" | "EXPIRED";
+
+export type PositionHealthSummary = {
+  status: PositionHealthStatus;
+  reasons: string[];
+};
+
+export type PremiumCaptureSummary = {
+  originalPremium: number;
+  estimatedBuyToClose: number;
+  grossPremiumProfit: number;
+  capturedPercent: number | null;
+  remainingPremium: number;
+};
+
 export function round(value: number, digits = 4): number {
   const factor = 10 ** digits;
   return Math.round((value + Number.EPSILON) * factor) / factor;
@@ -128,6 +143,10 @@ export function cspBreakEven(strike: number, premiumReceived: number): number {
   return round(strike - premiumReceived, 2);
 }
 
+export function optionContractValue(perSharePrice: number, contracts: number): number {
+  return round(Math.max(perSharePrice, 0) * contracts * 100, 2);
+}
+
 export function securedCapital(strike: number, contracts: number): number {
   return round(strike * 100 * contracts, 2);
 }
@@ -166,6 +185,26 @@ export function remainingPremium(premiumReceived: number, currentOptionMark: num
   return round(Math.max(currentOptionMark, 0), 4);
 }
 
+export function premiumCaptureSummary(
+  premiumReceivedPerShare: number,
+  currentBuyToClosePerShare: number,
+  contracts: number,
+  fees = 0,
+): PremiumCaptureSummary {
+  const originalPremium = optionContractValue(premiumReceivedPerShare, contracts);
+  const estimatedBuyToClose = estimatedBuyToCloseCost(contracts, currentBuyToClosePerShare, fees);
+  const grossPremiumProfit = round(originalPremium - estimatedBuyToClose, 2);
+  const capturedPercent = originalPremium <= 0 ? null : round((grossPremiumProfit / originalPremium) * 100, 2);
+
+  return {
+    originalPremium,
+    estimatedBuyToClose,
+    grossPremiumProfit,
+    capturedPercent,
+    remainingPremium: estimatedBuyToClose,
+  };
+}
+
 export function bidAskSpreadDollars(bid: number, ask: number): number {
   return round(Math.max(ask - bid, 0), 4);
 }
@@ -188,4 +227,61 @@ export function estimatedBuyToCloseCost(
 ): number {
   const selectedPrice = useAsk ? optionAsk : optionMark ?? optionAsk;
   return round(Math.max(selectedPrice, 0) * contracts * 100 + fees, 2);
+}
+
+export function positionHealthSummary({
+  status,
+  dte,
+  distanceDollars,
+  distancePercent,
+  absoluteDelta,
+}: {
+  status?: string;
+  dte: number;
+  distanceDollars: number;
+  distancePercent: number | null;
+  absoluteDelta: number | null;
+}): PositionHealthSummary {
+  if (status === "EXPIRED" || dte <= 0) {
+    return {
+      status: "EXPIRED",
+      reasons: ["DTE is 0 or the trade status is EXPIRED."],
+    };
+  }
+
+  if (distanceDollars < 0) {
+    return {
+      status: "IN_THE_MONEY",
+      reasons: ["The current stock price is below the put strike."],
+    };
+  }
+
+  const reasons: string[] = [];
+  if (distancePercent !== null && distancePercent <= 2) {
+    reasons.push("The stock is within 2% of the strike.");
+  }
+  if (absoluteDelta !== null && absoluteDelta >= 0.45) {
+    reasons.push("Absolute delta is 0.45 or higher.");
+  }
+  if (reasons.length) {
+    return { status: "NEAR_STRIKE", reasons };
+  }
+
+  if (distancePercent !== null && distancePercent <= 5) {
+    reasons.push("The stock is within 5% of the strike.");
+  }
+  if (dte <= 7) {
+    reasons.push("Seven or fewer calendar days remain.");
+  }
+  if (absoluteDelta !== null && absoluteDelta >= 0.3) {
+    reasons.push("Absolute delta is 0.30 or higher.");
+  }
+  if (reasons.length) {
+    return { status: "WATCH", reasons };
+  }
+
+  return {
+    status: "COMFORTABLE",
+    reasons: ["The stock is above the strike, more than 5% away, with more than 7 DTE and absolute delta below 0.30."],
+  };
 }

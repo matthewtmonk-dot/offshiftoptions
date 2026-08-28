@@ -49,8 +49,8 @@ enum NoteCategory {
 enum RecommendationStatus {
   NEW
   WATCHING
-  DISMISSED
-  DONE
+  PASSED
+  ARCHIVED
 }
 
 enum ConversationType {
@@ -538,6 +538,7 @@ model ScannerRule {
   sortOrder   Int             @default(0)
   profile     ScannerProfile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
+  @@unique([profileId, key])
   @@index([profileId, enabled])
 }
 

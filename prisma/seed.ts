@@ -3,7 +3,7 @@ import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { hash } from "bcryptjs";
 import { PrismaClient } from "../src/generated/prisma/client";
-import { evaluateCandidate, type ScannerRule as EngineScannerRule } from "../src/domain/scanner/scanner";
+import { defaultScannerRules, evaluateDemoScan } from "../src/domain/scanner/profile";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -14,81 +14,7 @@ const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString }),
 });
 
-const rules: EngineScannerRule[] = [
-  { key: "price", name: "Price", operator: "BETWEEN", desired: [10, 80] },
-  { key: "rsi", name: "RSI", operator: "LTE", desired: 55 },
-  { key: "bbPercent", name: "Bollinger %", operator: "LTE", desired: 70 },
-  { key: "delta", name: "Delta", operator: "BETWEEN", desired: [0.12, 0.3] },
-  { key: "ror", name: "Return on risk", operator: "GTE", desired: 1 },
-  { key: "spreadPercent", name: "Bid/ask spread", operator: "LTE", desired: 25 },
-  { key: "openInterest", name: "Open interest", operator: "GTE", desired: 100 },
-  { key: "optionVolume", name: "Option volume", operator: "GTE", desired: 25 },
-  { key: "earningsDistance", name: "Earnings distance", operator: "GTE", desired: 14 },
-  { key: "debtToEquity", name: "Debt/equity", operator: "LTE", desired: 1.2 },
-];
-
-const candidates = [
-  {
-    ticker: "CORZ",
-    values: {
-      price: 16.89,
-      rsi: 48,
-      bbPercent: 42,
-      delta: 0.18,
-      ror: 1.58,
-      spreadPercent: 40,
-      openInterest: 840,
-      optionVolume: 126,
-      earningsDistance: 35,
-      debtToEquity: 1.5,
-    },
-  },
-  {
-    ticker: "SOFI",
-    values: {
-      price: 18.42,
-      rsi: 62,
-      bbPercent: 76,
-      delta: 0.34,
-      ror: 1.1,
-      spreadPercent: 18,
-      openInterest: 1240,
-      optionVolume: 410,
-      earningsDistance: 22,
-      debtToEquity: 0.9,
-    },
-  },
-  {
-    ticker: "AMD",
-    values: {
-      price: 156.2,
-      rsi: 51,
-      bbPercent: 58,
-      delta: undefined,
-      ror: undefined,
-      spreadPercent: 21,
-      openInterest: 3220,
-      optionVolume: 884,
-      earningsDistance: 9,
-      debtToEquity: 0.4,
-    },
-  },
-  {
-    ticker: "IONQ",
-    values: {
-      price: 28.1,
-      rsi: 44,
-      bbPercent: 36,
-      delta: 0.22,
-      ror: 1.35,
-      spreadPercent: 19,
-      openInterest: 225,
-      optionVolume: 54,
-      earningsDistance: 41,
-      debtToEquity: 0.2,
-    },
-  },
-];
+const rules = defaultScannerRules();
 
 function jsonReady(values: Record<string, number | string | boolean | null | undefined>) {
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value ?? null]));
@@ -185,18 +111,17 @@ async function createScannerProfile(ownerId: string) {
     },
   });
 
-  for (const candidate of candidates) {
-    const summary = evaluateCandidate(rules, candidate.values);
+  for (const candidate of evaluateDemoScan(rules)) {
     await prisma.scanResult.create({
       data: {
         runId: run.id,
         ticker: candidate.ticker,
-        summaryStatus: summary.status,
-        passedCriteria: summary.passed,
-        totalCriteria: summary.total,
+        summaryStatus: candidate.summary.status,
+        passedCriteria: candidate.summary.passed,
+        totalCriteria: candidate.summary.total,
         snapshotJson: jsonReady(candidate.values),
         criterionResults: {
-          create: summary.results.map((result) => ({
+          create: candidate.summary.results.map((result) => ({
             criterionName: result.name,
             actualValue:
               result.actualValue === undefined || result.actualValue === null

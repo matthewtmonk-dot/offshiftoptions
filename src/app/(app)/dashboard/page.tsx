@@ -9,7 +9,7 @@ import {
   cashSecuredReturnOnRisk,
   daysToExpiration,
   distanceToStrikePercent,
-  premiumCapturedPercent,
+  premiumCaptureSummary,
 } from "@/domain/finance/calculations";
 import { addReactionAction } from "../actions";
 
@@ -22,13 +22,21 @@ export default async function DashboardPage() {
   const firstTrade = data.openTrades[0];
   const firstLeg = firstTrade?.legs[0];
   const firstPosition = firstTrade?.positionSnapshots[0];
-  const dte = firstLeg ? daysToExpiration(firstLeg.expiration, new Date("2026-08-28T12:00:00Z")) : null;
+  const dte = firstLeg ? daysToExpiration(firstLeg.expiration) : null;
   const ror =
     firstLeg && firstPosition
       ? cashSecuredReturnOnRisk(toNumber(firstLeg.premium), toNumber(firstLeg.strike), firstLeg.contracts, toNumber(firstLeg.fees))
       : null;
   const annualized = ror && dte ? annualizedReturnOnRisk(ror, dte) : null;
-  const captured = firstLeg && firstPosition ? premiumCapturedPercent(toNumber(firstLeg.premium), toNumber(firstPosition.optionMark)) : null;
+  const capture =
+    firstLeg && firstPosition
+      ? premiumCaptureSummary(
+          toNumber(firstLeg.premium),
+          toNumber(firstPosition.optionAsk),
+          firstLeg.contracts,
+          toNumber(firstLeg.fees),
+        )
+      : null;
 
   return (
     <div className="space-y-6">
@@ -44,7 +52,11 @@ export default async function DashboardPage() {
         <Metric label="Account value" value={snapshot ? money(snapshot.accountValue) : "No data"} subtext="Demo/manual" />
         <Metric label="Cash" value={snapshot ? money(snapshot.cash) : "No data"} subtext="Manual account snapshot" />
         <Metric label="Securing puts" value={snapshot ? money(snapshot.cashSecuringPuts) : "No data"} subtext="CSP collateral" />
+        <Metric label="Available cash" value={snapshot ? money(snapshot.availableCash) : "No data"} subtext="Private demo/manual" />
+        <Metric label="Realized P/L" value={snapshot ? money(snapshot.realizedPL) : "No data"} subtext="Private demo/manual dollars" />
+        <Metric label="Unrealized P/L" value={snapshot ? money(snapshot.unrealizedPL) : "No data"} subtext="Private demo/manual dollars" />
         <Metric label="Premium collected" value={snapshot ? money(snapshot.premiumCollected) : "No data"} subtext="Demo realized premium" />
+        <Metric label="Open CSP count" value={data.openTrades.length} subtext="Current user only" />
       </section>
 
       <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
@@ -88,9 +100,9 @@ export default async function DashboardPage() {
                 </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
-                <Metric label="Captured" value={captured === null ? "N/A" : percent(captured)} subtext={`${money(firstLeg.premium, 2)} received`} />
+                <Metric label="Captured" value={capture?.capturedPercent === null || !capture ? "N/A" : percent(capture.capturedPercent)} subtext={capture ? `${money(capture.originalPremium)} received` : "No data"} />
                 <Metric label="ROR" value={ror === null ? "N/A" : percent(ror)} subtext={annualized === null ? "DTE unavailable" : `${percent(annualized)} annualized`} />
-                <Metric label="BTC estimate" value={money(toNumber(firstPosition.optionAsk) * firstLeg.contracts * 100)} subtext="Uses current ask" />
+                <Metric label="BTC estimate" value={capture ? money(capture.estimatedBuyToClose) : "N/A"} subtext="Uses current ask" />
               </div>
             </div>
           ) : (
