@@ -1,4 +1,4 @@
-const CACHE_NAME = "lst-buddy-shell-v1";
+const CACHE_NAME = "oso-shell-v2";
 const SHELL_URLS = ["/", "/login", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

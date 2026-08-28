@@ -81,7 +81,7 @@ async function ensureBootstrapConversation(
 }
 
 /**
- * Safe, idempotent production bootstrap: creates the two initial LST Buddy
+ * Safe, idempotent production bootstrap: creates the two initial Off Shift Options
  * users and their shared conversation if they do not already exist. Never
  * deletes, resets, or overwrites existing users, passwords, or any other
  * data. Safe to run multiple times against the same database.

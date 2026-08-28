@@ -9,7 +9,7 @@ export default function InstallPage() {
     <div className="space-y-6">
       <div>
         <p className="text-sm font-medium text-emerald-300">Progressive Web App foundation</p>
-        <h1 className="text-3xl font-semibold text-zinc-50">Install LST Buddy</h1>
+        <h1 className="text-3xl font-semibold text-zinc-50">Install Off Shift Options</h1>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">

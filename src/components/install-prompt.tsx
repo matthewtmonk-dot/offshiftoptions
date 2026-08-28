@@ -25,7 +25,7 @@ export function InstallPrompt() {
 
   async function install() {
     if (!promptEvent) {
-      setStatus("Use your browser menu to add LST Buddy to the Home Screen when a prompt is unavailable.");
+      setStatus("Use your browser menu to add Off Shift Options to the Home Screen when a prompt is unavailable.");
       return;
     }
 
@@ -43,7 +43,7 @@ export function InstallPrompt() {
         className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300"
       >
         <Download className="size-4" aria-hidden />
-        Install LST Buddy
+        Install Off Shift Options
       </button>
       <p className="text-sm text-zinc-300">{status}</p>
     </div>

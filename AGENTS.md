@@ -8,9 +8,9 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 <!-- END:nextjs-agent-rules -->
 
-# LST Buddy Agent Notes
+# Off Shift Options Agent Notes
 
-LST Buddy is a private, fun, educational trading research and tracking PWA for Matt and Eric. It helps with conservative cash-secured-put research, manual/demo tracking, watchlists, recommendations, chat, notifications, and rule-following.
+Off Shift Options (formerly "LST Buddy") is a private, fun, educational trading research and tracking PWA for Matt and Eric. It helps with conservative cash-secured-put research, manual/demo tracking, watchlists, recommendations, chat, notifications, and rule-following. The "My LST" scanner profile name refers to the underlying Low Stress Trading strategy, not the app's product name.
 
 ## Absolute Product Rule
 

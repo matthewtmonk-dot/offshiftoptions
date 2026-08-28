@@ -27,7 +27,7 @@ export default async function LoginPage({
             <LockKeyhole className="size-5" aria-hidden />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-zinc-50">LST Buddy</h1>
+            <h1 className="text-2xl font-semibold text-zinc-50">Off Shift Options</h1>
             <p className="text-sm text-zinc-400">Demo/manual research workspace</p>
           </div>
         </div>

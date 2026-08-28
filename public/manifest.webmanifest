@@ -1,6 +1,6 @@
 {
-  "name": "LST Buddy",
-  "short_name": "LST Buddy",
+  "name": "Off Shift Options",
+  "short_name": "OSO",
   "description": "Private demo/manual cash-secured-put research and tracking app.",
   "start_url": "/dashboard",
   "scope": "/",
@@ -9,12 +9,11 @@
   "theme_color": "#0a0f0d",
   "orientation": "portrait-primary",
   "icons": [
-    {
-      "src": "/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
-    }
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
   "categories": ["finance", "productivity", "education"]
 }

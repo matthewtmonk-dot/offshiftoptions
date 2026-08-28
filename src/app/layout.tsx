@@ -13,23 +13,36 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+
 export const metadata: Metadata = {
+  ...(appUrl ? { metadataBase: new URL(appUrl) } : {}),
   title: {
-    default: "LST Buddy",
-    template: "%s | LST Buddy",
+    default: "Off Shift Options",
+    template: "%s | Off Shift Options",
   },
   description: "Private PWA for conservative cash-secured-put research, tracking, and buddy accountability.",
   manifest: "/manifest.webmanifest",
   icons: {
-    icon: "/icon.svg",
-    apple: "/icon.svg",
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
   },
   appleWebApp: {
     capable: true,
-    title: "LST Buddy",
+    title: "OSO",
     statusBarStyle: "black-translucent",
   },
-  applicationName: "LST Buddy",
+  applicationName: "Off Shift Options",
+  openGraph: {
+    title: "Off Shift Options",
+    description: "Private PWA for conservative cash-secured-put research, tracking, and buddy accountability.",
+    siteName: "Off Shift Options",
+    type: "website",
+  },
 };
 
 export const viewport: Viewport = {

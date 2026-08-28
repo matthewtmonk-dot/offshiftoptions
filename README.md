@@ -1,8 +1,8 @@
-# LST Buddy
+# Off Shift Options
 
-LST Buddy is a private Phase 1 PWA for Matt and Eric to research and track conservative cash-secured puts with watchlists, scanner criteria, recommendations, chat, in-app notifications, and privacy controls.
+Off Shift Options (formerly "LST Buddy") is a private PWA for Matt and Eric to research and track conservative cash-secured puts with watchlists, scanner criteria, recommendations, chat, in-app notifications, and privacy controls. The "My LST" scanner profile name refers to the underlying Low Stress Trading strategy, not the app's product name.
 
-This app does not place trades. Trades stay in Schwab/Thinkorswim or another brokerage outside LST Buddy.
+This app does not place trades. Trades stay in Schwab/Thinkorswim or another brokerage outside Off Shift Options.
 
 ## Quick Start With Docker
 

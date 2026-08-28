@@ -1,6 +1,6 @@
 # Schwab Read-Only Provider Placeholder
 
-LST Buddy may eventually connect to the Charles Schwab Individual Trader API, but the application must remain read-only.
+Off Shift Options may eventually connect to the Charles Schwab Individual Trader API, but the application must remain read-only.
 
 Allowed future provider methods:
 
