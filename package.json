@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
-    "build": "prisma generate && prisma migrate deploy && next build",
+    "build": "prisma generate && prisma migrate deploy && pnpm run bootstrap:production && next build",
     "build:first-deploy": "prisma generate && prisma migrate deploy && pnpm run bootstrap:production && next build",
     "start": "next start",
     "lint": "eslint .",
