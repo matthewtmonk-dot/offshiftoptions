@@ -40,12 +40,19 @@ Watchlist Pro/Con/General notes are structured, single-per-category-per-owner re
 
 Add `CHECK` constraints on ticker columns (`WatchlistItem`, `StockNote`, `Recommendation`, `ChatMessage`, `Activity`) as a defense-in-depth backstop behind the existing server-side `src/lib/tickers.ts` validation.
 
-## 2026-08-28: Production Build Applies Migrations, Never Seeds
-
-`pnpm build` runs `prisma generate && prisma migrate deploy && next build` so a Hostinger/Supabase deployment applies pending migrations automatically. The production build intentionally never runs `prisma db seed`, `migrate dev`, `db push`, or `migrate reset` — seeding a production database is a deliberate, separate, one-time action.
-
 ## 2026-08-28: Non-Destructive Production Bootstrap, Separate From The Dev Seed
 
 `prisma/seed.ts` (`pnpm db:seed`) is a destructive development fixture: it unconditionally deletes nearly every row in the database before recreating Matt, Eric, and demo trades/watchlists/chat. It must never run against production.
 
-For the brand-new production database's one-time initial setup, `prisma/bootstrap-production.ts` (`pnpm bootstrap:production`, logic in `src/lib/bootstrap.ts`) instead only creates the two initial users (`matt@lst.local`, `eric@lst.local`, using `DEV_SEED_PASSWORD` for their initial password) and their shared conversation if they do not already exist — it never deletes, resets, or overwrites existing users, passwords, or any other data, and is safe to run repeatedly. `build:first-deploy` (`prisma generate && prisma migrate deploy && pnpm run bootstrap:production && next build`) is a temporary Hostinger build command for exactly the first deployment; the normal `build` script never runs it. Both the temporary script and this section should be removed once the first production deployment has succeeded.
+For a brand-new production database's one-time initial setup, `prisma/bootstrap-production.ts` (`pnpm bootstrap:production`, logic in `src/lib/bootstrap.ts`) instead only creates the two initial users (`matt@lst.local`, `eric@lst.local`, using `DEV_SEED_PASSWORD` for their initial password) and their shared conversation if they do not already exist — it never deletes, resets, or overwrites existing users, passwords, or any other data, and is safe to run repeatedly.
+
+## 2026-08-28: Hostinger Production Build Does Not Run Migrations Or Bootstrap
+
+The permanent Hostinger production build is `prisma generate && next build`.
+
+During the first production deployment, the build script was temporarily changed several times to run `prisma migrate deploy` and then `pnpm bootstrap:production` (or `tsx prisma/bootstrap-production.ts` directly) so the brand-new Supabase database could be migrated and bootstrapped in one deploy. Two real Hostinger environment limitations were discovered in the process:
+
+- `prisma migrate deploy` fails inside the Hostinger build environment with `schema-engine-debian-openssl-1.1.x EACCES`.
+- Hostinger's build shell does not support nested `pnpm run ...` invocations from within a package script (only the top-level `pnpm run build` works); a script must exec binaries like `tsx` directly instead.
+
+Once the first deployment's bootstrap succeeded and Matt/Eric login was verified against Supabase, the build script was reverted to the permanent form above. Prisma migrations are intentionally **not** run automatically during the Hostinger build going forward — see `docs/ARCHITECTURE.md` (Deployment) and `docs/ROADMAP.md` (Phase 2 infrastructure) for the resulting migration policy and the still-undesigned controlled migration process.

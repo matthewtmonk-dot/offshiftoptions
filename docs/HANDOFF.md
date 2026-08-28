@@ -208,3 +208,17 @@ Changed `package.json`'s `build` script from `prisma generate && next build` to 
 ### Git State
 
 See commits below. Working tree was clean after the final push (`git status`), branch `main` tracking `origin/main`.
+
+## 2026-08-28 First Hostinger Production Deployment
+
+The first Hostinger deployment against the new Supabase database succeeded. Getting there required several corrective, user-directed changes to the `build` script, made and pushed one at a time as each Hostinger failure was diagnosed:
+
+1. `prisma generate && prisma migrate deploy && next build` (planned permanent build) — not tried yet in production at this point.
+2. Added a one-time `pnpm run bootstrap:production` step before `next build` to also create the initial Matt/Eric users. First attempt failed: `prisma migrate deploy` errored inside Hostinger's build environment with `schema-engine-debian-openssl-1.1.x EACCES`.
+3. Dropped `prisma migrate deploy` (migrations were already applied from an earlier successful deploy) — `prisma generate && pnpm run bootstrap:production && next build`. Failed: Hostinger's build shell does not support nested `pnpm run ...` calls (`pnpm: command not found`).
+4. Called `tsx prisma/bootstrap-production.ts` directly instead of through `pnpm run` — `prisma generate && tsx prisma/bootstrap-production.ts && next build`. **This succeeded.** The safe, non-destructive bootstrap created Matt and Eric against the live Supabase database, and Matt's login was verified working in production.
+5. Cleaned up: reverted `build` to the permanent `prisma generate && next build`, and removed the now-unneeded `build:first-deploy` script. `bootstrap:production` and `db:seed` were both kept as-is (implementations unchanged throughout).
+
+**Resulting policy:** Prisma migrations are not run automatically during the Hostinger build (see `docs/ARCHITECTURE.md` — Deployment, and `docs/DECISIONS.md`). A controlled process for applying future production schema migrations has not been designed yet; it is tracked as a Phase 2 infrastructure task in `docs/ROADMAP.md`. The production bootstrap has already run once and is not part of routine deploys going forward.
+
+No commands were run against Supabase from this local machine at any point in this sequence — every `pnpm build`/`pnpm bootstrap:production` execution happened inside Hostinger's own deploy pipeline.

@@ -30,15 +30,16 @@ This application does not place trades. Do not add buy, sell, place order, submi
 ## Commands
 
 - `pnpm dev`
-- `pnpm build` (runs `prisma generate && prisma migrate deploy && next build` — never seeds)
+- `pnpm build` (runs `prisma generate && next build` — this is also the exact Hostinger production build; it never seeds, bootstraps, or applies migrations, see `docs/ARCHITECTURE.md` Deployment)
 - `pnpm lint`
 - `pnpm typecheck`
 - `pnpm test`
 - `RUN_DB_TESTS=1 DATABASE_URL=... pnpm test` (opt-in database integration tests)
 - `pnpm test:e2e` (Playwright smoke tests against a running app)
 - `pnpm db:migrate`
-- `pnpm db:seed`
+- `pnpm db:seed` (destructive, local development/reset data only — never run against production)
 - `pnpm db:reset`
+- `pnpm bootstrap:production` (safe, non-destructive, idempotent production user bootstrap — not part of routine deploys)
 - `docker compose up --build`
 
 ## Coding Expectations

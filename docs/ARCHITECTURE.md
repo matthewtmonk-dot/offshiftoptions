@@ -58,3 +58,20 @@ pnpm db:migrate
 pnpm db:seed
 pnpm dev
 ```
+
+## Deployment (Hostinger + Supabase)
+
+**Hostinger production build:**
+
+```bash
+prisma generate && next build
+```
+
+This is the permanent `pnpm build` script. It does not run `prisma migrate deploy` and does not seed or bootstrap any data.
+
+**Current migration policy:** Prisma migrations are **not** automatically executed inside Hostinger. The Hostinger build environment currently produces an `EACCES` error (`schema-engine-debian-openssl-1.1.x EACCES`) when Prisma's schema engine is executed by `prisma migrate deploy` during the build, and Hostinger's build shell does not support nested `pnpm` invocations either. Because of this, future production schema migrations must be applied through a separate, controlled migration process run outside the Hostinger build step, before deployment. That process has not been designed yet — see `docs/ROADMAP.md` (Phase 2 infrastructure).
+
+**Two separate database scripts exist and must not be confused:**
+
+- `pnpm db:seed` (`prisma/seed.ts`) — **destructive**, local development only. Unconditionally deletes nearly all data before recreating demo users/trades/watchlists/chat. Must never run against Supabase/production.
+- `pnpm bootstrap:production` (`prisma/bootstrap-production.ts`, logic in `src/lib/bootstrap.ts`) — **safe, non-destructive, idempotent**. Creates Matt and Eric (and their shared conversation) only if they don't already exist; never deletes, resets, or overwrites existing data. This is not part of the routine Hostinger build — the initial production bootstrap has already been run successfully once, and this script is now only for reference/disaster-recovery (e.g. manually re-run against Supabase if a brand-new database is ever provisioned again).

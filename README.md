@@ -48,10 +48,11 @@ Useful scripts:
 - `pnpm test`
 - `pnpm test:e2e`
 - `pnpm db:migrate`
-- `pnpm db:seed`
+- `pnpm db:seed` — **destructive**, local development/reset data only
 - `pnpm db:reset`
+- `pnpm bootstrap:production` — safe, non-destructive, idempotent production user bootstrap (already run once against Supabase; not part of routine deploys)
 
-`pnpm build` runs `prisma generate && prisma migrate deploy && next build`. It applies existing migrations before building; it never seeds or resets data. Point `DATABASE_URL` at a real database (Docker/dev or Supabase/production) before building.
+`pnpm build` runs `prisma generate && next build`. This is also the exact Hostinger production build command. It never seeds, bootstraps, or applies migrations — see "Deployment (Hostinger + Supabase)" in `docs/ARCHITECTURE.md` for why migrations are not run automatically, and `docs/DECISIONS.md` for the full history.
 
 ## Database Integration Tests
 
