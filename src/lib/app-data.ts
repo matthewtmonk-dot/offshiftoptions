@@ -2,6 +2,12 @@ import "server-only";
 
 import { prisma } from "./prisma";
 
+export type TrackerScope = "mine" | "buddy" | "both";
+
+export function normalizeTrackerScope(value: unknown): TrackerScope {
+  return value === "buddy" || value === "both" ? value : "mine";
+}
+
 export async function getUnreadNotificationCount(userId: string) {
   return prisma.notification.count({
     where: {
@@ -230,4 +236,67 @@ export async function getPositionsPageData(userId: string) {
       comments: { include: { author: true }, orderBy: { createdAt: "desc" } },
     },
   });
+}
+
+export async function getTrackerPageData(userId: string, scope: TrackerScope) {
+  const buddyCampaignWhere = {
+    ownerId: { not: userId },
+    OR: [{ visibility: "SHARED" as const }, { visibility: "INHERIT" as const, account: { visibility: "SHARED" as const } }],
+  };
+  const campaignWhere =
+    scope === "mine"
+      ? { ownerId: userId }
+      : scope === "buddy"
+        ? buddyCampaignWhere
+        : { OR: [{ ownerId: userId }, buddyCampaignWhere] };
+  const buddyAccountWhere = { userId: { not: userId }, visibility: "SHARED" as const };
+  const accountWhere =
+    scope === "mine"
+      ? { userId }
+      : scope === "buddy"
+        ? buddyAccountWhere
+        : { OR: [{ userId }, buddyAccountWhere] };
+
+  const [users, ownAccounts, visibleAccounts, campaigns, legacyTrades] = await Promise.all([
+    prisma.user.findMany({ where: { id: { not: userId } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+    prisma.tradingAccount.findMany({
+      where: { userId },
+      orderBy: { createdAt: "asc" },
+      include: {
+        snapshots: { orderBy: { capturedAt: "desc" }, take: 1 },
+        _count: { select: { campaigns: true } },
+      },
+    }),
+    prisma.tradingAccount.findMany({
+      where: accountWhere,
+      orderBy: [{ user: { name: "asc" } }, { createdAt: "asc" }],
+      include: {
+        user: { select: { id: true, name: true } },
+        snapshots: { orderBy: { capturedAt: "desc" }, take: 1 },
+        _count: { select: { campaigns: true } },
+      },
+    }),
+    prisma.campaign.findMany({
+      where: campaignWhere,
+      orderBy: [{ status: "asc" }, { openedAt: "desc" }],
+      include: {
+        owner: { select: { id: true, name: true } },
+        account: {
+          select: {
+            id: true,
+            userId: true,
+            name: true,
+            accountType: true,
+            visibility: true,
+            manualBalance: true,
+            startingBalance: true,
+          },
+        },
+        events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] },
+      },
+    }),
+    getPositionsPageData(userId),
+  ]);
+
+  return { users, ownAccounts, visibleAccounts, campaigns, legacyTrades };
 }

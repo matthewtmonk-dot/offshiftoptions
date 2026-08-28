@@ -12,8 +12,38 @@ enum Visibility {
   SHARED
 }
 
+enum RecordVisibility {
+  INHERIT
+  PRIVATE
+  SHARED
+}
+
 enum TradeStrategy {
   CASH_SECURED_PUT
+}
+
+enum CampaignStrategy {
+  CASH_SECURED_PUT
+  WHEEL
+}
+
+enum CampaignStatus {
+  OPEN
+  ASSIGNED
+  CLOSED
+}
+
+enum CampaignEventType {
+  SELL_PUT
+  CLOSE_PUT
+  ROLL_PUT_CLOSE
+  ROLL_PUT_OPEN
+  ASSIGNMENT
+  SELL_COVERED_CALL
+  CLOSE_COVERED_CALL
+  COVERED_CALL_EXPIRED
+  STOCK_SALE
+  NOTE
 }
 
 enum TradeStatus {
@@ -124,34 +154,35 @@ enum BrokerConnectionStatus {
 }
 
 model User {
-  id                         String                 @id @default(cuid())
-  name                       String
-  email                      String                 @unique
-  passwordHash               String
-  createdAt                  DateTime               @default(now())
-  updatedAt                  DateTime               @updatedAt
-  settings                   UserSettings?
-  sharingPreferences         SharingPreferences?
-  sessions                   Session[]
-  accounts                   TradingAccount[]
-  trades                     Trade[]
-  watchlists                 Watchlist[]
-  watchlistItems             WatchlistItem[]
-  notes                      StockNote[]
-  comments                   Comment[]
-  recommendationsSent        Recommendation[]       @relation("SentRecommendations")
-  recommendationsReceived    Recommendation[]       @relation("ReceivedRecommendations")
-  conversationMemberships    ConversationMember[]
-  chatMessages               ChatMessage[]
-  chatReads                  ChatMessageRead[]
-  reactions                  Reaction[]
-  activities                 Activity[]
-  notificationsSent          Notification[]         @relation("NotificationActor")
-  notificationsReceived      Notification[]         @relation("NotificationRecipient")
-  pushSubscriptions          PushSubscription[]
-  scannerProfiles            ScannerProfile[]
-  scannerRuns                ScanRun[]
-  brokerConnections          BrokerConnection[]
+  id                      String               @id @default(cuid())
+  name                    String
+  email                   String               @unique
+  passwordHash            String
+  createdAt               DateTime             @default(now())
+  updatedAt               DateTime             @updatedAt
+  settings                UserSettings?
+  sharingPreferences      SharingPreferences?
+  sessions                Session[]
+  accounts                TradingAccount[]
+  trades                  Trade[]
+  watchlists              Watchlist[]
+  watchlistItems          WatchlistItem[]
+  notes                   StockNote[]
+  comments                Comment[]
+  recommendationsSent     Recommendation[]     @relation("SentRecommendations")
+  recommendationsReceived Recommendation[]     @relation("ReceivedRecommendations")
+  conversationMemberships ConversationMember[]
+  chatMessages            ChatMessage[]
+  chatReads               ChatMessageRead[]
+  reactions               Reaction[]
+  activities              Activity[]
+  notificationsSent       Notification[]       @relation("NotificationActor")
+  notificationsReceived   Notification[]       @relation("NotificationRecipient")
+  pushSubscriptions       PushSubscription[]
+  scannerProfiles         ScannerProfile[]
+  scannerRuns             ScanRun[]
+  brokerConnections       BrokerConnection[]
+  campaigns               Campaign[]
 }
 
 model Session {
@@ -179,50 +210,53 @@ model UserSettings {
 }
 
 model SharingPreferences {
-  id                   String     @id @default(cuid())
-  userId               String     @unique
-  defaultTrade         Visibility @default(SHARED)
-  defaultPosition      Visibility @default(SHARED)
-  defaultWatchlist     Visibility @default(SHARED)
-  defaultNote          Visibility @default(SHARED)
+  id                    String     @id @default(cuid())
+  userId                String     @unique
+  defaultTrade          Visibility @default(SHARED)
+  defaultPosition       Visibility @default(SHARED)
+  defaultWatchlist      Visibility @default(SHARED)
+  defaultNote           Visibility @default(SHARED)
   defaultRecommendation Visibility @default(SHARED)
   defaultAccountBalance Visibility @default(PRIVATE)
-  defaultDollarPL      Visibility @default(PRIVATE)
-  defaultPercentPL     Visibility @default(SHARED)
-  createdAt            DateTime   @default(now())
-  updatedAt            DateTime   @updatedAt
-  user                 User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  defaultDollarPL       Visibility @default(PRIVATE)
+  defaultPercentPL      Visibility @default(SHARED)
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+  user                  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model TradingAccount {
-  id          String            @id @default(cuid())
-  userId      String
-  name        String
-  brokerName  String            @default("Manual")
-  accountType String            @default("Demo")
-  currency    String            @default("USD")
-  visibility  Visibility        @default(PRIVATE)
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
-  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  snapshots   AccountSnapshot[]
-  trades      Trade[]
+  id              String            @id @default(cuid())
+  userId          String
+  name            String
+  brokerName      String            @default("Manual")
+  accountType     String            @default("Demo")
+  currency        String            @default("USD")
+  startingBalance Decimal?          @db.Decimal(14, 2)
+  manualBalance   Decimal?          @db.Decimal(14, 2)
+  visibility      Visibility        @default(SHARED)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snapshots       AccountSnapshot[]
+  trades          Trade[]
+  campaigns       Campaign[]
 
   @@index([userId, visibility])
 }
 
 model AccountSnapshot {
-  id                String         @id @default(cuid())
-  accountId         String
-  capturedAt        DateTime       @default(now())
-  accountValue      Decimal        @db.Decimal(14, 2)
-  cash              Decimal        @db.Decimal(14, 2)
-  cashSecuringPuts  Decimal        @db.Decimal(14, 2)
-  availableCash     Decimal        @db.Decimal(14, 2)
-  realizedPL        Decimal        @db.Decimal(14, 2)
-  unrealizedPL      Decimal        @db.Decimal(14, 2)
-  premiumCollected  Decimal        @db.Decimal(14, 2)
-  account           TradingAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  id               String         @id @default(cuid())
+  accountId        String
+  capturedAt       DateTime       @default(now())
+  accountValue     Decimal        @db.Decimal(14, 2)
+  cash             Decimal        @db.Decimal(14, 2)
+  cashSecuringPuts Decimal        @db.Decimal(14, 2)
+  availableCash    Decimal        @db.Decimal(14, 2)
+  realizedPL       Decimal        @db.Decimal(14, 2)
+  unrealizedPL     Decimal        @db.Decimal(14, 2)
+  premiumCollected Decimal        @db.Decimal(14, 2)
+  account          TradingAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@index([accountId, capturedAt])
 }
@@ -257,24 +291,24 @@ model Trade {
 }
 
 model TradeLeg {
-  id          String         @id @default(cuid())
-  tradeId     String
-  action      TradeLegAction
-  symbol      String
-  contracts   Int
-  strike      Decimal        @db.Decimal(12, 2)
-  expiration  DateTime
-  openedAt    DateTime?
-  closedAt    DateTime?
-  premium     Decimal?       @db.Decimal(12, 4)
-  price       Decimal?       @db.Decimal(12, 4)
-  fees        Decimal        @default(0) @db.Decimal(12, 2)
-  delta       Decimal?       @db.Decimal(10, 4)
-  gamma       Decimal?       @db.Decimal(10, 4)
-  theta       Decimal?       @db.Decimal(10, 4)
-  vega        Decimal?       @db.Decimal(10, 4)
-  createdAt   DateTime       @default(now())
-  trade       Trade          @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  id         String         @id @default(cuid())
+  tradeId    String
+  action     TradeLegAction
+  symbol     String
+  contracts  Int
+  strike     Decimal        @db.Decimal(12, 2)
+  expiration DateTime
+  openedAt   DateTime?
+  closedAt   DateTime?
+  premium    Decimal?       @db.Decimal(12, 4)
+  price      Decimal?       @db.Decimal(12, 4)
+  fees       Decimal        @default(0) @db.Decimal(12, 2)
+  delta      Decimal?       @db.Decimal(10, 4)
+  gamma      Decimal?       @db.Decimal(10, 4)
+  theta      Decimal?       @db.Decimal(10, 4)
+  vega       Decimal?       @db.Decimal(10, 4)
+  createdAt  DateTime       @default(now())
+  trade      Trade          @relation(fields: [tradeId], references: [id], onDelete: Cascade)
 
   @@index([tradeId])
   @@index([symbol, expiration, strike])
@@ -300,15 +334,63 @@ model PositionSnapshot {
   @@index([tradeId, capturedAt])
 }
 
+model Campaign {
+  id                String           @id @default(cuid())
+  ownerId           String
+  accountId         String
+  ticker            String
+  strategy          CampaignStrategy @default(CASH_SECURED_PUT)
+  status            CampaignStatus   @default(OPEN)
+  visibility        RecordVisibility @default(INHERIT)
+  openedAt          DateTime
+  closedAt          DateTime?
+  thesis            String?
+  entrySnapshotJson Json?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  owner             User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  account           TradingAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  events            CampaignEvent[]
+
+  @@index([ownerId, status])
+  @@index([accountId, status])
+  @@index([ticker])
+  @@index([visibility])
+}
+
+model CampaignEvent {
+  id              String            @id @default(cuid())
+  campaignId      String
+  type            CampaignEventType
+  occurredAt      DateTime
+  sortOrder       Int               @default(0)
+  groupKey        String?
+  optionType      OptionType?
+  contracts       Int?
+  shares          Int?
+  strike          Decimal?          @db.Decimal(12, 2)
+  expiration      DateTime?
+  premium         Decimal?          @db.Decimal(12, 4)
+  cashAmount      Decimal?          @db.Decimal(14, 2)
+  fees            Decimal           @default(0) @db.Decimal(12, 2)
+  underlyingPrice Decimal?          @db.Decimal(12, 2)
+  notes           String?
+  createdAt       DateTime          @default(now())
+  campaign        Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, occurredAt])
+  @@index([campaignId, groupKey])
+}
+
 model Watchlist {
-  id          String          @id @default(cuid())
-  ownerId     String
-  name        String
-  visibility  Visibility      @default(SHARED)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  owner       User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  items       WatchlistItem[]
+  id         String          @id @default(cuid())
+  ownerId    String
+  name       String
+  visibility Visibility      @default(SHARED)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  owner      User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  items      WatchlistItem[]
 
   @@index([ownerId, visibility])
 }
@@ -336,7 +418,7 @@ model WatchlistItem {
 
 model StockNote {
   id              String         @id @default(cuid())
-  ownerId          String
+  ownerId         String
   ticker          String
   watchlistItemId String?
   category        NoteCategory
@@ -373,20 +455,20 @@ model Comment {
 }
 
 model Recommendation {
-  id         String               @id @default(cuid())
-  senderId   String
+  id          String               @id @default(cuid())
+  senderId    String
   recipientId String
-  ticker     String
-  message    String
-  reasonTags String[]             @default([])
-  visibility Visibility           @default(SHARED)
-  status     RecommendationStatus @default(NEW)
-  createdAt  DateTime             @default(now())
-  updatedAt  DateTime             @updatedAt
-  sender     User                 @relation("SentRecommendations", fields: [senderId], references: [id], onDelete: Cascade)
-  recipient  User                 @relation("ReceivedRecommendations", fields: [recipientId], references: [id], onDelete: Cascade)
-  comments   Comment[]
-  reactions  Reaction[]
+  ticker      String
+  message     String
+  reasonTags  String[]             @default([])
+  visibility  Visibility           @default(SHARED)
+  status      RecommendationStatus @default(NEW)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  sender      User                 @relation("SentRecommendations", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient   User                 @relation("ReceivedRecommendations", fields: [recipientId], references: [id], onDelete: Cascade)
+  comments    Comment[]
+  reactions   Reaction[]
 
   @@index([senderId])
   @@index([recipientId, status])
@@ -396,7 +478,7 @@ model Recommendation {
 model Conversation {
   id        String               @id @default(cuid())
   title     String
-  type      ConversationType      @default(PRIVATE)
+  type      ConversationType     @default(PRIVATE)
   createdAt DateTime             @default(now())
   updatedAt DateTime             @updatedAt
   members   ConversationMember[]
@@ -444,7 +526,7 @@ model ChatMessageRead {
 }
 
 model Reaction {
-  id               String              @id @default(cuid())
+  id               String             @id @default(cuid())
   actorId          String
   kind             ReactionKind
   targetType       ReactionTargetType
@@ -453,29 +535,29 @@ model Reaction {
   watchlistItemId  String?
   commentId        String?
   activityId       String?
-  createdAt        DateTime            @default(now())
-  actor            User                @relation(fields: [actorId], references: [id], onDelete: Cascade)
-  trade            Trade?              @relation(fields: [tradeId], references: [id], onDelete: Cascade)
-  recommendation   Recommendation?     @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
-  watchlistItem    WatchlistItem?      @relation(fields: [watchlistItemId], references: [id], onDelete: Cascade)
-  comment          Comment?            @relation(fields: [commentId], references: [id], onDelete: Cascade)
-  activity         Activity?           @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  createdAt        DateTime           @default(now())
+  actor            User               @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  trade            Trade?             @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  recommendation   Recommendation?    @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  watchlistItem    WatchlistItem?     @relation(fields: [watchlistItemId], references: [id], onDelete: Cascade)
+  comment          Comment?           @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  activity         Activity?          @relation(fields: [activityId], references: [id], onDelete: Cascade)
 
   @@index([actorId])
   @@index([targetType])
 }
 
 model Activity {
-  id        String       @id @default(cuid())
-  actorId   String
-  type      ActivityType
-  title     String
-  body      String?
-  ticker    String?
-  visibility Visibility  @default(SHARED)
-  createdAt DateTime     @default(now())
-  actor     User         @relation(fields: [actorId], references: [id], onDelete: Cascade)
-  reactions Reaction[]
+  id         String       @id @default(cuid())
+  actorId    String
+  type       ActivityType
+  title      String
+  body       String?
+  ticker     String?
+  visibility Visibility   @default(SHARED)
+  createdAt  DateTime     @default(now())
+  actor      User         @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  reactions  Reaction[]
 
   @@index([actorId, visibility])
   @@index([ticker])
@@ -514,29 +596,29 @@ model PushSubscription {
 }
 
 model ScannerProfile {
-  id          String        @id @default(cuid())
-  ownerId     String
-  name        String
-  visibility  Visibility    @default(PRIVATE)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  owner       User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  rules       ScannerRule[]
-  scanRuns    ScanRun[]
+  id         String        @id @default(cuid())
+  ownerId    String
+  name       String
+  visibility Visibility    @default(PRIVATE)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  owner      User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  rules      ScannerRule[]
+  scanRuns   ScanRun[]
 
   @@unique([ownerId, name])
 }
 
 model ScannerRule {
-  id          String          @id @default(cuid())
-  profileId   String
-  key         String
-  name        String
-  operator    ScannerOperator
-  valueJson   Json
-  enabled     Boolean         @default(true)
-  sortOrder   Int             @default(0)
-  profile     ScannerProfile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  id        String          @id @default(cuid())
+  profileId String
+  key       String
+  name      String
+  operator  ScannerOperator
+  valueJson Json
+  enabled   Boolean         @default(true)
+  sortOrder Int             @default(0)
+  profile   ScannerProfile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
   @@unique([profileId, key])
   @@index([profileId, enabled])
@@ -556,16 +638,16 @@ model ScanRun {
 }
 
 model ScanResult {
-  id                 String                @id @default(cuid())
-  runId              String
-  ticker             String
-  summaryStatus      CriterionStatus
-  passedCriteria     Int
-  totalCriteria      Int
-  snapshotJson       Json
-  createdAt          DateTime              @default(now())
-  run                ScanRun               @relation(fields: [runId], references: [id], onDelete: Cascade)
-  criterionResults   ScanCriterionResult[]
+  id               String                @id @default(cuid())
+  runId            String
+  ticker           String
+  summaryStatus    CriterionStatus
+  passedCriteria   Int
+  totalCriteria    Int
+  snapshotJson     Json
+  createdAt        DateTime              @default(now())
+  run              ScanRun               @relation(fields: [runId], references: [id], onDelete: Cascade)
+  criterionResults ScanCriterionResult[]
 
   @@index([runId])
   @@index([ticker])
@@ -611,24 +693,24 @@ model PriceCandle {
 }
 
 model OptionContractSnapshot {
-  id               String     @id @default(cuid())
-  symbol           String
-  underlyingSymbol String
-  optionType       OptionType
-  strike           Decimal    @db.Decimal(12, 2)
-  expiration       DateTime
-  bid              Decimal    @db.Decimal(12, 4)
-  ask              Decimal    @db.Decimal(12, 4)
-  mark             Decimal    @db.Decimal(12, 4)
-  last             Decimal?   @db.Decimal(12, 4)
-  delta            Decimal?   @db.Decimal(10, 4)
-  gamma            Decimal?   @db.Decimal(10, 4)
-  theta            Decimal?   @db.Decimal(10, 4)
-  vega             Decimal?   @db.Decimal(10, 4)
-  impliedVolatility Decimal?  @db.Decimal(10, 4)
-  openInterest     Int?
-  volume           Int?
-  capturedAt       DateTime   @default(now())
+  id                String     @id @default(cuid())
+  symbol            String
+  underlyingSymbol  String
+  optionType        OptionType
+  strike            Decimal    @db.Decimal(12, 2)
+  expiration        DateTime
+  bid               Decimal    @db.Decimal(12, 4)
+  ask               Decimal    @db.Decimal(12, 4)
+  mark              Decimal    @db.Decimal(12, 4)
+  last              Decimal?   @db.Decimal(12, 4)
+  delta             Decimal?   @db.Decimal(10, 4)
+  gamma             Decimal?   @db.Decimal(10, 4)
+  theta             Decimal?   @db.Decimal(10, 4)
+  vega              Decimal?   @db.Decimal(10, 4)
+  impliedVolatility Decimal?   @db.Decimal(10, 4)
+  openInterest      Int?
+  volume            Int?
+  capturedAt        DateTime   @default(now())
 
   @@index([underlyingSymbol, expiration, strike])
   @@index([symbol, capturedAt])

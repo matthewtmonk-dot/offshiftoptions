@@ -7,7 +7,7 @@ import { defaultScannerRules, evaluateDemoScan } from "../src/domain/scanner/pro
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
-  throw new Error("DATABASE_URL is required to seed LST Buddy.");
+  throw new Error("DATABASE_URL is required to seed Off Shift Options.");
 }
 
 const prisma = new PrismaClient({
@@ -34,6 +34,8 @@ async function resetDatabase() {
     prisma.chatMessage.deleteMany(),
     prisma.conversationMember.deleteMany(),
     prisma.conversation.deleteMany(),
+    prisma.campaignEvent.deleteMany(),
+    prisma.campaign.deleteMany(),
     prisma.positionSnapshot.deleteMany(),
     prisma.tradeLeg.deleteMany(),
     prisma.trade.deleteMany(),
@@ -138,6 +140,23 @@ async function createScannerProfile(ownerId: string) {
   }
 }
 
+function demoCampaignSnapshot(ticker: string) {
+  const candidate = evaluateDemoScan(rules).find((result) => result.ticker === ticker);
+  if (!candidate) {
+    return undefined;
+  }
+
+  return {
+    source: "DEMO",
+    capturedAt: "2026-08-28T14:45:00.000Z",
+    profileName: "My LST",
+    scannerStatus: candidate.summary.status,
+    passedCriteria: candidate.summary.passed,
+    totalCriteria: candidate.summary.total,
+    values: jsonReady(candidate.values),
+  };
+}
+
 async function main() {
   const devPassword = process.env.DEV_SEED_PASSWORD ?? "lstbuddy-dev-only";
   const passwordHash = await hash(devPassword, 10);
@@ -152,18 +171,21 @@ async function main() {
   const mattAccount = await prisma.tradingAccount.create({
     data: {
       userId: matt.id,
-      name: "Matt Manual CSP",
+      name: "Matt IRA",
       brokerName: "Manual demo",
-      visibility: "PRIVATE",
+      accountType: "IRA",
+      startingBalance: "10000.00",
+      manualBalance: "10482.00",
+      visibility: "SHARED",
       snapshots: {
         create: {
-          accountValue: "52640.00",
-          cash: "31280.00",
-          cashSecuringPuts: "1650.00",
-          availableCash: "29630.00",
-          realizedPL: "840.00",
+          accountValue: "10482.00",
+          cash: "7290.00",
+          cashSecuringPuts: "3192.00",
+          availableCash: "7290.00",
+          realizedPL: "482.00",
           unrealizedPL: "21.00",
-          premiumCollected: "1260.00",
+          premiumCollected: "715.00",
         },
       },
     },
@@ -172,18 +194,405 @@ async function main() {
   const ericAccount = await prisma.tradingAccount.create({
     data: {
       userId: eric.id,
-      name: "Eric Manual CSP",
+      name: "Eric IRA",
       brokerName: "Manual demo",
+      accountType: "IRA",
+      startingBalance: "10000.00",
+      manualBalance: "10192.00",
+      visibility: "SHARED",
+      snapshots: {
+        create: {
+          accountValue: "10192.00",
+          cash: "6792.00",
+          cashSecuringPuts: "3400.00",
+          availableCash: "6792.00",
+          realizedPL: "192.00",
+          unrealizedPL: "-14.00",
+          premiumCollected: "380.00",
+        },
+      },
+    },
+  });
+
+  const paperAccount = await prisma.tradingAccount.create({
+    data: {
+      userId: matt.id,
+      name: "Playground / Paper",
+      brokerName: "Manual demo",
+      accountType: "Paper",
+      startingBalance: "5000.00",
+      manualBalance: "5036.00",
       visibility: "PRIVATE",
       snapshots: {
         create: {
-          accountValue: "48720.00",
-          cash: "28100.00",
-          cashSecuringPuts: "1800.00",
-          availableCash: "26300.00",
-          realizedPL: "620.00",
-          unrealizedPL: "-14.00",
-          premiumCollected: "980.00",
+          accountValue: "5036.00",
+          cash: "5036.00",
+          cashSecuringPuts: "0.00",
+          availableCash: "5036.00",
+          realizedPL: "36.00",
+          unrealizedPL: "0.00",
+          premiumCollected: "36.00",
+        },
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: matt.id,
+      accountId: mattAccount.id,
+      ticker: "BROS",
+      strategy: "CASH_SECURED_PUT",
+      status: "CLOSED",
+      visibility: "INHERIT",
+      openedAt: new Date("2026-07-31T14:05:00Z"),
+      closedAt: new Date("2026-08-07T18:30:00Z"),
+      thesis: "Simple demo CSP that closed after most of the premium came out.",
+      events: {
+        create: [
+          {
+            type: "SELL_PUT",
+            occurredAt: new Date("2026-07-31T14:05:00Z"),
+            sortOrder: 0,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "45.00",
+            expiration: new Date("2026-08-21T20:00:00Z"),
+            premium: "0.8400",
+          },
+          {
+            type: "CLOSE_PUT",
+            occurredAt: new Date("2026-08-07T18:30:00Z"),
+            sortOrder: 1,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "45.00",
+            expiration: new Date("2026-08-21T20:00:00Z"),
+            premium: "0.1800",
+            notes: "Locked in the easy part and moved on.",
+          },
+        ],
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: matt.id,
+      accountId: mattAccount.id,
+      ticker: "IONQ",
+      strategy: "CASH_SECURED_PUT",
+      status: "OPEN",
+      visibility: "INHERIT",
+      openedAt: new Date("2026-08-28T14:00:00Z"),
+      thesis: "Open CSP from the current demo scanner universe.",
+      entrySnapshotJson: demoCampaignSnapshot("IONQ"),
+      events: {
+        create: {
+          type: "SELL_PUT",
+          occurredAt: new Date("2026-08-28T14:00:00Z"),
+          sortOrder: 0,
+          optionType: "PUT",
+          contracts: 1,
+          strike: "27.00",
+          expiration: new Date("2026-09-18T20:00:00Z"),
+          premium: "0.3200",
+        },
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: matt.id,
+      accountId: mattAccount.id,
+      ticker: "AAP",
+      strategy: "CASH_SECURED_PUT",
+      status: "OPEN",
+      visibility: "INHERIT",
+      openedAt: new Date("2026-08-21T14:00:00Z"),
+      thesis: "Demo campaign showing a roll that preserves the original leg.",
+      entrySnapshotJson: demoCampaignSnapshot("AAP"),
+      events: {
+        create: [
+          {
+            type: "SELL_PUT",
+            occurredAt: new Date("2026-08-21T14:00:00Z"),
+            sortOrder: 0,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "40.00",
+            expiration: new Date("2026-09-04T20:00:00Z"),
+            premium: "0.4800",
+          },
+          {
+            type: "ROLL_PUT_CLOSE",
+            occurredAt: new Date("2026-08-28T14:15:00Z"),
+            sortOrder: 1,
+            groupKey: "aap-roll-1",
+            optionType: "PUT",
+            contracts: 1,
+            strike: "40.00",
+            expiration: new Date("2026-09-04T20:00:00Z"),
+            premium: "0.7100",
+          },
+          {
+            type: "ROLL_PUT_OPEN",
+            occurredAt: new Date("2026-08-28T14:16:00Z"),
+            sortOrder: 2,
+            groupKey: "aap-roll-1",
+            optionType: "PUT",
+            contracts: 1,
+            strike: "39.00",
+            expiration: new Date("2026-09-11T20:00:00Z"),
+            premium: "1.0200",
+            notes: "Net roll credit is positive while moving the strike down.",
+          },
+        ],
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: matt.id,
+      accountId: mattAccount.id,
+      ticker: "SOFI",
+      strategy: "CASH_SECURED_PUT",
+      status: "CLOSED",
+      visibility: "INHERIT",
+      openedAt: new Date("2026-08-05T14:00:00Z"),
+      closedAt: new Date("2026-08-28T18:30:00Z"),
+      thesis: "Multiple rolls that eventually close positive.",
+      entrySnapshotJson: demoCampaignSnapshot("SOFI"),
+      events: {
+        create: [
+          {
+            type: "SELL_PUT",
+            occurredAt: new Date("2026-08-05T14:00:00Z"),
+            sortOrder: 0,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "18.00",
+            expiration: new Date("2026-08-14T20:00:00Z"),
+            premium: "0.3600",
+          },
+          {
+            type: "ROLL_PUT_CLOSE",
+            occurredAt: new Date("2026-08-12T15:00:00Z"),
+            sortOrder: 1,
+            groupKey: "sofi-roll-1",
+            optionType: "PUT",
+            contracts: 1,
+            strike: "18.00",
+            expiration: new Date("2026-08-14T20:00:00Z"),
+            premium: "0.5200",
+          },
+          {
+            type: "ROLL_PUT_OPEN",
+            occurredAt: new Date("2026-08-12T15:01:00Z"),
+            sortOrder: 2,
+            groupKey: "sofi-roll-1",
+            optionType: "PUT",
+            contracts: 1,
+            strike: "17.50",
+            expiration: new Date("2026-08-21T20:00:00Z"),
+            premium: "0.8800",
+          },
+          {
+            type: "ROLL_PUT_CLOSE",
+            occurredAt: new Date("2026-08-19T15:00:00Z"),
+            sortOrder: 3,
+            groupKey: "sofi-roll-2",
+            optionType: "PUT",
+            contracts: 1,
+            strike: "17.50",
+            expiration: new Date("2026-08-21T20:00:00Z"),
+            premium: "0.4400",
+          },
+          {
+            type: "ROLL_PUT_OPEN",
+            occurredAt: new Date("2026-08-19T15:01:00Z"),
+            sortOrder: 4,
+            groupKey: "sofi-roll-2",
+            optionType: "PUT",
+            contracts: 1,
+            strike: "17.00",
+            expiration: new Date("2026-08-28T20:00:00Z"),
+            premium: "0.7600",
+          },
+          {
+            type: "CLOSE_PUT",
+            occurredAt: new Date("2026-08-28T18:30:00Z"),
+            sortOrder: 5,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "17.00",
+            expiration: new Date("2026-08-28T20:00:00Z"),
+            premium: "0.2100",
+            notes: "A little messy, still green.",
+          },
+        ],
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: matt.id,
+      accountId: mattAccount.id,
+      ticker: "F",
+      strategy: "WHEEL",
+      status: "ASSIGNED",
+      visibility: "INHERIT",
+      openedAt: new Date("2026-07-17T14:00:00Z"),
+      thesis: "Assigned CSP followed by covered call premium.",
+      entrySnapshotJson: demoCampaignSnapshot("F"),
+      events: {
+        create: [
+          {
+            type: "SELL_PUT",
+            occurredAt: new Date("2026-07-17T14:00:00Z"),
+            sortOrder: 0,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "11.50",
+            expiration: new Date("2026-08-14T20:00:00Z"),
+            premium: "0.2200",
+          },
+          {
+            type: "ASSIGNMENT",
+            occurredAt: new Date("2026-08-14T20:30:00Z"),
+            sortOrder: 1,
+            optionType: "PUT",
+            contracts: 1,
+            shares: 100,
+            strike: "11.50",
+            expiration: new Date("2026-08-14T20:00:00Z"),
+          },
+          {
+            type: "SELL_COVERED_CALL",
+            occurredAt: new Date("2026-08-17T14:00:00Z"),
+            sortOrder: 2,
+            optionType: "CALL",
+            contracts: 1,
+            strike: "12.00",
+            expiration: new Date("2026-08-28T20:00:00Z"),
+            premium: "0.1800",
+          },
+          {
+            type: "COVERED_CALL_EXPIRED",
+            occurredAt: new Date("2026-08-28T20:00:00Z"),
+            sortOrder: 3,
+            optionType: "CALL",
+            contracts: 1,
+            strike: "12.00",
+            expiration: new Date("2026-08-28T20:00:00Z"),
+            notes: "Kept the shares and the call premium.",
+          },
+          {
+            type: "SELL_COVERED_CALL",
+            occurredAt: new Date("2026-08-28T20:10:00Z"),
+            sortOrder: 4,
+            optionType: "CALL",
+            contracts: 1,
+            strike: "12.50",
+            expiration: new Date("2026-09-18T20:00:00Z"),
+            premium: "0.1600",
+          },
+        ],
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: matt.id,
+      accountId: mattAccount.id,
+      ticker: "ROKU",
+      strategy: "CASH_SECURED_PUT",
+      status: "CLOSED",
+      visibility: "INHERIT",
+      openedAt: new Date("2026-08-14T14:00:00Z"),
+      closedAt: new Date("2026-08-20T18:30:00Z"),
+      thesis: "Losing campaign example so red outcomes are represented honestly.",
+      entrySnapshotJson: demoCampaignSnapshot("ROKU"),
+      events: {
+        create: [
+          {
+            type: "SELL_PUT",
+            occurredAt: new Date("2026-08-14T14:00:00Z"),
+            sortOrder: 0,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "62.00",
+            expiration: new Date("2026-09-18T20:00:00Z"),
+            premium: "0.6200",
+          },
+          {
+            type: "CLOSE_PUT",
+            occurredAt: new Date("2026-08-20T18:30:00Z"),
+            sortOrder: 1,
+            optionType: "PUT",
+            contracts: 1,
+            strike: "62.00",
+            expiration: new Date("2026-09-18T20:00:00Z"),
+            premium: "1.3500",
+            notes: "Took the loss and protected the account.",
+          },
+        ],
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: matt.id,
+      accountId: paperAccount.id,
+      ticker: "WBD",
+      strategy: "CASH_SECURED_PUT",
+      status: "OPEN",
+      visibility: "PRIVATE",
+      openedAt: new Date("2026-08-28T15:05:00Z"),
+      thesis: "Private paper/demo campaign for visibility testing.",
+      entrySnapshotJson: demoCampaignSnapshot("WBD"),
+      events: {
+        create: {
+          type: "SELL_PUT",
+          occurredAt: new Date("2026-08-28T15:05:00Z"),
+          sortOrder: 0,
+          optionType: "PUT",
+          contracts: 1,
+          strike: "14.00",
+          expiration: new Date("2026-09-18T20:00:00Z"),
+          premium: "0.1000",
+          notes: "Explicitly private even though campaigns usually follow the account.",
+        },
+      },
+    },
+  });
+
+  await prisma.campaign.create({
+    data: {
+      ownerId: eric.id,
+      accountId: ericAccount.id,
+      ticker: "HOOD",
+      strategy: "CASH_SECURED_PUT",
+      status: "OPEN",
+      visibility: "INHERIT",
+      openedAt: new Date("2026-08-28T15:20:00Z"),
+      thesis: "Eric shared open CSP from the demo scanner universe.",
+      entrySnapshotJson: demoCampaignSnapshot("HOOD"),
+      events: {
+        create: {
+          type: "SELL_PUT",
+          occurredAt: new Date("2026-08-28T15:20:00Z"),
+          sortOrder: 0,
+          optionType: "PUT",
+          contracts: 1,
+          strike: "34.00",
+          expiration: new Date("2026-09-18T20:00:00Z"),
+          premium: "0.4600",
         },
       },
     },
@@ -553,7 +962,7 @@ async function main() {
       : [],
   });
 
-  console.log(`Seeded LST Buddy demo data for Matt and Eric. Development password source: DEV_SEED_PASSWORD${process.env.DEV_SEED_PASSWORD ? "" : " default"}.`);
+  console.log(`Seeded Off Shift Options demo data for Matt and Eric. Development password source: DEV_SEED_PASSWORD${process.env.DEV_SEED_PASSWORD ? "" : " default"}.`);
 }
 
 main()

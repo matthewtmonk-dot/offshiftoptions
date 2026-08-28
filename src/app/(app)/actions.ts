@@ -9,15 +9,23 @@ import {
   addReactionForUser,
   addRecommendationCommentForUser,
   addWatchlistCommentForUser,
+  assignCampaignPutForUser,
+  closeCampaignPutForUser,
+  createCampaignForUser,
+  createTradingAccountForUser,
   createRecommendationForUser,
   createWatchlistItemForUser,
   markAllNotificationsReadForUser,
   markConversationReadForUser,
   markNotificationReadForUser,
   removeWatchlistItemForUser,
+  rerunDemoScannerForUser,
+  rollCampaignPutForUser,
   safeReturnPath,
   saveStockNoteForUser,
   sendChatMessageForUser,
+  toggleCampaignVisibilityForUser,
+  toggleTradingAccountVisibilityForUser,
   toggleWatchlistItemVisibilityForUser,
   updateRecommendationStatusForUser,
   updateScannerSettingsForUser,
@@ -218,6 +226,158 @@ export async function updateScannerSettingsAction(formData: FormData) {
   revalidatePath("/scanner");
   revalidatePath("/dashboard");
   redirect("/scanner/settings?saved=1");
+}
+
+export async function runDemoScannerAction() {
+  const user = await requireCurrentUser();
+  await rerunDemoScannerForUser(user.id);
+
+  revalidatePath("/scanner");
+  revalidatePath("/dashboard");
+}
+
+export async function createTradingAccountAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await createTradingAccountForUser(
+      user.id,
+      formData.get("name"),
+      formData.get("accountType"),
+      formData.get("startingBalance"),
+      formData.get("manualBalance"),
+      formData.get("visibility"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function toggleTradingAccountVisibilityAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  await toggleTradingAccountVisibilityForUser(user.id, String(formData.get("accountId") ?? ""));
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function createCampaignAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await createCampaignForUser(
+      user.id,
+      String(formData.get("accountId") ?? ""),
+      formData.get("ticker"),
+      formData.get("tradeDate"),
+      formData.get("expiration"),
+      formData.get("strike"),
+      formData.get("contracts"),
+      formData.get("premium"),
+      formData.get("fees"),
+      formData.get("notes"),
+      formData.get("visibility"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function toggleCampaignVisibilityAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  await toggleCampaignVisibilityForUser(user.id, String(formData.get("campaignId") ?? ""));
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function closeCampaignPutAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await closeCampaignPutForUser(
+      user.id,
+      String(formData.get("campaignId") ?? ""),
+      formData.get("occurredAt"),
+      formData.get("premium"),
+      formData.get("fees"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function rollCampaignPutAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await rollCampaignPutForUser(
+      user.id,
+      String(formData.get("campaignId") ?? ""),
+      formData.get("occurredAt"),
+      formData.get("closePremium"),
+      formData.get("newExpiration"),
+      formData.get("newStrike"),
+      formData.get("newPremium"),
+      formData.get("fees"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function assignCampaignPutAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await assignCampaignPutForUser(
+      user.id,
+      String(formData.get("campaignId") ?? ""),
+      formData.get("occurredAt"),
+      formData.get("shares"),
+      formData.get("fees"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
 }
 
 export async function changePasswordAction(formData: FormData) {

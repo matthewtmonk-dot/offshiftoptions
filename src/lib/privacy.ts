@@ -1,4 +1,5 @@
 export type Visibility = "PRIVATE" | "SHARED";
+export type InheritedVisibility = Visibility | "INHERIT";
 
 export class AuthorizationError extends Error {
   constructor(message = "You are not allowed to read this record.") {
@@ -13,6 +14,30 @@ export function canReadRecord(viewerId: string, ownerId: string, visibility: Vis
 
 export function assertCanReadRecord(viewerId: string, ownerId: string, visibility: Visibility): void {
   if (!canReadRecord(viewerId, ownerId, visibility)) {
+    throw new AuthorizationError();
+  }
+}
+
+export function resolveInheritedVisibility(visibility: InheritedVisibility, parentVisibility: Visibility): Visibility {
+  return visibility === "INHERIT" ? parentVisibility : visibility;
+}
+
+export function canReadInheritedRecord(
+  viewerId: string,
+  ownerId: string,
+  visibility: InheritedVisibility,
+  parentVisibility: Visibility,
+): boolean {
+  return canReadRecord(viewerId, ownerId, resolveInheritedVisibility(visibility, parentVisibility));
+}
+
+export function assertCanReadInheritedRecord(
+  viewerId: string,
+  ownerId: string,
+  visibility: InheritedVisibility,
+  parentVisibility: Visibility,
+): void {
+  if (!canReadInheritedRecord(viewerId, ownerId, visibility, parentVisibility)) {
     throw new AuthorizationError();
   }
 }

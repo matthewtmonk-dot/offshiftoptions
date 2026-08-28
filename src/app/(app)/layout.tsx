@@ -20,7 +20,7 @@ import { signOutAction } from "./actions";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/positions", label: "Positions", icon: WalletCards },
+  { href: "/positions", label: "Tracker", icon: WalletCards },
   { href: "/scanner", label: "Scanner", icon: ChartNoAxesCombined },
   { href: "/scanner/settings", label: "Settings", icon: SlidersHorizontal },
   { href: "/watchlist", label: "Watchlist", icon: ListChecks },

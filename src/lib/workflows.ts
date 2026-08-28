@@ -1,12 +1,37 @@
+import { randomUUID } from "node:crypto";
 import type { NoteCategory, ReactionTargetType } from "@/generated/prisma/enums";
 import { evaluateDemoScan, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
-import { assertCanMutateRecord, assertCanReadRecord } from "./privacy";
+import {
+  assertCanMutateRecord,
+  assertCanReadInheritedRecord,
+  assertCanReadRecord,
+  resolveInheritedVisibility,
+  type InheritedVisibility,
+  type Visibility,
+} from "./privacy";
 import { prisma } from "./prisma";
 import { requireTicker, ValidationError } from "./tickers";
 import { notifyInApp } from "./notifications";
 
 const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
+const ACCOUNT_VISIBILITIES = new Set<Visibility>(["PRIVATE", "SHARED"]);
+const RECORD_VISIBILITIES = new Set<InheritedVisibility>(["INHERIT", "PRIVATE", "SHARED"]);
+const campaignDetailInclude = {
+  owner: { select: { id: true, name: true, email: true } },
+  account: {
+    select: {
+      id: true,
+      userId: true,
+      name: true,
+      accountType: true,
+      startingBalance: true,
+      manualBalance: true,
+      visibility: true,
+    },
+  },
+  events: { orderBy: [{ occurredAt: "asc" as const }, { sortOrder: "asc" as const }] },
+};
 const RETURNABLE_PATHS = new Set([
   "/dashboard",
   "/positions",
@@ -25,6 +50,328 @@ export function safeReturnPath(value: FormDataEntryValue | null, fallback: strin
 
 export function trimText(value: unknown, maxLength = 700) {
   return String(value ?? "").trim().slice(0, maxLength);
+}
+
+export async function createTradingAccountForUser(
+  userId: string,
+  nameInput: unknown,
+  accountTypeInput: unknown,
+  startingBalanceInput: unknown,
+  manualBalanceInput: unknown,
+  visibilityInput: unknown,
+) {
+  const name = trimText(nameInput, 80);
+  if (!name) {
+    throw new ValidationError("Name the account first.");
+  }
+
+  const accountType = trimText(accountTypeInput, 40) || "Manual";
+  const startingBalance = parseOptionalMoney(startingBalanceInput, "starting balance");
+  const manualBalance = parseOptionalMoney(manualBalanceInput, "current balance") ?? startingBalance;
+  const visibility = parseAccountVisibility(visibilityInput, "SHARED");
+  const snapshotBalance = manualBalance ?? startingBalance;
+
+  return prisma.tradingAccount.create({
+    data: {
+      userId,
+      name,
+      brokerName: "Manual",
+      accountType,
+      startingBalance,
+      manualBalance,
+      visibility,
+      snapshots:
+        snapshotBalance === null
+          ? undefined
+          : {
+              create: {
+                accountValue: snapshotBalance,
+                cash: snapshotBalance,
+                cashSecuringPuts: 0,
+                availableCash: snapshotBalance,
+                realizedPL: 0,
+                unrealizedPL: 0,
+                premiumCollected: 0,
+              },
+            },
+    },
+  });
+}
+
+export async function toggleTradingAccountVisibilityForUser(userId: string, accountId: string) {
+  const account = await prisma.tradingAccount.findUnique({ where: { id: accountId } });
+  if (!account) {
+    return null;
+  }
+
+  assertCanMutateRecord(userId, account.userId);
+  return prisma.tradingAccount.update({
+    where: { id: account.id },
+    data: { visibility: account.visibility === "PRIVATE" ? "SHARED" : "PRIVATE" },
+  });
+}
+
+export async function createCampaignForUser(
+  userId: string,
+  accountId: string,
+  tickerInput: unknown,
+  tradeDateInput: unknown,
+  expirationInput: unknown,
+  strikeInput: unknown,
+  contractsInput: unknown,
+  premiumInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+  visibilityInput: unknown,
+) {
+  const ticker = requireTicker(tickerInput);
+  const account = await prisma.tradingAccount.findFirst({ where: { id: accountId, userId } });
+  if (!account) {
+    throw new ValidationError("Choose one of your accounts.");
+  }
+
+  const tradeDate = parseDateInput(tradeDateInput, "trade date");
+  const expiration = parseDateInput(expirationInput, "expiration date");
+  const strike = parsePositiveNumber(strikeInput, "strike");
+  const contracts = parsePositiveInteger(contractsInput, "contracts");
+  const premium = parseNonNegativeNumber(premiumInput, "premium");
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 1200);
+  const visibility = parseRecordVisibility(visibilityInput, "INHERIT");
+  const entrySnapshotJson = await latestScannerSnapshotForUser(userId, ticker);
+
+  return prisma.campaign.create({
+    data: {
+      ownerId: userId,
+      accountId: account.id,
+      ticker,
+      strategy: "CASH_SECURED_PUT",
+      status: "OPEN",
+      visibility,
+      openedAt: tradeDate,
+      thesis: notes || null,
+      entrySnapshotJson: entrySnapshotJson ?? undefined,
+      events: {
+        create: {
+          type: "SELL_PUT",
+          occurredAt: tradeDate,
+          sortOrder: 0,
+          optionType: "PUT",
+          contracts,
+          strike,
+          expiration,
+          premium,
+          fees,
+          notes: notes || null,
+        },
+      },
+    },
+    include: campaignDetailInclude,
+  });
+}
+
+export async function getReadableCampaignForUser(userId: string, campaignId: string) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: campaignDetailInclude,
+  });
+
+  if (!campaign) {
+    return null;
+  }
+
+  assertCanReadInheritedRecord(userId, campaign.ownerId, campaign.visibility, campaign.account.visibility);
+  return campaign;
+}
+
+export async function toggleCampaignVisibilityForUser(userId: string, campaignId: string) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: { account: true },
+  });
+
+  if (!campaign) {
+    return null;
+  }
+
+  assertCanMutateRecord(userId, campaign.ownerId);
+  const effectiveVisibility = resolveInheritedVisibility(campaign.visibility, campaign.account.visibility);
+  return prisma.campaign.update({
+    where: { id: campaign.id },
+    data: { visibility: effectiveVisibility === "PRIVATE" ? "SHARED" : "PRIVATE" },
+  });
+}
+
+export async function closeCampaignPutForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  premiumInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "OPEN") {
+    throw new ValidationError("Only an open put campaign can be closed this way.");
+  }
+
+  const activePut = latestPutLeg(campaign.events);
+  if (!activePut) {
+    throw new ValidationError("No open put leg was found for this campaign.");
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "close date");
+  const premium = parseNonNegativeNumber(premiumInput, "close premium");
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId: campaign.id,
+      type: "CLOSE_PUT",
+      occurredAt,
+      sortOrder: nextSortOrder(campaign.events),
+      optionType: "PUT",
+      contracts: activePut.contracts,
+      strike: activePut.strike,
+      expiration: activePut.expiration,
+      premium,
+      fees,
+      notes: notes || null,
+    },
+  });
+
+  return prisma.campaign.update({
+    where: { id: campaign.id },
+    data: { status: "CLOSED", closedAt: occurredAt },
+    include: campaignDetailInclude,
+  });
+}
+
+export async function rollCampaignPutForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  closePremiumInput: unknown,
+  newExpirationInput: unknown,
+  newStrikeInput: unknown,
+  newPremiumInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "OPEN") {
+    throw new ValidationError("Only an open put campaign can be rolled.");
+  }
+
+  const activePut = latestPutLeg(campaign.events);
+  if (!activePut) {
+    throw new ValidationError("No open put leg was found for this campaign.");
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "roll date");
+  const closePremium = parseNonNegativeNumber(closePremiumInput, "close premium");
+  const newExpiration = parseDateInput(newExpirationInput, "new expiration date");
+  const newStrike = parsePositiveNumber(newStrikeInput, "new strike");
+  const newPremium = parseNonNegativeNumber(newPremiumInput, "new premium");
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+  const groupKey = `roll-${randomUUID()}`;
+  const baseSortOrder = nextSortOrder(campaign.events);
+
+  await prisma.campaignEvent.createMany({
+    data: [
+      {
+        campaignId: campaign.id,
+        type: "ROLL_PUT_CLOSE",
+        occurredAt,
+        sortOrder: baseSortOrder,
+        groupKey,
+        optionType: "PUT",
+        contracts: activePut.contracts,
+        strike: activePut.strike,
+        expiration: activePut.expiration,
+        premium: closePremium,
+        fees,
+        notes: notes || null,
+      },
+      {
+        campaignId: campaign.id,
+        type: "ROLL_PUT_OPEN",
+        occurredAt,
+        sortOrder: baseSortOrder + 1,
+        groupKey,
+        optionType: "PUT",
+        contracts: activePut.contracts,
+        strike: newStrike,
+        expiration: newExpiration,
+        premium: newPremium,
+        fees: 0,
+        notes: notes || null,
+      },
+    ],
+  });
+
+  return prisma.campaign.update({
+    where: { id: campaign.id },
+    data: { status: "OPEN", closedAt: null },
+    include: campaignDetailInclude,
+  });
+}
+
+export async function assignCampaignPutForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  sharesInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "OPEN") {
+    throw new ValidationError("Only an open put campaign can be assigned.");
+  }
+
+  const activePut = latestPutLeg(campaign.events);
+  if (!activePut) {
+    throw new ValidationError("No open put leg was found for this campaign.");
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "assignment date");
+  const shares = parseOptionalPositiveInteger(sharesInput, "shares") ?? activePut.contracts * 100;
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId: campaign.id,
+      type: "ASSIGNMENT",
+      occurredAt,
+      sortOrder: nextSortOrder(campaign.events),
+      optionType: "PUT",
+      contracts: activePut.contracts,
+      shares,
+      strike: activePut.strike,
+      expiration: activePut.expiration,
+      fees,
+      notes: notes || null,
+    },
+  });
+
+  return prisma.campaign.update({
+    where: { id: campaign.id },
+    data: { status: "ASSIGNED", strategy: "WHEEL" },
+    include: campaignDetailInclude,
+  });
 }
 
 export async function createWatchlistItemForUser(userId: string, tickerInput: unknown) {
@@ -632,4 +979,180 @@ export async function rerunDemoScannerForUser(userId: string, profileId?: string
 
 function jsonReady(values: Record<string, number | string | boolean | null | undefined>) {
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value ?? null]));
+}
+
+function parseAccountVisibility(value: unknown, fallback: Visibility): Visibility {
+  const visibility = String(value ?? fallback).toUpperCase() as Visibility;
+  if (!ACCOUNT_VISIBILITIES.has(visibility)) {
+    throw new ValidationError("Choose a valid account visibility.");
+  }
+
+  return visibility;
+}
+
+function parseRecordVisibility(value: unknown, fallback: InheritedVisibility): InheritedVisibility {
+  const visibility = String(value ?? fallback).toUpperCase() as InheritedVisibility;
+  if (!RECORD_VISIBILITIES.has(visibility)) {
+    throw new ValidationError("Choose a valid campaign visibility.");
+  }
+
+  return visibility;
+}
+
+function parseDateInput(value: unknown, label: string) {
+  const text = String(value ?? "").trim();
+  const date = text ? new Date(text) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    throw new ValidationError(`Enter a valid ${label}.`);
+  }
+
+  return date;
+}
+
+function parseOptionalMoney(value: unknown, label: string) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new ValidationError(`Enter a valid ${label}.`);
+  }
+
+  return parsed;
+}
+
+function parsePositiveNumber(value: unknown, label: string) {
+  const parsed = Number(String(value ?? "").trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new ValidationError(`Enter a valid ${label}.`);
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeNumber(value: unknown, label: string) {
+  const parsed = Number(String(value ?? "").trim());
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new ValidationError(`Enter a valid ${label}.`);
+  }
+
+  return parsed;
+}
+
+function parsePositiveInteger(value: unknown, label: string) {
+  const parsed = Number(String(value ?? "").trim());
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new ValidationError(`Enter a valid ${label}.`);
+  }
+
+  return parsed;
+}
+
+function parseOptionalPositiveInteger(value: unknown, label: string) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+
+  return parsePositiveInteger(text, label);
+}
+
+async function latestScannerSnapshotForUser(userId: string, ticker: string) {
+  const result = await prisma.scanResult.findFirst({
+    where: {
+      ticker,
+      run: { ownerId: userId },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      summaryStatus: true,
+      passedCriteria: true,
+      totalCriteria: true,
+      snapshotJson: true,
+      run: {
+        select: {
+          createdAt: true,
+          source: true,
+          profile: { select: { name: true } },
+        },
+      },
+    },
+  });
+
+  if (!result) {
+    return null;
+  }
+
+  return {
+    source: result.run.source,
+    capturedAt: result.run.createdAt.toISOString(),
+    profileName: result.run.profile.name,
+    scannerStatus: result.summaryStatus,
+    passedCriteria: result.passedCriteria,
+    totalCriteria: result.totalCriteria,
+    values: result.snapshotJson,
+  };
+}
+
+async function getOwnMutableCampaign(userId: string, campaignId: string) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: {
+      account: true,
+      events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] },
+    },
+  });
+
+  if (!campaign) {
+    return null;
+  }
+
+  assertCanMutateRecord(userId, campaign.ownerId);
+  return campaign;
+}
+
+function latestPutLeg(
+  events: {
+    type: string;
+    contracts: number | null;
+    strike: unknown;
+    expiration: Date | null;
+    occurredAt: Date;
+    sortOrder: number;
+  }[],
+) {
+  const latest = [...events]
+    .reverse()
+    .find((event) => (event.type === "SELL_PUT" || event.type === "ROLL_PUT_OPEN") && event.contracts && event.strike);
+  const strike = latest ? numericInput(latest.strike) : null;
+  if (!latest || !latest.contracts || !latest.expiration || strike === null) {
+    return null;
+  }
+
+  return {
+    contracts: latest.contracts,
+    strike,
+    expiration: latest.expiration,
+  };
+}
+
+function nextSortOrder(events: { sortOrder: number }[]) {
+  return events.reduce((next, event) => Math.max(next, event.sortOrder + 1), 0);
+}
+
+function numericInput(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const candidate = value as { toNumber?: () => number; toString?: () => string };
+  if (typeof candidate.toNumber === "function") {
+    const parsed = candidate.toNumber();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  const parsed = Number(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
 }
