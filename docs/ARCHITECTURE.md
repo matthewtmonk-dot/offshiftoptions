@@ -69,7 +69,22 @@ prisma generate && next build
 
 This is the permanent `pnpm build` script. It does not run `prisma migrate deploy` and does not seed or bootstrap any data.
 
-**Current migration policy:** Prisma migrations are **not** automatically executed inside Hostinger. The Hostinger build environment currently produces an `EACCES` error (`schema-engine-debian-openssl-1.1.x EACCES`) when Prisma's schema engine is executed by `prisma migrate deploy` during the build, and Hostinger's build shell does not support nested `pnpm` invocations either. Because of this, future production schema migrations must be applied through a separate, controlled migration process run outside the Hostinger build step, before deployment. That process has not been designed yet — see `docs/ROADMAP.md` (Phase 2 infrastructure).
+**Current migration policy:** Prisma migrations are **not** automatically executed inside Hostinger.
+
+**Root cause analysis:** `prisma generate` succeeds inside the Hostinger build, but `prisma migrate deploy` fails with `schema-engine-debian-openssl-1.1.x EACCES`. `generate` mainly copies/references engine binaries; `migrate deploy` must actually **spawn and execute** the downloaded `schema-engine` binary as a subprocess to talk to the database. An `EACCES` specifically on execution (not on read/open) after a successful `generate` step points to the Hostinger build/runtime environment restricting execution of arbitrary spawned binaries — most likely a `noexec`-mounted or otherwise locked-down filesystem/sandbox on their managed Node hosting product, not a simple missing-`+x`-bit problem. A `chmod +x` would not fix a mount-level `noexec` restriction, so that was deliberately not attempted. Hostinger's build shell also does not support nested `pnpm run ...` invocations from within a package script (only the top-level `pnpm run build` works).
+
+**Recommended long-term migration workflow** (safe, maintainable, no Hostinger environment changes required):
+
+1. Change `prisma/schema.prisma` and generate a migration locally as usual (`prisma migrate dev` in local development against Docker Postgres).
+2. Before pushing the schema-changing commit to `main` (remember: pushing to `main` triggers a Hostinger auto-deploy), apply the migration directly to Supabase from an environment that can actually execute the schema-engine binary — a local developer machine or a CI runner (e.g. a manually-triggered GitHub Actions job) both work, since neither has Hostinger's execution restriction:
+   ```bash
+   DATABASE_URL="<supabase-connection-string>" pnpm prisma migrate deploy
+   ```
+   Never hardcode or commit the Supabase `DATABASE_URL`; pass it as an ad hoc environment variable or CI secret.
+3. Verify the migration applied cleanly (check `_prisma_migrations` in Supabase, or hit `/api/health` after the next deploy).
+4. Only then push the application code that depends on the new schema to `main`, so Hostinger's build (`prisma generate && next build`) runs against a database that already has the matching schema.
+
+This keeps Hostinger's build fully dependable (it never touches migrations) while still using Prisma's own migration history tracking (`_prisma_migrations`) instead of hand-run SQL, which would need manual bookkeeping to stay in sync. Automating step 2 in CI is a reasonable Phase 2 follow-up once this manual workflow has been used a few times — see `docs/ROADMAP.md` (Phase 2 infrastructure).
 
 **Two separate database scripts exist and must not be confused:**
 
