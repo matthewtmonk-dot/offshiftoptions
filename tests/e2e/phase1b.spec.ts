@@ -71,6 +71,28 @@ test("scanner settings are editable per user", async ({ page }) => {
   await expect(page.locator('input[name="price:max"]')).toHaveValue("80");
 });
 
+test("tracker shows campaign lifecycles without leaking private buddy campaigns", async ({ page }) => {
+  await loginAs(page, "Matt");
+  await page.goto("/positions?scope=both");
+  await expect(page.getByRole("heading", { name: "Tracker" })).toBeVisible();
+  await expect(page.getByText("SOFI").first()).toBeVisible();
+  await expect(page.getByText("WBD").first()).toBeVisible();
+
+  const aapCard = page.locator("details").filter({ hasText: "AAP" }).first();
+  await aapCard.click();
+  await expect(aapCard.getByText("Lifecycle")).toBeVisible();
+  await expect(aapCard.getByText("Roll net")).toBeVisible();
+
+  await signOut(page);
+  await loginAs(page, "Eric");
+  await page.goto("/positions?scope=both");
+  await expect(page.getByText("HOOD").first()).toBeVisible();
+  await expect(page.getByText("WBD")).toHaveCount(0);
+
+  await page.getByRole("link", { name: "Accounts" }).click();
+  await expect(page.getByText("Matt IRA").first()).toBeVisible();
+});
+
 test("major app pages render at mobile width without horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await loginAs(page, "Matt");

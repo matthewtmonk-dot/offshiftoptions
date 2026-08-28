@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { hash } from "bcryptjs";
+import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 
 const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
@@ -14,6 +15,8 @@ maybeDescribe("database-backed Phase 1B workflows", () => {
   const createdWatchlistItems: string[] = [];
   const createdRecommendations: string[] = [];
   const createdNotifications: string[] = [];
+  const createdCampaigns: string[] = [];
+  const createdAccounts: string[] = [];
 
   beforeAll(async () => {
     prisma = (await import("./prisma")).prisma;
@@ -23,6 +26,8 @@ maybeDescribe("database-backed Phase 1B workflows", () => {
   });
 
   afterAll(async () => {
+    await prisma.campaign.deleteMany({ where: { id: { in: createdCampaigns } } });
+    await prisma.tradingAccount.deleteMany({ where: { id: { in: createdAccounts } } });
     await prisma.notification.deleteMany({ where: { id: { in: createdNotifications } } });
     await prisma.recommendation.deleteMany({ where: { id: { in: createdRecommendations } } });
     await prisma.watchlistItem.deleteMany({ where: { id: { in: createdWatchlistItems } } });
@@ -51,6 +56,161 @@ maybeDescribe("database-backed Phase 1B workflows", () => {
 
     await expect(workflows.getReadableWatchlistItemForUser(eric.id, item.id)).resolves.toMatchObject({ id: item.id });
     await expect(workflows.removeWatchlistItemForUser(eric.id, item.id)).rejects.toThrow("not allowed");
+  });
+
+  it("creates manual accounts and campaign entries with scanner snapshots", async () => {
+    const account = await workflows.createTradingAccountForUser(
+      matt.id,
+      `Integration Account ${Date.now()}`,
+      "Paper",
+      "10000",
+      "10050",
+      "SHARED",
+    );
+    createdAccounts.push(account.id);
+
+    const campaign = await workflows.createCampaignForUser(
+      matt.id,
+      account.id,
+      "IONQ",
+      "2026-08-28",
+      "2026-09-18",
+      "27",
+      "1",
+      "0.32",
+      "0",
+      "Integration campaign",
+      "INHERIT",
+    );
+    createdCampaigns.push(campaign.id);
+
+    expect(campaign).toMatchObject({ ownerId: matt.id, accountId: account.id, ticker: "IONQ", visibility: "INHERIT" });
+    expect(campaign.events).toHaveLength(1);
+    expect(campaign.events[0]).toMatchObject({ type: "SELL_PUT", contracts: 1 });
+    expect(campaign.entrySnapshotJson).toMatchObject({ profileName: "My LST", scannerStatus: expect.any(String) });
+  });
+
+  it("enforces inherited, explicit shared, and explicit private campaign visibility", async () => {
+    const account = await workflows.createTradingAccountForUser(
+      matt.id,
+      `Private Parent ${Date.now()}`,
+      "Manual",
+      "5000",
+      "5000",
+      "PRIVATE",
+    );
+    createdAccounts.push(account.id);
+
+    const campaign = await workflows.createCampaignForUser(
+      matt.id,
+      account.id,
+      "HOOD",
+      "2026-08-28",
+      "2026-09-18",
+      "34",
+      "1",
+      "0.46",
+      "0",
+      "Visibility integration campaign",
+      "INHERIT",
+    );
+    createdCampaigns.push(campaign.id);
+
+    await expect(workflows.getReadableCampaignForUser(matt.id, campaign.id)).resolves.toMatchObject({ id: campaign.id });
+    await expect(workflows.getReadableCampaignForUser(eric.id, campaign.id)).rejects.toThrow("not allowed");
+
+    await prisma.campaign.update({ where: { id: campaign.id }, data: { visibility: "SHARED" } });
+    await expect(workflows.getReadableCampaignForUser(eric.id, campaign.id)).resolves.toMatchObject({ id: campaign.id });
+
+    await prisma.tradingAccount.update({ where: { id: account.id }, data: { visibility: "SHARED" } });
+    await prisma.campaign.update({ where: { id: campaign.id }, data: { visibility: "PRIVATE" } });
+    await expect(workflows.getReadableCampaignForUser(eric.id, campaign.id)).rejects.toThrow("not allowed");
+  });
+
+  it("blocks buddy campaign mutation and preserves both roll legs", async () => {
+    const account = await workflows.createTradingAccountForUser(
+      matt.id,
+      `Roll Account ${Date.now()}`,
+      "Manual",
+      "7000",
+      "7000",
+      "SHARED",
+    );
+    createdAccounts.push(account.id);
+    const campaign = await workflows.createCampaignForUser(
+      matt.id,
+      account.id,
+      "AAP",
+      "2026-08-21",
+      "2026-09-04",
+      "40",
+      "1",
+      "0.48",
+      "0",
+      "Roll integration campaign",
+      "INHERIT",
+    );
+    createdCampaigns.push(campaign.id);
+
+    await expect(
+      workflows.rollCampaignPutForUser(eric.id, campaign.id, "2026-08-28", "0.71", "2026-09-11", "39", "1.02", "0", "Nope"),
+    ).rejects.toThrow("not allowed");
+
+    await workflows.rollCampaignPutForUser(
+      matt.id,
+      campaign.id,
+      "2026-08-28",
+      "0.71",
+      "2026-09-11",
+      "39",
+      "1.02",
+      "0",
+      "Good roll",
+    );
+
+    const stored = await prisma.campaign.findUniqueOrThrow({
+      where: { id: campaign.id },
+      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+    });
+    expect(stored.events.map((event) => event.type)).toEqual(["SELL_PUT", "ROLL_PUT_CLOSE", "ROLL_PUT_OPEN"]);
+    expect(stored.events[1].groupKey).toBe(stored.events[2].groupKey);
+    const summary = summarizeCampaign({ status: stored.status, events: stored.events });
+    expect(summary.netRollPremium).toBe(31);
+  });
+
+  it("records assignment without closing the campaign result prematurely", async () => {
+    const account = await workflows.createTradingAccountForUser(
+      matt.id,
+      `Assignment Account ${Date.now()}`,
+      "Manual",
+      "9000",
+      "9000",
+      "SHARED",
+    );
+    createdAccounts.push(account.id);
+    const campaign = await workflows.createCampaignForUser(
+      matt.id,
+      account.id,
+      "F",
+      "2026-08-01",
+      "2026-08-28",
+      "11.5",
+      "1",
+      "0.22",
+      "0",
+      "Assignment integration campaign",
+      "INHERIT",
+    );
+    createdCampaigns.push(campaign.id);
+
+    const assigned = await workflows.assignCampaignPutForUser(matt.id, campaign.id, "2026-08-28", "", "0", "Assigned");
+    expect(assigned).toMatchObject({ status: "ASSIGNED", strategy: "WHEEL" });
+    expect(assigned?.events.map((event) => event.type)).toContain("ASSIGNMENT");
+
+    const summary = summarizeCampaign({ status: assigned?.status ?? "ASSIGNED", events: assigned?.events ?? [] });
+    expect(summary.sharesHeld).toBe(100);
+    expect(summary.adjustedBasis).toBe(11.28);
+    expect(summary.totalCampaignPL).toBeNull();
   });
 
   it("creates recommendation notifications and protects recipient-owned status", async () => {

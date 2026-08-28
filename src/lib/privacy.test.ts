@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { AuthorizationError, assertCanMutateRecord, assertCanReadRecord, canMutateRecord, canReadRecord } from "./privacy";
+import {
+  AuthorizationError,
+  assertCanMutateRecord,
+  assertCanReadInheritedRecord,
+  assertCanReadRecord,
+  canMutateRecord,
+  canReadInheritedRecord,
+  canReadRecord,
+  resolveInheritedVisibility,
+} from "./privacy";
 
 describe("privacy and server-side authorization helpers", () => {
   const matt = "matt";
@@ -25,5 +34,20 @@ describe("privacy and server-side authorization helpers", () => {
     expect(canMutateRecord(matt, matt)).toBe(true);
     expect(canMutateRecord(eric, matt)).toBe(false);
     expect(() => assertCanMutateRecord(eric, matt)).toThrow(AuthorizationError);
+  });
+
+  it("resolves inherited visibility from its parent record", () => {
+    expect(resolveInheritedVisibility("INHERIT", "SHARED")).toBe("SHARED");
+    expect(resolveInheritedVisibility("INHERIT", "PRIVATE")).toBe("PRIVATE");
+    expect(resolveInheritedVisibility("SHARED", "PRIVATE")).toBe("SHARED");
+    expect(resolveInheritedVisibility("PRIVATE", "SHARED")).toBe("PRIVATE");
+  });
+
+  it("allows shared overrides and blocks private overrides with inherited records", () => {
+    expect(canReadInheritedRecord(eric, matt, "INHERIT", "SHARED")).toBe(true);
+    expect(canReadInheritedRecord(eric, matt, "INHERIT", "PRIVATE")).toBe(false);
+    expect(canReadInheritedRecord(eric, matt, "SHARED", "PRIVATE")).toBe(true);
+    expect(canReadInheritedRecord(eric, matt, "PRIVATE", "SHARED")).toBe(false);
+    expect(() => assertCanReadInheritedRecord(eric, matt, "PRIVATE", "SHARED")).toThrow(AuthorizationError);
   });
 });
