@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireCurrentUser } from "@/lib/auth";
+import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,11 @@ const pushSubscriptionSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const user = await requireCurrentUser();
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+
   const payload = pushSubscriptionSchema.parse(await request.json());
 
   await prisma.pushSubscription.upsert({

@@ -1,5 +1,6 @@
 import { Check, Send } from "lucide-react";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
+import { LiveRefresh } from "@/components/live-refresh";
 import { requireCurrentUser } from "@/lib/auth";
 import { getChatPageData } from "@/lib/app-data";
 import { shortDateTime } from "@/lib/format";
@@ -17,6 +18,7 @@ export default async function ChatPage() {
 
   return (
     <div className="space-y-6">
+      <LiveRefresh intervalMs={4000} />
       <div>
         <p className="text-sm font-medium text-emerald-300">Private buddy chat</p>
         <h1 className="text-3xl font-semibold text-zinc-50">{conversation?.title ?? "Buddy Chat"}</h1>

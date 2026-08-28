@@ -16,11 +16,11 @@ export async function GET() {
       checkedAt: new Date().toISOString(),
     });
   } catch (error) {
+    console.error("Health check database query failed:", error);
     return NextResponse.json(
       {
         app: "ok",
         database: "error",
-        message: error instanceof Error ? error.message : "Unknown database error",
         checkedAt: new Date().toISOString(),
       },
       { status: 503 },

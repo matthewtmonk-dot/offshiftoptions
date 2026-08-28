@@ -144,9 +144,12 @@ export default async function DashboardPage() {
         <Panel
           title="LST Scanner"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner">
-              Results
-            </Link>
+            <div className="flex items-center gap-2">
+              <Badge tone="warn">DEMO</Badge>
+              <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner">
+                Results
+              </Link>
+            </div>
           }
         >
           <div className="space-y-3">

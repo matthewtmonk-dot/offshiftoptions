@@ -39,6 +39,11 @@ export default async function ScannerPage() {
         </Link>
       </div>
 
+      <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+        Demo/mock data — not live market or option-chain data. Results will switch to real Schwab data once that
+        integration is connected.
+      </div>
+
       <Panel title="Rules">
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           {profile?.rules.map((rule) => {
@@ -115,6 +120,7 @@ function ScannerResultCard({
           <div className="flex items-center gap-2">
             <h2 className="text-2xl font-semibold text-zinc-50">{result.ticker}</h2>
             <StatusBadge status={result.summaryStatus} />
+            <Badge tone="warn">DEMO</Badge>
           </div>
           <p className="mt-1 text-sm text-zinc-400">
             {result.passedCriteria} / {result.totalCriteria} criteria passed
