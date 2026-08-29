@@ -110,7 +110,7 @@ GitHub main → Hostinger auto-deploy → Next.js app → Supabase PostgreSQL
 
 **Never run against production:** `prisma migrate reset`, `db:reset`, `pnpm db:seed`, or any ad hoc `deleteMany`-based reset logic — unless Matt explicitly understands and authorizes exactly what data would be lost. If any AI is ever asked to run a destructive database command, it must first explain exactly what data would be lost and get explicit confirmation.
 
-**Pending production migration:** `prisma/migrations/20260828215700_campaign_tracker_foundation/` (adds the Campaign Tracker schema — see Campaign Tracker section) has been created and applied to local Docker Postgres only. **It has NOT been applied to production Supabase.** Follow the migration runbook in Production / Deployment before or alongside the Hostinger deploy that ships this code — do not push the campaign tracker code to `main` until this migration is applied and verified against Supabase.
+**Migration status:** `prisma/migrations/20260828215700_campaign_tracker_foundation/` (adds the Campaign Tracker schema — see Campaign Tracker section) is applied to both local Docker Postgres and **production Supabase** (Matt ran `prisma migrate deploy` against production on 2026-08-29 and confirmed with `prisma migrate status` — "3 migrations found, database schema is up to date"). Production is schema-ready for the Campaign Tracker code.
 
 ---
 
@@ -190,7 +190,7 @@ Names and purposes only — **never values**.
 
 `/positions` (nav label "Tracker") is a manual account + campaign lifecycle tracker — the direct implementation of the "Tracker" product area in `PRODUCT_VISION.md`. It models a whole trading idea (a "campaign") from the first cash-secured put through rolls, assignment, covered calls, and eventual close as one continuous, inspectable history — not isolated trade rows.
 
-**Schema** (`prisma/schema.prisma`, migration `prisma/migrations/20260828215700_campaign_tracker_foundation/`, **not yet applied to production** — see Database / Seed / Bootstrap Safety):
+**Schema** (`prisma/schema.prisma`, migration `prisma/migrations/20260828215700_campaign_tracker_foundation/`, **applied to production Supabase as of 2026-08-29** — see Database / Seed / Bootstrap Safety):
 - `RecordVisibility` enum: `INHERIT | PRIVATE | SHARED` — used by `Campaign.visibility`.
 - `Campaign` model: owner, account, ticker, `CampaignStrategy` (`CASH_SECURED_PUT | WHEEL`), `CampaignStatus` (`OPEN | ASSIGNED | CLOSED`), visibility, opened/closed dates, thesis text, and an `entrySnapshotJson` (the owner's own scanner result at entry time, for context — not a live query).
 - `CampaignEvent` model: append-only lifecycle events (`SELL_PUT`, `CLOSE_PUT`, `ROLL_PUT_CLOSE`, `ROLL_PUT_OPEN`, `ASSIGNMENT`, `SELL_COVERED_CALL`, `CLOSE_COVERED_CALL`, `COVERED_CALL_EXPIRED`, `STOCK_SALE`, `NOTE`), each with its own contracts/shares/strike/premium/fees/underlying price. A roll writes a `ROLL_PUT_CLOSE` + `ROLL_PUT_OPEN` pair sharing a `groupKey`; **no workflow ever updates or deletes an existing event** — the full history is always reconstructible.
@@ -298,7 +298,7 @@ DB-integration tests always use disposable test users with cleanup in `afterAll`
 - `README.md` — human/developer-facing docs, local setup, scripts.
 - `package.json` — scripts and dependencies.
 - `prisma/schema.prisma` — database model.
-- `prisma/migrations/` — migrations: `20260828114500_init`, `20260828132500_phase_1b_hardening` (both live in production), `20260828215700_campaign_tracker_foundation` (local Docker only — **not yet applied to production**, see Database / Seed / Bootstrap Safety).
+- `prisma/migrations/` — migrations: `20260828114500_init`, `20260828132500_phase_1b_hardening`, `20260828215700_campaign_tracker_foundation` — all three applied to production Supabase.
 - `prisma/seed.ts` — **destructive** development/demo seed. Never production.
 - `prisma/bootstrap-production.ts` — safe production bootstrap CLI.
 - `src/lib/bootstrap.ts` — safe bootstrap logic (idempotent, non-destructive).
@@ -348,7 +348,6 @@ Future AI agents should not casually reverse these:
 - **No CI-automated migration deploy** — Hostinger cannot run `prisma migrate deploy` (see the warning in Production / Deployment). The Supabase migration workflow is currently a manual runbook: apply and verify a migration against Supabase *before* pushing dependent code to `main`. Reasonable to automate in CI later; not done yet, and not to be implemented as a side effect of an unrelated task.
 - **Scanner data is entirely demo/mock** until Schwab access is approved and integrated — expected, not a bug, but worth remembering it's the single biggest "not real yet" surface in the app.
 - A handful of older docs (e.g. `docs/SCHWAB_INTEGRATION.md`) still say "LST Buddy" in prose; harmless, not yet swept for the rebrand since it doesn't affect any user-visible surface.
-- **Campaign Tracker migration (`20260828215700_campaign_tracker_foundation`) has not been applied to production Supabase yet.** Do not push this code to `main` until it has been (see Production / Deployment runbook and Database / Seed / Bootstrap Safety).
 - **No UI action yet for covered-call sell/close or stock sale** on an `ASSIGNED` campaign — intentionally deferred, honestly labeled in the UI, and is the recommended next slice (see Next Tasks). The finance/schema layer already supports these event types.
 - Everything in the Tracker is still fully manual entry; there is no Schwab sync of accounts/positions yet (blocked on Schwab approval).
 
@@ -362,22 +361,23 @@ Future AI agents should not casually reverse these:
 - `offshiftoptions.com` has been purchased, connected as the production domain, and confirmed live; `NEXT_PUBLIC_APP_URL` has already been updated in Hostinger to `https://offshiftoptions.com` and Hostinger redeployed afterward (externally confirmed). The old temporary Hostinger URL is no longer primary.
 - Schwab Trader API Individual access has been requested; approval is still pending. No Schwab code exists yet.
 - Earlier completed work: a full pre-Schwab production hardening pass (rebrand, PWA icons, Change Password, live chat, security headers, `/api/health` fix) and a scanner demo-quality pass (setup scoring, near-match detection, exclusion diagnostics, Score/Filter modes, quick filters, `Demo*Provider` naming).
-- **Most recent completed work: the Campaign Tracker foundation** — `PRODUCT_VISION.md`, the `Campaign`/`CampaignEvent`/`RecordVisibility` schema and migration, `src/domain/finance/campaigns.ts` lifecycle math, INHERIT/SHARED/PRIVATE visibility with Mine/Eric/Both filtering, the `/positions` "Tracker" UI (accounts + campaign cards, New Campaign/New Account, Close/Roll/Assign actions), realistic demo data, and full test coverage (unit, DB integration, Playwright). Picked up mid-implementation after a prior session ran out of usage during final validation; this session verified everything against the actual repository, fixed one real financial-calculation gap (partial stock sale realized P/L) and one real privacy leak (a private account's name showing through an explicitly-shared campaign), fixed one Playwright test bug, and ran the full validation suite plus manual visual QA to completion. **Committed locally; not yet pushed** — see Git/Deployment State below.
+- **Most recent completed work: the Campaign Tracker foundation** — `PRODUCT_VISION.md`, the `Campaign`/`CampaignEvent`/`RecordVisibility` schema and migration, `src/domain/finance/campaigns.ts` lifecycle math, INHERIT/SHARED/PRIVATE visibility with Mine/Eric/Both filtering, the `/positions` "Tracker" UI (accounts + campaign cards, New Campaign/New Account, Close/Roll/Assign actions), realistic demo data, and full test coverage (unit, DB integration, Playwright). Picked up mid-implementation after a prior session ran out of usage during final validation; fixed one real financial-calculation gap (partial stock sale realized P/L) and one real privacy leak (a private account's name showing through an explicitly-shared campaign), fixed one Playwright test bug, and ran the full validation suite plus manual visual QA to completion.
+- **Migration `20260828215700_campaign_tracker_foundation` applied to production Supabase on 2026-08-29** (Matt ran `prisma migrate deploy` + `prisma migrate status`, confirmed up to date). Campaign Tracker code committed and pushed to `origin/main` in the same session — see Git / Deployment State and Recent Relevant Commits.
 - This continuity system (`PROJECT_HANDOFF.md`, `AGENTS.md` update, `CLAUDE.md`) is in place so any AI can resume by reading this file.
-- **Nothing is currently blocked** except Schwab approval (external, no ETA) and the production migration step, which is a deliberate manual gate, not a stall.
+- **Nothing is currently blocked** except Schwab approval (external, no ETA).
 
 ### Git / Deployment State (as of this session)
 
-- Both the scanner enhancement work (already-complete, inherited from an earlier session) and the Campaign Tracker foundation are now **committed locally** on `main` as three commits: `4cba783` (scanner), `648c970` (campaign tracker), `868e250` (campaign tracker tests) — see Recent Relevant Commits.
-- **Nothing has been pushed.** `origin/main` is still at `ff413e8`. Hostinger has not been deployed with any of this work.
-- **Before pushing:** apply and verify migration `20260828215700_campaign_tracker_foundation` against production Supabase using the runbook in Production / Deployment, since Hostinger auto-deploys on push to `main` and the app would otherwise run new code against an old schema. Only push once that migration is confirmed applied.
+- The scanner enhancement work and the Campaign Tracker foundation (schema, workflows, UI, tests, docs) are **committed and pushed to `origin/main`** — see Recent Relevant Commits for hashes.
+- Production Supabase already has the matching schema (migration applied before this push, confirmed via `prisma migrate status`), so Hostinger's next auto-deploy build (`prisma generate && next build` — no migration step) runs the new code against a database that's already ready for it.
+- Confirm in Hostinger's dashboard whether the deploy triggered automatically from the push; if it requires a manual trigger, that is reported to Matt rather than guessed.
 
 ---
 
 ## Next Tasks
 
 **NOW** (no external blocker)
-- Apply migration `20260828215700_campaign_tracker_foundation` to production Supabase (per the Production / Deployment runbook), then push the Campaign Tracker commit(s) to `main`.
+- Run the production smoke test (login, dashboard, Tracker campaigns/accounts, `/api/health`) once Hostinger's deploy of this push completes.
 - **Recommended next implementation slice:** finish the wheel lifecycle UI — a "Sell Covered Call" action, a "Close Covered Call"/"Expire Covered Call" action, and a "Record Stock Sale" action for `ASSIGNED` campaigns, mirroring the existing `closeCampaignPutForUser`/`rollCampaignPutForUser` pattern (ownership re-checked server-side, event appended, never mutating prior events). The finance math and schema already support this; only the create-event workflows/actions/forms are missing.
 - Sweep remaining "LST Buddy" prose mentions in older docs (`docs/SCHWAB_INTEGRATION.md`, etc.) for full branding consistency — cosmetic, low priority.
 - Consider automating the Supabase migration-deploy step in CI instead of the manual runbook.
@@ -401,9 +401,7 @@ Future AI agents should not casually reverse these:
 - `868e250` — test: cover campaign visibility, roll history, and lifecycle math
 - `648c970` — feat: add campaign tracker foundation (accounts, campaigns, lifecycle, visibility)
 - `4cba783` — feat: enhance scanner with setup scoring, quick filters, and diagnostics
-- `ff413e8` — docs: clarify production migration and domain state (last commit pushed to `origin/main`)
+- `ff413e8` — docs: clarify production migration and domain state
 - `7d847e4` — docs: document pre-Schwab production hardening
-- `32d3578` — feat: add self-service change password screen
-- `6e92f8b` — feat: rebrand to Off Shift Options with production PWA icons
 
 Full history is in Git — this list is only enough to orient a new AI, not a complete log.
