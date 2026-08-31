@@ -3,6 +3,7 @@ export type MarketQuote = {
   price: number;
   change?: number;
   changePercent?: number;
+  volume?: number;
   asOf: Date;
 };
 
@@ -25,6 +26,7 @@ export type OptionContractSnapshot = {
   bid: number;
   ask: number;
   mark: number;
+  last?: number;
   delta?: number;
   gamma?: number;
   theta?: number;

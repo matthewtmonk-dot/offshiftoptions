@@ -36,14 +36,15 @@ import {
 } from "@/domain/scanner/profile";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
-import { money, percent, shortDate, toNumber } from "@/lib/format";
+import { money, percent, shortDate, shortDateTime, toNumber } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
 import { ensureMyLstScannerProfileForUser } from "@/lib/workflows";
-import { recommendStockAction, runDemoScannerAction } from "../actions";
+import { recommendStockAction, runDemoScannerAction, runLiveSchwabScannerAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
 type ScannerSearchParams = {
+  error?: string;
   mode?: string;
   quick?: string;
   sort?: string;
@@ -125,6 +126,7 @@ export default async function ScannerPage({
   const run = profile?.scanRuns[0];
   const watchlistTickers = new Set(watchlistItems.map((item) => item.ticker));
   const allResults = (run?.results ?? []).map((result) => toViewResult(result, watchlistTickers));
+  const isLiveSchwabRun = run?.source === "LIVE:SCHWAB";
   const diagnostics = buildExclusionDiagnostics(
     allResults.map((result) => ({ ticker: result.record.ticker, summary: result.summary })),
   );
@@ -140,13 +142,24 @@ export default async function ScannerPage({
     <div className="space-y-6">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-sm font-medium text-emerald-300">Demo scanner profile</p>
+          <p className="text-sm font-medium text-emerald-300">
+            {isLiveSchwabRun ? "Live Schwab market scan" : "Demo scanner profile"}
+          </p>
           <h1 className="text-3xl font-semibold text-zinc-50">My LST Scanner</h1>
           <p className="mt-2 max-w-2xl text-sm text-zinc-400">
             Score setups, spot near misses, and see exactly which rule is thinning the list.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <form action={runLiveSchwabScannerAction}>
+            <button
+              type="submit"
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-sky-400/40 bg-sky-400/10 px-3 text-sm font-medium text-sky-100 transition hover:border-sky-300 hover:bg-sky-400/15"
+            >
+              <RefreshCw className="size-4" aria-hidden />
+              Run live Schwab scan
+            </button>
+          </form>
           <form action={runDemoScannerAction}>
             <button
               type="submit"
@@ -166,9 +179,21 @@ export default async function ScannerPage({
         </div>
       </div>
 
-      <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
-        Demo/mock data - not live market or option-chain data. Schwab work remains read-only and unavailable until access is approved.
-      </div>
+      {params.error ? (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
+          {params.error}
+        </div>
+      ) : null}
+
+      {isLiveSchwabRun ? (
+        <div className="rounded-md border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-sm text-sky-100">
+          LIVE • SCHWAB market data. OSO still calculates RSI, Bollinger position, returns, scores, and PASS/FAIL/UNKNOWN.
+        </div>
+      ) : (
+        <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+          Demo/mock data - not live market or option-chain data. Use the live Schwab scan after OAuth and server environment variables are ready.
+        </div>
+      )}
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <PulseTile icon={BarChart3} label="Candidates" value={allResults.length ? numberFormat.format(allResults.length) : "0"} tone="info" />
@@ -272,8 +297,8 @@ export default async function ScannerPage({
         title={run ? `${filteredResults.length} Ranked Candidates` : "Latest Run"}
         action={
           <div className="flex items-center gap-2">
-            <Badge tone="warn">DEMO</Badge>
-            {run ? <Badge tone="neutral">{shortDate(run.createdAt)}</Badge> : null}
+            <Badge tone={isLiveSchwabRun ? "info" : "warn"}>{isLiveSchwabRun ? "LIVE • SCHWAB" : "DEMO"}</Badge>
+            {run ? <Badge tone="neutral">{shortDateTime(run.createdAt)}</Badge> : null}
           </div>
         }
       >

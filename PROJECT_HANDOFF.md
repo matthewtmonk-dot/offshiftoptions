@@ -129,8 +129,12 @@ Names and purposes only — **never values**.
 - `PLAYWRIGHT_BASE_URL` — overrides the Playwright base URL (defaults to `http://127.0.0.1:3000`).
 - `NODE_ENV` — managed by Next.js itself (`next dev` forces development, `next build`/`next start` force production); not something to set manually.
 
-**FUTURE SCHWAB** (not yet used anywhere in code — names not finalized)
-- A Schwab OAuth client ID / client secret / redirect URI, and encrypted-at-rest token storage. None of this exists yet. When added: server-side only, never in client bundles, never committed, never placed in this file.
+**SCHWAB INTEGRATION** (read-only foundation implemented; Hostinger env vars configured per Matt on 2026-08-31; OAuth connection pending)
+- `SCHWAB_CLIENT_ID` — server-side Schwab app client ID.
+- `SCHWAB_CLIENT_SECRET` — server-side Schwab app client secret.
+- `SCHWAB_REDIRECT_URI` — must match the registered production callback exactly: `https://offshiftoptions.com/api/schwab/callback`.
+- `SCHWAB_TOKEN_ENCRYPTION_KEY` — server-side 32-byte AES-GCM key for encrypted Schwab access/refresh tokens. Recommended format is `base64:<32 random bytes in base64>`; generate locally with `node -e "console.log('base64:'+require('node:crypto').randomBytes(32).toString('base64'))"`.
+- These are consumed only by server-side Schwab code (`src/providers/schwab/*`, `/api/schwab/connect`, `/api/schwab/callback`, and related workflows). Do not use `NEXT_PUBLIC_` for Schwab credentials, and never commit or paste values into project documentation.
 
 **FUTURE WEB PUSH** (not yet used anywhere in code)
 - `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` — required once real Web Push delivery is implemented (see Known Issues / PWA section). Private key must stay server-only.
@@ -157,7 +161,7 @@ Names and purposes only — **never values**.
 | Feature | Status | Notes |
 |---|---|---|
 | Dashboard | WORKING | Aggregates account snapshot, open trades, watchlist, recommendations, latest scan, recent chat. All values marked demo/manual where applicable. |
-| Scanner (results) | DEMO/MOCK | `src/domain/scanner` — real PASS/FAIL/UNKNOWN evaluation engine with setup scores, near-match detection, exclusion diagnostics, sortable/quick-filtered results, and expandable stock/option inspectors. The current universe is a deterministic 13-candidate demo set, not live market data. Visibly labeled with demo warnings and DEMO badges. |
+| Scanner (results) | DEMO + CONTROLLED LIVE SCHWAB PATH | `src/domain/scanner` — real PASS/FAIL/UNKNOWN evaluation engine with setup scores, near-match detection, exclusion diagnostics, sortable/quick-filtered results, and expandable stock/option inspectors. Demo remains deterministic and visibly labeled. A new read-only `LIVE:SCHWAB` action can run a small staged live scan once Schwab env vars and OAuth are configured; it never silently falls back to demo data. |
 | My LST scanner settings | WORKING (per-user) | `/scanner/settings` — each user edits their own `ScannerProfile`/`ScannerRule` rows; proven isolated per-user by DB integration tests. |
 | Watchlist | WORKING | Private/shared items, Pro/Con/General notes (owner-only edit), buddy comments (shared, read-access-gated). |
 | Recommendations | WORKING | Send/receive between Matt and Eric, reason tags, status lifecycle (`NEW`/`WATCHING`/`PASSED`/`ARCHIVED`), participant-gated comments. |
@@ -171,7 +175,7 @@ Names and purposes only — **never values**.
 | Authentication | WORKING | See Authentication section. |
 | Change password | WORKING | `/account`. |
 | Sharing/privacy controls | WORKING | `PRIVATE`/`SHARED` visibility enforced server-side; proven by unit + DB-integration tests. |
-| Schwab market/account data | BLOCKED BY EXTERNAL SERVICE | Access requested, approval pending. Nothing implemented beyond read-only provider interface placeholders. |
+| Schwab market/account data | FOUNDATION IMPLEMENTED, DEPLOY/OAUTH PENDING | Schwab Trader API app is approved/configured for Market Data Production and Accounts and Trading Production, with Order Limit 0 and callback `https://offshiftoptions.com/api/schwab/callback`. OAuth routes, signed state, encrypted token storage/refresh, read-only market-data provider, read-only broker-read foundation, and the controlled live scanner action are implemented. Hostinger Schwab env vars are configured per Matt as of 2026-08-31. No trading, no account sync/reconciliation UI, and live production use still requires deploy plus a completed Schwab OAuth connection. |
 
 ---
 
@@ -180,8 +184,9 @@ Names and purposes only — **never values**.
 - Engine: `src/domain/scanner/scanner.ts` — criterion-level evaluation. Each criterion produces `PASS` / `FAIL` / `UNKNOWN` with an actual value, operator, desired value/range, and explanation. Overall result: `FAIL` if any criterion fails, else `UNKNOWN` if any is unknown, else `PASS`. The engine also calculates a criteria/setup score (not profit probability), labels score quality, identifies near misses, surfaces a primary concern, and summarizes first-rule exclusions for the "why is the list thin?" diagnostic.
 - Rule catalog: `src/domain/scanner/profile.ts` (`SCANNER_RULE_DEFINITIONS`) — stock price range, RSI, Bollinger %, DTE, absolute delta, put ROR, annualized ROR, option bid, bid/ask spread %, open interest, option volume, earnings distance, Do Not Trade filter (fixed desired value, not user-editable), debt/equity.
 - Per-user settings: `/scanner/settings` edits a user's own `ScannerProfile`/`ScannerRule` rows (enable/disable + desired value(s) per rule); `@@unique([profileId, key])` prevents duplicate rule keys per profile. Verified isolated per user (Matt editing his settings never changes Eric's) by `src/lib/workflows.integration.test.ts`.
-- Scanner page UI: `/scanner` now has Score and Filter modes, quick filters (Strongest, Best premium, Most liquid, Lowest RSI, Far from earnings, Near matches, Watchlist only), query-string sorting, desktop table layout, mobile cards, native expandable inspectors, visual status tiles, and a `Refresh demo scan` server action that reruns the deterministic demo scanner for the signed-in user without seeding or resetting data.
-- **Data is demo/mock**: `DEMO_SCAN_CANDIDATES` in `profile.ts` is a fixed 13-candidate universe (including IONQ, HOOD, PLTR, RIVN, AAP, SNAP, F, CORZ, SOFI, AMD, ROKU, T, WBD) with hand-entered stock/option/technical/earnings/liquidity values, not a live feed. This is visibly labeled in the UI and must stay labeled until real Schwab option-chain data replaces it.
+- Scanner page UI: `/scanner` now has Score and Filter modes, quick filters (Strongest, Best premium, Most liquid, Lowest RSI, Far from earnings, Near matches, Watchlist only), query-string sorting, desktop table layout, mobile cards, native expandable inspectors, visual status tiles, a `Refresh demo scan` server action, and a `Run live Schwab scan` server action. Scan provenance is visibly labeled as `DEMO` or `LIVE • SCHWAB`.
+- **Demo data remains available and labeled**: `DEMO_SCAN_CANDIDATES` in `profile.ts` is a fixed 13-candidate universe (including IONQ, HOOD, PLTR, RIVN, AAP, SNAP, F, CORZ, SOFI, AMD, ROKU, T, WBD) with hand-entered stock/option/technical/earnings/liquidity values, not a live feed.
+- **Controlled live Schwab scan**: `src/domain/scanner/live-scan.ts` uses the same 13-symbol starter universe for the first production-safe slice. It fetches quotes and daily history first, calculates OSO-owned RSI/Bollinger/volume/price filters, shortlists only candidates that pass the inexpensive stock stage, then calls option chains for at most 8 symbols by default. Successful live runs persist with `ScanRun.source = "LIVE:SCHWAB"`. Failures surface `LIVE DATA UNAVAILABLE` to the user and do not create or substitute demo results.
 - Demo provider names: `src/providers/market-data/mock.ts` exports `DemoMarketDataProvider` plus backward-compatible `MockMarketDataProvider`; the demo market provider reads from the same deterministic scanner demo universe for quotes and option-chain snapshots. `src/providers/broker-read/mock.ts` exports `DemoBrokerReadProvider` plus backward-compatible `MockBrokerReadProvider`. These providers remain read-only test/development boundaries.
 
 ---
@@ -211,11 +216,25 @@ Names and purposes only — **never values**.
 
 ## Schwab API
 
-- **Current status: access requested, approval pending** (externally reported — not verifiable from this repo).
-- No Schwab credentials, secrets, OAuth tokens, or client IDs exist anywhere in this repository.
-- `src/providers/schwab/` contains only a placeholder/read-only interface boundary — no live calls implemented.
-- **Architectural rule (do not violate):** read-only. Allowed future methods are read-oriented only (`getQuote`, `getPriceHistory`, `getOptionChain`, `getAccounts`, `getPositions`, `getTransactions`, `getOrders` for historical observation only). Forbidden: `placeOrder`, `submitOrder`, `replaceOrder`, `cancelOrder`, algorithmic execution, automated trading — do not add these unless Matt explicitly changes this requirement.
-- When Schwab work begins, update this section continuously (approval state, app registration, callback config, OAuth/token-refresh status, available functionality, scanner integration status) without ever storing secrets here. Any Schwab client secret or token must stay server-side, never in client-side JavaScript.
+- **Current status: Schwab Trader API app approved/configured; read-only OAuth/provider foundation implemented locally on 2026-08-31.** Hostinger Schwab env vars are configured per Matt. Production live use is pending deploy plus a real OAuth connection.
+- Enabled products: **Market Data Production** and **Accounts and Trading Production**.
+- **Order Limit: 0.** Even though the Schwab app includes the Accounts and Trading product, Off Shift Options remains strictly read-only.
+- Registered production callback URL: `https://offshiftoptions.com/api/schwab/callback`.
+- Official Schwab docs/API checks were refreshed before implementation. Schwab public docs identify OAuth 2 delegated access with `authorization_code` callback flow and refresh-token renewal; no public official PKCE requirement/support was found, so the implementation uses signed, expiring, per-user OAuth state and does not send PKCE parameters. The official API host/path family was also probed without credentials and returned `401 Unauthorized` at the expected auth, token, market-data, and trader endpoints.
+- No Schwab credentials, secrets, OAuth tokens, authorization codes, refresh tokens, account hashes, or client IDs exist in this repository. Only env var names and placeholder examples are documented.
+- OAuth routes:
+  - `GET /api/schwab/connect` requires an authenticated OSO session, validates server env config, creates a 10-minute signed HttpOnly state cookie scoped to the current user, and redirects to Schwab's authorization endpoint.
+  - `GET /api/schwab/callback` requires the same current OSO user, verifies returned state and cookie state, exchanges the code server-side with the Schwab token endpoint, stores encrypted tokens in that user's `BrokerConnection`, discovers account-number hashes server-side, and redirects back to `/account`.
+- Token storage/refresh: `src/providers/schwab/crypto.ts` encrypts access/refresh tokens using AES-256-GCM with `SCHWAB_TOKEN_ENCRYPTION_KEY`; `src/providers/schwab/tokens.ts` refreshes near-expiry access tokens and marks a connection `EXPIRED` if refresh fails. Token and account-hash errors are sanitized before reaching UI.
+- Market data provider: `src/providers/schwab/market-data.ts` implements the existing `MarketDataProvider` interface for quotes, price history, option chains, instruments, and market hours. `src/providers/schwab/normalizers.ts` maps Schwab payloads into OSO's internal quote/candle/option snapshots, including bid/ask/mark/last/open interest/volume/Greeks where present. OSO still calculates Wilder RSI, Bollinger Bands/position, spread %, distance OTM, RoR, annualized RoR, setup score, PASS/FAIL/UNKNOWN, and near-match diagnostics.
+- Controlled scanner integration: `rerunLiveSchwabScannerForUser()` uses `getSchwabMarketDataProvider()` and persists successful runs with `source = "LIVE:SCHWAB"`. If Schwab env vars/tokens/API calls are unavailable, the action returns `LIVE DATA UNAVAILABLE` and does not silently use demo data.
+- Broker-read foundation: `src/providers/schwab/broker-read.ts` implements read-only accounts, account detail/positions, transactions, and historical order observation behind `BrokerReadProvider`. It is not wired into account sync/reconciliation UI yet.
+- Existing Prisma model reused: Schwab OAuth data uses the existing `BrokerConnection` table (`provider`, `status`, encrypted token ciphertext fields, expiry/scopes/metadata). No schema migration was required for this slice.
+- Market data may currently use the latest connected Schwab connection as a server-only market-data token source. That path only calls market-data endpoints and never exposes the owner, tokens, account hashes, balances, positions, transactions, or account history to another user.
+- **Architectural rule (do not violate):** read-only. Allowed methods are read-oriented only (`getQuote`, `getPriceHistory`, `getOptionChain`, `getInstrument`, `getMarketHours`, `getAccounts`, `getPositions`, `getTransactions`, `getOrders` for historical observation only). Forbidden: `placeOrder`, `submitOrder`, `replaceOrder`, `cancelOrder`, preview-for-execution endpoints, algorithmic execution, automated trading — do not add these unless Matt explicitly changes this requirement.
+- **Brokerage account data is user-scoped:** Matt's Schwab OAuth connection, balances, positions, transactions, imported records, campaigns, account settings, performance, projections, and trading-result achievements belong to Matt. They must never populate Eric's account, affect Eric's settings, appear as Eric's positions, change Eric's account value/history, or automatically become shared. Eric can continue using manual accounts/trades/imports without connecting Schwab; if he later wants automatic Schwab account sync, he authorizes his own Schwab account through the same OSO Schwab developer app.
+- **Sharing is separate from ownership:** Matt can share a campaign/account summary with Eric, but the owner remains Matt and the underlying brokerage connection/tokens remain Matt-owned. Shared visibility never makes a campaign count toward Eric's balance, P/L, win rate, projections, or trading-result achievements.
+- Any Schwab client secret, authorization code, access token, refresh token, account hash, or broker-specific identifier must stay server-side, never in client-side JavaScript, logs, error pages, analytics, screenshots, project docs, or Git. Store Schwab access/refresh tokens encrypted at rest with a dedicated server-side key.
 
 ---
 
@@ -257,6 +276,10 @@ Names and purposes only — **never values**.
 - Sessions: HTTP-only, `Secure` in production, `SameSite=Lax`, HMAC-hashed tokens, new token minted per login (no fixation).
 - Password hashing: `bcryptjs`, consistent across all creation/change paths.
 - Ownership enforcement covers watchlist items, notes, recommendations, chat membership, notifications, and scanner settings — each scoped to the correct owner/participant, proven by unit + DB-integration tests.
+- Schwab market data may be shared application infrastructure, but Schwab brokerage account data and tokens are strictly user-scoped. Never reuse one user's OAuth connection for another user's account sync, imports, balances, positions, transactions, performance, projections, settings, or trading-result achievements.
+- Schwab OAuth state is signed with an HMAC, expires after 10 minutes, is tied to the current OSO user, and is stored in an HttpOnly/SameSite=Lax cookie (`Secure` in production). The callback requires an active OSO session and rejects cross-user, tampered, mismatched, or expired state.
+- Schwab access/refresh tokens are encrypted at rest with a dedicated server-side AES-256-GCM key. Client-side UI shows only safe connection metadata such as status, linked account count, and account-number last4s; account hashes stay server-side.
+- Schwab token access has an explicit `expectedUserId` guard and a DB integration regression test proving Eric cannot read Matt's Schwab broker token.
 - No secrets in the client bundle — only `NEXT_PUBLIC_APP_URL` is public, and it contains no sensitive data.
 - No trading/order-submission endpoints exist anywhere in the codebase.
 - Input validation: server-side ticker format validation (`src/lib/tickers.ts`) backed by database `CHECK` constraints; password strength validation (`src/lib/account.ts`).
@@ -268,21 +291,20 @@ Names and purposes only — **never values**.
 
 ## Testing
 
-Last verified (August 28, 2026, against local Docker Postgres/rebuilt Docker app container only — nothing run against Supabase):
+Last verified (August 31, 2026, against local Docker PostgreSQL and a local built Next app only — nothing run against Supabase):
 
 | Check | Command | Result |
 |---|---|---|
 | Prisma validate | `corepack pnpm prisma validate` | passed |
-| Prisma generate | `corepack pnpm prisma generate` | passed |
+| Prisma generate | via `corepack pnpm typecheck` / `corepack pnpm build` | passed |
 | TypeScript | `corepack pnpm typecheck` | passed |
-| ESLint | `corepack pnpm lint` | passed, no warnings |
-| Vitest unit tests | `corepack pnpm test` | 35 passed / 18 skipped (DB tests skip without `RUN_DB_TESTS`) |
-| Vitest incl. DB integration | `RUN_DB_TESTS=1 corepack pnpm test` | 53/53 passed (10 files) against local Docker Postgres, including new campaign finance/privacy/roll-preservation cases |
-| Playwright e2e | `corepack pnpm exec playwright test` | 6/6 passed against a rebuilt local Docker app container, including the new Tracker privacy/lifecycle test |
-| Production build | `corepack pnpm build` (clean, `rm -rf .next` first) | passed |
-| Visual QA | manual desktop (1440px) + mobile (390px) screenshots via a throwaway Playwright script | saved under `test-results/visual-qa/` (9 screenshots: Tracker mine/both/accounts, rolled + assigned campaign detail, New Campaign form, mobile list/detail/creation) |
+| ESLint | `corepack pnpm lint` | passed, no output |
+| Vitest unit tests | `corepack pnpm test` | 46 passed / 19 skipped across 13 passed / 4 skipped test files (DB tests skip without `RUN_DB_TESTS`) |
+| Vitest incl. DB integration | `RUN_DB_TESTS=1 DATABASE_URL=<local Docker Postgres URL> corepack pnpm test` | 65/65 passed across 17 files against local Docker Postgres; emitted a `pg` driver deprecation warning about `client.query()` while a query is already executing, but no test failed |
+| Playwright e2e | `PLAYWRIGHT_BASE_URL=http://127.0.0.1:3001 corepack pnpm test:e2e` | 6/6 passed against local `next start -p 3001`; includes mobile overflow sweeps for `/account` and `/scanner` |
+| Production build | `corepack pnpm build` | passed |
 
-One real defect was found via this pass and fixed with a regression test: `summarizeCampaign()` dropped realized P/L from a **partial** stock sale (some assigned shares sold, some still held) until the whole position closed. One Playwright test bug was also found and fixed: `getByText("Lifecycle").first()` matched the first (closed) campaign card in DOM order instead of the one actually clicked open, since every card renders the same static heading text — now scoped to the clicked card's locator.
+This pass added Schwab-focused tests for token encryption, OAuth state tamper/cross-user/expiry rejection, sanitized Schwab API errors, Schwab payload normalization, token refresh behavior, staged live scanner behavior/option-chain call caps/no demo fallback, and a DB integration proof that one user's Schwab token cannot be read through another user's user ID.
 
 DB-integration tests always use disposable test users with cleanup in `afterAll` — they never touch Matt/Eric's real seeded credentials. Nothing in this repository's test suite is designed to run against Supabase; do not point it there.
 
@@ -304,15 +326,19 @@ DB-integration tests always use disposable test users with cleanup in `afterAll`
 - `src/lib/bootstrap.ts` — safe bootstrap logic (idempotent, non-destructive).
 - `src/lib/auth.ts` — authentication/session logic.
 - `src/lib/account.ts` — change-password logic.
+- `src/lib/broker-connections.ts` — safe Schwab connection summaries, disconnect, and provider factory helpers.
 - `src/lib/privacy.ts` — `PRIVATE`/`SHARED` authorization helpers.
 - `src/lib/workflows.ts` — server-side mutation/authorization logic for every server action.
-- `src/domain/scanner/` — scanner engine (`scanner.ts`) and rule catalog/demo data (`profile.ts`).
+- `src/domain/scanner/` — scanner engine (`scanner.ts`), rule catalog/demo data (`profile.ts`), and staged live Schwab scanner (`live-scan.ts`).
 - `src/domain/finance/calculations.ts` — legacy per-trade financial calculations.
 - `src/domain/finance/campaigns.ts` — campaign lifecycle financial summaries (`summarizeCampaign`).
 - `src/domain/social/` — recommendation reason tags/statuses.
+- `src/providers/market-data/` — market-data provider contracts plus demo provider.
+- `src/providers/broker-read/` — broker-read provider contracts plus demo provider.
+- `src/providers/schwab/` — read-only Schwab OAuth/token/client/normalizer/market-data/broker-read implementation and docs.
 - `src/components/live-refresh.tsx` — chat's polling live-update mechanism.
 - `src/app/(app)/` — authenticated Next.js routes (dashboard, positions, scanner, scanner/settings, watchlist, recommendations, chat, notifications, account, install).
-- `src/app/api/health/`, `src/app/api/push-subscriptions/` — API routes.
+- `src/app/api/health/`, `src/app/api/push-subscriptions/`, `src/app/api/schwab/` — API routes.
 - `next.config.ts` — security headers.
 - `docs/` — supporting architecture/security/decision documentation (`ARCHITECTURE.md`, `SECURITY.md`, `DECISIONS.md`, `DATA_MODEL.md`, `SCANNER_RULES.md`, `PWA_AND_NOTIFICATIONS.md`, `SCHWAB_INTEGRATION.md`, `ROADMAP.md`, `LST_DOMAIN.md`).
 
@@ -346,10 +372,9 @@ Future AI agents should not casually reverse these:
 - **`LST_SESSION_SECRET` env var name predates the "Off Shift Options" rebrand.** Cosmetic only (it's an internal config key, not user-visible), but renaming it later requires coordinating the Hostinger env var change with a deploy — not urgent.
 - **CSP allows `script-src`/`style-src` `'unsafe-inline'`** because Next's App Router needs it without a nonce-based setup. A stricter nonce-based CSP is a possible future hardening step, not currently required.
 - **No CI-automated migration deploy** — Hostinger cannot run `prisma migrate deploy` (see the warning in Production / Deployment). The Supabase migration workflow is currently a manual runbook: apply and verify a migration against Supabase *before* pushing dependent code to `main`. Reasonable to automate in CI later; not done yet, and not to be implemented as a side effect of an unrelated task.
-- **Scanner data is entirely demo/mock** until Schwab access is approved and integrated — expected, not a bug, but worth remembering it's the single biggest "not real yet" surface in the app.
-- A handful of older docs (e.g. `docs/SCHWAB_INTEGRATION.md`) still say "LST Buddy" in prose; harmless, not yet swept for the rebrand since it doesn't affect any user-visible surface.
+- **Live Schwab scanner is a foundation, not the full production scanner yet.** Hostinger Schwab env vars are configured per Matt, but live scanning still requires the code deploy and at least one OAuth connection. The live universe is intentionally still the 13-symbol starter list, option-chain calls are capped, and there is no durable market-data cache/backoff layer yet. A broader curated universe plus batching/rate-limit handling is the next Schwab scanner slice.
 - **No UI action yet for covered-call sell/close or stock sale** on an `ASSIGNED` campaign — intentionally deferred, honestly labeled in the UI, and is the recommended next slice (see Next Tasks). The finance/schema layer already supports these event types.
-- Everything in the Tracker is still fully manual entry; there is no Schwab sync of accounts/positions yet (blocked on Schwab approval).
+- Everything in the Tracker is still fully manual entry. A user-scoped Schwab account-read provider foundation exists, but there is no account sync/reconciliation/campaign import UI yet.
 
 ---
 
@@ -359,35 +384,40 @@ Future AI agents should not casually reverse these:
 - Supabase production PostgreSQL is live and reachable; `/api/health` has reported healthy.
 - Production Matt/Eric accounts have been bootstrapped via the safe, non-destructive bootstrap script and login has been verified in production.
 - `offshiftoptions.com` has been purchased, connected as the production domain, and confirmed live; `NEXT_PUBLIC_APP_URL` has already been updated in Hostinger to `https://offshiftoptions.com` and Hostinger redeployed afterward (externally confirmed). The old temporary Hostinger URL is no longer primary.
-- Schwab Trader API Individual access has been requested; approval is still pending. No Schwab code exists yet.
+- Schwab Trader API app approval/configuration is complete as of 2026-08-31: Market Data Production and Accounts and Trading Production are enabled, Order Limit is 0, and the production callback is `https://offshiftoptions.com/api/schwab/callback`.
 - Earlier completed work: a full pre-Schwab production hardening pass (rebrand, PWA icons, Change Password, live chat, security headers, `/api/health` fix) and a scanner demo-quality pass (setup scoring, near-match detection, exclusion diagnostics, Score/Filter modes, quick filters, `Demo*Provider` naming).
 - **Most recent completed work: the Campaign Tracker foundation** — `PRODUCT_VISION.md`, the `Campaign`/`CampaignEvent`/`RecordVisibility` schema and migration, `src/domain/finance/campaigns.ts` lifecycle math, INHERIT/SHARED/PRIVATE visibility with Mine/Eric/Both filtering, the `/positions` "Tracker" UI (accounts + campaign cards, New Campaign/New Account, Close/Roll/Assign actions), realistic demo data, and full test coverage (unit, DB integration, Playwright). Picked up mid-implementation after a prior session ran out of usage during final validation; fixed one real financial-calculation gap (partial stock sale realized P/L) and one real privacy leak (a private account's name showing through an explicitly-shared campaign), fixed one Playwright test bug, and ran the full validation suite plus manual visual QA to completion.
+- **Most recent completed work: Schwab OAuth/market-data foundation** — server-only Schwab env config, signed OAuth state, `/api/schwab/connect`, `/api/schwab/callback`, encrypted token storage/refresh in existing `BrokerConnection` rows, read-only Schwab market-data provider, read-only broker-read provider foundation, Account-page brokerage connection panel, and `/scanner` live run action with clear `LIVE • SCHWAB` provenance and no demo fallback. Hostinger Schwab env vars are configured per Matt as of 2026-08-31. This work has passed local validation and is ready for push/deploy.
 - **Migration `20260828215700_campaign_tracker_foundation` applied to production Supabase on 2026-08-29** (Matt ran `prisma migrate deploy` + `prisma migrate status`, confirmed up to date). Campaign Tracker code committed and pushed to `origin/main` in the same session — see Git / Deployment State and Recent Relevant Commits.
+- No schema migration was created or required for the Schwab foundation; it reuses the existing `BrokerConnection` model.
 - This continuity system (`PROJECT_HANDOFF.md`, `AGENTS.md` update, `CLAUDE.md`) is in place so any AI can resume by reading this file.
-- **Nothing is currently blocked** except Schwab approval (external, no ETA).
+- **Nothing is currently blocked by Schwab approval or production env var setup.** The current Schwab production readiness step is deploy, complete a real Schwab OAuth connection, then run the first controlled live scan.
 
 ### Git / Deployment State (as of this session)
 
 - The scanner enhancement work and the Campaign Tracker foundation (schema, workflows, UI, tests, docs) are **committed and pushed to `origin/main`** — see Recent Relevant Commits for hashes.
 - Production Supabase already has the matching schema (migration applied before this push, confirmed via `prisma migrate status`), so Hostinger's next auto-deploy build (`prisma generate && next build` — no migration step) runs the new code against a database that's already ready for it.
-- Confirm in Hostinger's dashboard whether the deploy triggered automatically from the push; if it requires a manual trigger, that is reported to Matt rather than guessed.
+- The Schwab foundation work is ready to push after pre-push validation. Hostinger Schwab env vars are already configured per Matt, and there is no schema migration. After pushing to `main`, Hostinger is expected to run `prisma generate && next build`; verify `/api/health`, log in, connect Schwab from `/account`, then run the live scanner and confirm `LIVE • SCHWAB`.
 
 ---
 
 ## Next Tasks
 
 **NOW** (no external blocker)
-- Run the production smoke test (login, dashboard, Tracker campaigns/accounts, `/api/health`) once Hostinger's deploy of this push completes.
+- Hostinger Schwab env vars are configured per Matt: `SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, `SCHWAB_REDIRECT_URI=https://offshiftoptions.com/api/schwab/callback`, and `SCHWAB_TOKEN_ENCRYPTION_KEY=base64:<32 random bytes>`. Do not print, inspect, or retrieve the values.
+- Commit/push the Schwab foundation and let Hostinger auto-deploy. No Supabase migration step is needed for this slice.
+- Run the production smoke test after deploy: `/api/health`, login, `/account` Schwab connection panel, Schwab OAuth callback, `/scanner` `Run live Schwab scan`, and confirm the latest run is labeled `LIVE • SCHWAB` rather than `DEMO`.
+- Next Schwab scanner slice: broaden the live ticker universe, add batching/rate-limit backoff/caching, add stronger empty-chain diagnostics, and decide whether the Research page should use live quotes/chains directly or reuse cached scanner snapshots.
 - **Recommended next implementation slice:** finish the wheel lifecycle UI — a "Sell Covered Call" action, a "Close Covered Call"/"Expire Covered Call" action, and a "Record Stock Sale" action for `ASSIGNED` campaigns, mirroring the existing `closeCampaignPutForUser`/`rollCampaignPutForUser` pattern (ownership re-checked server-side, event appended, never mutating prior events). The finance math and schema already support this; only the create-event workflows/actions/forms are missing.
-- Sweep remaining "LST Buddy" prose mentions in older docs (`docs/SCHWAB_INTEGRATION.md`, etc.) for full branding consistency — cosmetic, low priority.
 - Consider automating the Supabase migration-deploy step in CI instead of the manual runbook.
 - Consider renaming `LST_SESSION_SECRET` to something brand-neutral (coordinate with a Hostinger env var update — not urgent).
 
-**AFTER SCHWAB APPROVAL**
-- Schwab OAuth app registration, callback configuration, token storage (server-side, encrypted at rest).
-- Read-only account/position/quote/price-history integration.
-- Replace demo scanner candidates with live option-chain data, keeping the same PASS/FAIL/UNKNOWN engine.
-- Re-verify the "no order execution" boundary once any real brokerage code exists.
+**SCHWAB INTEGRATION**
+- Keep OAuth/token/account-hash handling server-only and re-check official Schwab docs before adding new endpoint coverage. If Schwab publishes PKCE support/requirements later, add it deliberately with tests.
+- Expand shared live market-data integration for quotes, historical prices, option chains, expirations/strikes, bid/ask, option volume, open interest, and Greeks where Schwab provides them.
+- Build Matt's read-only account/position/transaction sync as user-scoped brokerage data with an explicit reconciliation/confirmation UI. Eric remains independent/manual unless he later authorizes his own Schwab connection through the same OSO Schwab app.
+- Gradually replace the demo scanner universe with live option-chain data while keeping the same PASS/FAIL/UNKNOWN engine and visible data-source labels.
+- Re-verify the "no order execution" boundary after every Schwab expansion.
 
 **LATER**
 - Complete real Web Push delivery (VAPID keys, `web-push` dependency, client subscribe flow, service worker push handler).

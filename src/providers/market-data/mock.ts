@@ -18,6 +18,7 @@ const demoQuotes: Record<string, MarketQuote> = Object.fromEntries(
           price,
           change: numericValue(candidate.values.priceChange) ?? undefined,
           changePercent: numericValue(candidate.values.priceChangePercent) ?? undefined,
+          volume: numericValue(candidate.values.stockVolume) ?? undefined,
           asOf: demoAsOf,
         },
       ],

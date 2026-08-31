@@ -26,7 +26,9 @@ Off Shift Options (formerly "LST Buddy") is a private, fun, educational trading 
 
 ## Absolute Product Rule
 
-This application does not place trades. Do not add buy, sell, place order, submit order, replace order, cancel order, automated trading, or algorithmic execution methods. Future Schwab work is read-only.
+This application does not place trades. Do not add buy, sell, place order, submit order, replace order, cancel order, automated trading, or algorithmic execution methods. Schwab integration is read-only.
+
+Schwab market data is shared application infrastructure, but brokerage account data is user-scoped. Never reuse Matt's OAuth/account authorization for Eric or let one user's balances, positions, transactions, imported records, campaigns, settings, performance, projections, or trading achievements populate or affect the other user's account.
 
 ## Stack
 

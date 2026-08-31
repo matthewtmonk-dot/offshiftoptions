@@ -19,6 +19,7 @@ export default async function DashboardPage() {
   const user = await requireCurrentUser();
   const data = await getDashboardData(user.id);
   const snapshot = data.accountSnapshot;
+  const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
   const firstTrade = data.openTrades[0];
   const firstLeg = firstTrade?.legs[0];
   const firstPosition = firstTrade?.positionSnapshots[0];
@@ -145,7 +146,7 @@ export default async function DashboardPage() {
           title="LST Scanner"
           action={
             <div className="flex items-center gap-2">
-              <Badge tone="warn">DEMO</Badge>
+              <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "LIVE • SCHWAB" : "DEMO"}</Badge>
               <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner">
                 Results
               </Link>

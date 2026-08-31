@@ -20,6 +20,7 @@ import {
   markNotificationReadForUser,
   removeWatchlistItemForUser,
   rerunDemoScannerForUser,
+  rerunLiveSchwabScannerForUser,
   rollCampaignPutForUser,
   safeReturnPath,
   saveStockNoteForUser,
@@ -30,6 +31,7 @@ import {
   updateRecommendationStatusForUser,
   updateScannerSettingsForUser,
 } from "@/lib/workflows";
+import { disconnectSchwabForUser } from "@/lib/broker-connections";
 import { ValidationError } from "@/lib/tickers";
 
 function redirectWithError(path: string, error: string): never {
@@ -236,6 +238,22 @@ export async function runDemoScannerAction() {
   revalidatePath("/dashboard");
 }
 
+export async function runLiveSchwabScannerAction() {
+  const user = await requireCurrentUser();
+
+  try {
+    await rerunLiveSchwabScannerForUser(user.id);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/scanner", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/scanner");
+  revalidatePath("/dashboard");
+}
+
 export async function createTradingAccountAction(formData: FormData) {
   const user = await requireCurrentUser();
   const returnTo = actionReturnPath(formData, "/positions");
@@ -400,4 +418,14 @@ export async function changePasswordAction(formData: FormData) {
   }
 
   redirect("/account?saved=1");
+}
+
+export async function disconnectSchwabAction() {
+  const user = await requireCurrentUser();
+  await disconnectSchwabForUser(user.id);
+
+  revalidatePath("/account");
+  revalidatePath("/scanner");
+  revalidatePath("/dashboard");
+  redirect("/account?schwab=disconnected");
 }

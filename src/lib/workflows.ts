@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { evaluateLiveMarketScan, type LiveScanCandidate } from "@/domain/scanner/live-scan";
 import type { NoteCategory, ReactionTargetType } from "@/generated/prisma/enums";
 import { evaluateDemoScan, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
@@ -13,6 +14,7 @@ import {
 import { prisma } from "./prisma";
 import { requireTicker, ValidationError } from "./tickers";
 import { notifyInApp } from "./notifications";
+import { getSchwabMarketDataProvider } from "./broker-connections";
 
 const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
 const ACCOUNT_VISIBILITIES = new Set<Visibility>(["PRIVATE", "SHARED"]);
@@ -33,6 +35,7 @@ const campaignDetailInclude = {
   events: { orderBy: [{ occurredAt: "asc" as const }, { sortOrder: "asc" as const }] },
 };
 const RETURNABLE_PATHS = new Set([
+  "/account",
   "/dashboard",
   "/positions",
   "/scanner",
@@ -940,15 +943,49 @@ export async function rerunDemoScannerForUser(userId: string, profileId?: string
     orderBy: { sortOrder: "asc" },
   });
   const rules = scannerRulesFromRecords(records);
+  return persistScannerRun(userId, profile.id, "DEMO", evaluateDemoScan(rules));
+}
+
+export async function rerunLiveSchwabScannerForUser(userId: string) {
+  const profile = await ensureMyLstScannerProfileForUser(userId);
+  const provider = await getSchwabMarketDataProvider();
+  if (!provider) {
+    throw new ValidationError("LIVE DATA UNAVAILABLE: connect Schwab in Account settings and configure the Schwab server environment variables.");
+  }
+
+  const records = await prisma.scannerRule.findMany({
+    where: { profileId: profile.id },
+    orderBy: { sortOrder: "asc" },
+  });
+  const rules = scannerRulesFromRecords(records);
+
+  try {
+    const candidates = await evaluateLiveMarketScan({ provider, rules });
+    return persistScannerRun(userId, profile.id, "LIVE:SCHWAB", candidates);
+  } catch {
+    throw new ValidationError("LIVE DATA UNAVAILABLE: Schwab market data did not return a complete scan. Demo data was not substituted.");
+  }
+}
+
+function jsonReady(values: Record<string, number | string | boolean | null | undefined>) {
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value ?? null]));
+}
+
+async function persistScannerRun(
+  userId: string,
+  profileId: string,
+  source: string,
+  candidates: LiveScanCandidate[],
+) {
   const run = await prisma.scanRun.create({
     data: {
-      profileId: profile.id,
+      profileId,
       ownerId: userId,
-      source: "DEMO",
+      source,
     },
   });
 
-  for (const candidate of evaluateDemoScan(rules)) {
+  for (const candidate of candidates) {
     await prisma.scanResult.create({
       data: {
         runId: run.id,
@@ -975,10 +1012,6 @@ export async function rerunDemoScannerForUser(userId: string, profileId?: string
   }
 
   return run;
-}
-
-function jsonReady(values: Record<string, number | string | boolean | null | undefined>) {
-  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value ?? null]));
 }
 
 function parseAccountVisibility(value: unknown, fallback: Visibility): Visibility {

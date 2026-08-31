@@ -1,17 +1,25 @@
-import { KeyRound, Save } from "lucide-react";
+import Link from "next/link";
+import { KeyRound, Link2, RefreshCw, Save, ShieldCheck, Unplug } from "lucide-react";
 import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { requireCurrentUser } from "@/lib/auth";
-import { changePasswordAction } from "../actions";
+import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
+import { shortDateTime } from "@/lib/format";
+import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
+import { changePasswordAction, disconnectSchwabAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
 export default async function AccountPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; saved?: string }>;
+  searchParams: Promise<{ error?: string; saved?: string; schwab?: string }>;
 }) {
   const user = await requireCurrentUser();
   const params = await searchParams;
+  const [schwabConnection, schwabConfig] = await Promise.all([
+    getSchwabConnectionSummaryForUser(user.id),
+    Promise.resolve(getSchwabConfigStatus()),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -30,6 +38,97 @@ export default async function AccountPage({
           Password changed. Your other signed-in sessions were signed out.
         </div>
       ) : null}
+      {schwabMessage(params.schwab)}
+
+      <Panel title="Brokerage Connections">
+        <div className="grid gap-4 lg:grid-cols-[1fr_0.85fr]">
+          <div className="flex items-start gap-3">
+            <div className="grid size-11 shrink-0 place-items-center rounded-md border border-sky-400/30 bg-sky-400/10">
+              <ShieldCheck className="size-5 text-sky-200" aria-hidden />
+            </div>
+            <div className="min-w-0 space-y-3">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-lg font-semibold text-zinc-50">Charles Schwab</h2>
+                  <Badge tone={schwabConnection?.connected ? "good" : schwabConnection?.status === "EXPIRED" ? "warn" : "neutral"}>
+                    {schwabConnection?.connected
+                      ? "CONNECTED"
+                      : schwabConnection?.status === "EXPIRED"
+                        ? "RECONNECT REQUIRED"
+                        : "NOT CONNECTED"}
+                  </Badge>
+                </div>
+                <p className="mt-1 max-w-xl text-sm text-zinc-400">
+                  Read-only OAuth for live market data now and personal account sync later. Off Shift Options does not place,
+                  preview, replace, or cancel orders.
+                </p>
+              </div>
+
+              {schwabConnection ? (
+                <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                  <ConnectionDatum label="Last updated" value={shortDateTime(schwabConnection.updatedAt)} />
+                  <ConnectionDatum
+                    label="Access token"
+                    value={schwabConnection.expiresAt ? `Expires ${shortDateTime(schwabConnection.expiresAt)}` : "Not active"}
+                  />
+                  <ConnectionDatum label="Linked accounts" value={linkedAccountLabel(schwabConnection)} />
+                  <ConnectionDatum
+                    label="Last refresh"
+                    value={schwabConnection.lastSuccessfulRefreshAt ? shortDateTime(schwabConnection.lastSuccessfulRefreshAt) : "Not yet"}
+                  />
+                </dl>
+              ) : (
+                <p className="text-sm text-zinc-400">
+                  Connect Schwab when the Hostinger environment variables are set. Eric can keep using manual tracking and
+                  shared research without connecting his own brokerage account.
+                </p>
+              )}
+
+              {!schwabConfig.configured ? (
+                <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+                  Schwab server environment is pending: {schwabConfig.missing.join(", ")}.
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+            <div className="flex items-start gap-2 text-sm text-zinc-400">
+              <Link2 className="mt-0.5 size-4 shrink-0 text-emerald-300" aria-hidden />
+              <div>
+                <div className="font-medium text-zinc-200">Callback URL</div>
+                <div className="break-all text-xs">{SCHWAB_PRODUCTION_CALLBACK_URL}</div>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row lg:flex-col">
+              {schwabConfig.configured ? (
+                <Link
+                  href="/api/schwab/connect"
+                  className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300"
+                >
+                  <RefreshCw className="size-4" aria-hidden />
+                  {schwabConnection?.connected ? "Reconnect Schwab" : "Connect Schwab"}
+                </Link>
+              ) : (
+                <span className="inline-flex min-h-11 flex-1 items-center justify-center rounded-md border border-zinc-700 px-4 text-sm font-medium text-zinc-500">
+                  Connect after env setup
+                </span>
+              )}
+              {schwabConnection ? (
+                <form action={disconnectSchwabAction} className="flex-1">
+                  <button
+                    type="submit"
+                    className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-zinc-700 px-4 text-sm font-medium text-zinc-300 transition hover:border-red-400/60 hover:text-red-200"
+                  >
+                    <Unplug className="size-4" aria-hidden />
+                    Disconnect
+                  </button>
+                </form>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </Panel>
 
       <Panel title="Change Password">
         <form action={changePasswordAction} className="max-w-sm space-y-4">
@@ -90,4 +189,71 @@ export default async function AccountPage({
       </Panel>
     </div>
   );
+}
+
+function ConnectionDatum({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dd className="mt-1 break-words font-medium text-zinc-100">{value}</dd>
+    </div>
+  );
+}
+
+function linkedAccountLabel(connection: NonNullable<Awaited<ReturnType<typeof getSchwabConnectionSummaryForUser>>>) {
+  if (!connection.accountCount) {
+    return connection.accountDiscoveryStatus === "UNAVAILABLE" ? "Discovery unavailable" : "None discovered yet";
+  }
+
+  const last4s = connection.accountNumberLast4s.map((last4) => `...${last4}`).join(", ");
+  return last4s ? `${connection.accountCount} (${last4s})` : String(connection.accountCount);
+}
+
+function schwabMessage(status: string | undefined) {
+  switch (status) {
+    case "connected":
+      return (
+        <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
+          Schwab connected. Tokens were stored encrypted on the server.
+        </div>
+      );
+    case "disconnected":
+      return (
+        <div className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200">
+          Schwab disconnected for this user.
+        </div>
+      );
+    case "missing_config":
+      return (
+        <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+          Schwab is waiting on server environment variables.
+        </div>
+      );
+    case "state_error":
+      return (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
+          Schwab connection failed state validation. Please start the connection again from this page.
+        </div>
+      );
+    case "token_error":
+      return (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
+          Schwab returned an OAuth token error. No token values were stored in the browser.
+        </div>
+      );
+    case "auth_error":
+      return (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
+          Schwab authorization was not completed.
+        </div>
+      );
+    case "missing_code":
+      return (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
+          Schwab did not return an authorization code. Please try connecting again.
+        </div>
+      );
+    default:
+      return null;
+  }
 }

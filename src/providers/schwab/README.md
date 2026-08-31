@@ -1,8 +1,8 @@
-# Schwab Read-Only Provider Placeholder
+# Schwab Read-Only Providers
 
-Off Shift Options may eventually connect to the Charles Schwab Individual Trader API, but the application must remain read-only.
+Off Shift Options connects to the Charles Schwab Trader API in read-only mode only. OAuth, token refresh, encrypted token storage, market data, and broker-read foundations live behind provider interfaces; pages should not call Schwab directly.
 
-Allowed future provider methods:
+Allowed provider methods:
 
 - `getQuote(symbol)`
 - `getPriceHistory(symbol, ...)`
@@ -23,4 +23,4 @@ Forbidden methods:
 - `cancelOrder`
 - automated trading or algorithmic execution
 
-Future OAuth tokens must remain server-side, be encrypted at rest, and never be exposed to browser JavaScript.
+OAuth tokens remain server-side, are encrypted at rest with `SCHWAB_TOKEN_ENCRYPTION_KEY`, and are never exposed to browser JavaScript. Brokerage account data is user-scoped; the shared scanner can use a Schwab market-data provider without exposing another user's tokens, account hashes, balances, positions, or transactions.
