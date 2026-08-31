@@ -59,6 +59,8 @@ Schwab market data is shared application infrastructure, but brokerage account d
 ## Coding Expectations
 
 - Keep financial calculations isolated in `src/domain/finance` and covered by deterministic tests.
+- Account/trading performance must be derived from the append-only ledger (`AccountLedgerEntry`), never from `currentBalance − startingBalance` — a deposit or withdrawal must never be mistaken for trading profit or loss. See `PROJECT_HANDOFF.md` Account Ledger section.
+- A scanner criterion's default `enabled` state must come from `SCANNER_RULE_DEFINITIONS[...].defaultEnabled`, not left to the database column default — this bit us once in `prisma/seed.ts` (every rule silently defaulted to enabled).
 - Keep scanner logic in `src/domain/scanner` with PASS/FAIL/UNKNOWN per criterion.
 - Enforce privacy server-side with `src/lib/privacy.ts`; never rely only on React hiding.
 - Treat Phase 1 financial values as DEMO or MANUAL.

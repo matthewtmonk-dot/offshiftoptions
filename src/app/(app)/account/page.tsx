@@ -1,11 +1,19 @@
 import Link from "next/link";
-import { KeyRound, Link2, RefreshCw, Save, ShieldCheck, Unplug } from "lucide-react";
+import { KeyRound, Link2, Plus, RefreshCw, Save, ShieldCheck, Unplug } from "lucide-react";
 import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { requireCurrentUser } from "@/lib/auth";
+import { getAccountPageData } from "@/lib/app-data";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
-import { shortDateTime } from "@/lib/format";
+import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
+import { summarizeCampaign } from "@/domain/finance/campaigns";
+import { money, shortDateTime } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
-import { changePasswordAction, disconnectSchwabAction } from "../actions";
+import {
+  addAccountLedgerEntryAction,
+  changePasswordAction,
+  disconnectSchwabAction,
+  syncSchwabAccountAction,
+} from "../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -16,10 +24,18 @@ export default async function AccountPage({
 }) {
   const user = await requireCurrentUser();
   const params = await searchParams;
-  const [schwabConnection, schwabConfig] = await Promise.all([
+  const [schwabConnection, schwabConfig, accountData] = await Promise.all([
     getSchwabConnectionSummaryForUser(user.id),
     Promise.resolve(getSchwabConfigStatus()),
+    getAccountPageData(user.id),
   ]);
+
+  const realizedPLByAccount = new Map<string, number>();
+  for (const campaign of accountData.completedCampaigns) {
+    const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+    const pl = summary.totalCampaignPL ?? summary.realizedPL ?? 0;
+    realizedPLByAccount.set(campaign.accountId, (realizedPLByAccount.get(campaign.accountId) ?? 0) + pl);
+  }
 
   return (
     <div className="space-y-6">
@@ -40,6 +56,62 @@ export default async function AccountPage({
       ) : null}
       {schwabMessage(params.schwab)}
 
+      <Panel title="Your Accounts">
+        <div className="space-y-3">
+          {accountData.accounts.map((account) => {
+            const ledger = summarizeAccountLedger(account.ledgerEntries);
+            const realized = realizedPLByAccount.get(account.id) ?? 0;
+            const current = currentAccountValue(ledger, realized);
+            return (
+              <div key={account.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-zinc-50">{account.name}</span>
+                    <Badge tone={account.source === "SCHWAB" ? "info" : "neutral"}>{account.source}</Badge>
+                    <Badge tone={account.visibility === "PRIVATE" ? "warn" : "good"}>{account.visibility}</Badge>
+                  </div>
+                  {current.value === null ? (
+                    <span className="text-sm text-zinc-500">No value yet</span>
+                  ) : (
+                    <span className="font-medium text-zinc-100">
+                      {money(current.value)}{" "}
+                      <span className="text-xs text-zinc-500">({current.source === "SCHWAB" ? "live Schwab" : "manual + trading"})</span>
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-3 text-sm text-zinc-400 sm:grid-cols-4">
+                  <div>Starting: {ledger.startingValue === null ? "UNKNOWN" : money(ledger.startingValue)}</div>
+                  <div>Contributions: {money(ledger.netContributions)}</div>
+                  <div>Trading P/L: {money(realized)}</div>
+                  <div>Cash: {ledger.latestBrokerSnapshot?.cash === null || ledger.latestBrokerSnapshot?.cash === undefined ? "N/A" : money(ledger.latestBrokerSnapshot.cash)}</div>
+                </div>
+
+                {account.source === "MANUAL" ? (
+                  <form action={addAccountLedgerEntryAction} className="mt-3 grid gap-2 border-t border-zinc-800 pt-3 sm:grid-cols-[1fr_1fr_1fr_auto]">
+                    <input type="hidden" name="accountId" value={account.id} />
+                    <input type="hidden" name="returnTo" value="/positions" />
+                    <select name="type" className="min-h-10 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100">
+                      <option value="DEPOSIT">Deposit</option>
+                      <option value="WITHDRAWAL">Withdrawal</option>
+                      <option value="MANUAL_ADJUSTMENT">Adjustment</option>
+                    </select>
+                    <input name="occurredAt" type="date" required defaultValue={new Date().toISOString().slice(0, 10)} className="min-h-10 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100" />
+                    <input name="amount" type="number" step="0.01" required placeholder="Amount" className="min-h-10 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100" />
+                    <button type="submit" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300 hover:border-emerald-400/60">
+                      <Plus className="size-4" aria-hidden />
+                      Log
+                    </button>
+                  </form>
+                ) : null}
+              </div>
+            );
+          })}
+          {accountData.accounts.length === 0 ? (
+            <p className="text-sm text-zinc-400">No accounts yet. Add one from the Tracker.</p>
+          ) : null}
+        </div>
+      </Panel>
+
       <Panel title="Brokerage Connections">
         <div className="grid gap-4 lg:grid-cols-[1fr_0.85fr]">
           <div className="flex items-start gap-3">
@@ -59,24 +131,35 @@ export default async function AccountPage({
                   </Badge>
                 </div>
                 <p className="mt-1 max-w-xl text-sm text-zinc-400">
-                  Read-only OAuth for live market data now and personal account sync later. Off Shift Options does not place,
+                  Read-only OAuth for live market data and personal account sync. Off Shift Options does not place,
                   preview, replace, or cancel orders.
                 </p>
               </div>
 
-              {schwabConnection ? (
-                <dl className="grid gap-3 text-sm sm:grid-cols-2">
-                  <ConnectionDatum label="Last updated" value={shortDateTime(schwabConnection.updatedAt)} />
-                  <ConnectionDatum
-                    label="Access token"
-                    value={schwabConnection.expiresAt ? `Expires ${shortDateTime(schwabConnection.expiresAt)}` : "Not active"}
-                  />
-                  <ConnectionDatum label="Linked accounts" value={linkedAccountLabel(schwabConnection)} />
-                  <ConnectionDatum
-                    label="Last refresh"
-                    value={schwabConnection.lastSuccessfulRefreshAt ? shortDateTime(schwabConnection.lastSuccessfulRefreshAt) : "Not yet"}
-                  />
-                </dl>
+              {schwabConnection?.connected ? (
+                <div className="space-y-3">
+                  <p className="text-sm text-zinc-300">
+                    Connected · {linkedAccountLabel(schwabConnection)} ·{" "}
+                    {schwabConnection.lastAccountSyncAt
+                      ? `last synced ${shortDateTime(schwabConnection.lastAccountSyncAt)}`
+                      : "not yet synced"}
+                  </p>
+                  {schwabConnection.lastAccountSyncFailureAt ? (
+                    <p className="text-xs text-amber-200">
+                      Last sync attempt failed ({schwabConnection.lastAccountSyncFailureReason ?? "unknown reason"}) at{" "}
+                      {shortDateTime(schwabConnection.lastAccountSyncFailureAt)}.
+                    </p>
+                  ) : null}
+                  <form action={syncSchwabAccountAction}>
+                    <button
+                      type="submit"
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300"
+                    >
+                      <RefreshCw className="size-4" aria-hidden />
+                      Sync now
+                    </button>
+                  </form>
+                </div>
               ) : (
                 <p className="text-sm text-zinc-400">
                   Connect Schwab when the Hostinger environment variables are set. Eric can keep using manual tracking and
@@ -89,43 +172,60 @@ export default async function AccountPage({
                   Schwab server environment is pending: {schwabConfig.missing.join(", ")}.
                 </div>
               ) : null}
+
+              <details className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
+                <summary className="cursor-pointer font-medium text-zinc-300">Connection details</summary>
+                {schwabConnection ? (
+                  <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+                    <ConnectionDatum label="Last token update" value={shortDateTime(schwabConnection.updatedAt)} />
+                    <ConnectionDatum
+                      label="Access token"
+                      value={schwabConnection.expiresAt ? `Expires ${shortDateTime(schwabConnection.expiresAt)}` : "Not active"}
+                    />
+                    <ConnectionDatum label="Linked accounts" value={linkedAccountLabel(schwabConnection)} />
+                    <ConnectionDatum
+                      label="Token last refreshed"
+                      value={schwabConnection.lastSuccessfulRefreshAt ? shortDateTime(schwabConnection.lastSuccessfulRefreshAt) : "Not yet"}
+                    />
+                  </dl>
+                ) : null}
+                <div className="mt-3 flex items-start gap-2 text-sm text-zinc-400">
+                  <Link2 className="mt-0.5 size-4 shrink-0 text-emerald-300" aria-hidden />
+                  <div>
+                    <div className="font-medium text-zinc-200">Callback URL</div>
+                    <div className="break-all text-xs">{SCHWAB_PRODUCTION_CALLBACK_URL}</div>
+                  </div>
+                </div>
+                <div className="mt-3">
+                  {schwabConfig.configured ? (
+                    <Link
+                      href="/api/schwab/connect"
+                      className="text-xs font-medium text-zinc-400 underline decoration-zinc-600 underline-offset-4 hover:text-zinc-200"
+                    >
+                      {schwabConnection?.connected ? "Reconnect Schwab" : "Connect Schwab"}
+                    </Link>
+                  ) : (
+                    <span className="text-xs text-zinc-500">Connect after env setup</span>
+                  )}
+                </div>
+              </details>
             </div>
           </div>
 
           <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
-            <div className="flex items-start gap-2 text-sm text-zinc-400">
-              <Link2 className="mt-0.5 size-4 shrink-0 text-emerald-300" aria-hidden />
-              <div>
-                <div className="font-medium text-zinc-200">Callback URL</div>
-                <div className="break-all text-xs">{SCHWAB_PRODUCTION_CALLBACK_URL}</div>
-              </div>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row lg:flex-col">
-              {schwabConfig.configured ? (
-                <Link
-                  href="/api/schwab/connect"
-                  className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300"
+            {schwabConnection ? (
+              <form action={disconnectSchwabAction}>
+                <button
+                  type="submit"
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-zinc-800 px-4 text-xs font-medium text-zinc-500 transition hover:border-red-400/60 hover:text-red-300"
                 >
-                  <RefreshCw className="size-4" aria-hidden />
-                  {schwabConnection?.connected ? "Reconnect Schwab" : "Connect Schwab"}
-                </Link>
-              ) : (
-                <span className="inline-flex min-h-11 flex-1 items-center justify-center rounded-md border border-zinc-700 px-4 text-sm font-medium text-zinc-500">
-                  Connect after env setup
-                </span>
-              )}
-              {schwabConnection ? (
-                <form action={disconnectSchwabAction} className="flex-1">
-                  <button
-                    type="submit"
-                    className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-zinc-700 px-4 text-sm font-medium text-zinc-300 transition hover:border-red-400/60 hover:text-red-200"
-                  >
-                    <Unplug className="size-4" aria-hidden />
-                    Disconnect
-                  </button>
-                </form>
-              ) : null}
-            </div>
+                  <Unplug className="size-4" aria-hidden />
+                  Disconnect Schwab
+                </button>
+              </form>
+            ) : (
+              <p className="text-xs text-zinc-500">No connection to disconnect.</p>
+            )}
           </div>
         </div>
       </Panel>
@@ -215,6 +315,12 @@ function schwabMessage(status: string | undefined) {
       return (
         <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
           Schwab connected. Tokens were stored encrypted on the server.
+        </div>
+      );
+    case "synced":
+      return (
+        <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
+          Schwab account data synced.
         </div>
       );
     case "disconnected":

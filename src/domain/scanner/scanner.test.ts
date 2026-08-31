@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { defaultScannerRules, evaluateDemoScan, parseScannerDesiredFromForm } from "./profile";
+import {
+  defaultScannerRules,
+  evaluateDemoScan,
+  GATING_RULE_KEYS,
+  parseScannerDesiredFromForm,
+  SCANNER_RULE_DEFINITIONS,
+} from "./profile";
 import {
   buildExclusionDiagnostics,
   evaluateCandidate,
   evaluateCriterion,
   getNearMisses,
+  honestSetupLabel,
+  honestSetupScore,
   setupScore,
   setupScoreLabel,
   type ScannerRule,
@@ -48,16 +56,26 @@ describe("scanner engine", () => {
     expect(summary.passed).toBe(2);
   });
 
-  it("evaluates the shared My LST demo profile with pass/fail/unknown results", () => {
-    const results = evaluateDemoScan(defaultScannerRules());
+  it("evaluates the shared LST Core demo profile with pass/fail/unknown results", () => {
+    // Only the rules enabled by default in LST Core - matching how a fresh profile
+    // actually scans, rather than every experimental/disabled rule at once.
+    const coreRules = SCANNER_RULE_DEFINITIONS.filter((definition) => definition.defaultEnabled).map(
+      (definition) => ({
+        key: definition.key,
+        name: definition.name,
+        operator: definition.operator,
+        desired: definition.defaultDesired,
+      }),
+    );
+    const results = evaluateDemoScan(coreRules);
     const amd = results.find((result) => result.ticker === "AMD");
-    const ionq = results.find((result) => result.ticker === "IONQ");
-    const aap = results.find((result) => result.ticker === "AAP");
+    const rivn = results.find((result) => result.ticker === "RIVN");
+    const f = results.find((result) => result.ticker === "F");
 
     expect(results).toHaveLength(13);
-    expect(ionq?.summary.status).toBe("PASS");
-    expect(aap).toBeDefined();
-    expect(getNearMisses(aap!.summary.results)).toHaveLength(1);
+    expect(rivn?.summary.status).toBe("PASS");
+    expect(f).toBeDefined();
+    expect(getNearMisses(f!.summary.results)).toHaveLength(1);
     expect(amd?.summary.results.some((result) => result.status === "UNKNOWN")).toBe(true);
     expect(amd?.summary.status).toBe("FAIL");
   });
@@ -85,6 +103,64 @@ describe("scanner engine", () => {
     expect(setupScore(poor)).toBe(0);
   });
 
+  it("never labels an UNKNOWN row Excellent/Strong, even at a high known-score", () => {
+    // Matches the audit's live example: 92 "Excellent" sitting next to a grey UNKNOWN -
+    // 12 of 14 criteria clean passes, 2 unknown, which still nets a high raw score.
+    const passRules: ScannerRule[] = Array.from({ length: 12 }, (_, index) => ({
+      key: `pass${index}`,
+      name: `Pass rule ${index}`,
+      operator: "GTE",
+      desired: 0,
+    }));
+    const lstRules: ScannerRule[] = [
+      ...passRules,
+      { key: "earningsDistance", name: "Earnings distance", operator: "GTE", desired: 10 },
+      { key: "debtToEquity", name: "Debt/equity", operator: "LTE", desired: 1.2 },
+    ];
+    const values: Record<string, number | null> = Object.fromEntries(lstRules.map((rule) => [rule.key, 1]));
+    values.earningsDistance = null;
+    values.debtToEquity = null;
+    const summary = evaluateCandidate(lstRules, values);
+
+    expect(summary.status).toBe("UNKNOWN");
+    const score = honestSetupScore(summary, GATING_RULE_KEYS);
+    expect(score).toBeGreaterThanOrEqual(90);
+    expect(honestSetupLabel(summary, GATING_RULE_KEYS)).toBe("Verify");
+  });
+
+  it("caps the score and forces a non-positive label on a gating criterion FAIL", () => {
+    // Matches the audit's live example: 85 "Strong" on a candidate with a 76.9% spread,
+    // and 90 "Excellent" on a candidate with a delta well outside the strategy's band.
+    const lstRules: ScannerRule[] = [
+      { key: "price", name: "Stock price", operator: "BETWEEN", desired: [10, 50] },
+      { key: "delta", name: "Absolute delta", operator: "BETWEEN", desired: [0.12, 0.3] },
+      { key: "ror", name: "Put ROR", operator: "GTE", desired: 1 },
+    ];
+    const summary = evaluateCandidate(lstRules, { price: 28.1, delta: 0.41, ror: 1.5 });
+
+    expect(summary.status).toBe("FAIL");
+    const rawScore = setupScore(summary);
+    const score = honestSetupScore(summary, GATING_RULE_KEYS);
+    expect(rawScore).toBeGreaterThan(49);
+    expect(score).toBeLessThanOrEqual(49);
+    expect(honestSetupLabel(summary, GATING_RULE_KEYS)).toBe("Fails");
+  });
+
+  it("leaves the graded label scale in place for a preference-only miss", () => {
+    // RSI is a preference rule, not gating - a miss there can still read positively if
+    // nothing gating failed and nothing is unknown.
+    const lstRules: ScannerRule[] = [
+      { key: "price", name: "Stock price", operator: "BETWEEN", desired: [10, 50] },
+      { key: "rsi", name: "RSI", operator: "LTE", desired: 40 },
+      { key: "ror", name: "Put ROR", operator: "GTE", desired: 1 },
+    ];
+    const summary = evaluateCandidate(lstRules, { price: 28.1, rsi: 41, ror: 1.5 });
+
+    expect(summary.status).toBe("FAIL");
+    expect(honestSetupLabel(summary, GATING_RULE_KEYS)).not.toBe("Fails");
+    expect(honestSetupLabel(summary, GATING_RULE_KEYS)).not.toBe("Verify");
+  });
+
   it("summarizes first-rule scanner exclusions", () => {
     const candidates = evaluateDemoScan(defaultScannerRules()).map((result) => ({
       ticker: result.ticker,
@@ -109,6 +185,7 @@ describe("scanner engine", () => {
           name: "Stock price",
           operator: "BETWEEN",
           defaultDesired: [10, 80],
+          defaultEnabled: true,
           explanation: "Test",
           input: { kind: "range", minLabel: "Min", maxLabel: "Max" },
         },

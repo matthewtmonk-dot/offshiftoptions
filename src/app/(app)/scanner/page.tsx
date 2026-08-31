@@ -19,21 +19,16 @@ import {
   buildExclusionDiagnostics,
   formatCriterionValue,
   getNearMisses,
+  honestSetupLabel,
+  honestSetupScore,
   primaryConcern,
-  setupScore,
-  setupScoreLabel,
   type CriterionResult,
   type CriterionStatus,
   type ScanSummary,
   type ScannerOperator,
   type ScannerRule,
 } from "@/domain/scanner/scanner";
-import {
-  formatRuleDesired,
-  getRuleDesired,
-  getScannerRuleDefinition,
-  SCANNER_RULE_DEFINITIONS,
-} from "@/domain/scanner/profile";
+import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
 import { money, percent, shortDate, shortDateTime, toNumber } from "@/lib/format";
@@ -100,6 +95,7 @@ const quickFilters: { key: QuickKey; label: string; sort?: SortKey }[] = [
 
 const numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const ruleOrder = new Map(SCANNER_RULE_DEFINITIONS.map((definition, index) => [definition.name, index]));
+const ruleKeyByName = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.name, definition.key]));
 
 export default async function ScannerPage({
   searchParams,
@@ -174,7 +170,7 @@ export default async function ScannerPage({
             className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm font-medium text-zinc-200 transition hover:border-emerald-400/60 hover:text-emerald-200"
           >
             <SlidersHorizontal className="size-4" aria-hidden />
-            Settings
+            Scanner Rules
           </Link>
         </div>
       </div>
@@ -378,26 +374,6 @@ export default async function ScannerPage({
           ))}
         </div>
         {!filteredResults.length ? <EmptyState>No scanner candidates match this view.</EmptyState> : null}
-      </Panel>
-
-      <Panel title="Active Rules">
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-          {profile?.rules.map((rule) => {
-            const definition = getScannerRuleDefinition(rule.key);
-            const desired = getRuleDesired(rule.valueJson, definition?.defaultDesired ?? "");
-            return (
-              <div key={rule.id} className="rounded-md border border-zinc-800 bg-zinc-900/70 p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="font-medium text-zinc-100">{rule.name}</div>
-                  <Badge tone={rule.enabled ? "info" : "neutral"}>{rule.enabled ? "ON" : "OFF"}</Badge>
-                </div>
-                <div className="mt-1 text-sm text-zinc-400">{formatRuleDesired(rule.operator, desired)}</div>
-                {definition ? <div className="mt-2 text-xs text-zinc-500">{definition.explanation}</div> : null}
-              </div>
-            );
-          })}
-          {!profile?.rules.length ? <EmptyState>No scanner rules are seeded yet.</EmptyState> : null}
-        </div>
       </Panel>
     </div>
   );
@@ -622,7 +598,7 @@ function ControlLink({
 }
 
 function ScoreRing({ score, label }: { score: number; label: string }) {
-  const color = scoreColor(score);
+  const color = scoreColor(score, label);
 
   return (
     <div className="flex shrink-0 flex-col items-center gap-1">
@@ -645,7 +621,7 @@ function ScoreRing({ score, label }: { score: number; label: string }) {
 function ScoreChip({ score, label }: { score: number; label: string }) {
   return (
     <div className="flex items-center gap-2">
-      <span className={`inline-flex min-w-11 justify-center rounded-md border px-2 py-1 text-sm font-semibold ${scoreChipClass(score)}`}>
+      <span className={`inline-flex min-w-11 justify-center rounded-md border px-2 py-1 text-sm font-semibold ${scoreChipClass(score, label)}`}>
         {score}
       </span>
       <span className="text-zinc-300">{label}</span>
@@ -666,7 +642,7 @@ type ScannerViewResult = {
   record: ScannerResult;
   summary: ScanSummary;
   score: number;
-  scoreLabel: ReturnType<typeof setupScoreLabel>;
+  scoreLabel: ReturnType<typeof honestSetupLabel>;
   nearMisses: ReturnType<typeof getNearMisses>;
   concern: CriterionResult | null;
   inWatchlist: boolean;
@@ -697,13 +673,13 @@ type ScannerViewResult = {
 
 function toViewResult(result: ScannerResult, watchlistTickers: Set<string>): ScannerViewResult {
   const summary = toDomainSummary(result);
-  const score = setupScore(summary);
+  const score = honestSetupScore(summary, GATING_RULE_KEYS);
 
   return {
     record: result,
     summary,
     score,
-    scoreLabel: setupScoreLabel(score),
+    scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
     nearMisses: getNearMisses(summary.results),
     concern: primaryConcern(summary.results),
     inWatchlist: watchlistTickers.has(result.ticker),
@@ -736,6 +712,7 @@ function toViewResult(result: ScannerResult, watchlistTickers: Set<string>): Sca
 function toDomainSummary(result: ScannerResult): ScanSummary {
   const criteria = result.criterionResults
     .map((criterion): CriterionResult => ({
+      key: ruleKeyByName.get(criterion.criterionName) ?? criterion.criterionName,
       name: criterion.criterionName,
       actualValue: parseActualValue(criterion.actualValue),
       operator: criterion.operator as ScannerOperator,
@@ -963,30 +940,36 @@ function toneText(tone: BadgeTone) {
   return "text-zinc-400";
 }
 
-function scoreColor(score: number) {
+function scoreColor(score: number, label?: string) {
+  if (label === "Verify") {
+    return "rgb(161 161 170)";
+  }
+  if (label === "Fails" || score < 45) {
+    return "rgb(248 113 113)";
+  }
   if (score >= 90) {
     return "rgb(52 211 153)";
   }
   if (score >= 78) {
     return "rgb(56 189 248)";
   }
-  if (score >= 45) {
-    return "rgb(251 191 36)";
-  }
-  return "rgb(248 113 113)";
+  return "rgb(251 191 36)";
 }
 
-function scoreChipClass(score: number) {
+function scoreChipClass(score: number, label?: string) {
+  if (label === "Verify") {
+    return "border-zinc-600 bg-zinc-800 text-zinc-300";
+  }
+  if (label === "Fails" || score < 45) {
+    return "border-red-400/40 bg-red-400/15 text-red-100";
+  }
   if (score >= 90) {
     return "border-emerald-400/40 bg-emerald-400/15 text-emerald-100";
   }
   if (score >= 78) {
     return "border-sky-400/40 bg-sky-400/15 text-sky-100";
   }
-  if (score >= 45) {
-    return "border-amber-400/40 bg-amber-400/15 text-amber-100";
-  }
-  return "border-red-400/40 bg-red-400/15 text-red-100";
+  return "border-amber-400/40 bg-amber-400/15 text-amber-100";
 }
 
 function resultBorder(status: CriterionStatus, nearMisses: number) {

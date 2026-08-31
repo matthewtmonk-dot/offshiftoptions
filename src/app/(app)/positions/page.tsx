@@ -15,11 +15,14 @@ import {
   WalletCards,
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
+import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
+import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
 import { requireCurrentUser } from "@/lib/auth";
 import { getTrackerPageData, normalizeTrackerScope, type TrackerScope } from "@/lib/app-data";
-import { money, shortDate, toNumber } from "@/lib/format";
+import { money, percent, shortDate, toNumber } from "@/lib/format";
 import { resolveInheritedVisibility } from "@/lib/privacy";
+import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import {
   assignCampaignPutAction,
   closeCampaignPutAction,
@@ -32,11 +35,14 @@ import {
 
 export const dynamic = "force-dynamic";
 
+const WEEKLY_TARGET_PERCENT = 1;
+
 type TrackerData = Awaited<ReturnType<typeof getTrackerPageData>>;
 type CampaignRow = TrackerData["campaigns"][number];
 type CampaignEventRow = CampaignRow["events"][number];
 type AccountRow = TrackerData["visibleAccounts"][number];
-type ViewMode = "campaigns" | "accounts";
+type ViewMode = "open" | "history" | "performance" | "accounts";
+type SchwabPositions = Awaited<ReturnType<typeof getSchwabOpenPositionsForUser>>;
 
 export default async function PositionsPage({
   searchParams,
@@ -46,49 +52,85 @@ export default async function PositionsPage({
   const user = await requireCurrentUser();
   const query = await searchParams;
   const scope = normalizeTrackerScope(firstParam(query.scope));
-  const view = firstParam(query.view) === "accounts" ? "accounts" : "campaigns";
+  const view = parseViewMode(firstParam(query.view));
   const error = firstParam(query.error);
-  const data = await getTrackerPageData(user.id, scope);
+  const [data, schwabPositions] = await Promise.all([
+    getTrackerPageData(user.id, scope),
+    getSchwabOpenPositionsForUser(user.id),
+  ]);
   const buddyName = data.users[0]?.name ?? "Buddy";
   const rows = data.campaigns.map((campaign) => ({
     campaign,
     summary: summarizeCampaign({ status: campaign.status, events: campaign.events }),
   }));
-  const openCount = rows.filter((row) => row.campaign.status !== "CLOSED").length;
-  const closedCount = rows.length - openCount;
+  const openRows = rows.filter((row) => row.campaign.status !== "CLOSED");
+  const historyRows = rows.filter((row) => row.campaign.status === "CLOSED");
+  const openCount = openRows.length;
+  const closedCount = historyRows.length;
   const realizedTotal = rows.reduce((sum, row) => sum + (row.summary.realizedPL ?? 0), 0);
   const premiumTotal = rows.reduce((sum, row) => sum + row.summary.netOptionPremium, 0);
+  const openCampaignTickers = new Set(openRows.map((row) => row.campaign.ticker.toUpperCase()));
+
+  // Performance is always computed from the current user's own completed campaigns and own
+  // accounts, never from the scope-filtered `campaigns`/`visibleAccounts` lists above - so
+  // switching the Mine/Buddy/Both selector can never blend Matt's and Eric's P/L together.
+  const ownAccountRows = data.ownAccounts.map((account) => {
+    const ledger = summarizeAccountLedger(account.ledgerEntries);
+    return { account, ledger };
+  });
+  const ownCompletedForPerformance = data.ownCompletedCampaigns.map((campaign) => {
+    const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+    return {
+      campaignId: campaign.id,
+      closedAt: campaign.closedAt ?? campaign.updatedAt,
+      finalResult: summary.finalResult,
+      pl: summary.totalCampaignPL ?? summary.realizedPL,
+      daysActive: summary.daysActive,
+    };
+  });
+  const ownRealizedByAccount = new Map<string, number>();
+  for (const campaign of data.ownCompletedCampaigns) {
+    const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+    const pl = summary.totalCampaignPL ?? summary.realizedPL ?? 0;
+    ownRealizedByAccount.set(campaign.accountId, (ownRealizedByAccount.get(campaign.accountId) ?? 0) + pl);
+  }
+  const ownCurrentValues = ownAccountRows.map((row) =>
+    currentAccountValue(row.ledger, ownRealizedByAccount.get(row.account.id) ?? 0),
+  );
+  const ownBaseline = ownCurrentValues.some((value) => value.value !== null)
+    ? ownCurrentValues.reduce((sum, value) => sum + (value.value ?? 0), 0)
+    : null;
+  const ownStartingTotal = ownAccountRows.reduce((sum, row) => sum + (row.ledger.startingValue ?? 0), 0);
+  const ownContributionsTotal = ownAccountRows.reduce((sum, row) => sum + row.ledger.netContributions, 0);
+  const ownWinLoss = summarizeWinLoss(ownCompletedForPerformance);
+  const ownWeekly = summarizeWeeklyReturns(ownCompletedForPerformance, ownBaseline, WEEKLY_TARGET_PERCENT);
+
+  // Realized P/L per account for the Accounts tab - bucketed per account, never summed
+  // across accounts owned by different users.
+  const realizedByAccount = new Map<string, number>();
+  for (const row of historyRows) {
+    const pl = row.summary.totalCampaignPL ?? row.summary.realizedPL ?? 0;
+    realizedByAccount.set(row.campaign.accountId, (realizedByAccount.get(row.campaign.accountId) ?? 0) + pl);
+  }
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-5 shadow-sm shadow-black/20">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="max-w-3xl">
-            <p className="text-sm font-medium text-emerald-300">Manual/demo campaign tracking</p>
-            <h1 className="mt-1 text-3xl font-semibold text-zinc-50">Tracker</h1>
-            <p className="mt-2 text-sm leading-6 text-zinc-400">
-              Follow each ticker idea from first CSP through rolls, assignment, calls, and final result.
-              The goal is simple: did the whole campaign actually work?
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {(["mine", "buddy", "both"] as TrackerScope[]).map((option) => (
-              <Link
-                key={option}
-                href={trackerHref(option, view)}
-                className={segmentClass(scope === option)}
-              >
-                {option === "mine" ? "Mine" : option === "buddy" ? buddyName : "Both"}
-              </Link>
-            ))}
-          </div>
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-sm font-medium text-emerald-300">Campaign &amp; account tracker</p>
+          <h1 className="text-2xl font-semibold text-zinc-50">Tracker</h1>
         </div>
-      </section>
+        <div className="flex flex-wrap gap-2">
+          {(["mine", "buddy", "both"] as TrackerScope[]).map((option) => (
+            <Link key={option} href={trackerHref(option, view)} className={segmentClass(scope === option)}>
+              {option === "mine" ? "Mine" : option === "buddy" ? buddyName : "Both"}
+            </Link>
+          ))}
+        </div>
+      </div>
 
       {error ? (
-        <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100">
-          {error}
-        </div>
+        <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100">{error}</div>
       ) : null}
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -120,36 +162,80 @@ export default async function PositionsPage({
         />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <NewCampaignPanel accounts={data.ownAccounts} buddyName={buddyName} />
-        <NewAccountPanel buddyName={buddyName} />
-      </section>
-
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-1">
-          <Link href={trackerHref(scope, "campaigns")} className={tabClass(view === "campaigns")}>
-            Campaigns
-          </Link>
-          <Link href={trackerHref(scope, "accounts")} className={tabClass(view === "accounts")}>
-            Accounts
-          </Link>
+          {(
+            [
+              ["open", "Open"],
+              ["history", "History"],
+              ["performance", "Performance"],
+              ["accounts", "Accounts"],
+            ] as [ViewMode, string][]
+          ).map(([mode, label]) => (
+            <Link key={mode} href={trackerHref(scope, mode)} className={tabClass(view === mode)}>
+              {label}
+            </Link>
+          ))}
         </div>
         <p className="text-xs text-zinc-500">Demo/manual data only. Trade execution stays outside this app.</p>
       </div>
 
-      {view === "campaigns" ? (
+      {view === "open" ? (
+        <section className="space-y-4">
+          {data.ownAccounts.length === 0 ? (
+            <NewAccountPanel buddyName={buddyName} defaultOpen />
+          ) : (
+            <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+              <NewCampaignPanel accounts={data.ownAccounts} buddyName={buddyName} />
+              <NewAccountPanel buddyName={buddyName} />
+            </section>
+          )}
+
+          <SchwabPositionsPanel positions={schwabPositions} openCampaignTickers={openCampaignTickers} />
+
+          <div className="space-y-3">
+            {openRows.map((row) => (
+              <CampaignCard key={row.campaign.id} row={row} currentUserId={user.id} />
+            ))}
+            {openRows.length === 0 ? (
+              <EmptyState>
+                {data.ownAccounts.length === 0
+                  ? "Add an account above, then start a campaign."
+                  : "No open campaigns for this view. Create one above to start the history."}
+              </EmptyState>
+            ) : null}
+            {data.legacyTrades.length ? <LegacySnapshots trades={data.legacyTrades} /> : null}
+          </div>
+        </section>
+      ) : null}
+
+      {view === "history" ? (
         <section className="space-y-3">
-          {rows.map((row) => (
+          {historyRows.map((row) => (
             <CampaignCard key={row.campaign.id} row={row} currentUserId={user.id} />
           ))}
-          {rows.length === 0 ? (
-            <EmptyState>No visible campaigns for this view yet. Create a manual campaign to start the history.</EmptyState>
-          ) : null}
-          {data.legacyTrades.length ? <LegacySnapshots trades={data.legacyTrades} /> : null}
+          {historyRows.length === 0 ? <EmptyState>No closed campaigns yet for this view.</EmptyState> : null}
         </section>
-      ) : (
-        <AccountsSection accounts={data.visibleAccounts} currentUserId={user.id} buddyName={buddyName} />
-      )}
+      ) : null}
+
+      {view === "performance" ? (
+        <PerformanceSection
+          winLoss={ownWinLoss}
+          weekly={ownWeekly}
+          startingTotal={ownStartingTotal}
+          contributionsTotal={ownContributionsTotal}
+          currentTotal={ownBaseline}
+        />
+      ) : null}
+
+      {view === "accounts" ? (
+        <AccountsSection
+          accounts={data.visibleAccounts}
+          currentUserId={user.id}
+          buddyName={buddyName}
+          realizedByAccount={realizedByAccount}
+        />
+      ) : null}
     </div>
   );
 }
@@ -244,9 +330,9 @@ function NewCampaignPanel({
   );
 }
 
-function NewAccountPanel({ buddyName }: { buddyName: string }) {
+function NewAccountPanel({ buddyName, defaultOpen }: { buddyName: string; defaultOpen?: boolean }) {
   return (
-    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" open={defaultOpen}>
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
         <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
           <WalletCards className="size-4 text-sky-300" aria-hidden />
@@ -279,9 +365,9 @@ function NewAccountPanel({ buddyName }: { buddyName: string }) {
         </div>
         <div className="space-y-2">
           <FieldLabel>Default sharing</FieldLabel>
-          <select name="visibility" defaultValue="SHARED" className={inputClass}>
+          <select name="visibility" defaultValue="PRIVATE" className={inputClass}>
+            <option value="PRIVATE">Private (default)</option>
             <option value="SHARED">Shared with {buddyName}</option>
-            <option value="PRIVATE">Private</option>
           </select>
         </div>
         <div className="flex items-end">
@@ -488,23 +574,27 @@ function AccountsSection({
   accounts,
   currentUserId,
   buddyName,
+  realizedByAccount,
 }: {
   accounts: AccountRow[];
   currentUserId: string;
   buddyName: string;
+  realizedByAccount: Map<string, number>;
 }) {
   return (
     <section className="grid gap-3 lg:grid-cols-2">
       {accounts.map((account) => {
         const isOwner = account.userId === currentUserId;
-        const snapshot = account.snapshots[0];
-        const balance = account.manualBalance ?? snapshot?.accountValue ?? account.startingBalance;
+        const ledger = summarizeAccountLedger(account.ledgerEntries);
+        const realized = realizedByAccount.get(account.id) ?? 0;
+        const current = currentAccountValue(ledger, realized);
         return (
           <article key={account.id} className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-xl font-semibold text-zinc-50">{account.name}</h2>
+                  <Badge tone={account.source === "SCHWAB" ? "info" : "neutral"}>{account.source}</Badge>
                   <Badge tone={account.visibility === "SHARED" ? "info" : "warn"}>
                     {account.visibility === "SHARED" ? <Users className="mr-1 size-3.5" aria-hidden /> : <Lock className="mr-1 size-3.5" aria-hidden />}
                     {account.visibility === "SHARED" ? `Shared with ${isOwner ? buddyName : "you"}` : "Private"}
@@ -523,15 +613,163 @@ function AccountsSection({
                 </form>
               ) : null}
             </div>
-            <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
-              <ResultItem label="Balance" value={balance === null || balance === undefined ? "Not set" : money(balance)} />
-              <ResultItem label="Starting" value={account.startingBalance === null ? "Not set" : money(account.startingBalance)} />
+            <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <ResultItem label="Starting" value={ledger.startingValue === null ? "UNKNOWN" : money(ledger.startingValue)} />
+              <ResultItem label="Contributions" value={money(ledger.netContributions)} tone={ledger.netContributions} />
+              <ResultItem
+                label="Current"
+                value={current.value === null ? "No data" : money(current.value)}
+              />
               <ResultItem label="Campaigns" value={account._count.campaigns} />
             </dl>
+            {isOwner ? (
+              <p className="mt-3 text-xs text-zinc-500">
+                Log a deposit, withdrawal, or adjustment from{" "}
+                <Link href="/account" className="text-emerald-300 hover:text-emerald-200">
+                  Account
+                </Link>
+                .
+              </p>
+            ) : null}
           </article>
         );
       })}
       {accounts.length === 0 ? <EmptyState>No visible accounts for this view.</EmptyState> : null}
+    </section>
+  );
+}
+
+function SchwabPositionsPanel({
+  positions,
+  openCampaignTickers,
+}: {
+  positions: SchwabPositions;
+  openCampaignTickers: Set<string>;
+}) {
+  if (positions === null) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+          <ShieldCheck className="size-4 text-sky-300" aria-hidden />
+          Your Schwab Positions
+        </h2>
+        <Link href="/account" className="text-xs font-medium text-emerald-300 hover:text-emerald-200">
+          Manage connection
+        </Link>
+      </div>
+      {positions.length === 0 ? (
+        <p className="text-sm text-zinc-400">Schwab reports no open positions right now.</p>
+      ) : (
+        <div className="space-y-2">
+          {positions.map((position) => {
+            const isMatch = openCampaignTickers.has(underlyingFromSymbol(position.symbol));
+            return (
+              <div
+                key={`${position.accountId}-${position.symbol}`}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm"
+              >
+                <div>
+                  <span className="font-medium text-zinc-100">{position.symbol}</span>{" "}
+                  <span className="text-zinc-500">· {position.accountLabel}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-zinc-400">{position.quantity} sh · {money(position.marketValue)}</span>
+                  <Badge tone={isMatch ? "info" : "neutral"}>{isMatch ? "Possible match" : "Unlinked"}</Badge>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="mt-2 text-xs text-zinc-500">
+        Raw broker positions as Schwab reports them. &quot;Possible match&quot; means an open campaign shares the
+        same underlying ticker - it is not an automatic link. Reconciling broker fills to specific campaigns is
+        future work.
+      </p>
+    </div>
+  );
+}
+
+function underlyingFromSymbol(symbol: string) {
+  const match = symbol.trim().toUpperCase().match(/^[A-Z]+/);
+  return match ? match[0] : symbol.trim().toUpperCase();
+}
+
+function PerformanceSection({
+  winLoss,
+  weekly,
+  startingTotal,
+  contributionsTotal,
+  currentTotal,
+}: {
+  winLoss: ReturnType<typeof summarizeWinLoss>;
+  weekly: ReturnType<typeof summarizeWeeklyReturns>;
+  startingTotal: number;
+  contributionsTotal: number;
+  currentTotal: number | null;
+}) {
+  return (
+    <section className="space-y-4">
+      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <p className="text-xs uppercase tracking-normal text-zinc-500">Always your own results - never combined with a buddy&apos;s</p>
+        <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+          <ResultItem label="Starting value" value={money(startingTotal)} />
+          <ResultItem label="Net contributions" value={money(contributionsTotal)} tone={contributionsTotal} />
+          <ResultItem label="Current value" value={currentTotal === null ? "No data" : money(currentTotal)} />
+        </dl>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        {weekly.status === "INSUFFICIENT_HISTORY" ? (
+          <p className="text-sm text-zinc-400">
+            <span className="font-medium text-zinc-200">INSUFFICIENT HISTORY</span> - complete at least one campaign
+            with a known account value to start tracking weekly return against the {weekly.targetPercent}% target.
+          </p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <span className="text-zinc-300">
+              This week{" "}
+              <span className={(weekly.thisWeekPercent ?? 0) >= weekly.targetPercent ? "text-emerald-300" : "text-amber-300"}>
+                {percent(weekly.thisWeekPercent ?? 0)}
+              </span>{" "}
+              of {weekly.targetPercent}% target
+            </span>
+            <span className="text-zinc-500">
+              4-wk avg {weekly.trailing4WeekAveragePercent === null ? "N/A" : percent(weekly.trailing4WeekAveragePercent)}
+            </span>
+            <span className="text-zinc-500">
+              {weekly.weeksAtOrAboveTarget ?? 0} of {weekly.totalWeeksTracked ?? 0} weeks at target
+            </span>
+          </div>
+        )}
+        <p className="mt-2 text-xs text-zinc-500">
+          Simple realized-return-per-week against current account value, not a time-weighted rate of return. See
+          PROJECT_HANDOFF.md for the documented methodology and its limitations.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <dl className="grid gap-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
+          <ResultItem label="Completed" value={winLoss.completedCount} />
+          <ResultItem label="Wins" value={winLoss.wins} />
+          <ResultItem label="Losses" value={winLoss.losses} />
+          <ResultItem label="Win rate" value={winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`} />
+          <ResultItem label="Avg win" value={winLoss.averageWin === null ? "N/A" : money(winLoss.averageWin)} tone={winLoss.averageWin} />
+          <ResultItem label="Avg loss" value={winLoss.averageLoss === null ? "N/A" : money(winLoss.averageLoss)} tone={winLoss.averageLoss} />
+          <ResultItem label="Avg duration" value={winLoss.averageDurationDays === null ? "N/A" : `${winLoss.averageDurationDays} days`} />
+          <ResultItem label="Realized trading P/L" value={money(winLoss.realizedTradingPL)} tone={winLoss.realizedTradingPL} />
+        </dl>
+        {winLoss.unknownResults > 0 ? (
+          <p className="mt-2 text-xs text-zinc-500">
+            {winLoss.unknownResults} closed campaign{winLoss.unknownResults === 1 ? "" : "s"} without a known final P/L excluded
+            from win/loss math.
+          </p>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -730,10 +968,14 @@ function firstParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function parseViewMode(value: string | undefined): ViewMode {
+  return value === "history" || value === "performance" || value === "accounts" ? value : "open";
+}
+
 function trackerHref(scope: TrackerScope, view: ViewMode) {
   const params = new URLSearchParams();
   params.set("scope", scope);
-  if (view !== "campaigns") {
+  if (view !== "open") {
     params.set("view", view);
   }
   return `/positions?${params.toString()}`;

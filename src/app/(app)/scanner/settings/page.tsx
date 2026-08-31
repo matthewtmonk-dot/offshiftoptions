@@ -1,6 +1,8 @@
-import { Save } from "lucide-react";
+import { RotateCcw, Save } from "lucide-react";
 import { Badge, EmptyState, FieldLabel, Panel } from "@/components/ui";
 import {
+  diffScannerRulesFromLstCore,
+  formatRuleDesired,
   getRuleDesired,
   SCANNER_RULE_DEFINITIONS,
   type ScannerRuleDefinition,
@@ -8,7 +10,7 @@ import {
 import { requireCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { ensureMyLstScannerProfileForUser } from "@/lib/workflows";
-import { updateScannerSettingsAction } from "../../actions";
+import { resetScannerSettingsToLstCoreAction, updateScannerSettingsAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +27,9 @@ export default async function ScannerSettingsPage({
     orderBy: { sortOrder: "asc" },
   });
   const rulesByKey = new Map(rules.map((rule) => [rule.key, rule]));
+  const diff = diffScannerRulesFromLstCore(rules);
+  const diffByKey = new Map(diff.map((entry) => [entry.key, entry]));
+  const changedCount = diff.filter((entry) => entry.changed).length;
 
   return (
     <div className="space-y-6">
@@ -43,9 +48,26 @@ export default async function ScannerSettingsPage({
       ) : null}
       {params.saved ? (
         <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
-          Scanner settings saved.
+          {params.saved === "core" ? "Reset to LST Core." : "Scanner settings saved."}
         </div>
       ) : null}
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+        <p className="text-sm text-zinc-300">
+          {changedCount === 0
+            ? "This profile matches LST Core."
+            : `${changedCount} rule${changedCount === 1 ? "" : "s"} differ${changedCount === 1 ? "s" : ""} from LST Core.`}
+        </p>
+        <form action={resetScannerSettingsToLstCoreAction}>
+          <button
+            type="submit"
+            className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-xs font-medium text-zinc-300 transition hover:border-amber-400/60 hover:text-amber-200"
+          >
+            <RotateCcw className="size-3.5" aria-hidden />
+            Reset all to LST Core
+          </button>
+        </form>
+      </div>
 
       <form action={updateScannerSettingsAction} className="space-y-4">
         <Panel
@@ -69,7 +91,8 @@ export default async function ScannerSettingsPage({
                   key={definition.key}
                   definition={definition}
                   desired={desired}
-                  enabled={rule?.enabled ?? true}
+                  enabled={rule?.enabled ?? definition.defaultEnabled}
+                  changed={diffByKey.get(definition.key)?.changed ?? false}
                 />
               );
             })}
@@ -85,17 +108,27 @@ function RuleEditor({
   definition,
   desired,
   enabled,
+  changed,
 }: {
   definition: ScannerRuleDefinition;
   desired: number | string | boolean | [number, number];
   enabled: boolean;
+  changed: boolean;
 }) {
   return (
-    <section className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+    <section className={`rounded-lg border p-4 ${changed ? "border-amber-400/40 bg-amber-400/5" : "border-zinc-800 bg-zinc-900"}`}>
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-base font-semibold text-zinc-50">{definition.name}</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-semibold text-zinc-50">{definition.name}</h2>
+            {changed ? <Badge tone="warn">Differs from LST Core</Badge> : null}
+          </div>
           <p className="mt-1 text-sm text-zinc-400">{definition.explanation}</p>
+          {changed ? (
+            <p className="mt-1 text-xs text-amber-200/80">
+              LST Core: {definition.defaultEnabled ? "on" : "off"} · {formatRuleDesired(definition.operator, definition.defaultDesired)}
+            </p>
+          ) : null}
         </div>
         <label className="flex min-h-10 shrink-0 items-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300">
           <input

@@ -14,11 +14,17 @@ import {
 import { prisma } from "./prisma";
 import { requireTicker, ValidationError } from "./tickers";
 import { notifyInApp } from "./notifications";
-import { getSchwabMarketDataProvider } from "./broker-connections";
+import type { AccountLedgerEntryType } from "@/generated/prisma/enums";
+import {
+  getSchwabBrokerReadProviderForUser,
+  getSchwabMarketDataProvider,
+  recordSchwabAccountSyncResult,
+} from "./broker-connections";
 
 const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
 const ACCOUNT_VISIBILITIES = new Set<Visibility>(["PRIVATE", "SHARED"]);
 const RECORD_VISIBILITIES = new Set<InheritedVisibility>(["INHERIT", "PRIVATE", "SHARED"]);
+const MANUAL_LEDGER_ENTRY_TYPES = new Set<AccountLedgerEntryType>(["DEPOSIT", "WITHDRAWAL", "MANUAL_ADJUSTMENT"]);
 const campaignDetailInclude = {
   owner: { select: { id: true, name: true, email: true } },
   account: {
@@ -71,8 +77,11 @@ export async function createTradingAccountForUser(
   const accountType = trimText(accountTypeInput, 40) || "Manual";
   const startingBalance = parseOptionalMoney(startingBalanceInput, "starting balance");
   const manualBalance = parseOptionalMoney(manualBalanceInput, "current balance") ?? startingBalance;
-  const visibility = parseAccountVisibility(visibilityInput, "SHARED");
+  // Accounts default PRIVATE - personal brokerage/balance data is not shared-by-default
+  // the way watchlist/research ideas are. Sharing remains available, opt-in, per account.
+  const visibility = parseAccountVisibility(visibilityInput, "PRIVATE");
   const snapshotBalance = manualBalance ?? startingBalance;
+  const openedAt = new Date();
 
   return prisma.tradingAccount.create({
     data: {
@@ -97,6 +106,145 @@ export async function createTradingAccountForUser(
                 premiumCollected: 0,
               },
             },
+      // The ledger - not startingBalance/manualBalance - is the authoritative source for
+      // distinguishing trading performance from contributions (see src/domain/finance/accountLedger.ts).
+      ledgerEntries:
+        startingBalance === null
+          ? undefined
+          : {
+              create: {
+                type: "STARTING_VALUE",
+                occurredAt: openedAt,
+                amount: startingBalance,
+                source: "MANUAL",
+              },
+            },
+    },
+  });
+}
+
+export type SchwabAccountSyncResult = {
+  syncedAccounts: number;
+  accounts: { id: string; name: string; accountValue: number; cash: number }[];
+};
+
+/**
+ * Pulls real account value/cash from Schwab for the authenticated user only and
+ * records it as a BROKER_SNAPSHOT ledger entry per linked account. Never fabricates a
+ * value Schwab did not return, and never touches another user's accounts or tokens.
+ */
+export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAccountSyncResult> {
+  const provider = await getSchwabBrokerReadProviderForUser(userId);
+  if (!provider) {
+    throw new ValidationError("Connect Schwab in Account settings before syncing.");
+  }
+
+  let brokerAccounts;
+  try {
+    brokerAccounts = await provider.getAccounts();
+  } catch {
+    await recordSchwabAccountSyncResult(userId, { failureReason: "fetch_failed" });
+    throw new ValidationError("Schwab did not return account data. Try again in a moment.");
+  }
+
+  if (!brokerAccounts.length) {
+    await recordSchwabAccountSyncResult(userId, { failureReason: "no_accounts" });
+    throw new ValidationError("Schwab did not report any linked accounts to sync.");
+  }
+
+  const syncedAt = new Date();
+  const accounts = [];
+
+  for (const brokerAccount of brokerAccounts) {
+    const tradingAccount = await prisma.tradingAccount.upsert({
+      where: { userId_externalAccountId: { userId, externalAccountId: brokerAccount.id } },
+      update: {
+        name: brokerAccount.label,
+      },
+      create: {
+        userId,
+        name: brokerAccount.label,
+        brokerName: "Schwab",
+        accountType: "Brokerage",
+        source: "SCHWAB",
+        externalAccountId: brokerAccount.id,
+        visibility: "PRIVATE",
+      },
+    });
+
+    await prisma.accountLedgerEntry.create({
+      data: {
+        accountId: tradingAccount.id,
+        type: "BROKER_SNAPSHOT",
+        occurredAt: syncedAt,
+        accountValue: brokerAccount.accountValue,
+        cash: brokerAccount.cash,
+        source: "SCHWAB",
+      },
+    });
+
+    accounts.push({ id: tradingAccount.id, name: tradingAccount.name, accountValue: brokerAccount.accountValue, cash: brokerAccount.cash });
+  }
+
+  await recordSchwabAccountSyncResult(userId, { succeededAt: syncedAt });
+  return { syncedAccounts: accounts.length, accounts };
+}
+
+export async function getSchwabOpenPositionsForUser(userId: string) {
+  const provider = await getSchwabBrokerReadProviderForUser(userId);
+  if (!provider) {
+    return null;
+  }
+
+  try {
+    const accounts = await provider.getAccounts();
+    const positionsByAccount = await Promise.all(
+      accounts.map(async (account) => ({
+        account,
+        positions: await provider.getPositions(account.id),
+      })),
+    );
+
+    return positionsByAccount.flatMap(({ account, positions }) =>
+      positions.map((position) => ({ ...position, accountLabel: account.label })),
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function addAccountLedgerEntryForUser(
+  userId: string,
+  accountId: string,
+  typeInput: unknown,
+  occurredAtInput: unknown,
+  amountInput: unknown,
+  notesInput: unknown,
+) {
+  const account = await prisma.tradingAccount.findFirst({ where: { id: accountId, userId } });
+  if (!account) {
+    throw new ValidationError("Choose one of your accounts.");
+  }
+
+  const type = String(typeInput ?? "").toUpperCase() as AccountLedgerEntryType;
+  if (!MANUAL_LEDGER_ENTRY_TYPES.has(type)) {
+    throw new ValidationError("Choose deposit, withdrawal, or adjustment.");
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "date");
+  // Deposits/withdrawals are always entered as a positive magnitude - the type itself
+  // determines direction. An adjustment (a correction, not a cash flow) may go either way.
+  const amount = type === "MANUAL_ADJUSTMENT" ? parseFiniteNumberOrThrow(amountInput, "amount") : parsePositiveNumber(amountInput, "amount");
+  const notes = trimText(notesInput, 500);
+
+  return prisma.accountLedgerEntry.create({
+    data: {
+      accountId: account.id,
+      type,
+      occurredAt,
+      amount,
+      source: "MANUAL",
+      notes: notes || null,
     },
   });
 }
@@ -885,7 +1033,7 @@ export async function ensureMyLstScannerProfileForUser(userId: string) {
           operator: definition.operator,
           valueJson: { desired: definition.defaultDesired },
           sortOrder: index,
-          enabled: true,
+          enabled: definition.defaultEnabled,
         })),
       },
     },
@@ -919,6 +1067,40 @@ export async function updateScannerSettingsForUser(userId: string, formData: For
         operator: definition.operator,
         valueJson: { desired },
         enabled,
+        sortOrder: index,
+      },
+    });
+  }
+
+  await rerunDemoScannerForUser(userId, profile.id);
+  return profile;
+}
+
+export async function resetScannerSettingsToLstCoreForUser(userId: string) {
+  const profile = await ensureMyLstScannerProfileForUser(userId);
+
+  for (const [index, definition] of SCANNER_RULE_DEFINITIONS.entries()) {
+    await prisma.scannerRule.upsert({
+      where: {
+        profileId_key: {
+          profileId: profile.id,
+          key: definition.key,
+        },
+      },
+      update: {
+        name: definition.name,
+        operator: definition.operator,
+        valueJson: { desired: definition.defaultDesired },
+        enabled: definition.defaultEnabled,
+        sortOrder: index,
+      },
+      create: {
+        profileId: profile.id,
+        key: definition.key,
+        name: definition.name,
+        operator: definition.operator,
+        valueJson: { desired: definition.defaultDesired },
+        enabled: definition.defaultEnabled,
         sortOrder: index,
       },
     });
@@ -1059,6 +1241,15 @@ function parseOptionalMoney(value: unknown, label: string) {
 function parsePositiveNumber(value: unknown, label: string) {
   const parsed = Number(String(value ?? "").trim());
   if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new ValidationError(`Enter a valid ${label}.`);
+  }
+
+  return parsed;
+}
+
+function parseFiniteNumberOrThrow(value: unknown, label: string) {
+  const parsed = Number(String(value ?? "").trim());
+  if (!Number.isFinite(parsed) || parsed === 0) {
     throw new ValidationError(`Enter a valid ${label}.`);
   }
 

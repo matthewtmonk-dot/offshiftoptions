@@ -9,6 +9,7 @@ export type ScannerRule = {
 };
 
 export type CriterionResult = {
+  key: string;
   name: string;
   actualValue: number | string | boolean | null | undefined;
   operator: ScannerOperator;
@@ -31,7 +32,7 @@ export type CriterionGap = {
   message: string;
 };
 
-export type SetupScoreLabel = "Excellent" | "Strong" | "Borderline" | "Needs work" | "Poor";
+export type SetupScoreLabel = "Excellent" | "Strong" | "Borderline" | "Needs work" | "Poor" | "Fails" | "Verify";
 
 export type ExclusionDiagnostic = {
   startingUniverse: number;
@@ -47,6 +48,7 @@ export type ExclusionDiagnostic = {
 export function evaluateCriterion(rule: ScannerRule, actualValue: CriterionResult["actualValue"]): CriterionResult {
   if (actualValue === null || actualValue === undefined || actualValue === "") {
     return {
+      key: rule.key,
       name: rule.name,
       actualValue,
       operator: rule.operator,
@@ -58,6 +60,7 @@ export function evaluateCriterion(rule: ScannerRule, actualValue: CriterionResul
 
   const passed = compare(rule.operator, actualValue, rule.desired);
   return {
+    key: rule.key,
     name: rule.name,
     actualValue,
     operator: rule.operator,
@@ -118,6 +121,46 @@ export function setupScoreLabel(score: number): SetupScoreLabel {
     return "Needs work";
   }
   return "Poor";
+}
+
+/**
+ * A gating criterion defines whether the setup is even tradeable under the strategy
+ * (price band, liquidity, delta shape, earnings risk, an explicit do-not-trade flag).
+ * A preference criterion is a quality/timing signal (RSI, BB position, ROR, etc.) that
+ * can be missed by a little without making the trade impossible or unsafe.
+ *
+ * A FAIL on a gating criterion must cap the score and force a non-positive label - it
+ * must never read "Strong"/"Excellent" regardless of how well the rest of the row scores.
+ * Any UNKNOWN criterion (gating or preference) must also block a positive label, since a
+ * score computed only on what's known cannot certify a setup as ready.
+ */
+export const GATING_SCORE_CAP = 49;
+
+export function hasGatingFailure(results: CriterionResult[], gatingKeys: ReadonlySet<string>): boolean {
+  return results.some((result) => result.status === "FAIL" && gatingKeys.has(result.key));
+}
+
+export function honestSetupScore(summary: ScanSummary, gatingKeys: ReadonlySet<string>): number {
+  const raw = setupScore(summary);
+  return hasGatingFailure(summary.results, gatingKeys) ? Math.min(raw, GATING_SCORE_CAP) : raw;
+}
+
+/**
+ * The label a user actually reads. Never derived from the numeric score alone:
+ * - a gating FAIL always reads "Fails", regardless of score
+ * - any UNKNOWN criterion always reads "Verify", regardless of score
+ * - only a fully-resolved, non-gating-failed row uses the graded 0-100 scale
+ */
+export function honestSetupLabel(summary: ScanSummary, gatingKeys: ReadonlySet<string>): SetupScoreLabel {
+  if (hasGatingFailure(summary.results, gatingKeys)) {
+    return "Fails";
+  }
+
+  if (summary.status === "UNKNOWN") {
+    return "Verify";
+  }
+
+  return setupScoreLabel(honestSetupScore(summary, gatingKeys));
 }
 
 export function getNearMisses(results: CriterionResult[]): CriterionGap[] {

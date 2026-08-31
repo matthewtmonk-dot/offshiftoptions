@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { getCurrentSessionTokenHash, requireCurrentUser, signOut } from "@/lib/auth";
 import { changePasswordForUser } from "@/lib/account";
 import {
+  addAccountLedgerEntryForUser,
   addReactionForUser,
   addRecommendationCommentForUser,
   addWatchlistCommentForUser,
@@ -21,10 +22,12 @@ import {
   removeWatchlistItemForUser,
   rerunDemoScannerForUser,
   rerunLiveSchwabScannerForUser,
+  resetScannerSettingsToLstCoreForUser,
   rollCampaignPutForUser,
   safeReturnPath,
   saveStockNoteForUser,
   sendChatMessageForUser,
+  syncSchwabAccountForUser,
   toggleCampaignVisibilityForUser,
   toggleTradingAccountVisibilityForUser,
   toggleWatchlistItemVisibilityForUser,
@@ -230,6 +233,16 @@ export async function updateScannerSettingsAction(formData: FormData) {
   redirect("/scanner/settings?saved=1");
 }
 
+export async function resetScannerSettingsToLstCoreAction() {
+  const user = await requireCurrentUser();
+  await resetScannerSettingsToLstCoreForUser(user.id);
+
+  revalidatePath("/scanner/settings");
+  revalidatePath("/scanner");
+  revalidatePath("/dashboard");
+  redirect("/scanner/settings?saved=core");
+}
+
 export async function runDemoScannerAction() {
   const user = await requireCurrentUser();
   await rerunDemoScannerForUser(user.id);
@@ -428,4 +441,46 @@ export async function disconnectSchwabAction() {
   revalidatePath("/scanner");
   revalidatePath("/dashboard");
   redirect("/account?schwab=disconnected");
+}
+
+export async function syncSchwabAccountAction() {
+  const user = await requireCurrentUser();
+
+  try {
+    await syncSchwabAccountForUser(user.id);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/account", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/account");
+  revalidatePath("/dashboard");
+  revalidatePath("/positions");
+  redirect("/account?schwab=synced");
+}
+
+export async function addAccountLedgerEntryAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await addAccountLedgerEntryForUser(
+      user.id,
+      String(formData.get("accountId") ?? ""),
+      formData.get("type"),
+      formData.get("occurredAt"),
+      formData.get("amount"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
 }

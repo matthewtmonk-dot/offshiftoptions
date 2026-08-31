@@ -26,6 +26,7 @@ export type ScannerRuleDefinition = {
   name: string;
   operator: ScannerOperator;
   defaultDesired: EngineScannerRule["desired"];
+  defaultEnabled: boolean;
   explanation: string;
   input: RuleInput;
 };
@@ -35,12 +36,41 @@ export type DemoScannerCandidate = {
   values: Record<string, number | string | boolean | null | undefined>;
 };
 
+export const LST_CORE_PROFILE_NAME = "LST Core";
+export const LEGACY_MY_LST_PROFILE_NAME = "My LST";
+export const SCANNER_PROFILE_NAMES = [LST_CORE_PROFILE_NAME, LEGACY_MY_LST_PROFILE_NAME] as const;
+
+/**
+ * Gating vs preference is about whether a FAIL on this criterion means the setup is
+ * untradeable under the strategy (gating) or merely a quality/timing miss (preference).
+ * Gating FAILs cap the score and force a non-positive label (see scanner.ts). This list
+ * is intentionally explicit rather than inferred, per the confirmed LST rule set:
+ * - price / stockVolume / openInterest / optionBid: define the tradeable universe and
+ *   basic liquidity - a fail here means there is no realistic fill, not "close".
+ * - spreadPercent: same liquidity/tradeability category even though it is not part of
+ *   the confirmed core numbers - a 77% spread is not a preference miss.
+ * - delta: defines the assignment-probability shape of the CSP itself.
+ * - earningsDistance: the single highest-consequence gate for cash-secured puts.
+ * - doNotTrade: an explicit exclusion, not a soft preference.
+ */
+export const GATING_RULE_KEYS = new Set([
+  "price",
+  "stockVolume",
+  "openInterest",
+  "optionBid",
+  "spreadPercent",
+  "delta",
+  "earningsDistance",
+  "doNotTrade",
+]);
+
 export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
   {
     key: "price",
     name: "Stock price",
     operator: "BETWEEN",
-    defaultDesired: [10, 80],
+    defaultDesired: [10, 50],
+    defaultEnabled: true,
     explanation: "The stock price range the scanner should evaluate for cash-secured put candidates.",
     input: {
       kind: "range",
@@ -51,10 +81,20 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     },
   },
   {
+    key: "stockVolume",
+    name: "Underlying volume",
+    operator: "GTE",
+    defaultDesired: 40_000,
+    defaultEnabled: true,
+    explanation: "Minimum stock-share volume for basic liquidity. Missing volume remains UNKNOWN.",
+    input: { kind: "single", label: "Minimum underlying share volume", step: "1000", min: 0 },
+  },
+  {
     key: "rsi",
     name: "RSI",
     operator: "LTE",
-    defaultDesired: 55,
+    defaultDesired: 40,
+    defaultEnabled: true,
     explanation: "A momentum indicator. This app uses Wilder's RSI calculation.",
     input: { kind: "single", label: "Maximum RSI", step: "0.1", min: 0, max: 100 },
   },
@@ -62,7 +102,8 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     key: "bbPercent",
     name: "BB %",
     operator: "LTE",
-    defaultDesired: 70,
+    defaultDesired: 33,
+    defaultEnabled: true,
     explanation: "Where the stock price sits between the lower and upper Bollinger Bands.",
     input: { kind: "single", label: "Maximum Bollinger Band position / BB %", step: "0.1", min: 0, max: 100 },
   },
@@ -71,6 +112,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "DTE",
     operator: "BETWEEN",
     defaultDesired: [14, 45],
+    defaultEnabled: false,
     explanation: "Days To Expiration - how many calendar days remain until the option expires.",
     input: {
       kind: "range",
@@ -85,6 +127,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Absolute delta",
     operator: "BETWEEN",
     defaultDesired: [0.12, 0.3],
+    defaultEnabled: false,
     explanation:
       "How sensitive the option is to movement in the stock. For the put scanner, absolute delta is shown for easier comparison.",
     input: {
@@ -101,6 +144,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Put ROR",
     operator: "GTE",
     defaultDesired: 1,
+    defaultEnabled: true,
     explanation: "Premium relative to the cash-secured capital required by the put.",
     input: { kind: "single", label: "Minimum Put Return on Risk", step: "0.1", min: 0 },
   },
@@ -109,6 +153,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Annualized ROR",
     operator: "GTE",
     defaultDesired: 15,
+    defaultEnabled: false,
     explanation: "Return on risk scaled to a yearly rate for comparison. It is educational context, not a target recommendation.",
     input: { kind: "single", label: "Minimum annualized ROR", step: "0.1", min: 0 },
   },
@@ -116,7 +161,8 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     key: "optionBid",
     name: "Option bid",
     operator: "GTE",
-    defaultDesired: 0.05,
+    defaultDesired: 0.1,
+    defaultEnabled: true,
     explanation: "The current option bid. Missing quotes remain UNKNOWN.",
     input: { kind: "single", label: "Minimum option bid", step: "0.01", min: 0 },
   },
@@ -125,6 +171,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Bid/ask spread",
     operator: "LTE",
     defaultDesired: 25,
+    defaultEnabled: false,
     explanation: "The difference between the current bid and ask. Wider spreads generally mean less efficient entry/exit pricing.",
     input: { kind: "single", label: "Maximum bid/ask spread %", step: "0.1", min: 0 },
   },
@@ -133,6 +180,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Open interest",
     operator: "GTE",
     defaultDesired: 100,
+    defaultEnabled: true,
     explanation: "The number of open option contracts currently outstanding for that contract.",
     input: { kind: "single", label: "Minimum open interest", step: "1", min: 0 },
   },
@@ -141,6 +189,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Option volume",
     operator: "GTE",
     defaultDesired: 25,
+    defaultEnabled: false,
     explanation: "How many contracts traded during the session.",
     input: { kind: "single", label: "Minimum option volume", step: "1", min: 0 },
   },
@@ -148,7 +197,8 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     key: "earningsDistance",
     name: "Earnings distance",
     operator: "GTE",
-    defaultDesired: 14,
+    defaultDesired: 10,
+    defaultEnabled: true,
     explanation: "Minimum days until earnings. If earnings timing is unavailable, the criterion remains UNKNOWN.",
     input: { kind: "single", label: "Minimum days until earnings", step: "1", min: 0 },
   },
@@ -157,6 +207,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Do Not Trade filter",
     operator: "EQ",
     defaultDesired: false,
+    defaultEnabled: false,
     explanation: "Flags candidates marked as Do Not Trade. UNKNOWN stays UNKNOWN when this data is unavailable.",
     input: { kind: "boolean", label: "Require Do Not Trade flag to be false" },
   },
@@ -165,6 +216,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     name: "Debt/equity",
     operator: "LTE",
     defaultDesired: 1.2,
+    defaultEnabled: false,
     explanation: "A simple Phase 1 fundamental rule. Missing fundamentals remain UNKNOWN.",
     input: { kind: "single", label: "Maximum debt/equity", step: "0.1", min: 0 },
   },
@@ -569,6 +621,45 @@ export function getRuleDesired(valueJson: unknown, fallback: EngineScannerRule["
 
 export function getScannerRuleDefinition(key: string) {
   return SCANNER_RULE_DEFINITIONS.find((definition) => definition.key === key);
+}
+
+export type ScannerRuleDiff = {
+  key: string;
+  name: string;
+  coreDesired: EngineScannerRule["desired"];
+  currentDesired: EngineScannerRule["desired"];
+  coreEnabled: boolean;
+  currentEnabled: boolean;
+  changed: boolean;
+};
+
+/**
+ * Compares a user's stored rules against the LST Core defaults so the settings UI can
+ * show "N rules differ from LST Core" and highlight exactly which ones, without ever
+ * silently overwriting the user's own choices.
+ */
+export function diffScannerRulesFromLstCore(
+  records: { key: string; valueJson: unknown; enabled: boolean }[],
+): ScannerRuleDiff[] {
+  const recordsByKey = new Map(records.map((record) => [record.key, record]));
+
+  return SCANNER_RULE_DEFINITIONS.map((definition) => {
+    const record = recordsByKey.get(definition.key);
+    const currentDesired = getRuleDesired(record?.valueJson, definition.defaultDesired);
+    const currentEnabled = record?.enabled ?? definition.defaultEnabled;
+    const desiredChanged = JSON.stringify(currentDesired) !== JSON.stringify(definition.defaultDesired);
+    const enabledChanged = currentEnabled !== definition.defaultEnabled;
+
+    return {
+      key: definition.key,
+      name: definition.name,
+      coreDesired: definition.defaultDesired,
+      currentDesired,
+      coreEnabled: definition.defaultEnabled,
+      currentEnabled,
+      changed: desiredChanged || enabledChanged,
+    };
+  });
 }
 
 export function scannerRulesFromRecords(

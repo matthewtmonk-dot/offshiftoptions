@@ -303,6 +303,7 @@ maybeDescribe("database-backed Phase 1B workflows", () => {
     ]);
 
     expect(mattPriceRule.valueJson).toMatchObject({ desired: [12, 60] });
-    expect(ericPriceRule.valueJson).toMatchObject({ desired: [10, 80] });
+    // LST Core default price band is $10-$50 - see src/domain/scanner/profile.ts.
+    expect(ericPriceRule.valueJson).toMatchObject({ desired: [10, 50] });
   });
 });

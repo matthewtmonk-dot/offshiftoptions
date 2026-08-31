@@ -3,7 +3,7 @@ import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { hash } from "bcryptjs";
 import { PrismaClient } from "../src/generated/prisma/client";
-import { defaultScannerRules, evaluateDemoScan } from "../src/domain/scanner/profile";
+import { defaultScannerRules, evaluateDemoScan, SCANNER_RULE_DEFINITIONS } from "../src/domain/scanner/profile";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -93,12 +93,16 @@ async function createScannerProfile(ownerId: string) {
       ownerId,
       name: "My LST",
       visibility: "PRIVATE",
+      // enabled must come from each definition's defaultEnabled (LST Core), not the
+      // schema column default - otherwise every seeded profile starts with every rule
+      // (including preference-only ones) turned on instead of matching LST Core.
       rules: {
-        create: rules.map((rule, index) => ({
-          key: rule.key,
-          name: rule.name,
-          operator: rule.operator,
-          valueJson: { desired: rule.desired },
+        create: SCANNER_RULE_DEFINITIONS.map((definition, index) => ({
+          key: definition.key,
+          name: definition.name,
+          operator: definition.operator,
+          valueJson: { desired: definition.defaultDesired },
+          enabled: definition.defaultEnabled,
           sortOrder: index,
         })),
       },
@@ -188,6 +192,11 @@ async function main() {
           premiumCollected: "715.00",
         },
       },
+      // The ledger, not startingBalance/manualBalance, is the source of truth for the
+      // Account/Performance/Tracker views - seed it so demo accounts don't show "No data".
+      ledgerEntries: {
+        create: { type: "STARTING_VALUE", occurredAt: new Date("2026-07-01T00:00:00Z"), amount: "10000.00", source: "MANUAL" },
+      },
     },
   });
 
@@ -211,6 +220,9 @@ async function main() {
           premiumCollected: "380.00",
         },
       },
+      ledgerEntries: {
+        create: { type: "STARTING_VALUE", occurredAt: new Date("2026-07-01T00:00:00Z"), amount: "10000.00", source: "MANUAL" },
+      },
     },
   });
 
@@ -233,6 +245,9 @@ async function main() {
           unrealizedPL: "0.00",
           premiumCollected: "36.00",
         },
+      },
+      ledgerEntries: {
+        create: { type: "STARTING_VALUE", occurredAt: new Date("2026-07-01T00:00:00Z"), amount: "5000.00", source: "MANUAL" },
       },
     },
   });

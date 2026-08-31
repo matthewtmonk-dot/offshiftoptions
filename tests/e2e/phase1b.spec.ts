@@ -13,11 +13,11 @@ async function signOut(page: Page) {
 
 test("Matt and Eric can authenticate to their own dashboard", async ({ page }) => {
   await loginAs(page, "Matt");
-  await expect(page.getByText("Current user only")).toBeVisible();
+  await expect(page.getByText("No order submission")).toBeVisible();
   await signOut(page);
 
   await loginAs(page, "Eric");
-  await expect(page.getByText("Current user only")).toBeVisible();
+  await expect(page.getByText("No order submission")).toBeVisible();
 });
 
 test("Matt private watchlist items are not visible to Eric", async ({ page }) => {
@@ -68,20 +68,23 @@ test("scanner settings are editable per user", async ({ page }) => {
   await loginAs(page, "Eric");
   await page.goto("/scanner/settings");
   await expect(page.locator('input[name="price:min"]')).toHaveValue("10");
-  await expect(page.locator('input[name="price:max"]')).toHaveValue("80");
+  await expect(page.locator('input[name="price:max"]')).toHaveValue("50");
 });
 
 test("tracker shows campaign lifecycles without leaking private buddy campaigns", async ({ page }) => {
   await loginAs(page, "Matt");
   await page.goto("/positions?scope=both");
   await expect(page.getByRole("heading", { name: "Tracker" })).toBeVisible();
-  await expect(page.getByText("SOFI").first()).toBeVisible();
+  // Open tab is the default view - only open campaigns show here.
   await expect(page.getByText("WBD").first()).toBeVisible();
 
   const aapCard = page.locator("details").filter({ hasText: "AAP" }).first();
   await aapCard.click();
   await expect(aapCard.getByText("Lifecycle")).toBeVisible();
   await expect(aapCard.getByText("Roll net")).toBeVisible();
+
+  await page.getByRole("link", { name: "History" }).click();
+  await expect(page.getByText("SOFI").first()).toBeVisible();
 
   await signOut(page);
   await loginAs(page, "Eric");

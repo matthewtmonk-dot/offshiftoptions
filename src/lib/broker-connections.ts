@@ -22,6 +22,9 @@ export type SchwabConnectionSummary = {
   lastSuccessfulRefreshAt: string | null;
   lastRefreshFailureAt: string | null;
   lastRefreshFailureReason: string | null;
+  lastAccountSyncAt: string | null;
+  lastAccountSyncFailureAt: string | null;
+  lastAccountSyncFailureReason: string | null;
 };
 
 export async function getSchwabConnectionSummaryForUser(userId: string): Promise<SchwabConnectionSummary | null> {
@@ -112,7 +115,46 @@ function summarizeSchwabConnection(connection: {
     lastSuccessfulRefreshAt: stringValue(metadata?.lastSuccessfulRefreshAt),
     lastRefreshFailureAt: stringValue(metadata?.lastRefreshFailureAt),
     lastRefreshFailureReason: stringValue(metadata?.lastRefreshFailureReason),
+    lastAccountSyncAt: stringValue(metadata?.lastAccountSyncAt),
+    lastAccountSyncFailureAt: stringValue(metadata?.lastAccountSyncFailureAt),
+    lastAccountSyncFailureReason: stringValue(metadata?.lastAccountSyncFailureReason),
   };
+}
+
+/**
+ * Records whether an account-data sync (balances/positions) succeeded or failed, kept
+ * distinct from token-refresh metadata (lastSuccessfulRefreshAt) which only reflects the
+ * OAuth token lifecycle, not whether we ever actually fetched account data.
+ */
+export async function recordSchwabAccountSyncResult(
+  userId: string,
+  result: { succeededAt?: Date; failureReason?: string },
+) {
+  const connection = await prisma.brokerConnection.findFirst({
+    where: { userId, provider: "SCHWAB" },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  if (!connection) {
+    return null;
+  }
+
+  const existing = objectValue(connection.metadata) ?? {};
+  const patch = result.succeededAt
+    ? {
+        lastAccountSyncAt: result.succeededAt.toISOString(),
+        lastAccountSyncFailureAt: null,
+        lastAccountSyncFailureReason: null,
+      }
+    : {
+        lastAccountSyncFailureAt: new Date().toISOString(),
+        lastAccountSyncFailureReason: result.failureReason ?? "unknown",
+      };
+
+  return prisma.brokerConnection.update({
+    where: { id: connection.id },
+    data: { metadata: { ...existing, ...patch } },
+  });
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {

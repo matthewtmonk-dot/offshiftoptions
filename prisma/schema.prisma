@@ -46,6 +46,20 @@ enum CampaignEventType {
   NOTE
 }
 
+enum AccountLedgerEntryType {
+  STARTING_VALUE
+  DEPOSIT
+  WITHDRAWAL
+  MANUAL_ADJUSTMENT
+  BROKER_SNAPSHOT
+  NOTE
+}
+
+enum AccountSource {
+  MANUAL
+  SCHWAB
+}
+
 enum TradeStatus {
   OPEN
   CLOSED
@@ -226,22 +240,28 @@ model SharingPreferences {
 }
 
 model TradingAccount {
-  id              String            @id @default(cuid())
-  userId          String
-  name            String
-  brokerName      String            @default("Manual")
-  accountType     String            @default("Demo")
-  currency        String            @default("USD")
-  startingBalance Decimal?          @db.Decimal(14, 2)
-  manualBalance   Decimal?          @db.Decimal(14, 2)
-  visibility      Visibility        @default(SHARED)
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  snapshots       AccountSnapshot[]
-  trades          Trade[]
-  campaigns       Campaign[]
+  id                 String               @id @default(cuid())
+  userId             String
+  name               String
+  brokerName         String               @default("Manual")
+  accountType        String               @default("Demo")
+  currency           String               @default("USD")
+  startingBalance    Decimal?             @db.Decimal(14, 2)
+  manualBalance      Decimal?             @db.Decimal(14, 2)
+  visibility         Visibility           @default(PRIVATE)
+  source             AccountSource        @default(MANUAL)
+  brokerConnectionId String?
+  externalAccountId  String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  user               User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerConnection   BrokerConnection?    @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
+  snapshots          AccountSnapshot[]
+  ledgerEntries      AccountLedgerEntry[]
+  trades             Trade[]
+  campaigns          Campaign[]
 
+  @@unique([userId, externalAccountId])
   @@index([userId, visibility])
 }
 
@@ -259,6 +279,23 @@ model AccountSnapshot {
   account          TradingAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@index([accountId, capturedAt])
+}
+
+model AccountLedgerEntry {
+  id           String                 @id @default(cuid())
+  accountId    String
+  type         AccountLedgerEntryType
+  occurredAt   DateTime
+  amount       Decimal?               @db.Decimal(14, 2)
+  accountValue Decimal?               @db.Decimal(14, 2)
+  cash         Decimal?               @db.Decimal(14, 2)
+  source       String                 @default("MANUAL")
+  notes        String?
+  createdAt    DateTime               @default(now())
+  account      TradingAccount         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, occurredAt])
+  @@index([type])
 }
 
 model Trade {
@@ -730,6 +767,7 @@ model BrokerConnection {
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
   user                   User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tradingAccounts        TradingAccount[]
 
   @@index([userId, provider])
 }

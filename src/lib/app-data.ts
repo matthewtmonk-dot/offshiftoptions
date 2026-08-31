@@ -18,7 +18,7 @@ export async function getUnreadNotificationCount(userId: string) {
 }
 
 export async function getDashboardData(userId: string) {
-  const [account, openTrades, watchlistItems, incomingRecommendations, activities, conversation, profile] =
+  const [account, ownAccounts, openCampaigns, completedCampaigns, openTrades, watchlistItems, incomingRecommendations, activities, conversation, profile] =
     await Promise.all([
       prisma.tradingAccount.findFirst({
         where: { userId },
@@ -28,6 +28,19 @@ export async function getDashboardData(userId: string) {
             take: 1,
           },
         },
+      }),
+      prisma.tradingAccount.findMany({
+        where: { userId },
+        include: { ledgerEntries: { orderBy: { occurredAt: "asc" } } },
+      }),
+      prisma.campaign.findMany({
+        where: { ownerId: userId, status: { in: ["OPEN", "ASSIGNED"] } },
+        orderBy: { openedAt: "desc" },
+        include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+      }),
+      prisma.campaign.findMany({
+        where: { ownerId: userId, status: "CLOSED" },
+        include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
       }),
       prisma.trade.findMany({
         where: { userId, status: "OPEN" },
@@ -97,6 +110,9 @@ export async function getDashboardData(userId: string) {
   return {
     account,
     accountSnapshot: account?.snapshots[0] ?? null,
+    ownAccounts,
+    openCampaigns,
+    completedCampaigns,
     openTrades,
     watchlistItems,
     incomingRecommendations,
@@ -257,13 +273,14 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope) {
         ? buddyAccountWhere
         : { OR: [{ userId }, buddyAccountWhere] };
 
-  const [users, ownAccounts, visibleAccounts, campaigns, legacyTrades] = await Promise.all([
+  const [users, ownAccounts, visibleAccounts, campaigns, ownCompletedCampaigns, legacyTrades] = await Promise.all([
     prisma.user.findMany({ where: { id: { not: userId } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.tradingAccount.findMany({
       where: { userId },
       orderBy: { createdAt: "asc" },
       include: {
         snapshots: { orderBy: { capturedAt: "desc" }, take: 1 },
+        ledgerEntries: { orderBy: { occurredAt: "asc" } },
         _count: { select: { campaigns: true } },
       },
     }),
@@ -273,6 +290,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope) {
       include: {
         user: { select: { id: true, name: true } },
         snapshots: { orderBy: { capturedAt: "desc" }, take: 1 },
+        ledgerEntries: { orderBy: { occurredAt: "asc" } },
         _count: { select: { campaigns: true } },
       },
     }),
@@ -295,8 +313,32 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope) {
         events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] },
       },
     }),
+    // ALWAYS scoped to the current user regardless of `scope` - performance/win-rate must
+    // never silently combine Matt and Eric's results into one figure (see PROJECT_HANDOFF.md).
+    prisma.campaign.findMany({
+      where: { ownerId: userId, status: "CLOSED" },
+      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+    }),
     getPositionsPageData(userId),
   ]);
 
-  return { users, ownAccounts, visibleAccounts, campaigns, legacyTrades };
+  return { users, ownAccounts, visibleAccounts, campaigns, ownCompletedCampaigns, legacyTrades };
+}
+
+export async function getAccountPageData(userId: string) {
+  const [accounts, completedCampaigns] = await Promise.all([
+    prisma.tradingAccount.findMany({
+      where: { userId },
+      orderBy: [{ source: "asc" }, { createdAt: "asc" }],
+      include: {
+        ledgerEntries: { orderBy: { occurredAt: "asc" } },
+      },
+    }),
+    prisma.campaign.findMany({
+      where: { ownerId: userId, status: "CLOSED" },
+      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+    }),
+  ]);
+
+  return { accounts, completedCampaigns };
 }
