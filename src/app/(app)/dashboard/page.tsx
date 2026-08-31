@@ -4,7 +4,9 @@ import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { getDashboardData } from "@/lib/app-data";
 import { money, percent } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
+import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
+import { computeOpenPositionsCount, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
@@ -18,8 +20,10 @@ const ruleKeyByName = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [defi
 
 export default async function DashboardPage() {
   const user = await requireCurrentUser();
-  const data = await getDashboardData(user.id);
+  const [data, schwabPositions] = await Promise.all([getDashboardData(user.id), getSchwabOpenPositionsForUser(user.id)]);
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
+  const brokerPositions = schwabPositions ?? [];
+  const brokerCsp = summarizeCspSecuredCapital(brokerPositions);
 
   const completedPLByAccount = new Map<string, number>();
   const completedForPerformance = data.completedCampaigns.map((campaign) => {
@@ -44,12 +48,29 @@ export default async function DashboardPage() {
   const hasAnyAccountValue = accountRows.some((row) => row.current.value !== null);
   const totalCash = accountRows.reduce((sum, row) => sum + (row.ledger.latestBrokerSnapshot?.cash ?? 0), 0);
   const hasAnyCash = accountRows.some((row) => row.ledger.latestBrokerSnapshot);
-  const securedCapital = data.openCampaigns.reduce((sum, campaign) => {
+  const campaignSecuredCapital = data.openCampaigns.reduce((sum, campaign) => {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
     return sum + (summary.collateralCommitted ?? 0);
   }, 0);
+  // Additive, not reconciled: an OSO campaign and a Schwab position are separate records
+  // with no link between them yet (see Tracker's "Possible match" hint). If the same
+  // real-world trade is tracked as both, it is counted twice here until reconciliation
+  // ships - documented in PROJECT_HANDOFF.md as the deliberate, safest-available interim
+  // behavior rather than silently merging or guessing a link.
+  const securedCapital = campaignSecuredCapital + brokerCsp.total;
+  const openPositionsCount = computeOpenPositionsCount(data.openCampaigns.length, brokerPositions);
   const winLoss = summarizeWinLoss(completedForPerformance);
   const weekly = summarizeWeeklyReturns(completedForPerformance, hasAnyAccountValue ? totalValue : null, WEEKLY_TARGET_PERCENT);
+
+  const hasManualAccountData = accountRows.some((row) => row.ledger.startingValue !== null && !row.ledger.latestBrokerSnapshot);
+  const hasSchwabAccountData = hasAnyCash || brokerPositions.length > 0;
+  const accountDataSource: "LIVE SCHWAB" | "MANUAL" | "MIXED" | null = hasSchwabAccountData
+    ? hasManualAccountData
+      ? "MIXED"
+      : "LIVE SCHWAB"
+    : hasManualAccountData
+      ? "MANUAL"
+      : null;
 
   const topSetups = (data.latestScanRun?.results ?? [])
     .map((result) => {
@@ -67,16 +88,23 @@ export default async function DashboardPage() {
         <span>
           <h1 className="inline text-sm font-semibold text-zinc-100">Hey {user.name}</h1> ·{" "}
           <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "LIVE SCHWAB" : "DEMO SCANNER"}</Badge>{" "}
-          {data.openCampaigns.length} open · win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
+          {openPositionsCount} open · win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
         </span>
         <span className="text-xs">No order submission - Off Shift Options never places, changes, or cancels trades.</span>
       </div>
 
       <section className="grid gap-3 sm:grid-cols-3 xl:grid-cols-5">
-        <Stat label="Account value" value={hasAnyAccountValue ? money(totalValue) : "No data"} />
+        <Stat
+          label="Account value"
+          value={hasAnyAccountValue ? money(totalValue) : "No data"}
+          badge={accountDataSource}
+        />
         <Stat label="Cash" value={hasAnyCash ? money(totalCash) : "No data"} />
-        <Stat label="Secured (CSP)" value={money(securedCapital)} />
-        <Stat label="Open positions" value={String(data.openCampaigns.length)} />
+        <Stat
+          label="Secured (CSP)"
+          value={brokerCsp.hasUnknown ? `${money(securedCapital)}+` : money(securedCapital)}
+        />
+        <Stat label="Open positions" value={String(openPositionsCount)} />
         <Stat label="Realized trading P/L" value={money(winLoss.realizedTradingPL)} tone={winLoss.realizedTradingPL} />
       </section>
 
@@ -131,7 +159,27 @@ export default async function DashboardPage() {
                 </div>
               );
             })}
-            {data.openCampaigns.length === 0 ? (
+            {brokerPositions.slice(0, 4).map((position) => {
+              const display = describeBrokerPositionForDisplay(position);
+              return (
+                <div
+                  key={`${position.accountId}-${position.symbol}`}
+                  className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3"
+                >
+                  <div>
+                    <div className="font-semibold">{display.title}</div>
+                    <div className="text-sm text-zinc-400">{display.detailLine ?? display.quantityLabel}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className={position.marketValue >= 0 ? "text-emerald-300" : "text-red-300"}>
+                      {display.quantityLabel} · {money(position.marketValue)}
+                    </div>
+                    <Badge tone="info">SCHWAB</Badge>
+                  </div>
+                </div>
+              );
+            })}
+            {data.openCampaigns.length === 0 && brokerPositions.length === 0 ? (
               <EmptyState>
                 No open campaigns. <Link href="/positions" className="text-emerald-300 hover:text-emerald-200">Start one in the Tracker.</Link>
               </EmptyState>
@@ -256,11 +304,36 @@ export default async function DashboardPage() {
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: number }) {
+function Stat({
+  label,
+  value,
+  tone,
+  badge,
+}: {
+  label: string;
+  value: string;
+  tone?: number;
+  badge?: "LIVE SCHWAB" | "MANUAL" | "MIXED" | null;
+}) {
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
-      <div className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</div>
+        {badge ? (
+          <span
+            className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-normal ${
+              badge === "LIVE SCHWAB"
+                ? "bg-sky-400/15 text-sky-300"
+                : badge === "MIXED"
+                  ? "bg-amber-400/15 text-amber-300"
+                  : "bg-zinc-700/50 text-zinc-400"
+            }`}
+          >
+            {badge}
+          </span>
+        ) : null}
+      </div>
       <div className={`mt-1 text-xl font-semibold ${toneClass}`}>{value}</div>
     </div>
   );

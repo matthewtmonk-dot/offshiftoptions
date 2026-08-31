@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
+import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
 import { optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
 import { requireCurrentUser } from "@/lib/auth";
@@ -177,7 +178,7 @@ export default async function PositionsPage({
             </Link>
           ))}
         </div>
-        <p className="text-xs text-zinc-500">Demo/manual data only. Trade execution stays outside this app.</p>
+        <p className="text-xs text-zinc-500">Tracking + live read-only Schwab data. Trade execution stays in thinkorswim.</p>
       </div>
 
       {view === "open" ? (
@@ -666,18 +667,24 @@ function SchwabPositionsPanel({
       ) : (
         <div className="space-y-2">
           {positions.map((position) => {
-            const isMatch = openCampaignTickers.has(underlyingFromSymbol(position.symbol));
+            const classified = classifyBrokerPosition(position);
+            const display = describeBrokerPositionForDisplay(position);
+            const isMatch = openCampaignTickers.has(classified.underlying.toUpperCase());
             return (
               <div
                 key={`${position.accountId}-${position.symbol}`}
                 className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm"
               >
                 <div>
-                  <span className="font-medium text-zinc-100">{position.symbol}</span>{" "}
-                  <span className="text-zinc-500">· {position.accountLabel}</span>
+                  <div className="font-medium text-zinc-100">
+                    {display.title} {display.detailLine ? <span className="text-zinc-400">· {display.detailLine}</span> : null}
+                  </div>
+                  <div className="text-xs text-zinc-500">{position.accountLabel}</div>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className="text-zinc-400">{position.quantity} sh · {money(position.marketValue)}</span>
+                  <span className="text-zinc-400">
+                    {display.quantityLabel} · Market value: {money(position.marketValue)}
+                  </span>
                   <Badge tone={isMatch ? "info" : "neutral"}>{isMatch ? "Possible match" : "Unlinked"}</Badge>
                 </div>
               </div>
@@ -686,17 +693,13 @@ function SchwabPositionsPanel({
         </div>
       )}
       <p className="mt-2 text-xs text-zinc-500">
-        Raw broker positions as Schwab reports them. &quot;Possible match&quot; means an open campaign shares the
+        Broker positions as Schwab reports them. &quot;Possible match&quot; means an open campaign shares the
         same underlying ticker - it is not an automatic link. Reconciling broker fills to specific campaigns is
-        future work.
+        future work; an OSO campaign and a Schwab position for the same real-world trade currently count as two
+        separate open positions on the Dashboard until that reconciliation exists.
       </p>
     </div>
   );
-}
-
-function underlyingFromSymbol(symbol: string) {
-  const match = symbol.trim().toUpperCase().match(/^[A-Z]+/);
-  return match ? match[0] : symbol.trim().toUpperCase();
 }
 
 function PerformanceSection({

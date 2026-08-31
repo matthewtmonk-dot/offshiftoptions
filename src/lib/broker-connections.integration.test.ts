@@ -7,18 +7,22 @@ maybeDescribe("broker connection ownership", () => {
   let prisma: typeof import("./prisma").prisma;
   let encryptToken: typeof import("@/providers/schwab/crypto").encryptToken;
   let getValidSchwabAccessTokenForConnection: typeof import("@/providers/schwab/tokens").getValidSchwabAccessTokenForConnection;
-  let connectionId: string | null = null;
+  let getSchwabBrokerReadProviderForUser: typeof import("./broker-connections").getSchwabBrokerReadProviderForUser;
+  let getSchwabOpenPositionsForUser: typeof import("./workflows").getSchwabOpenPositionsForUser;
+  const connectionIds: string[] = [];
 
   beforeAll(async () => {
     process.env.SCHWAB_TOKEN_ENCRYPTION_KEY = `base64:${Buffer.alloc(32, 4).toString("base64")}`;
     prisma = (await import("./prisma")).prisma;
     encryptToken = (await import("@/providers/schwab/crypto")).encryptToken;
     getValidSchwabAccessTokenForConnection = (await import("@/providers/schwab/tokens")).getValidSchwabAccessTokenForConnection;
+    getSchwabBrokerReadProviderForUser = (await import("./broker-connections")).getSchwabBrokerReadProviderForUser;
+    getSchwabOpenPositionsForUser = (await import("./workflows")).getSchwabOpenPositionsForUser;
   });
 
   afterAll(async () => {
-    if (connectionId) {
-      await prisma.brokerConnection.deleteMany({ where: { id: connectionId } });
+    if (connectionIds.length) {
+      await prisma.brokerConnection.deleteMany({ where: { id: { in: connectionIds } } });
     }
     await prisma.$disconnect();
   });
@@ -39,7 +43,7 @@ maybeDescribe("broker connection ownership", () => {
         expiresAt: new Date(Date.now() + 10 * 60 * 1000),
       },
     });
-    connectionId = connection.id;
+    connectionIds.push(connection.id);
 
     await expect(
       getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: matt.id }),
@@ -47,5 +51,32 @@ maybeDescribe("broker connection ownership", () => {
     await expect(
       getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: eric.id }),
     ).resolves.toBeNull();
+  });
+
+  it("Matt's connected Schwab account never surfaces open positions through Eric's user ID", async () => {
+    const [matt, eric] = await Promise.all([
+      prisma.user.findUniqueOrThrow({ where: { email: "matt@lst.local" }, select: { id: true } }),
+      prisma.user.findUniqueOrThrow({ where: { email: "eric@lst.local" }, select: { id: true } }),
+    ]);
+    const connection = await prisma.brokerConnection.create({
+      data: {
+        userId: matt.id,
+        provider: "SCHWAB",
+        label: "Charles Schwab positions-isolation test",
+        status: "CONNECTED",
+        accessTokenCiphertext: encryptToken("matt-access-token-2"),
+        refreshTokenCiphertext: encryptToken("matt-refresh-token-2"),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+    connectionIds.push(connection.id);
+
+    // Matt has a usable provider (his own connected, unexpired connection).
+    await expect(getSchwabBrokerReadProviderForUser(matt.id)).resolves.not.toBeNull();
+
+    // Eric has no Schwab connection of his own - he must get nothing, never Matt's data,
+    // through the exact same lookup path getSchwabOpenPositionsForUser uses.
+    await expect(getSchwabBrokerReadProviderForUser(eric.id)).resolves.toBeNull();
+    await expect(getSchwabOpenPositionsForUser(eric.id)).resolves.toBeNull();
   });
 });

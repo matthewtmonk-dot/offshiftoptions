@@ -95,11 +95,17 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         return [];
       }
 
+      const putCallRaw = stringValue(instrument?.putCall);
+
       return {
         accountId,
         symbol,
         quantity: positionQuantity(position),
         marketValue: numberValue(position?.marketValue) ?? 0,
+        assetType: stringValue(instrument?.assetType),
+        putCall: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
+        strikePrice: numberValue(instrument?.strikePrice),
+        underlyingSymbol: stringValue(instrument?.underlyingSymbol),
       };
     });
   }

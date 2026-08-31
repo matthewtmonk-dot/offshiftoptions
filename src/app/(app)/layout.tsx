@@ -43,7 +43,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             <Initials name="Off Shift Options" />
             <div>
               <div className="text-lg font-semibold text-zinc-50">Off Shift Options</div>
-              <div className="text-xs text-zinc-500">Demo/manual Phase 1</div>
+              <div className="text-xs text-zinc-500">Tracking + read-only Schwab data</div>
             </div>
           </div>
           <nav className="space-y-1">

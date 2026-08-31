@@ -10,6 +10,15 @@ export type BrokerPosition = {
   symbol: string;
   quantity: number;
   marketValue: number;
+  /** Schwab's own instrument classification, when available (e.g. "OPTION", "EQUITY"). */
+  assetType?: string | null;
+  /** Schwab's own put/call flag for an option instrument, when available - the most
+   * authoritative signal for identifying a short put; falls back to OCC symbol parsing
+   * (see src/domain/finance/occOption.ts) when absent. */
+  putCall?: "PUT" | "CALL" | null;
+  /** The option's strike price, straight from Schwab's instrument object when available. */
+  strikePrice?: number | null;
+  underlyingSymbol?: string | null;
 };
 
 export type BrokerTransaction = {
