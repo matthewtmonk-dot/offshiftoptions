@@ -1,8 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
 async function loginAs(page: Page, name: "Matt" | "Eric") {
+  const email = name === "Matt" ? "matt@lst.local" : "eric@lst.local";
+  const password = process.env.DEV_SEED_PASSWORD ?? "lstbuddy-dev-only";
   await page.goto("/login");
-  await page.getByRole("button", { name: `Login as ${name}` }).click();
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: new RegExp(`Hey ${name}`) })).toBeVisible();
 }
 
