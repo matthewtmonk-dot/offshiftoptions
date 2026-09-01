@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { KeyRound, Link2, Plus, RefreshCw, Save, ShieldCheck, Unplug } from "lucide-react";
 import { Badge, FieldLabel, Panel } from "@/components/ui";
+import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
 import { getAccountPageData } from "@/lib/app-data";
 import { getSchwabConnectionSummaryForUser, getSchwabDeveloperCredentialSummaryForUser } from "@/lib/broker-connections";
@@ -59,6 +60,19 @@ export default async function AccountPage({
         </div>
       ) : null}
       {schwabMessage(params.schwab)}
+
+      <Panel title="Preferences">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-sm font-medium text-zinc-200">Appearance</div>
+            <p className="mt-1 text-xs text-zinc-500">
+              System follows your device&apos;s light/dark setting automatically. Light and Dark stay fixed until
+              you change this again.
+            </p>
+          </div>
+          <AppearanceControl current={user.settings?.appearance ?? "SYSTEM"} />
+        </div>
+      </Panel>
 
       <Panel title="Your Accounts">
         <div className="space-y-3">
@@ -157,7 +171,7 @@ export default async function AccountPage({
                   <form action={syncSchwabAccountAction}>
                     <button
                       type="submit"
-                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300"
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black transition hover:bg-emerald-300"
                     >
                       <RefreshCw className="size-4" aria-hidden />
                       Sync now
@@ -343,7 +357,7 @@ export default async function AccountPage({
           </div>
           <button
             type="submit"
-            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 hover:bg-emerald-300"
+            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300"
           >
             <Save className="size-4" aria-hidden />
             Update Password

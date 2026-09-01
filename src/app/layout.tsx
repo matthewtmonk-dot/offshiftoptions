@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { PwaRegister } from "@/components/pwa-register";
+import { dataThemeAttributeFor, resolveAppearanceForRequest } from "@/lib/appearance";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -46,16 +47,23 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0a0f0d",
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#0a0f0d" },
+    { media: "(prefers-color-scheme: light)", color: "#f6f7f9" },
+  ],
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const { appearance } = await resolveAppearanceForRequest();
+  const dataTheme = dataThemeAttributeFor(appearance);
+
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full bg-zinc-950 antialiased`}
+      data-theme={dataTheme}
+      className={`${geistSans.variable} ${geistMono.variable} h-full bg-background antialiased`}
     >
-      <body className="min-h-full bg-zinc-950 text-zinc-100">
+      <body className="min-h-full bg-background text-foreground">
         <PwaRegister />
         {children}
       </body>

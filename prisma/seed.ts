@@ -67,6 +67,7 @@ async function createUser(name: string, email: string, passwordHash: string) {
       settings: {
         create: {
           darkMode: true,
+          appearance: "DARK",
           enableInAppNotify: true,
           enableWebPushNotify: false,
         },

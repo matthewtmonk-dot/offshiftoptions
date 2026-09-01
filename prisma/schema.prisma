@@ -12,6 +12,12 @@ enum Visibility {
   SHARED
 }
 
+enum AppearanceMode {
+  DARK
+  LIGHT
+  SYSTEM
+}
+
 enum RecordVisibility {
   INHERIT
   PRIVATE
@@ -253,15 +259,20 @@ model Session {
 }
 
 model UserSettings {
-  id                  String   @id @default(cuid())
-  userId              String   @unique
-  darkMode            Boolean  @default(true)
-  compactMode         Boolean  @default(false)
-  enableInAppNotify   Boolean  @default(true)
-  enableWebPushNotify Boolean  @default(false)
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                  String         @id @default(cuid())
+  userId              String         @unique
+  darkMode            Boolean        @default(true)
+  compactMode         Boolean        @default(false)
+  // Appearance (Dark/Light/System) supersedes the unused legacy darkMode boolean above,
+  // which no application code has ever read. Existing rows are backfilled to DARK by the
+  // migration so no current user's visual experience changes; the column default then
+  // switches to SYSTEM for accounts created afterward. See PROJECT_HANDOFF.md Appearance section.
+  appearance          AppearanceMode @default(SYSTEM)
+  enableInAppNotify   Boolean        @default(true)
+  enableWebPushNotify Boolean        @default(false)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  user                User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model SharingPreferences {

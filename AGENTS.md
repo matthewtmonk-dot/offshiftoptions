@@ -66,7 +66,9 @@ Schwab market data is shared application infrastructure, but brokerage account d
 - Enforce privacy server-side with `src/lib/privacy.ts`; never rely only on React hiding.
 - Treat Phase 1 financial values as DEMO or MANUAL.
 - Use record-level `Visibility` for shareable records.
-- Keep UI friendly and dark with restrained green accents. Use red/green mainly for fail/pass states.
+- Keep UI friendly with restrained green accents; the app now supports Dark (original look, default for existing users)/Light/System appearance — see `PROJECT_HANDOFF.md` Appearance System section. Use red/green mainly for fail/pass states, consistently in both themes.
+- Never use a Tailwind color-scale literal (e.g. `text-zinc-950`) for something that must stay a fixed color regardless of theme, such as dark text on a permanently-bright accent button — the Light theme remaps that same scale variable, so a "fixed" use of it silently becomes illegible. Use `text-black`/a dedicated non-remapped value instead. This bit us once (10 files fixed in the Appearance System slice).
+- When running Playwright against `next dev`, use `PLAYWRIGHT_BASE_URL=http://localhost:<port>`, never `127.0.0.1` — Next's dev-mode cross-origin asset guard silently 403s JS chunks requested via the IP literal, breaking client hydration (and therefore every `onClick`-driven assertion) with no visible test failure. `playwright.config.ts`'s default already uses `localhost`.
 - Update `PROJECT_HANDOFF.md` automatically after every meaningful change (see top of this file). `docs/HANDOFF.md` is an older chronological session log kept for detailed history.
 
 ## Key Docs

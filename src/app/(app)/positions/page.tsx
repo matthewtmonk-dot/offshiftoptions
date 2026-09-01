@@ -1318,7 +1318,7 @@ function trackerHref(scope: TrackerScope, view: ViewMode) {
 
 function tabClass(active: boolean) {
   return `rounded px-3 py-1.5 text-sm transition ${
-    active ? "bg-emerald-400 text-zinc-950" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
+    active ? "bg-emerald-400 text-black" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
   }`;
 }
 
@@ -1382,7 +1382,7 @@ function roundMoney(value: number) {
 const inputClass =
   "min-h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/70";
 const primaryButtonClass =
-  "inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300";
+  "inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black transition hover:bg-emerald-300";
 const secondaryButtonClass =
   "inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-zinc-700 px-4 text-sm font-semibold text-zinc-100 transition hover:border-sky-400/70 hover:text-sky-100";
 const tinyButtonClass =

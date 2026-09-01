@@ -85,7 +85,7 @@ export default async function ChatPage() {
               <input type="hidden" name="returnTo" value="/chat" />
               <input name="ticker" placeholder="Ticker" className="min-h-11 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100" />
               <input name="body" placeholder="Message" className="min-h-11 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100" required />
-              <button type="submit" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 hover:bg-emerald-300">
+              <button type="submit" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300">
                 <Send className="size-4" aria-hidden />
                 Send
               </button>

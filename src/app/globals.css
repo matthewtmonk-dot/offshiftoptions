@@ -1,15 +1,132 @@
 @import "tailwindcss";
 
+/*
+ * Appearance system (Dark / Light / System) — see PROJECT_HANDOFF.md "Appearance system".
+ *
+ * DARK is the default: the bare `:root` below is intentionally just today's existing
+ * OSO look (Tailwind's stock zinc/emerald/red/amber/sky palette), completely unchanged.
+ *
+ * LIGHT is implemented by overriding the *same* Tailwind color-scale CSS variables that
+ * every existing `bg-zinc-950`, `text-zinc-400`, `border-zinc-800`, `text-emerald-300`,
+ * etc. utility class already renders through (Tailwind v4 compiles every color utility to
+ * `var(--color-<name>)`, not a literal value — confirmed against this project's own
+ * compiled output). Overriding the variables re-themes every already-written page without
+ * editing hundreds of component files, per the project's semantic-token requirement.
+ *
+ * SYSTEM needs no JavaScript and cannot flash: when neither `[data-theme="light"]` nor
+ * `[data-theme="dark"]` is present on <html>, the plain `@media (prefers-color-scheme)`
+ * block below resolves synchronously during the browser's normal style computation,
+ * before first paint - exactly like any other media query. An explicit user choice
+ * (DARK or LIGHT) is written as `data-theme` on <html> and always wins over the OS
+ * preference, in both directions.
+ */
+
 :root {
-  --background: #090d0b;
-  --foreground: #f4f4f5;
+  /* Semantic tokens - aliases onto the (theme-aware) Tailwind scale below, so they never
+   * need a separate per-theme override block of their own. New/shared UI should prefer
+   * these names; the bulk of the existing app already re-themes via the raw scale itself. */
+  --background: var(--color-zinc-950);
+  --background-muted: var(--color-zinc-900);
+  --surface: var(--color-zinc-900);
+  --surface-elevated: var(--color-zinc-800);
+  --surface-hover: var(--color-zinc-800);
+  --foreground: var(--color-zinc-50);
+  --text-secondary: var(--color-zinc-300);
+  --text-muted: var(--color-zinc-500);
+  --border: var(--color-zinc-800);
+  --border-strong: var(--color-zinc-700);
+  --accent: var(--color-emerald-400);
+  --accent-hover: var(--color-emerald-300);
+  --accent-foreground: #000000;
+  --positive: var(--color-emerald-300);
+  --positive-muted: var(--color-emerald-400);
+  --negative: var(--color-red-300);
+  --negative-muted: var(--color-red-400);
+  --warning: var(--color-amber-300);
+  --warning-muted: var(--color-amber-400);
+  --unknown: var(--color-zinc-400);
+  --input-background: var(--color-zinc-950);
+  --table-header: var(--color-zinc-900);
+  --table-row-hover: var(--color-zinc-900);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-warning: var(--warning);
+  --color-unknown: var(--unknown);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+/* LIGHT via explicit OS preference (no user override forcing Dark). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --color-zinc-50: #0a0a0c;
+    --color-zinc-100: #18181b;
+    --color-zinc-200: #27272a;
+    --color-zinc-300: #3f3f46;
+    --color-zinc-400: #52525b;
+    --color-zinc-500: #71717a;
+    --color-zinc-600: #9a9aa5;
+    --color-zinc-700: #c6c6cd;
+    --color-zinc-800: #e4e4e8;
+    --color-zinc-900: #ffffff;
+    --color-zinc-950: #f6f7f9;
+
+    --color-emerald-100: #064e3b;
+    --color-emerald-200: #065f46;
+    --color-emerald-300: #047857;
+
+    --color-red-100: #7f1d1d;
+    --color-red-200: #991b1b;
+    --color-red-300: #b91c1c;
+
+    --color-amber-100: #78350f;
+    --color-amber-200: #92400e;
+    --color-amber-300: #b45309;
+
+    --color-sky-100: #075985;
+    --color-sky-200: #0369a1;
+    --color-sky-300: #0284c7;
+  }
+}
+
+/* LIGHT via explicit user choice - wins over the OS preference in both directions. */
+:root[data-theme="light"] {
+  --color-zinc-50: #0a0a0c;
+  --color-zinc-100: #18181b;
+  --color-zinc-200: #27272a;
+  --color-zinc-300: #3f3f46;
+  --color-zinc-400: #52525b;
+  --color-zinc-500: #71717a;
+  --color-zinc-600: #9a9aa5;
+  --color-zinc-700: #c6c6cd;
+  --color-zinc-800: #e4e4e8;
+  --color-zinc-900: #ffffff;
+  --color-zinc-950: #f6f7f9;
+
+  --color-emerald-100: #064e3b;
+  --color-emerald-200: #065f46;
+  --color-emerald-300: #047857;
+
+  --color-red-100: #7f1d1d;
+  --color-red-200: #991b1b;
+  --color-red-300: #b91c1c;
+
+  --color-amber-100: #78350f;
+  --color-amber-200: #92400e;
+  --color-amber-300: #b45309;
+
+  --color-sky-100: #075985;
+  --color-sky-200: #0369a1;
+  --color-sky-300: #0284c7;
 }
 
 body {
@@ -27,4 +144,10 @@ textarea {
 
 ::selection {
   background: rgba(52, 211, 153, 0.35);
+}
+
+/* Keyboard focus must stay visible in both themes. */
+:focus-visible {
+  outline: 2px solid var(--color-emerald-400);
+  outline-offset: 2px;
 }

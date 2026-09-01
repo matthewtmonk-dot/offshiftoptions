@@ -36,6 +36,8 @@ import {
   updateRecommendationStatusForUser,
   updateScannerSettingsForUser,
 } from "@/lib/workflows";
+import type { AppearanceMode } from "@/generated/prisma/enums";
+import { updateAppearanceForUser } from "@/lib/appearance";
 import { disconnectSchwabForUser } from "@/lib/broker-connections";
 import { confirmBrokerImportForUser, discardBrokerImportForUser, previewBrokerImportForUser } from "@/lib/broker-import";
 import {
@@ -55,6 +57,23 @@ function actionReturnPath(formData: FormData, fallback: string) {
 export async function signOutAction() {
   await signOut();
   redirect("/login");
+}
+
+const APPEARANCE_VALUES = new Set<AppearanceMode>(["DARK", "LIGHT", "SYSTEM"]);
+
+/**
+ * Called directly from the client AppearanceControl component (not via <form action>) so
+ * the button click can apply the DOM/cookie change optimistically while this persists to
+ * the database in the background. No redirect/revalidate - changing appearance never
+ * changes page content in a way that needs a fresh server render of the current view.
+ */
+export async function updateAppearanceAction(value: string) {
+  const user = await requireCurrentUser();
+  if (!APPEARANCE_VALUES.has(value as AppearanceMode)) {
+    throw new ValidationError("Invalid appearance value.");
+  }
+
+  await updateAppearanceForUser(user.id, value as AppearanceMode);
 }
 
 export async function addWatchlistItemAction(formData: FormData) {

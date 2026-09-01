@@ -40,7 +40,7 @@ export function InstallPrompt() {
       <button
         type="button"
         onClick={install}
-        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300"
+        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black transition hover:bg-emerald-300"
       >
         <Download className="size-4" aria-hidden />
         Install Off Shift Options

@@ -2,6 +2,7 @@ import "server-only";
 
 import { compare } from "bcryptjs";
 import { randomBytes, createHmac } from "node:crypto";
+import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { prisma } from "./prisma";
@@ -57,7 +58,12 @@ export async function signInWithPassword(email: string, password: string) {
   return user;
 }
 
-export async function getCurrentUser() {
+/**
+ * Memoized per-request with React's `cache()` - the root layout (for theme resolution),
+ * the authenticated app layout, and individual pages can all call this without issuing
+ * duplicate session/user queries for the same request.
+ */
+export const getCurrentUser = cache(async () => {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
 
@@ -67,7 +73,7 @@ export async function getCurrentUser() {
 
   const session = await prisma.session.findUnique({
     where: { tokenHash: hashSessionToken(token) },
-    include: { user: true },
+    include: { user: { include: { settings: { select: { appearance: true } } } } },
   });
 
   if (!session || session.expiresAt < new Date()) {
@@ -78,7 +84,7 @@ export async function getCurrentUser() {
   }
 
   return session.user;
-}
+});
 
 export async function requireCurrentUser() {
   const user = await getCurrentUser();

@@ -14,6 +14,7 @@ import {
   WalletCards,
 } from "lucide-react";
 import { Initials } from "@/components/ui";
+import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
 import { getUnreadNotificationCount } from "@/lib/app-data";
 import { signOutAction } from "./actions";
@@ -58,7 +59,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                   <Icon className="size-4" aria-hidden />
                   <span>{item.label}</span>
                   {item.href === "/notifications" && unread > 0 ? (
-                    <span className="ml-auto rounded-md bg-emerald-400 px-1.5 py-0.5 text-xs font-bold text-zinc-950">
+                    <span className="ml-auto rounded-md bg-emerald-400 px-1.5 py-0.5 text-xs font-bold text-black">
                       {unread}
                     </span>
                   ) : null}
@@ -67,12 +68,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             })}
           </nav>
           <div className="mt-8 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-            <div className="flex items-center gap-2">
-              <Initials name={user.name} />
-              <div>
-                <div className="text-sm font-semibold text-zinc-100">{user.name}</div>
-                <div className="text-xs text-zinc-500">{user.email}</div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Initials name={user.name} />
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">{user.name}</div>
+                  <div className="text-xs text-zinc-500">{user.email}</div>
+                </div>
               </div>
+              <AppearanceControl current={user.settings?.appearance ?? "SYSTEM"} compact />
             </div>
             <form action={signOutAction} className="mt-3">
               <button
@@ -95,7 +99,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               </div>
               <div className="flex items-center gap-2 text-sm text-zinc-300">
                 <Initials name={user.name} />
-                {unread > 0 ? <span className="rounded-md bg-emerald-400 px-2 py-1 text-xs font-bold text-zinc-950">{unread}</span> : null}
+                {unread > 0 ? <span className="rounded-md bg-emerald-400 px-2 py-1 text-xs font-bold text-black">{unread}</span> : null}
               </div>
             </div>
             <nav className="grid grid-cols-4 gap-2">

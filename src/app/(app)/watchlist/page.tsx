@@ -43,7 +43,7 @@ export default async function WatchlistPage({
           />
           <button
             type="submit"
-            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-zinc-950 hover:bg-emerald-300"
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300"
           >
             <Plus className="size-4" aria-hidden />
             Add
@@ -188,7 +188,7 @@ function WatchlistCard({ item, buddies, currentUserId, canEdit = false }: Watchl
               </label>
             ))}
           </div>
-          <button type="submit" className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-zinc-950 hover:bg-emerald-300">
+          <button type="submit" className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-black hover:bg-emerald-300">
             <Send className="size-4" aria-hidden />
             Recommend
           </button>
