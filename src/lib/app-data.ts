@@ -146,8 +146,17 @@ export async function getScannerPageData(userId: string) {
   });
 }
 
-export async function getWatchlistPageData(userId: string) {
-  const [users, ownWatchlist, visibleItems] = await Promise.all([
+/**
+ * Research (formerly "Watchlist") - a user's personal judgment of tickers as company/trade
+ * candidates. Returns the user's own items (all statuses/visibilities), any buddy items
+ * explicitly shared with this user (never merged with the viewer's own - see
+ * PROJECT_HANDOFF.md Research section on preserving disagreement), the user's most recent
+ * scan run (to show live Scanner status/score/RSI/BB next to each researched ticker without
+ * a second network call), and the user's own campaign history (to show "what have I done
+ * with this stock before" per ticker).
+ */
+export async function getResearchPageData(userId: string) {
+  const [users, ownWatchlist, visibleItems, latestRun, campaigns] = await Promise.all([
     prisma.user.findMany({
       where: { id: { not: userId } },
       orderBy: { name: "asc" },
@@ -186,9 +195,19 @@ export async function getWatchlistPageData(userId: string) {
         reactions: { include: { actor: true } },
       },
     }),
+    prisma.scanRun.findFirst({
+      where: { ownerId: userId },
+      orderBy: { createdAt: "desc" },
+      include: { results: { include: { criterionResults: true } } },
+    }),
+    prisma.campaign.findMany({
+      where: { ownerId: userId },
+      orderBy: { openedAt: "desc" },
+      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+    }),
   ]);
 
-  return { users, ownWatchlist, visibleItems };
+  return { users, ownWatchlist, visibleItems, latestRun, campaigns };
 }
 
 export async function getRecommendationsPageData(userId: string) {

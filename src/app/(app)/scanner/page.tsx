@@ -14,6 +14,7 @@ import {
   type ScannerRule,
 } from "@/domain/scanner/scanner";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
+import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
 import { prisma } from "@/lib/prisma";
@@ -41,7 +42,7 @@ export type ScannerViewResult = {
   scoreLabel: ReturnType<typeof honestSetupLabel>;
   nearMisses: ReturnType<typeof getNearMisses>;
   concern: CriterionResult | null;
-  inWatchlist: boolean;
+  researchStatus: ResearchStatus | null;
   values: {
     price: number | null;
     priceChangePercent: number | null;
@@ -76,19 +77,17 @@ export default async function ScannerPage({
   await ensureMyLstScannerProfileForUser(user.id);
 
   const params = await searchParams;
-  const [profile, buddies, watchlistItems] = await Promise.all([
+  const [profile, buddies, researchItems] = await Promise.all([
     getScannerPageData(user.id),
     prisma.user.findMany({ where: { id: { not: user.id } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.watchlistItem.findMany({
-      where: {
-        OR: [{ ownerId: user.id }, { visibility: "SHARED" }],
-      },
-      select: { ticker: true },
+      where: { ownerId: user.id },
+      select: { ticker: true, researchStatus: true },
     }),
   ]);
   const run = profile?.scanRuns[0];
-  const watchlistTickers = new Set(watchlistItems.map((item) => item.ticker));
-  const allResults = (run?.results ?? []).map((result) => toViewResult(result, watchlistTickers));
+  const researchByTicker = new Map(researchItems.map((item) => [item.ticker, item.researchStatus]));
+  const allResults = (run?.results ?? []).map((result) => toViewResult(result, researchByTicker));
   const isLiveSchwabRun = run?.source === "LIVE:SCHWAB";
   const diagnostics = buildExclusionDiagnostics(
     allResults.map((result) => ({ ticker: result.record.ticker, summary: result.summary })),
@@ -186,7 +185,7 @@ function shortRunTime(date: Date) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
 }
 
-function toViewResult(result: ScannerResult, watchlistTickers: Set<string>): ScannerViewResult {
+function toViewResult(result: ScannerResult, researchByTicker: Map<string, ResearchStatus>): ScannerViewResult {
   const summary = toDomainSummary(result);
   const score = honestSetupScore(summary, GATING_RULE_KEYS);
 
@@ -197,7 +196,7 @@ function toViewResult(result: ScannerResult, watchlistTickers: Set<string>): Sca
     scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
     nearMisses: getNearMisses(summary.results),
     concern: primaryConcern(summary.results),
-    inWatchlist: watchlistTickers.has(result.ticker),
+    researchStatus: researchByTicker.get(result.ticker) ?? null,
     values: {
       price: snapshotNumber(result.snapshotJson, "price"),
       priceChangePercent: snapshotNumber(result.snapshotJson, "priceChangePercent"),

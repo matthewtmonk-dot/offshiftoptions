@@ -24,7 +24,7 @@ const navItems = [
   { href: "/positions", label: "Tracker", icon: WalletCards },
   { href: "/scanner", label: "Scanner", icon: ChartNoAxesCombined },
   { href: "/scanner/settings", label: "Scanner Rules", icon: SlidersHorizontal },
-  { href: "/watchlist", label: "Watchlist", icon: ListChecks },
+  { href: "/research", label: "Research", icon: ListChecks },
   { href: "/recommendations", label: "Recs", icon: Send },
   { href: "/chat", label: "Chat", icon: MessageSquareText },
   { href: "/notifications", label: "Alerts", icon: Bell },

@@ -29,11 +29,13 @@ import {
   saveSchwabDeveloperCredentialsForUser,
   saveStockNoteForUser,
   sendChatMessageForUser,
+  setResearchStatusForUser,
   syncSchwabAccountForUser,
   toggleCampaignVisibilityForUser,
   toggleTradingAccountVisibilityForUser,
   toggleWatchlistItemVisibilityForUser,
   updateRecommendationStatusForUser,
+  updateResearchDetailsForUser,
   updateScannerSettingsForUser,
 } from "@/lib/workflows";
 import type { AppearanceMode } from "@/generated/prisma/enums";
@@ -78,7 +80,7 @@ export async function updateAppearanceAction(value: string) {
 
 export async function addWatchlistItemAction(formData: FormData) {
   const user = await requireCurrentUser();
-  const returnTo = actionReturnPath(formData, "/watchlist");
+  const returnTo = actionReturnPath(formData, "/research");
 
   try {
     await createWatchlistItemForUser(user.id, formData.get("ticker"));
@@ -89,15 +91,55 @@ export async function addWatchlistItemAction(formData: FormData) {
     throw error;
   }
 
-  revalidatePath("/watchlist");
+  revalidatePath("/research");
+  revalidatePath("/scanner");
   revalidatePath("/dashboard");
+}
+
+/**
+ * The one-click Research/Watch/Exclude action from both the Scanner and the Research page.
+ * Not a `returnTo`-based redirect action - both callers stay on their current page and just
+ * see the badge/filter update after revalidation.
+ */
+export async function setResearchStatusAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  try {
+    await setResearchStatusForUser(user.id, formData.get("ticker"), formData.get("status"));
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(actionReturnPath(formData, "/scanner"), error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/research");
+  revalidatePath("/scanner");
+  revalidatePath("/dashboard");
+}
+
+export async function updateResearchDetailsAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  try {
+    await updateResearchDetailsForUser(user.id, String(formData.get("itemId") ?? ""), formData);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/research", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/research");
+  revalidatePath("/scanner");
 }
 
 export async function removeWatchlistItemAction(formData: FormData) {
   const user = await requireCurrentUser();
   await removeWatchlistItemForUser(user.id, String(formData.get("itemId") ?? ""));
 
-  revalidatePath("/watchlist");
+  revalidatePath("/research");
+  revalidatePath("/scanner");
   revalidatePath("/dashboard");
 }
 
@@ -105,7 +147,7 @@ export async function toggleWatchlistItemVisibilityAction(formData: FormData) {
   const user = await requireCurrentUser();
   await toggleWatchlistItemVisibilityForUser(user.id, String(formData.get("itemId") ?? ""));
 
-  revalidatePath("/watchlist");
+  revalidatePath("/research");
   revalidatePath("/dashboard");
 }
 
@@ -118,7 +160,7 @@ export async function saveStockNoteAction(formData: FormData) {
     formData.get("body"),
   );
 
-  revalidatePath("/watchlist");
+  revalidatePath("/research");
   revalidatePath("/dashboard");
 }
 
@@ -126,7 +168,7 @@ export async function addWatchlistCommentAction(formData: FormData) {
   const user = await requireCurrentUser();
   await addWatchlistCommentForUser(user.id, String(formData.get("itemId") ?? ""), formData.get("body"));
 
-  revalidatePath("/watchlist");
+  revalidatePath("/research");
   revalidatePath("/dashboard");
 }
 
@@ -150,7 +192,7 @@ export async function recommendStockAction(formData: FormData) {
   }
 
   revalidatePath("/recommendations");
-  revalidatePath("/watchlist");
+  revalidatePath("/research");
   revalidatePath("/scanner");
   revalidatePath("/dashboard");
 }
@@ -188,7 +230,7 @@ export async function addReactionAction(formData: FormData) {
   );
 
   revalidatePath("/dashboard");
-  revalidatePath("/watchlist");
+  revalidatePath("/research");
   revalidatePath("/recommendations");
   revalidatePath("/positions");
   revalidatePath("/notifications");

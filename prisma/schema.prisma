@@ -90,6 +90,30 @@ enum WatchlistItemStatus {
   DO_NOT_TRADE
 }
 
+// The user's personal judgment of a ticker as a company/trade candidate - distinct from
+// the Scanner's technical PASS/FAIL/UNKNOWN, which never changes based on this. Supersedes
+// WatchlistItemStatus above (see the migration backfill and PROJECT_HANDOFF.md Research
+// section): WATCHING->WATCH, RESEARCHING->NEUTRAL, READY->LIKE, DO_NOT_TRADE->NEVER_TRADE.
+enum ResearchStatus {
+  LIKE
+  WATCH
+  NEUTRAL
+  AVOID
+  NEVER_TRADE
+}
+
+enum WouldOwnStatus {
+  YES
+  NO
+  CONDITIONAL
+}
+
+enum RollFriendliness {
+  UNKNOWN
+  FRIENDLY
+  DIFFICULT
+}
+
 enum NoteCategory {
   PRO
   CON
@@ -493,10 +517,41 @@ model WatchlistItem {
   ownerId     String
   ticker      String
   status      WatchlistItemStatus @default(WATCHING)
-  visibility  Visibility          @default(SHARED)
+  // Research is PRIVATE BY DEFAULT (see PROJECT_HANDOFF.md Research section) - changed from
+  // SHARED. Only affects new rows; existing rows keep whatever visibility they already had,
+  // matching the same precedent used for TradingAccount's default-visibility change.
+  visibility  Visibility          @default(PRIVATE)
   tags        String[]            @default([])
   addedAt     DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
+
+  // --- Research fields (2026-09 Scanner<->Research slice) ---
+  researchStatus       ResearchStatus     @default(NEUTRAL)
+  companyName          String?
+  whatItDoes           String?
+  wouldOwn             WouldOwnStatus?
+  wouldOwnMaxPrice     Decimal?           @db.Decimal(12, 2)
+  monthlyPutsOnly      Boolean            @default(false)
+  rollFriendliness     RollFriendliness   @default(UNKNOWN)
+  rollFriendlinessNote String?
+  exclusionReason      String?
+  manualSchwabGrade    String?
+  manualLsegRating     String?
+  manualLsegScore      String?
+  manualLsegTarget     String?
+  // Verified fundamentals (auto, from Schwab's quote "fundamental" field group) - left
+  // unpopulated in this slice. No live Schwab connection was available locally to verify
+  // field names/units against a real response; see PROJECT_HANDOFF.md Research section for
+  // the exact next step before wiring these up. Never treat as a live quote.
+  fundamentalPeRatio       Decimal?  @db.Decimal(10, 2)
+  fundamentalPegRatio      Decimal?  @db.Decimal(10, 2)
+  fundamentalDebtToEquity  Decimal?  @db.Decimal(10, 4)
+  fundamentalCurrentRatio  Decimal?  @db.Decimal(10, 4)
+  fundamentalEps           Decimal?  @db.Decimal(10, 4)
+  fundamentalDividendYield Decimal?  @db.Decimal(10, 4)
+  fundamentalSource        String?
+  fundamentalAsOf          DateTime?
+
   watchlist   Watchlist           @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
   owner       User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   notes       StockNote[]
@@ -505,6 +560,7 @@ model WatchlistItem {
 
   @@unique([watchlistId, ticker])
   @@index([ownerId, visibility])
+  @@index([ownerId, researchStatus])
   @@index([ticker])
 }
 

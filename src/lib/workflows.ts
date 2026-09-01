@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { evaluateLiveMarketScan, type LiveScanCandidate } from "@/domain/scanner/live-scan";
-import type { NoteCategory, ReactionTargetType } from "@/generated/prisma/enums";
+import { evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
+import type { NoteCategory, ReactionTargetType, ResearchStatus, RollFriendliness, WouldOwnStatus } from "@/generated/prisma/enums";
 import { evaluateDemoScan, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
 import {
@@ -26,6 +26,9 @@ import {
 } from "./broker-connections";
 
 const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
+const RESEARCH_STATUSES = new Set<ResearchStatus>(["LIKE", "WATCH", "NEUTRAL", "AVOID", "NEVER_TRADE"]);
+const WOULD_OWN_STATUSES = new Set<WouldOwnStatus>(["YES", "NO", "CONDITIONAL"]);
+const ROLL_FRIENDLINESS_VALUES = new Set<RollFriendliness>(["UNKNOWN", "FRIENDLY", "DIFFICULT"]);
 const ACCOUNT_VISIBILITIES = new Set<Visibility>(["PRIVATE", "SHARED"]);
 const RECORD_VISIBILITIES = new Set<InheritedVisibility>(["INHERIT", "PRIVATE", "SHARED"]);
 const MANUAL_LEDGER_ENTRY_TYPES = new Set<AccountLedgerEntryType>(["DEPOSIT", "WITHDRAWAL", "MANUAL_ADJUSTMENT"]);
@@ -51,6 +54,7 @@ const RETURNABLE_PATHS = new Set([
   "/scanner",
   "/scanner/settings",
   "/watchlist",
+  "/research",
   "/recommendations",
   "/chat",
   "/notifications",
@@ -549,10 +553,9 @@ export async function assignCampaignPutForUser(
   });
 }
 
-export async function createWatchlistItemForUser(userId: string, tickerInput: unknown) {
-  const ticker = requireTicker(tickerInput);
+async function ensureOwnWatchlist(userId: string) {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-  const watchlist =
+  return (
     (await prisma.watchlist.findFirst({ where: { ownerId: user.id } })) ??
     (await prisma.watchlist.create({
       data: {
@@ -560,40 +563,100 @@ export async function createWatchlistItemForUser(userId: string, tickerInput: un
         name: `${user.name}'s LST`,
         visibility: "SHARED",
       },
-    }));
+    }))
+  );
+}
 
-  const item = await prisma.watchlistItem.upsert({
-    where: {
-      watchlistId_ticker: {
-        watchlistId: watchlist.id,
-        ticker,
-      },
-    },
-    update: {
-      status: "WATCHING",
-    },
+/**
+ * Manual "add a ticker" entry point (the Research page's plain textbox) - defaults to WATCH.
+ * Kept as its own name/signature since `addWatchlistItemAction` already calls it; the actual
+ * upsert now lives in `setResearchStatusForUser` so Scanner quick actions share the same path.
+ */
+export async function createWatchlistItemForUser(userId: string, tickerInput: unknown) {
+  return setResearchStatusForUser(userId, tickerInput, "WATCH");
+}
+
+/**
+ * The one-click Research/Watch/Exclude path from both the Scanner and the Research page.
+ * Research is PRIVATE BY DEFAULT (see PROJECT_HANDOFF.md) - a brand-new item is created
+ * PRIVATE regardless of status, and no Activity is posted, since even the bare fact that a
+ * user watched/liked/excluded a ticker is itself a piece of personal sentiment that belongs
+ * to the user unless they explicitly share the item (via toggleWatchlistItemVisibilityForUser).
+ */
+export async function setResearchStatusForUser(userId: string, tickerInput: unknown, statusInput: unknown) {
+  const ticker = requireTicker(tickerInput);
+  const status = String(statusInput ?? "") as ResearchStatus;
+  if (!RESEARCH_STATUSES.has(status)) {
+    throw new ValidationError("Invalid research status.");
+  }
+
+  const watchlist = await ensureOwnWatchlist(userId);
+  return prisma.watchlistItem.upsert({
+    where: { watchlistId_ticker: { watchlistId: watchlist.id, ticker } },
+    update: { researchStatus: status },
     create: {
       watchlistId: watchlist.id,
-      ownerId: user.id,
+      ownerId: userId,
       ticker,
-      status: "WATCHING",
-      visibility: "SHARED",
-      tags: ["manual"],
+      researchStatus: status,
+      visibility: "PRIVATE",
+      tags: [],
     },
   });
+}
 
-  await prisma.activity.create({
+/**
+ * The full Research detail form: manual company description, fundamentals-adjacent manual
+ * grades, would-own/monthly-only/roll-friendliness personal rules, and an exclusion reason.
+ * Never touches researchStatus itself (that's setResearchStatusForUser's job) so a quick
+ * one-click status change from the Scanner never silently blows away a saved detail form.
+ */
+export async function updateResearchDetailsForUser(userId: string, itemId: string, formData: FormData) {
+  const item = await prisma.watchlistItem.findUnique({ where: { id: itemId } });
+  if (!item) {
+    return null;
+  }
+  assertCanMutateRecord(userId, item.ownerId);
+
+  const wouldOwnRaw = String(formData.get("wouldOwn") ?? "");
+  const wouldOwn = WOULD_OWN_STATUSES.has(wouldOwnRaw as WouldOwnStatus) ? (wouldOwnRaw as WouldOwnStatus) : null;
+  const rollFriendlinessRaw = String(formData.get("rollFriendliness") ?? "UNKNOWN");
+  const rollFriendliness = ROLL_FRIENDLINESS_VALUES.has(rollFriendlinessRaw as RollFriendliness)
+    ? (rollFriendlinessRaw as RollFriendliness)
+    : "UNKNOWN";
+
+  return prisma.watchlistItem.update({
+    where: { id: item.id },
     data: {
-      actorId: user.id,
-      type: "WATCHLIST",
-      title: `${user.name} added ${ticker}`,
-      body: "Added to the LST watchlist.",
-      ticker,
-      visibility: "SHARED",
+      companyName: trimText(formData.get("companyName"), 200) || null,
+      whatItDoes: trimText(formData.get("whatItDoes"), 1200) || null,
+      wouldOwn,
+      wouldOwnMaxPrice:
+        wouldOwn === "CONDITIONAL" ? parseOptionalMoney(formData.get("wouldOwnMaxPrice"), "maximum ownership price") : null,
+      monthlyPutsOnly: formData.get("monthlyPutsOnly") === "on",
+      rollFriendliness,
+      rollFriendlinessNote: trimText(formData.get("rollFriendlinessNote"), 500) || null,
+      exclusionReason: trimText(formData.get("exclusionReason"), 500) || null,
+      manualSchwabGrade: trimText(formData.get("manualSchwabGrade"), 50) || null,
+      manualLsegRating: trimText(formData.get("manualLsegRating"), 50) || null,
+      manualLsegScore: trimText(formData.get("manualLsegScore"), 50) || null,
+      manualLsegTarget: trimText(formData.get("manualLsegTarget"), 50) || null,
     },
   });
+}
 
-  return item;
+/**
+ * Tickers this user has actively researched (LIKE/WATCH/NEUTRAL - i.e. not AVOID/NEVER_TRADE)
+ * so the live Schwab scanner's universe can include previously-researched names, not just the
+ * fixed discovery starter list. See PROJECT_HANDOFF.md Research section: this is additive
+ * union, not a replacement for the discovery universe.
+ */
+export async function getResearchUniverseTickersForUser(userId: string): Promise<string[]> {
+  const items = await prisma.watchlistItem.findMany({
+    where: { ownerId: userId, researchStatus: { in: ["LIKE", "WATCH", "NEUTRAL"] } },
+    select: { ticker: true },
+  });
+  return items.map((item) => item.ticker);
 }
 
 export async function getReadableWatchlistItemForUser(userId: string, itemId: string) {
@@ -1164,9 +1227,11 @@ export async function rerunLiveSchwabScannerForUser(userId: string) {
     orderBy: { sortOrder: "asc" },
   });
   const rules = scannerRulesFromRecords(records);
+  const researchTickers = await getResearchUniverseTickersForUser(userId);
+  const universe = [...new Set([...STARTER_LIVE_SCAN_UNIVERSE, ...researchTickers])];
 
   try {
-    const candidates = await evaluateLiveMarketScan({ provider, rules });
+    const candidates = await evaluateLiveMarketScan({ provider, rules, universe });
     return persistScannerRun(userId, profile.id, "LIVE:SCHWAB", candidates);
   } catch {
     throw new ValidationError("LIVE DATA UNAVAILABLE: Schwab market data did not return a complete scan. Demo data was not substituted.");

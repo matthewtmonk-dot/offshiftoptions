@@ -24,23 +24,23 @@ test("Matt and Eric can authenticate to their own dashboard", async ({ page }) =
   await expect(page.getByText("No order submission")).toBeVisible();
 });
 
-test("Matt private watchlist items are not visible to Eric", async ({ page }) => {
+test("Matt private research items are not visible to Eric", async ({ page }) => {
+  // Watchlist was renamed to Research (2026-09) - a dense table, not per-item <article>
+  // cards - and new items are PRIVATE by default now, so no explicit visibility toggle is
+  // needed to prove isolation. See PROJECT_HANDOFF.md Research section.
   await loginAs(page, "Matt");
-  await page.goto("/watchlist");
+  await page.goto("/research");
   await page.getByPlaceholder("Ticker").fill("TST3");
   await page.getByRole("button", { name: "Add" }).click();
 
-  const mattCard = page.locator("article").filter({ hasText: "TST3" }).first();
-  await expect(mattCard).toBeVisible();
-  if ((await mattCard.getByText("SHARED").count()) > 0) {
-    await mattCard.getByRole("button", { name: "Private" }).click();
-  }
-  await expect(page.locator("article").filter({ hasText: "TST3" }).first().getByText("PRIVATE")).toBeVisible();
+  const mattTable = page.getByTestId("research-desktop-table");
+  await expect(mattTable.getByRole("row", { name: /TST3/ })).toBeVisible();
 
   await signOut(page);
   await loginAs(page, "Eric");
-  await page.goto("/watchlist");
-  await expect(page.locator("article").filter({ hasText: "TST3" })).toHaveCount(0);
+  await page.goto("/research");
+  await expect(page.getByTestId("research-desktop-table").getByRole("row", { name: /TST3/ })).toHaveCount(0);
+  await expect(page.getByText("TST3")).toHaveCount(0);
 });
 
 test("recommendations persist for the buddy recipient", async ({ page }) => {
@@ -108,7 +108,7 @@ test("major app pages render at mobile width without horizontal overflow", async
     "/dashboard",
     "/scanner",
     "/scanner/settings",
-    "/watchlist",
+    "/research",
     "/recommendations",
     "/chat",
     "/notifications",

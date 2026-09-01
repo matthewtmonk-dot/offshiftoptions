@@ -178,6 +178,55 @@ maybeDescribe("database-backed Phase 1B workflows", () => {
     expect(summary.netRollPremium).toBe(31);
   });
 
+  it("keeps every event of a full open->roll->close lifecycle - the append-only guarantee Research work depends on", async () => {
+    // STO PUT, BTC PUT, STO NEW PUT, BTC NEW PUT: sell, roll (close+open), then close the
+    // rolled-to put. All four events must remain queryable afterward - none overwritten or
+    // deleted - proving CampaignEvent is a true append-only history before building Research
+    // on top of it. See PROJECT_HANDOFF.md Research section.
+    const account = await workflows.createTradingAccountForUser(
+      matt.id,
+      `Append-Only Account ${Date.now()}`,
+      "Manual",
+      "6000",
+      "6000",
+      "PRIVATE",
+    );
+    createdAccounts.push(account.id);
+    const campaign = await workflows.createCampaignForUser(
+      matt.id,
+      account.id,
+      "SOFI",
+      "2026-08-05",
+      "2026-08-14",
+      "18",
+      "1",
+      "0.36",
+      "0",
+      "Append-only lifecycle test",
+      "PRIVATE",
+    );
+    createdCampaigns.push(campaign.id);
+
+    await workflows.rollCampaignPutForUser(matt.id, campaign.id, "2026-08-12", "0.52", "2026-08-21", "17.5", "0.88", "0", "Roll 1");
+
+    const midRoll = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
+    await workflows.closeCampaignPutForUser(matt.id, campaign.id, "2026-08-21", "0.21", "0", "Close the rolled-to put");
+
+    const final = await prisma.campaign.findUniqueOrThrow({
+      where: { id: campaign.id },
+      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+    });
+
+    expect(final.events.map((event) => event.type)).toEqual(["SELL_PUT", "ROLL_PUT_CLOSE", "ROLL_PUT_OPEN", "CLOSE_PUT"]);
+    // Every event ID present after the roll is still present, unmodified, after the close -
+    // the close only appended a new row, it never touched the prior three.
+    for (const event of midRoll.events) {
+      const stillThere = final.events.find((candidate) => candidate.id === event.id);
+      expect(stillThere).toMatchObject({ type: event.type, premium: event.premium, strike: event.strike });
+    }
+    expect(final.status).toBe("CLOSED");
+  });
+
   it("records assignment without closing the campaign result prematurely", async () => {
     const account = await workflows.createTradingAccountForUser(
       matt.id,

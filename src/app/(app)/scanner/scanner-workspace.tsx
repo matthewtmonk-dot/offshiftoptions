@@ -1,12 +1,15 @@
 "use client";
 
 import { Fragment, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   ArrowDownUp,
   ChevronDown,
   ChevronRight,
   CircleHelp,
+  EyeOff,
   ListFilter,
+  Search,
   Send,
   Star,
   Table2,
@@ -15,7 +18,7 @@ import { EmptyState, FieldLabel } from "@/components/ui";
 import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
 import { formatCriterionValue, type ExclusionDiagnostic } from "@/domain/scanner/scanner";
 import { money, percent, shortDate, toNumber } from "@/lib/format";
-import { recommendStockAction } from "../actions";
+import { recommendStockAction, setResearchStatusAction } from "../actions";
 import type { ScannerBuddy, ScannerViewResult } from "./page";
 
 type SortKey =
@@ -92,6 +95,7 @@ export function ScannerWorkspace({
 }) {
   const [quick, setQuick] = useState<QuickKey>("all");
   const [sort, setSort] = useState<SortKey>("score");
+  const [showExcluded, setShowExcluded] = useState(false);
   const [columns, setColumns] = useState<Record<OptionalColumnKey, boolean>>({
     delta: false,
     annualizedRor: false,
@@ -100,16 +104,21 @@ export function ScannerWorkspace({
   });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
+  const excludedCount = useMemo(() => results.filter((result) => result.researchStatus === "NEVER_TRADE").length, [results]);
+  const actionable = useMemo(
+    () => (showExcluded ? results : results.filter((result) => result.researchStatus !== "NEVER_TRADE")),
+    [results, showExcluded],
+  );
   const counts = useMemo(
     () => ({
-      pass: results.filter((result) => result.summary.status === "PASS").length,
-      near: results.filter((result) => result.nearMisses.length === 1).length,
-      watchlist: results.filter((result) => result.inWatchlist).length,
+      pass: actionable.filter((result) => result.summary.status === "PASS").length,
+      near: actionable.filter((result) => result.nearMisses.length === 1).length,
+      watchlist: actionable.filter((result) => result.researchStatus !== null).length,
     }),
-    [results],
+    [actionable],
   );
 
-  const visible = useMemo(() => sortResults(applyQuickFilter(results, quick), sort), [results, quick, sort]);
+  const visible = useMemo(() => sortResults(applyQuickFilter(actionable, quick), sort), [actionable, quick, sort]);
   const activeOptionalColumns = optionalColumns.filter((column) => columns[column.key]);
   const columnCount = BASE_COLUMN_COUNT + activeOptionalColumns.length;
 
@@ -208,6 +217,22 @@ export function ScannerWorkspace({
           </div>
         </details>
 
+        {excludedCount > 0 ? (
+          <button
+            type="button"
+            onClick={() => setShowExcluded((prev) => !prev)}
+            className={`inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition ${
+              showExcluded
+                ? "border-zinc-500 bg-zinc-800 text-zinc-100"
+                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+            }`}
+          >
+            <EyeOff className="size-3.5" aria-hidden />
+            {showExcluded ? "Hide" : "Show"} Excluded
+            <span className="text-[10px] text-zinc-500">{excludedCount}</span>
+          </button>
+        ) : null}
+
         <details className="ml-auto">
           <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200">
             <CircleHelp className="size-3.5" aria-hidden />
@@ -296,7 +321,7 @@ export function ScannerWorkspace({
                           <ChevronRight className="size-3.5 shrink-0 text-zinc-500" aria-hidden />
                         )}
                         <span className="text-sm font-semibold text-zinc-50">{result.record.ticker}</span>
-                        {result.inWatchlist ? <Star className="size-3.5 shrink-0 fill-emerald-300 text-emerald-300" aria-hidden /> : null}
+                        <ResearchBadge status={result.researchStatus} />
                       </button>
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
@@ -308,6 +333,9 @@ export function ScannerWorkspace({
                       <span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${status.tone}`}>
                         {status.word}
                       </span>
+                      {result.researchStatus === "NEVER_TRADE" ? (
+                        <span className="ml-1.5 inline-flex items-center text-[10px] font-semibold text-red-300/70">EXCLUDED BY YOU</span>
+                      ) : null}
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.price, money)}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">
@@ -368,7 +396,7 @@ function CandidateCard({ result, buddies }: { result: ScannerViewResult; buddies
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <span className="text-lg font-semibold text-zinc-50">{result.record.ticker}</span>
-            {result.inWatchlist ? <Star className="size-4 fill-emerald-300 text-emerald-300" aria-hidden /> : null}
+            <ResearchBadge status={result.researchStatus} />
           </div>
           <div className="flex items-center gap-2">
             <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.scoreLabel)}`}>
@@ -404,9 +432,44 @@ function MobileDatum({ label, value }: { label: string; value: React.ReactNode }
   );
 }
 
+const quickResearchChoices: { key: "LIKE" | "WATCH" | "NEUTRAL" | "AVOID" | "NEVER_TRADE"; label: string }[] = [
+  { key: "LIKE", label: "Like" },
+  { key: "WATCH", label: "Watch" },
+  { key: "NEUTRAL", label: "Neutral" },
+  { key: "AVOID", label: "Avoid" },
+  { key: "NEVER_TRADE", label: "Exclude" },
+];
+
 function CandidateInspector({ result, buddies }: { result: ScannerViewResult; buddies: ScannerBuddy[] }) {
   return (
     <div className="grid gap-5 rounded-md border border-zinc-800 bg-zinc-950 p-4 xl:grid-cols-[1fr_1fr_0.8fr]">
+      <div className="flex flex-wrap items-center gap-1.5 xl:col-span-3">
+        <span className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Research</span>
+        {quickResearchChoices.map((choice) => (
+          <form key={choice.key} action={setResearchStatusAction}>
+            <input type="hidden" name="ticker" value={result.record.ticker} />
+            <input type="hidden" name="status" value={choice.key} />
+            <input type="hidden" name="returnTo" value="/scanner" />
+            <button
+              type="submit"
+              className={`inline-flex min-h-8 items-center rounded-md border px-2.5 text-xs font-medium transition ${
+                result.researchStatus === choice.key
+                  ? "border-emerald-400/70 bg-emerald-400/15 text-emerald-100"
+                  : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"
+              }`}
+            >
+              {choice.label}
+            </button>
+          </form>
+        ))}
+        <Link
+          href="/research"
+          className="ml-1 inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 text-xs font-medium text-zinc-300 hover:border-emerald-400/60 hover:text-emerald-200"
+        >
+          <Search className="size-3.5" aria-hidden />
+          Open in Research
+        </Link>
+      </div>
       <section>
         <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Stock</h3>
         <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
@@ -553,6 +616,39 @@ function signedPercent(value: number | null) {
   return `${value > 0 ? "+" : ""}${percent(value)}`;
 }
 
+function ResearchBadge({ status }: { status: ScannerViewResult["researchStatus"] }) {
+  if (!status || status === "NEUTRAL") {
+    return null;
+  }
+  if (status === "LIKE") {
+    return (
+      <span title="Liked" className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-semibold text-emerald-300">
+        <Star className="size-3 fill-emerald-300" aria-hidden />
+        LIKE
+      </span>
+    );
+  }
+  if (status === "WATCH") {
+    return (
+      <span title="Watching" className="shrink-0 text-[10px] font-semibold text-sky-300">
+        WATCH
+      </span>
+    );
+  }
+  if (status === "AVOID") {
+    return (
+      <span title="Avoid" className="shrink-0 text-[10px] font-semibold text-amber-300">
+        AVOID
+      </span>
+    );
+  }
+  return (
+    <span title="Excluded by you" className="shrink-0 text-[10px] font-semibold text-red-300/70">
+      EXCLUDED
+    </span>
+  );
+}
+
 function statusInfo(result: ScannerViewResult): { word: string; tone: string } {
   if (result.summary.status === "PASS") {
     return { word: "PASS", tone: "border-emerald-400/40 bg-emerald-400/15 text-emerald-100" };
@@ -608,7 +704,7 @@ function applyQuickFilter(results: ScannerViewResult[], quick: QuickKey) {
     case "near":
       return results.filter((result) => result.nearMisses.length === 1);
     case "watchlist":
-      return results.filter((result) => result.inWatchlist);
+      return results.filter((result) => result.researchStatus !== null);
     case "strongest":
       return results.filter((result) => result.score >= 90);
     case "premium":

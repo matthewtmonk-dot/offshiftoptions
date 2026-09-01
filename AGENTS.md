@@ -24,6 +24,8 @@ Do not blindly implement a technically weaker approach just because Matt request
 
 Off Shift Options (formerly "LST Buddy") is a private, fun, educational trading research and tracking PWA for Matt and Eric. It helps with conservative cash-secured-put research, manual/demo tracking, watchlists, recommendations, chat, notifications, and rule-following. The "My LST" scanner profile name refers to the underlying Low Stress Trading strategy, not the app's product name.
 
+The product has four connected jobs - **Scan** (technical opportunity), **Research** (personal company judgment, private by default), **Track** (append-only campaign history), **Performance** (whether the strategy works over time) - see `PROJECT_HANDOFF.md`'s Product Model section before touching any of them. A personal Research judgment must never change a Scan result's technical score. "Watchlist" was renamed to "Research" (2026-09, `/watchlist` now redirects to `/research`) - don't reintroduce a separate watchlist concept.
+
 ## Absolute Product Rule
 
 This application does not place trades. Do not add buy, sell, place order, submit order, replace order, cancel order, automated trading, or algorithmic execution methods. Schwab integration is read-only.
@@ -69,6 +71,9 @@ Schwab market data is shared application infrastructure, but brokerage account d
 - Keep UI friendly with restrained green accents; the app now supports Dark (original look, default for existing users)/Light/System appearance — see `PROJECT_HANDOFF.md` Appearance System section. Use red/green mainly for fail/pass states, consistently in both themes.
 - Never use a Tailwind color-scale literal (e.g. `text-zinc-950`) for something that must stay a fixed color regardless of theme, such as dark text on a permanently-bright accent button — the Light theme remaps that same scale variable, so a "fixed" use of it silently becomes illegible. Use `text-black`/a dedicated non-remapped value instead. This bit us once (10 files fixed in the Appearance System slice).
 - When running Playwright against `next dev`, use `PLAYWRIGHT_BASE_URL=http://localhost:<port>`, never `127.0.0.1` — Next's dev-mode cross-origin asset guard silently 403s JS chunks requested via the IP literal, breaking client hydration (and therefore every `onClick`-driven assertion) with no visible test failure. `playwright.config.ts`'s default already uses `localhost`.
+- Playwright specs log in via the real email/password sign-in form, not a dev-only shortcut button — this is what lets the suite run against a genuine `next start` production build, which is the authoritative pass/fail signal for this project (see `PROJECT_HANDOFF.md` Testing section on the dev-only overlay artifact that otherwise makes `next dev` runs unreliable for anything involving Sign Out).
+- Never let a personal/preference field (Research status, exclusion, a future per-user setting) alter a Scan/Scanner result's technical score, status, or label. Compute them independently and join only for display — this is a load-bearing product invariant, not a style preference. See `PROJECT_HANDOFF.md` Product Model and Research sections.
+- Don't blindly trust a claim about what a third-party API (e.g. Schwab's quote `fundamental` field group) returns — verify the actual live response (field names, presence, units) before normalizing/displaying it. Guessing at units (e.g. Debt/Equity as `0.42` vs `42%`) is exactly the kind of silent-wrong-interpretation bug this project explicitly guards against.
 - Update `PROJECT_HANDOFF.md` automatically after every meaningful change (see top of this file). `docs/HANDOFF.md` is an older chronological session log kept for detailed history.
 
 ## Key Docs
