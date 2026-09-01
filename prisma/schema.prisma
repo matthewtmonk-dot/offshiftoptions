@@ -167,36 +167,77 @@ enum BrokerConnectionStatus {
   EXPIRED
 }
 
+enum SchwabDeveloperCredentialStatus {
+  CONFIGURED
+  VALIDATED
+  INVALID
+  REMOVED
+}
+
+enum BrokerRecordKind {
+  TRANSACTION
+  POSITION
+  REALIZED_GAIN_LOSS
+}
+
+enum BrokerRecordSource {
+  SCHWAB_API
+  SCHWAB_TRANSACTIONS_CSV
+  SCHWAB_POSITIONS_CSV
+  SCHWAB_GAINLOSS_CSV
+}
+
+enum BrokerRecordStatus {
+  CONFIRMED
+  CONFLICT
+  NEEDS_REVIEW
+}
+
+enum BrokerImportExportType {
+  POSITIONS
+  TRANSACTIONS
+  REALIZED_GAIN_LOSS
+}
+
+enum BrokerImportBatchStatus {
+  PENDING_PREVIEW
+  CONFIRMED
+  DISCARDED
+}
+
 model User {
-  id                      String               @id @default(cuid())
-  name                    String
-  email                   String               @unique
-  passwordHash            String
-  createdAt               DateTime             @default(now())
-  updatedAt               DateTime             @updatedAt
-  settings                UserSettings?
-  sharingPreferences      SharingPreferences?
-  sessions                Session[]
-  accounts                TradingAccount[]
-  trades                  Trade[]
-  watchlists              Watchlist[]
-  watchlistItems          WatchlistItem[]
-  notes                   StockNote[]
-  comments                Comment[]
-  recommendationsSent     Recommendation[]     @relation("SentRecommendations")
-  recommendationsReceived Recommendation[]     @relation("ReceivedRecommendations")
-  conversationMemberships ConversationMember[]
-  chatMessages            ChatMessage[]
-  chatReads               ChatMessageRead[]
-  reactions               Reaction[]
-  activities              Activity[]
-  notificationsSent       Notification[]       @relation("NotificationActor")
-  notificationsReceived   Notification[]       @relation("NotificationRecipient")
-  pushSubscriptions       PushSubscription[]
-  scannerProfiles         ScannerProfile[]
-  scannerRuns             ScanRun[]
-  brokerConnections       BrokerConnection[]
-  campaigns               Campaign[]
+  id                         String                      @id @default(cuid())
+  name                       String
+  email                      String                      @unique
+  passwordHash               String
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  settings                   UserSettings?
+  sharingPreferences         SharingPreferences?
+  sessions                   Session[]
+  accounts                   TradingAccount[]
+  trades                     Trade[]
+  watchlists                 Watchlist[]
+  watchlistItems             WatchlistItem[]
+  notes                      StockNote[]
+  comments                   Comment[]
+  recommendationsSent        Recommendation[]            @relation("SentRecommendations")
+  recommendationsReceived    Recommendation[]            @relation("ReceivedRecommendations")
+  conversationMemberships    ConversationMember[]
+  chatMessages               ChatMessage[]
+  chatReads                  ChatMessageRead[]
+  reactions                  Reaction[]
+  activities                 Activity[]
+  notificationsSent          Notification[]              @relation("NotificationActor")
+  notificationsReceived      Notification[]              @relation("NotificationRecipient")
+  pushSubscriptions          PushSubscription[]
+  scannerProfiles            ScannerProfile[]
+  scannerRuns                ScanRun[]
+  brokerConnections          BrokerConnection[]
+  schwabDeveloperCredentials SchwabDeveloperCredential[]
+  brokerRecords              BrokerRecord[]
+  brokerImportBatches        BrokerImportBatch[]
+  campaigns                  Campaign[]
 }
 
 model Session {
@@ -258,6 +299,8 @@ model TradingAccount {
   brokerConnection   BrokerConnection?    @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
   snapshots          AccountSnapshot[]
   ledgerEntries      AccountLedgerEntry[]
+  brokerRecords      BrokerRecord[]
+  brokerImportBatches BrokerImportBatch[]
   trades             Trade[]
   campaigns          Campaign[]
 
@@ -388,6 +431,7 @@ model Campaign {
   owner             User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   account           TradingAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
   events            CampaignEvent[]
+  linkedBrokerRecords BrokerRecord[]
 
   @@index([ownerId, status])
   @@index([accountId, status])
@@ -754,20 +798,114 @@ model OptionContractSnapshot {
 }
 
 model BrokerConnection {
-  id                     String                 @id @default(cuid())
+  id                     String                     @id @default(cuid())
   userId                 String
+  developerCredentialId  String?
   provider               BrokerProvider
   label                  String
-  status                 BrokerConnectionStatus @default(DISCONNECTED)
+  status                 BrokerConnectionStatus     @default(DISCONNECTED)
   accessTokenCiphertext  String?
   refreshTokenCiphertext String?
   expiresAt              DateTime?
-  scopes                 String[]               @default([])
+  scopes                 String[]                   @default([])
   metadata               Json?
-  createdAt              DateTime               @default(now())
-  updatedAt              DateTime               @updatedAt
-  user                   User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  user                   User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  developerCredential    SchwabDeveloperCredential? @relation(fields: [developerCredentialId], references: [id], onDelete: SetNull)
   tradingAccounts        TradingAccount[]
 
   @@index([userId, provider])
+  @@index([developerCredentialId])
+}
+
+model SchwabDeveloperCredential {
+  id                          String                          @id @default(cuid())
+  userId                      String
+  provider                    BrokerProvider                  @default(SCHWAB)
+  label                       String                          @default("Charles Schwab developer app")
+  clientIdCiphertext          String
+  clientSecretCiphertext      String
+  redirectUri                 String
+  status                      SchwabDeveloperCredentialStatus @default(CONFIGURED)
+  marketDataEnabled           Boolean                         @default(true)
+  appKeyLast4                 String?
+  lastValidatedAt             DateTime?
+  lastValidationFailureAt     DateTime?
+  lastValidationFailureReason String?
+  createdAt                   DateTime                        @default(now())
+  updatedAt                   DateTime                        @updatedAt
+  user                        User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerConnections           BrokerConnection[]
+
+  @@unique([userId, provider])
+  @@index([userId, status])
+}
+
+model BrokerRecord {
+  id                String               @id @default(cuid())
+  userId            String
+  accountId         String?
+  importBatchId     String?
+  linkedCampaignId  String?
+  provider          BrokerProvider       @default(SCHWAB)
+  kind              BrokerRecordKind
+  status            BrokerRecordStatus   @default(CONFIRMED)
+  fingerprint       String
+  identityKey       String
+  reconciliationKey String?
+  occurredAt        DateTime?
+  observedAt        DateTime?
+  symbol            String?
+  underlyingSymbol  String?
+  action            String?
+  description       String?
+  quantity          Decimal?             @db.Decimal(14, 4)
+  price             Decimal?             @db.Decimal(14, 4)
+  fees              Decimal?             @db.Decimal(14, 2)
+  amount            Decimal?             @db.Decimal(14, 2)
+  sources           BrokerRecordSource[] @default([])
+  sourceIds         String[]             @default([])
+  reconciliationDismissedAt DateTime?
+  metadata          Json?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account           TradingAccount?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  importBatch       BrokerImportBatch?   @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  linkedCampaign    Campaign?            @relation(fields: [linkedCampaignId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, provider, kind, fingerprint])
+  @@index([userId, provider, kind])
+  @@index([userId, reconciliationKey])
+  @@index([userId, identityKey])
+  @@index([importBatchId])
+  @@index([linkedCampaignId])
+}
+
+model BrokerImportBatch {
+  id                   String                  @id @default(cuid())
+  userId               String
+  accountId            String?
+  provider             BrokerProvider          @default(SCHWAB)
+  exportType           BrokerImportExportType
+  safeOriginalFilename String
+  fileFingerprint      String
+  asOfAt               DateTime?
+  status               BrokerImportBatchStatus @default(PENDING_PREVIEW)
+  rowCount             Int                     @default(0)
+  newCount             Int                     @default(0)
+  duplicateCount       Int                     @default(0)
+  conflictCount        Int                     @default(0)
+  reviewCount          Int                     @default(0)
+  invalidCount         Int                     @default(0)
+  previewPayload       Json?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  user                 User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account              TradingAccount?         @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  records              BrokerRecord[]
+
+  @@index([userId, status])
+  @@index([userId, createdAt])
 }

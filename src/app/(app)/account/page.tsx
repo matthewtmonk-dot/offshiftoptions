@@ -3,7 +3,7 @@ import { KeyRound, Link2, Plus, RefreshCw, Save, ShieldCheck, Unplug } from "luc
 import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { requireCurrentUser } from "@/lib/auth";
 import { getAccountPageData } from "@/lib/app-data";
-import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
+import { getSchwabConnectionSummaryForUser, getSchwabDeveloperCredentialSummaryForUser } from "@/lib/broker-connections";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { money, shortDateTime } from "@/lib/format";
@@ -12,6 +12,8 @@ import {
   addAccountLedgerEntryAction,
   changePasswordAction,
   disconnectSchwabAction,
+  removeSchwabDeveloperCredentialsAction,
+  saveSchwabDeveloperCredentialsAction,
   syncSchwabAccountAction,
 } from "../actions";
 
@@ -24,11 +26,13 @@ export default async function AccountPage({
 }) {
   const user = await requireCurrentUser();
   const params = await searchParams;
-  const [schwabConnection, schwabConfig, accountData] = await Promise.all([
+  const [schwabConnection, schwabDeveloperCredential, schwabConfig, accountData] = await Promise.all([
     getSchwabConnectionSummaryForUser(user.id),
+    getSchwabDeveloperCredentialSummaryForUser(user.id),
     Promise.resolve(getSchwabConfigStatus()),
     getAccountPageData(user.id),
   ]);
+  const schwabOauthReady = Boolean(schwabDeveloperCredential?.configured) || schwabConfig.configured;
 
   const realizedPLByAccount = new Map<string, number>();
   for (const campaign of accountData.completedCampaigns) {
@@ -162,16 +166,88 @@ export default async function AccountPage({
                 </div>
               ) : (
                 <p className="text-sm text-zinc-400">
-                  Connect Schwab when the Hostinger environment variables are set. Eric can keep using manual tracking and
-                  shared research without connecting his own brokerage account.
+                  Connect Schwab for your own read-only market data and account sync. Buddy accounts stay separate, and
+                  manual tracking keeps working without a brokerage connection.
                 </p>
               )}
 
-              {!schwabConfig.configured ? (
+              {!schwabOauthReady ? (
                 <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
-                  Schwab server environment is pending: {schwabConfig.missing.join(", ")}.
+                  Schwab needs a developer app before OAuth can start.
                 </div>
               ) : null}
+
+              <details className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
+                <summary className="cursor-pointer font-medium text-zinc-300">Configure developer app</summary>
+                <div className="mt-3 space-y-3 border-t border-zinc-800 pt-3">
+                  {schwabDeveloperCredential?.configured ? (
+                    <div className="flex flex-wrap items-center gap-3 rounded-md border border-emerald-400/20 bg-emerald-400/10 px-3 py-2">
+                      <Badge tone={schwabDeveloperCredential.status === "VALIDATED" ? "good" : "info"}>
+                        Developer app configured
+                      </Badge>
+                      <span>
+                        Last validated:{" "}
+                        {schwabDeveloperCredential.lastValidatedAt
+                          ? shortDateTime(schwabDeveloperCredential.lastValidatedAt)
+                          : "not yet"}
+                      </span>
+                    </div>
+                  ) : null}
+                  <form action={saveSchwabDeveloperCredentialsAction} className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <FieldLabel>App key / Client ID</FieldLabel>
+                      <input
+                        name="clientId"
+                        type="password"
+                        autoComplete="off"
+                        required
+                        placeholder={schwabDeveloperCredential?.configured ? "New app key" : "App key"}
+                        className="min-h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Client secret</FieldLabel>
+                      <input
+                        name="clientSecret"
+                        type="password"
+                        autoComplete="off"
+                        required
+                        placeholder={schwabDeveloperCredential?.configured ? "New secret" : "Client secret"}
+                        className="min-h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+                      />
+                    </div>
+                    <div className="space-y-2 sm:col-span-2">
+                      <FieldLabel>Callback URL</FieldLabel>
+                      <input
+                        name="redirectUri"
+                        type="url"
+                        required
+                        defaultValue={SCHWAB_PRODUCTION_CALLBACK_URL}
+                        className="min-h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-2 sm:col-span-2">
+                      <button
+                        type="submit"
+                        className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-emerald-400/50 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300"
+                      >
+                        <Save className="size-4" aria-hidden />
+                        {schwabDeveloperCredential?.configured ? "Replace credentials" : "Save developer app"}
+                      </button>
+                    </div>
+                  </form>
+                  {schwabDeveloperCredential?.configured ? (
+                    <form action={removeSchwabDeveloperCredentialsAction}>
+                      <button
+                        type="submit"
+                        className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-700 px-3 text-xs font-medium text-zinc-400 transition hover:border-red-400/60 hover:text-red-200"
+                      >
+                        Remove credentials
+                      </button>
+                    </form>
+                  ) : null}
+                </div>
+              </details>
 
               <details className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
                 <summary className="cursor-pointer font-medium text-zinc-300">Connection details</summary>
@@ -197,7 +273,7 @@ export default async function AccountPage({
                   </div>
                 </div>
                 <div className="mt-3">
-                  {schwabConfig.configured ? (
+                  {schwabOauthReady ? (
                     <Link
                       href="/api/schwab/connect"
                       className="text-xs font-medium text-zinc-400 underline decoration-zinc-600 underline-offset-4 hover:text-zinc-200"
@@ -205,7 +281,7 @@ export default async function AccountPage({
                       {schwabConnection?.connected ? "Reconnect Schwab" : "Connect Schwab"}
                     </Link>
                   ) : (
-                    <span className="text-xs text-zinc-500">Connect after env setup</span>
+                    <span className="text-xs text-zinc-500">Connect after developer app setup</span>
                   )}
                 </div>
               </details>
@@ -327,6 +403,18 @@ function schwabMessage(status: string | undefined) {
       return (
         <div className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200">
           Schwab disconnected for this user.
+        </div>
+      );
+    case "developer_configured":
+      return (
+        <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
+          Schwab developer app saved. Connect or reconnect Schwab when you are ready.
+        </div>
+      );
+    case "developer_removed":
+      return (
+        <div className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200">
+          Schwab developer app removed for this user.
         </div>
       );
     case "missing_config":

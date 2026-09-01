@@ -16,8 +16,12 @@ import { requireTicker, ValidationError } from "./tickers";
 import { notifyInApp } from "./notifications";
 import type { AccountLedgerEntryType } from "@/generated/prisma/enums";
 import {
+  removeSchwabDeveloperCredentialForUser,
+  saveSchwabDeveloperCredentialForUser,
+} from "@/providers/schwab/developer-credentials";
+import {
   getSchwabBrokerReadProviderForUser,
-  getSchwabMarketDataProvider,
+  getSchwabMarketDataProviderForUser,
   recordSchwabAccountSyncResult,
 } from "./broker-connections";
 
@@ -247,6 +251,26 @@ export async function addAccountLedgerEntryForUser(
       notes: notes || null,
     },
   });
+}
+
+export async function saveSchwabDeveloperCredentialsForUser(
+  userId: string,
+  clientIdInput: unknown,
+  clientSecretInput: unknown,
+  redirectUriInput: unknown,
+) {
+  try {
+    return await saveSchwabDeveloperCredentialForUser(userId, clientIdInput, clientSecretInput, redirectUriInput);
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new ValidationError(error.message);
+    }
+    throw error;
+  }
+}
+
+export async function removeSchwabDeveloperCredentialsForUser(userId: string) {
+  return removeSchwabDeveloperCredentialForUser(userId);
 }
 
 export async function toggleTradingAccountVisibilityForUser(userId: string, accountId: string) {
@@ -1130,9 +1154,9 @@ export async function rerunDemoScannerForUser(userId: string, profileId?: string
 
 export async function rerunLiveSchwabScannerForUser(userId: string) {
   const profile = await ensureMyLstScannerProfileForUser(userId);
-  const provider = await getSchwabMarketDataProvider();
+  const provider = await getSchwabMarketDataProviderForUser(userId);
   if (!provider) {
-    throw new ValidationError("LIVE DATA UNAVAILABLE: connect Schwab in Account settings and configure the Schwab server environment variables.");
+    throw new ValidationError("LIVE DATA UNAVAILABLE: connect Schwab in Account settings with usable Schwab developer credentials.");
   }
 
   const records = await prisma.scannerRule.findMany({

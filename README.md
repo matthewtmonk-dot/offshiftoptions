@@ -56,7 +56,7 @@ Useful scripts:
 
 ## Database Integration Tests
 
-`pnpm test` runs the unit suite and skips database-backed tests by default. To run the opt-in integration tests in `src/lib/workflows.integration.test.ts` against a live PostgreSQL instance (for example the Docker Compose database), set both `RUN_DB_TESTS=1` and `DATABASE_URL`:
+`pnpm test` runs the unit suite and skips database-backed tests by default. To run the opt-in integration tests in `src/lib/*.integration.test.ts` against a live PostgreSQL instance (for example the Docker Compose database), set both `RUN_DB_TESTS=1` and `DATABASE_URL`:
 
 ```bash
 RUN_DB_TESTS=1 DATABASE_URL="postgresql://lst_buddy:lst_buddy_dev@localhost:5432/lst_buddy?schema=public" pnpm test

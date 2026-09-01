@@ -5,6 +5,7 @@ import { getDashboardData } from "@/lib/app-data";
 import { money, percent } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
+import { splitBrokerPositionsByCampaignLink } from "@/lib/broker-reconciliation";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { computeOpenPositionsCount, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
@@ -22,7 +23,10 @@ export default async function DashboardPage() {
   const user = await requireCurrentUser();
   const [data, schwabPositions] = await Promise.all([getDashboardData(user.id), getSchwabOpenPositionsForUser(user.id)]);
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
-  const brokerPositions = schwabPositions ?? [];
+  // Positions already reconciled to an open Campaign are represented by that Campaign in
+  // data.openCampaigns - counting the raw broker position too would double count the same
+  // real-world trade. See src/lib/broker-reconciliation.ts.
+  const { unlinked: brokerPositions } = await splitBrokerPositionsByCampaignLink(user.id, schwabPositions ?? []);
   const brokerCsp = summarizeCspSecuredCapital(brokerPositions);
 
   const completedPLByAccount = new Map<string, number>();

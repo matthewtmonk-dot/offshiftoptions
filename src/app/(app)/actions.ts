@@ -19,12 +19,14 @@ import {
   markAllNotificationsReadForUser,
   markConversationReadForUser,
   markNotificationReadForUser,
+  removeSchwabDeveloperCredentialsForUser,
   removeWatchlistItemForUser,
   rerunDemoScannerForUser,
   rerunLiveSchwabScannerForUser,
   resetScannerSettingsToLstCoreForUser,
   rollCampaignPutForUser,
   safeReturnPath,
+  saveSchwabDeveloperCredentialsForUser,
   saveStockNoteForUser,
   sendChatMessageForUser,
   syncSchwabAccountForUser,
@@ -35,6 +37,11 @@ import {
   updateScannerSettingsForUser,
 } from "@/lib/workflows";
 import { disconnectSchwabForUser } from "@/lib/broker-connections";
+import { confirmBrokerImportForUser, discardBrokerImportForUser, previewBrokerImportForUser } from "@/lib/broker-import";
+import {
+  confirmBrokerPositionAsCampaignForUser,
+  skipBrokerReconciliationForUser,
+} from "@/lib/broker-reconciliation";
 import { ValidationError } from "@/lib/tickers";
 
 function redirectWithError(path: string, error: string): never {
@@ -443,6 +450,39 @@ export async function disconnectSchwabAction() {
   redirect("/account?schwab=disconnected");
 }
 
+export async function saveSchwabDeveloperCredentialsAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  try {
+    await saveSchwabDeveloperCredentialsForUser(
+      user.id,
+      formData.get("clientId"),
+      formData.get("clientSecret"),
+      formData.get("redirectUri"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/account", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/account");
+  revalidatePath("/scanner");
+  revalidatePath("/dashboard");
+  redirect("/account?schwab=developer_configured");
+}
+
+export async function removeSchwabDeveloperCredentialsAction() {
+  const user = await requireCurrentUser();
+  await removeSchwabDeveloperCredentialsForUser(user.id);
+
+  revalidatePath("/account");
+  revalidatePath("/scanner");
+  revalidatePath("/dashboard");
+  redirect("/account?schwab=developer_removed");
+}
+
 export async function syncSchwabAccountAction() {
   const user = await requireCurrentUser();
 
@@ -459,6 +499,110 @@ export async function syncSchwabAccountAction() {
   revalidatePath("/dashboard");
   revalidatePath("/positions");
   redirect("/account?schwab=synced");
+}
+
+export async function previewSchwabImportAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  const file = formData.get("file");
+  if (!(file instanceof File)) {
+    redirectWithError("/positions?view=accounts", "Choose a Schwab CSV export file to import.");
+  }
+  const accountId = String(formData.get("accountId") ?? "").trim() || null;
+
+  let batchId: string;
+  try {
+    const preview = await previewBrokerImportForUser(user.id, file, accountId);
+    batchId = preview.batchId;
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/positions?view=accounts", error.message);
+    }
+    throw error;
+  }
+
+  redirect(`/positions?view=accounts&previewBatch=${batchId}`);
+}
+
+export async function confirmSchwabImportAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const batchId = String(formData.get("batchId") ?? "");
+
+  try {
+    await confirmBrokerImportForUser(user.id, batchId);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/positions?view=accounts", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+  redirect("/positions?view=accounts&imported=1");
+}
+
+export async function discardSchwabImportAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const batchId = String(formData.get("batchId") ?? "");
+
+  try {
+    await discardBrokerImportForUser(user.id, batchId);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/positions?view=accounts", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  redirect("/positions?view=accounts&discarded=1");
+}
+
+export async function confirmBrokerReconciliationAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  try {
+    await confirmBrokerPositionAsCampaignForUser(
+      user.id,
+      String(formData.get("brokerRecordId") ?? ""),
+      String(formData.get("accountId") ?? ""),
+      formData.get("ticker"),
+      formData.get("tradeDate"),
+      formData.get("expiration"),
+      formData.get("strike"),
+      formData.get("contracts"),
+      formData.get("premium"),
+      formData.get("fees"),
+      formData.get("notes"),
+      formData.get("visibility"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/positions?view=accounts", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+  redirect("/positions?view=accounts&linked=1");
+}
+
+export async function skipBrokerReconciliationAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  try {
+    await skipBrokerReconciliationForUser(user.id, String(formData.get("brokerRecordId") ?? ""));
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError("/positions?view=accounts", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  redirect("/positions?view=accounts&skipped=1");
 }
 
 export async function addAccountLedgerEntryAction(formData: FormData) {

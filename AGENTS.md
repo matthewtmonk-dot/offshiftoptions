@@ -61,6 +61,7 @@ Schwab market data is shared application infrastructure, but brokerage account d
 - Keep financial calculations isolated in `src/domain/finance` and covered by deterministic tests.
 - Account/trading performance must be derived from the append-only ledger (`AccountLedgerEntry`), never from `currentBalance − startingBalance` — a deposit or withdrawal must never be mistaken for trading profit or loss. See `PROJECT_HANDOFF.md` Account Ledger section.
 - A scanner criterion's default `enabled` state must come from `SCANNER_RULE_DEFINITIONS[...].defaultEnabled`, not left to the database column default — this bit us once in `prisma/seed.ts` (every rule silently defaulted to enabled).
+- Brokerage import/reconciliation: never use a filename or CSV row number as economic identity — use `BrokerRecord.fingerprint` (the economic fact) and `identityKey` (the same real-world slot, without financial fields) instead. A same-identity-different-fingerprint match is a `CONFLICT`, never a silent overwrite. CampaignEvents remain the sole trading-performance source of truth even for a Campaign created from reconciled broker evidence — a Realized Gain/Loss import may only *verify* a Campaign's result, never add to it.
 - Keep scanner logic in `src/domain/scanner` with PASS/FAIL/UNKNOWN per criterion.
 - Enforce privacy server-side with `src/lib/privacy.ts`; never rely only on React hiding.
 - Treat Phase 1 financial values as DEMO or MANUAL.

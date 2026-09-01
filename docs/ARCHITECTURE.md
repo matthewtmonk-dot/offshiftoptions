@@ -1,18 +1,18 @@
-# LST Buddy Architecture
+# Off Shift Options Architecture
 
-LST Buddy is a local-first Progressive Web App built with Next.js App Router, strict TypeScript, Prisma 7, PostgreSQL, Tailwind CSS, and Vitest.
+Off Shift Options is a private Progressive Web App built with Next.js App Router, strict TypeScript, Prisma 7, PostgreSQL, Tailwind CSS, and Vitest.
 
-Phase 1 is intentionally demo/manual:
+The app remains intentionally low-risk:
 
-- No Schwab credentials are required.
-- No live option chain is presented.
+- Manual/demo workflows keep working without Schwab credentials.
+- Read-only Schwab OAuth, market data, account sync, and CSV normalization are implemented; Schwab credentials stay server-side/encrypted.
 - No trade placement, order submission, replacement, or cancellation exists.
 - Authentication, privacy checks, scanner rules, watchlists, chat, recommendations, notifications, and CSP position math are implemented server-side where relevant.
 
 ## Runtime Shape
 
 - Next.js server components render authenticated pages.
-- Server actions mutate watchlists, recommendations, reactions, chat messages, and notifications.
+- Server actions mutate watchlists, recommendations, reactions, chat messages, notifications, account ledger entries, and per-user Schwab developer credential records.
 - Cookie-backed sessions are stored in the database as HMAC-hashed opaque tokens.
 - Prisma uses `@prisma/adapter-pg` with `pg` for PostgreSQL connectivity.
 - Docker Compose starts PostgreSQL, applies migrations, seeds demo data, and starts Next.js.
@@ -26,19 +26,20 @@ Phase 1 is intentionally demo/manual:
 - `src/lib/tickers.ts` contains server-side ticker validation shared by workflows and forms.
 - `src/lib/workflows.ts` contains the actual mutation/authorization/notification logic for every server action; it is unit- and integration-tested independent of Next.js.
 - `src/providers/*` contains read-only market and broker provider contracts.
-- `src/providers/schwab` is a placeholder and must not grow trading methods.
+- `src/providers/schwab` contains read-only Schwab OAuth/token, market-data, broker-read, per-user developer-credential, and CSV normalization code. It must not grow trading/order-entry methods.
 
 ## Data Flow
 
-1. Seed script creates Matt, Eric, demo CSP positions, scanner runs, watchlists, chat, recommendations, notifications, and reactions.
+1. Seed script creates Matt, Eric, demo CSP positions, scanner runs, watchlists, chat, recommendations, notifications, and reactions for local development only.
 2. Authenticated pages call server-side data loaders in `src/lib/app-data.ts`.
 3. Server actions in `src/app/(app)/actions.ts` parse `FormData` and delegate to `src/lib/workflows.ts`, which performs authorization, validation, and mutation.
 4. Notifications are written through `NotificationDeliveryProvider` implementations.
+5. Schwab OAuth and credential operations stay server-side; browser forms submit secrets only to authenticated Server Actions over HTTPS and never store/display them again.
 
 ## Testing
 
 - `src/**/*.test.ts` — Vitest unit tests, always run by `pnpm test`.
-- `src/lib/workflows.integration.test.ts` — opt-in Vitest tests against a live PostgreSQL database, gated by `RUN_DB_TESTS=1` and `DATABASE_URL` (skipped otherwise). Vitest aliases the `server-only` package to a no-op stub (`test/stubs/server-only.ts`) since that guard only works inside Next.js's bundler.
+- `src/lib/*.integration.test.ts` — opt-in Vitest tests against a live PostgreSQL database, gated by `RUN_DB_TESTS=1` and `DATABASE_URL` (skipped otherwise). Vitest aliases the `server-only` package to a no-op stub (`test/stubs/server-only.ts`) since that guard only works inside Next.js's bundler.
 - `tests/e2e/*.spec.ts` — Playwright smoke tests (`pnpm test:e2e`) against a running app instance, covering login, private/shared data isolation, recommendation delivery, per-user scanner settings, and mobile layout.
 
 ## Local Operations

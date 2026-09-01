@@ -2,6 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireCurrentUser } from "@/lib/auth";
 import { exchangeSchwabAuthorizationCode, saveSchwabTokensForUser } from "@/providers/schwab/tokens";
 import { SCHWAB_OAUTH_STATE_COOKIE, verifySchwabOAuthState } from "@/providers/schwab/oauth-state";
+import {
+  markSchwabDeveloperCredentialInvalid,
+  markSchwabDeveloperCredentialValidated,
+  resolveSchwabOAuthConfigForUser,
+} from "@/providers/schwab/developer-credentials";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -28,9 +33,17 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const tokens = await exchangeSchwabAuthorizationCode(code);
-    await saveSchwabTokensForUser(user.id, tokens);
+    const oauthConfig = await resolveSchwabOAuthConfigForUser(user.id, {
+      developerCredentialId: storedState.developerCredentialId ?? null,
+      allowServerEnvFallback: !storedState.developerCredentialId,
+    });
+    const tokens = await exchangeSchwabAuthorizationCode(code, fetch, oauthConfig);
+    await saveSchwabTokensForUser(user.id, tokens, fetch, {
+      developerCredentialId: oauthConfig.developerCredentialId,
+    });
+    await markSchwabDeveloperCredentialValidated(user.id, oauthConfig.developerCredentialId);
   } catch {
+    await markSchwabDeveloperCredentialInvalid(user.id, storedState.developerCredentialId ?? null, "token_exchange_failed");
     return redirectAndClearState(request, "/account?schwab=token_error");
   }
 

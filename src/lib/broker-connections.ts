@@ -1,12 +1,15 @@
 import "server-only";
 
+import type { MarketDataProvider } from "@/providers/market-data/types";
+import { withMarketDataCache } from "@/providers/market-data/cache";
 import { SchwabBrokerReadProvider } from "@/providers/schwab/broker-read";
 import { SchwabMarketDataProvider } from "@/providers/schwab/market-data";
 import {
   accountNumbersFromMetadata,
-  findSchwabMarketDataConnection,
+  findSchwabMarketDataConnectionForUser,
   getValidSchwabAccessTokenForConnection,
 } from "@/providers/schwab/tokens";
+import { getUserSchwabDeveloperCredentialSummary } from "@/providers/schwab/developer-credentials";
 import { prisma } from "./prisma";
 
 export type SchwabConnectionSummary = {
@@ -27,6 +30,36 @@ export type SchwabConnectionSummary = {
   lastAccountSyncFailureReason: string | null;
 };
 
+export type ResolvedMarketDataProvider =
+  | {
+      provider: MarketDataProvider;
+      source: "USER_SCHWAB";
+      label: string;
+      connectionId: string;
+      usesUserDeveloperApp: boolean;
+    }
+  | {
+      provider: null;
+      source: "UNAVAILABLE";
+      label: string;
+      reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE";
+      sharedFallback: "DISABLED_POLICY_NOT_VERIFIED";
+    };
+
+export type ResolvedPersonalBrokerProvider =
+  | {
+      provider: SchwabBrokerReadProvider;
+      source: "USER_SCHWAB";
+      label: string;
+      connectionId: string;
+    }
+  | {
+      provider: null;
+      source: "UNAVAILABLE";
+      label: string;
+      reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE";
+    };
+
 export async function getSchwabConnectionSummaryForUser(userId: string): Promise<SchwabConnectionSummary | null> {
   const connection = await prisma.brokerConnection.findFirst({
     where: { userId, provider: "SCHWAB" },
@@ -34,6 +67,10 @@ export async function getSchwabConnectionSummaryForUser(userId: string): Promise
   });
 
   return connection ? summarizeSchwabConnection(connection) : null;
+}
+
+export async function getSchwabDeveloperCredentialSummaryForUser(userId: string) {
+  return getUserSchwabDeveloperCredentialSummary(userId);
 }
 
 export async function disconnectSchwabForUser(userId: string) {
@@ -61,34 +98,86 @@ export async function disconnectSchwabForUser(userId: string) {
   });
 }
 
-export async function getSchwabMarketDataProvider() {
-  const connection = await findSchwabMarketDataConnection();
+export async function resolveMarketDataProviderForUser(userId: string): Promise<ResolvedMarketDataProvider> {
+  const connection = await findSchwabMarketDataConnectionForUser(userId);
   if (!connection) {
-    return null;
+    return {
+      provider: null,
+      source: "UNAVAILABLE",
+      label: "No Schwab market-data connection",
+      reason: "NO_USER_CONNECTION",
+      sharedFallback: "DISABLED_POLICY_NOT_VERIFIED",
+    };
   }
 
-  const accessToken = await getValidSchwabAccessTokenForConnection(connection.id);
-  return accessToken ? new SchwabMarketDataProvider({ accessToken }) : null;
+  const accessToken = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: userId });
+  if (!accessToken) {
+    return {
+      provider: null,
+      source: "UNAVAILABLE",
+      label: "Schwab token unavailable",
+      reason: "TOKEN_UNAVAILABLE",
+      sharedFallback: "DISABLED_POLICY_NOT_VERIFIED",
+    };
+  }
+
+  return {
+    provider: withMarketDataCache(
+      new SchwabMarketDataProvider({ accessToken }),
+      `schwab:user:${userId}:connection:${connection.id}`,
+    ),
+    source: "USER_SCHWAB",
+    label: connection.developerCredentialId ? "User Schwab developer app" : "User Schwab OAuth via OSO app",
+    connectionId: connection.id,
+    usesUserDeveloperApp: Boolean(connection.developerCredentialId),
+  };
 }
 
-export async function getSchwabBrokerReadProviderForUser(userId: string) {
+export async function getSchwabMarketDataProviderForUser(userId: string) {
+  return (await resolveMarketDataProviderForUser(userId)).provider;
+}
+
+export async function getSchwabMarketDataProvider(userId: string) {
+  return getSchwabMarketDataProviderForUser(userId);
+}
+
+export async function resolvePersonalBrokerProviderForUser(userId: string): Promise<ResolvedPersonalBrokerProvider> {
   const connection = await prisma.brokerConnection.findFirst({
     where: { userId, provider: "SCHWAB", status: "CONNECTED" },
     orderBy: { updatedAt: "desc" },
   });
   if (!connection) {
-    return null;
+    return {
+      provider: null,
+      source: "UNAVAILABLE",
+      label: "No Schwab broker connection",
+      reason: "NO_USER_CONNECTION",
+    };
   }
 
   const accessToken = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: userId });
   if (!accessToken) {
-    return null;
+    return {
+      provider: null,
+      source: "UNAVAILABLE",
+      label: "Schwab token unavailable",
+      reason: "TOKEN_UNAVAILABLE",
+    };
   }
 
-  return new SchwabBrokerReadProvider({
-    accessToken,
-    accountNumbers: accountNumbersFromMetadata(connection.metadata),
-  });
+  return {
+    provider: new SchwabBrokerReadProvider({
+      accessToken,
+      accountNumbers: accountNumbersFromMetadata(connection.metadata),
+    }),
+    source: "USER_SCHWAB",
+    label: "User Schwab brokerage authorization",
+    connectionId: connection.id,
+  };
+}
+
+export async function getSchwabBrokerReadProviderForUser(userId: string) {
+  return (await resolvePersonalBrokerProviderForUser(userId)).provider;
 }
 
 function summarizeSchwabConnection(connection: {

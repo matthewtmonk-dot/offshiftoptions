@@ -24,12 +24,23 @@ import { getTrackerPageData, normalizeTrackerScope, type TrackerScope } from "@/
 import { money, percent, shortDate, toNumber } from "@/lib/format";
 import { resolveInheritedVisibility } from "@/lib/privacy";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
+import { getPendingBrokerImportBatchForUser, getBrokerImportBatchesForUser, type BrokerImportPreviewRow } from "@/lib/broker-import";
+import {
+  getBrokerActivityAwaitingReviewForUser,
+  splitBrokerPositionsByCampaignLink,
+  type BrokerActivityAwaitingReview,
+} from "@/lib/broker-reconciliation";
 import {
   assignCampaignPutAction,
   closeCampaignPutAction,
+  confirmBrokerReconciliationAction,
+  confirmSchwabImportAction,
   createCampaignAction,
   createTradingAccountAction,
+  discardSchwabImportAction,
+  previewSchwabImportAction,
   rollCampaignPutAction,
+  skipBrokerReconciliationAction,
   toggleCampaignVisibilityAction,
   toggleTradingAccountVisibilityAction,
 } from "../actions";
@@ -55,10 +66,16 @@ export default async function PositionsPage({
   const scope = normalizeTrackerScope(firstParam(query.scope));
   const view = parseViewMode(firstParam(query.view));
   const error = firstParam(query.error);
-  const [data, schwabPositions] = await Promise.all([
+  const previewBatchId = firstParam(query.previewBatch);
+  const [data, schwabPositions, brokerActivityAwaitingReview, importBatches, pendingImport] = await Promise.all([
     getTrackerPageData(user.id, scope),
     getSchwabOpenPositionsForUser(user.id),
+    getBrokerActivityAwaitingReviewForUser(user.id),
+    getBrokerImportBatchesForUser(user.id),
+    previewBatchId ? getPendingBrokerImportBatchForUser(user.id, previewBatchId) : Promise.resolve(null),
   ]);
+  const { linked: linkedSchwabPositions } = await splitBrokerPositionsByCampaignLink(user.id, schwabPositions ?? []);
+  const linkedSchwabSymbols = new Set(linkedSchwabPositions.map((position) => position.symbol));
   const buddyName = data.users[0]?.name ?? "Buddy";
   const rows = data.campaigns.map((campaign) => ({
     campaign,
@@ -192,7 +209,11 @@ export default async function PositionsPage({
             </section>
           )}
 
-          <SchwabPositionsPanel positions={schwabPositions} openCampaignTickers={openCampaignTickers} />
+          <SchwabPositionsPanel
+            positions={schwabPositions}
+            openCampaignTickers={openCampaignTickers}
+            linkedSymbols={linkedSchwabSymbols}
+          />
 
           <div className="space-y-3">
             {openRows.map((row) => (
@@ -230,12 +251,26 @@ export default async function PositionsPage({
       ) : null}
 
       {view === "accounts" ? (
-        <AccountsSection
-          accounts={data.visibleAccounts}
-          currentUserId={user.id}
-          buddyName={buddyName}
-          realizedByAccount={realizedByAccount}
-        />
+        <div className="space-y-4">
+          <AccountsSection
+            accounts={data.visibleAccounts}
+            currentUserId={user.id}
+            buddyName={buddyName}
+            realizedByAccount={realizedByAccount}
+          />
+          <ImportStatusMessage
+            imported={firstParam(query.imported)}
+            discarded={firstParam(query.discarded)}
+            linked={firstParam(query.linked)}
+            skipped={firstParam(query.skipped)}
+          />
+          {pendingImport ? (
+            <SchwabImportPreviewPanel batchId={previewBatchId!} batch={pendingImport.batch} rows={pendingImport.rows} />
+          ) : (
+            <SchwabImportPanel accounts={data.ownAccounts} recentBatches={importBatches} />
+          )}
+          <BrokerActivityAwaitingReviewPanel items={brokerActivityAwaitingReview} accounts={data.ownAccounts} buddyName={buddyName} />
+        </div>
       ) : null}
     </div>
   );
@@ -643,9 +678,11 @@ function AccountsSection({
 function SchwabPositionsPanel({
   positions,
   openCampaignTickers,
+  linkedSymbols,
 }: {
   positions: SchwabPositions;
   openCampaignTickers: Set<string>;
+  linkedSymbols: Set<string>;
 }) {
   if (positions === null) {
     return null;
@@ -669,7 +706,8 @@ function SchwabPositionsPanel({
           {positions.map((position) => {
             const classified = classifyBrokerPosition(position);
             const display = describeBrokerPositionForDisplay(position);
-            const isMatch = openCampaignTickers.has(classified.underlying.toUpperCase());
+            const isLinked = linkedSymbols.has(position.symbol);
+            const isMatch = !isLinked && openCampaignTickers.has(classified.underlying.toUpperCase());
             return (
               <div
                 key={`${position.accountId}-${position.symbol}`}
@@ -685,7 +723,9 @@ function SchwabPositionsPanel({
                   <span className="text-zinc-400">
                     {display.quantityLabel} · Market value: {money(position.marketValue)}
                   </span>
-                  <Badge tone={isMatch ? "info" : "neutral"}>{isMatch ? "Possible match" : "Unlinked"}</Badge>
+                  <Badge tone={isLinked ? "good" : isMatch ? "info" : "neutral"}>
+                    {isLinked ? "Linked to Campaign" : isMatch ? "Possible match" : "Unlinked"}
+                  </Badge>
                 </div>
               </div>
             );
@@ -694,9 +734,301 @@ function SchwabPositionsPanel({
       )}
       <p className="mt-2 text-xs text-zinc-500">
         Broker positions as Schwab reports them. &quot;Possible match&quot; means an open campaign shares the
-        same underlying ticker - it is not an automatic link. Reconciling broker fills to specific campaigns is
-        future work; an OSO campaign and a Schwab position for the same real-world trade currently count as two
-        separate open positions on the Dashboard until that reconciliation exists.
+        same underlying ticker - it is not an automatic link. &quot;Linked to Campaign&quot; means you confirmed
+        this position under Accounts -&gt; Broker Activity Awaiting Review; a linked position is counted once
+        (via its Campaign), not twice, on the Dashboard. Unlinked positions still count separately until reviewed.
+      </p>
+    </div>
+  );
+}
+
+function ImportStatusMessage({
+  imported,
+  discarded,
+  linked,
+  skipped,
+}: {
+  imported?: string;
+  discarded?: string;
+  linked?: string;
+  skipped?: string;
+}) {
+  if (imported) {
+    return (
+      <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
+        Import confirmed. New records were added to your account; duplicates and unchanged snapshots were skipped.
+      </div>
+    );
+  }
+  if (discarded) {
+    return <div className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300">Import discarded. Nothing was saved.</div>;
+  }
+  if (linked) {
+    return (
+      <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
+        Linked. That broker position now maps to a Campaign and will count once on the Dashboard.
+      </div>
+    );
+  }
+  if (skipped) {
+    return <div className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300">Skipped. You can revisit this later.</div>;
+  }
+  return null;
+}
+
+function SchwabImportPanel({
+  accounts,
+  recentBatches,
+}: {
+  accounts: TrackerData["ownAccounts"];
+  recentBatches: Awaited<ReturnType<typeof getBrokerImportBatchesForUser>>;
+}) {
+  return (
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+        <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+          <ShieldCheck className="size-4 text-sky-300" aria-hidden />
+          Import Schwab Data
+        </span>
+        <ChevronDown className="size-4 text-zinc-500 transition group-open:rotate-180" aria-hidden />
+      </summary>
+      <div className="mt-4 space-y-4 border-t border-zinc-800 pt-4">
+        <p className="text-sm text-zinc-400">
+          Upload a Schwab Positions, Transactions, or Realized Gain/Loss CSV export. You will see exactly what will
+          change before anything is saved - selecting a file never immediately alters your history.
+        </p>
+        <form action={previewSchwabImportAction} className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end" encType="multipart/form-data">
+          <div className="space-y-2">
+            <FieldLabel>Account (optional)</FieldLabel>
+            <select name="accountId" className={inputClass} defaultValue="">
+              <option value="">Not linked to one account</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-2">
+            <FieldLabel>CSV file</FieldLabel>
+            <input type="file" name="file" accept=".csv,text/csv" required className={inputClass} />
+          </div>
+          <button type="submit" className={primaryButtonClass}>
+            <Plus className="size-4" aria-hidden />
+            Preview Import
+          </button>
+        </form>
+        {recentBatches.length > 0 ? (
+          <div>
+            <div className="mb-2 text-xs font-semibold uppercase tracking-normal text-zinc-500">Recent imports</div>
+            <div className="space-y-1">
+              {recentBatches.map((batch) => (
+                <div key={batch.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-zinc-900/60 px-3 py-2 text-xs text-zinc-400">
+                  <span className="truncate">{batch.safeOriginalFilename}</span>
+                  <span className="flex items-center gap-2">
+                    <Badge tone={batch.status === "CONFIRMED" ? "good" : batch.status === "DISCARDED" ? "neutral" : "warn"}>
+                      {batch.status}
+                    </Badge>
+                    <span>
+                      {batch.newCount} new · {batch.duplicateCount} dup · {batch.conflictCount} conflict · {batch.reviewCount} review ·{" "}
+                      {batch.invalidCount} invalid
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+const CLASSIFICATION_TONE: Record<BrokerImportPreviewRow["classification"], "good" | "neutral" | "warn" | "bad" | "info"> = {
+  NEW: "good",
+  DUPLICATE: "neutral",
+  CONFLICT: "bad",
+  NEEDS_REVIEW: "warn",
+  INVALID: "bad",
+};
+
+function SchwabImportPreviewPanel({
+  batchId,
+  batch,
+  rows,
+}: {
+  batchId: string;
+  batch: { exportType: string; safeOriginalFilename: string; rowCount: number; newCount: number; duplicateCount: number; conflictCount: number; reviewCount: number; invalidCount: number };
+  rows: BrokerImportPreviewRow[];
+}) {
+  return (
+    <div className="rounded-lg border border-emerald-400/30 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-normal text-zinc-200">
+          Preview: {batch.safeOriginalFilename} ({batch.exportType})
+        </h2>
+        <div className="flex gap-2">
+          <form action={confirmSchwabImportAction}>
+            <input type="hidden" name="batchId" value={batchId} />
+            <button type="submit" className={primaryButtonClass}>
+              Confirm Import
+            </button>
+          </form>
+          <form action={discardSchwabImportAction}>
+            <input type="hidden" name="batchId" value={batchId} />
+            <button type="submit" className={tinyButtonClass}>
+              Discard
+            </button>
+          </form>
+        </div>
+      </div>
+      <dl className="mb-3 grid grid-cols-3 gap-3 text-sm sm:grid-cols-5">
+        <ResultItem label="New" value={batch.newCount} tone={batch.newCount > 0 ? 1 : null} />
+        <ResultItem label="Duplicate" value={batch.duplicateCount} />
+        <ResultItem label="Conflict" value={batch.conflictCount} tone={batch.conflictCount > 0 ? -1 : null} />
+        <ResultItem label="Needs review" value={batch.reviewCount} />
+        <ResultItem label="Invalid" value={batch.invalidCount} tone={batch.invalidCount > 0 ? -1 : null} />
+      </dl>
+      <div className="max-h-96 space-y-1 overflow-y-auto">
+        {rows.map((row, index) => (
+          <div key={index} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-zinc-900/60 px-3 py-2 text-xs">
+            <span className="text-zinc-300">
+              {row.symbol ?? row.action ?? "Cash activity"} {row.occurredAt ? `· ${shortDate(row.occurredAt)}` : ""}
+              {row.amount !== null ? ` · ${money(row.amount)}` : ""}
+            </span>
+            <span className="flex items-center gap-2">
+              {row.reason ? <span className="text-zinc-500">{row.reason}</span> : null}
+              <Badge tone={CLASSIFICATION_TONE[row.classification]}>{row.classification}</Badge>
+            </span>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        Nothing has been saved yet. Confirm to persist NEW/CONFLICT/NEEDS REVIEW rows; DUPLICATE and INVALID rows
+        are never stored.
+      </p>
+    </div>
+  );
+}
+
+function BrokerActivityAwaitingReviewPanel({
+  items,
+  accounts,
+  buddyName,
+}: {
+  items: BrokerActivityAwaitingReview[];
+  accounts: TrackerData["ownAccounts"];
+  buddyName: string;
+}) {
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+      <h2 className="mb-3 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <Flag className="size-4 text-amber-300" aria-hidden />
+        Broker Activity Awaiting Review
+      </h2>
+      <div className="space-y-3">
+        {items.map((item) => (
+          <details key={item.brokerRecordId} className="group rounded-lg border border-zinc-800 bg-zinc-900">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3 [&::-webkit-details-marker]:hidden">
+              <div>
+                <div className="font-semibold text-zinc-50">
+                  {item.suggestedTicker}
+                  {item.likelyCsp ? <Badge tone="info">Likely CSP campaign</Badge> : null}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {item.expiration ? shortDate(item.expiration) : "Unknown expiration"}
+                  {item.strike !== null ? ` · $${item.strike.toFixed(2)} ${item.optionType === "PUT" ? "Put" : "Call"}` : ""} · Current
+                  position: {item.quantity} · Transactions found: {item.transactionEvidenceCount}
+                </div>
+              </div>
+              <ChevronDown className="size-4 text-zinc-500 transition group-open:rotate-180" aria-hidden />
+            </summary>
+            <div className="space-y-4 border-t border-zinc-800 p-3">
+              <div>
+                <div className="mb-1 text-xs font-semibold uppercase tracking-normal text-zinc-500">Broker Evidence</div>
+                <p className="text-sm text-zinc-400">
+                  Schwab symbol {item.symbol} - current position {item.quantity}, {item.transactionEvidenceCount} matching
+                  transaction record{item.transactionEvidenceCount === 1 ? "" : "s"} found.
+                </p>
+              </div>
+              <div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-normal text-zinc-500">Proposed OSO Campaign</div>
+                {accounts.length === 0 ? (
+                  <EmptyState>Add an account first, then you can confirm this as a campaign.</EmptyState>
+                ) : (
+                  <form action={confirmBrokerReconciliationAction} className="grid gap-3 sm:grid-cols-3">
+                    <input type="hidden" name="brokerRecordId" value={item.brokerRecordId} />
+                    <div className="space-y-2">
+                      <FieldLabel>Account</FieldLabel>
+                      <select name="accountId" required className={inputClass} defaultValue={accounts[0]?.id}>
+                        {accounts.map((account) => (
+                          <option key={account.id} value={account.id}>
+                            {account.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Ticker</FieldLabel>
+                      <input name="ticker" defaultValue={item.suggestedTicker} required className={inputClass} />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Trade date</FieldLabel>
+                      <input name="tradeDate" type="date" defaultValue={item.suggestedTradeDate ?? dateInputValue(new Date())} required className={inputClass} />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Expiration</FieldLabel>
+                      <input name="expiration" type="date" defaultValue={item.suggestedExpiration ?? dateInputValue(daysFromNow(21))} required className={inputClass} />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Strike</FieldLabel>
+                      <input name="strike" type="number" step="0.01" min="0.01" defaultValue={item.suggestedStrike ?? undefined} required className={inputClass} />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Contracts</FieldLabel>
+                      <input name="contracts" type="number" step="1" min="1" defaultValue={item.suggestedContracts} required className={inputClass} />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Credit per share</FieldLabel>
+                      <input name="premium" type="number" step="0.0001" min="0" defaultValue={item.suggestedPremium ?? undefined} required className={inputClass} />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Fees</FieldLabel>
+                      <input name="fees" type="number" step="0.01" min="0" defaultValue="0" className={inputClass} />
+                    </div>
+                    <div className="space-y-2">
+                      <FieldLabel>Visibility</FieldLabel>
+                      <select name="visibility" defaultValue="INHERIT" className={inputClass}>
+                        <option value="INHERIT">Follow account</option>
+                        <option value="SHARED">Shared with {buddyName}</option>
+                        <option value="PRIVATE">Private</option>
+                      </select>
+                    </div>
+                    <div className="flex items-end gap-2 sm:col-span-3">
+                      <button type="submit" className={primaryButtonClass}>
+                        Confirm as Campaign
+                      </button>
+                    </div>
+                  </form>
+                )}
+                <form action={skipBrokerReconciliationAction} className="mt-2">
+                  <input type="hidden" name="brokerRecordId" value={item.brokerRecordId} />
+                  <button type="submit" className={tinyButtonClass}>
+                    Skip / Leave unlinked
+                  </button>
+                </form>
+              </div>
+            </div>
+          </details>
+        ))}
+      </div>
+      <p className="mt-3 text-xs text-zinc-500">
+        Nothing here is ever turned into a Campaign automatically. Review the broker evidence, edit the proposed
+        values if needed, then confirm or skip.
       </p>
     </div>
   );

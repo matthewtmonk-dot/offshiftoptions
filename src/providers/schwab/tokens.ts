@@ -8,6 +8,7 @@ import { decryptToken, encryptToken } from "./crypto";
 import { normalizeSchwabAccountNumbers, type SchwabAccountNumber } from "./broker-read";
 import { SCHWAB_TRADER_BASE_URL } from "./config";
 import { schwabGetJson, SchwabApiError, type SchwabFetch } from "./client";
+import { resolveSchwabOAuthConfigForConnection, type ResolvedSchwabOAuthConfig } from "./developer-credentials";
 
 type StoredConnection = {
   id: string;
@@ -17,6 +18,7 @@ type StoredConnection = {
   expiresAt: Date | null;
   scopes: string[];
   metadata: unknown;
+  developerCredentialId?: string | null;
 };
 
 export type SchwabTokenResponse = {
@@ -27,8 +29,12 @@ export type SchwabTokenResponse = {
   scope?: string;
 };
 
-export async function exchangeSchwabAuthorizationCode(code: string, fetchFn: SchwabFetch = fetch) {
-  return requestSchwabToken({ grant_type: "authorization_code", code }, fetchFn);
+export async function exchangeSchwabAuthorizationCode(
+  code: string,
+  fetchFn: SchwabFetch = fetch,
+  oauthConfig?: ResolvedSchwabOAuthConfig,
+) {
+  return requestSchwabToken({ grant_type: "authorization_code", code }, fetchFn, oauthConfig);
 }
 
 export async function refreshSchwabConnectionAccessToken(connectionId: string, fetchFn: SchwabFetch = fetch) {
@@ -42,7 +48,8 @@ export async function refreshSchwabConnectionAccessToken(connectionId: string, f
 
   const refreshToken = decryptToken(connection.refreshTokenCiphertext);
   try {
-    const tokenResponse = await requestSchwabToken({ grant_type: "refresh_token", refresh_token: refreshToken }, fetchFn);
+    const oauthConfig = await resolveSchwabOAuthConfigForConnection(connection);
+    const tokenResponse = await requestSchwabToken({ grant_type: "refresh_token", refresh_token: refreshToken }, fetchFn, oauthConfig);
     const refreshTokenCiphertext = tokenResponse.refresh_token
       ? encryptToken(tokenResponse.refresh_token)
       : connection.refreshTokenCiphertext;
@@ -95,9 +102,10 @@ export async function getValidSchwabAccessTokenForConnection(
   return refreshSchwabConnectionAccessToken(connection.id, options.fetchFn);
 }
 
-export async function findSchwabMarketDataConnection() {
+export async function findSchwabMarketDataConnectionForUser(userId: string) {
   return prisma.brokerConnection.findFirst({
     where: {
+      userId,
       provider: "SCHWAB",
       status: "CONNECTED",
       accessTokenCiphertext: { not: null },
@@ -111,6 +119,7 @@ export async function saveSchwabTokensForUser(
   userId: string,
   tokenResponse: SchwabTokenResponse,
   fetchFn: SchwabFetch = fetch,
+  options: { developerCredentialId?: string | null } = {},
 ) {
   const accessTokenCiphertext = encryptToken(tokenResponse.access_token);
   const refreshTokenCiphertext = tokenResponse.refresh_token ? encryptToken(tokenResponse.refresh_token) : null;
@@ -136,6 +145,7 @@ export async function saveSchwabTokensForUser(
       where: { id: existing.id },
       data: {
         label: "Charles Schwab",
+        developerCredentialId: options.developerCredentialId ?? existing.developerCredentialId,
         status: "CONNECTED",
         accessTokenCiphertext,
         refreshTokenCiphertext: refreshTokenCiphertext ?? existing.refreshTokenCiphertext,
@@ -151,6 +161,7 @@ export async function saveSchwabTokensForUser(
       userId,
       provider: "SCHWAB",
       label: "Charles Schwab",
+      developerCredentialId: options.developerCredentialId ?? null,
       status: "CONNECTED",
       accessTokenCiphertext,
       refreshTokenCiphertext,
@@ -175,8 +186,12 @@ export function tokenExpiresAt(tokenResponse: Pick<SchwabTokenResponse, "expires
   return new Date(now.getTime() + safeSeconds * 1000);
 }
 
-async function requestSchwabToken(params: Record<string, string>, fetchFn: SchwabFetch): Promise<SchwabTokenResponse> {
-  const config = getSchwabOAuthConfig();
+async function requestSchwabToken(
+  params: Record<string, string>,
+  fetchFn: SchwabFetch,
+  oauthConfig?: ResolvedSchwabOAuthConfig,
+): Promise<SchwabTokenResponse> {
+  const config = oauthConfig?.config ?? getSchwabOAuthConfig();
   const body = new URLSearchParams(params);
   if (params.grant_type === "authorization_code") {
     body.set("redirect_uri", config.redirectUri);

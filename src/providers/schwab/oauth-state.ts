@@ -9,15 +9,22 @@ export type SchwabOAuthStatePayload = {
   state: string;
   userId: string;
   returnTo: string;
+  developerCredentialId?: string | null;
   issuedAt: number;
   expiresAt: number;
 };
 
-export function createSchwabOAuthState(userId: string, returnTo = "/account", now = Date.now()) {
+export function createSchwabOAuthState(
+  userId: string,
+  returnTo = "/account",
+  now = Date.now(),
+  developerCredentialId?: string | null,
+) {
   const payload: SchwabOAuthStatePayload = {
     state: randomBytes(32).toString("base64url"),
     userId,
     returnTo,
+    developerCredentialId: developerCredentialId ?? null,
     issuedAt: now,
     expiresAt: now + STATE_MAX_AGE_MS,
   };
@@ -66,6 +73,9 @@ function parsePayload(unsigned: string): SchwabOAuthStatePayload | null {
       typeof parsed.state === "string" &&
       typeof parsed.userId === "string" &&
       typeof parsed.returnTo === "string" &&
+      (typeof parsed.developerCredentialId === "string" ||
+        parsed.developerCredentialId === null ||
+        parsed.developerCredentialId === undefined) &&
       typeof parsed.issuedAt === "number" &&
       typeof parsed.expiresAt === "number"
     ) {
