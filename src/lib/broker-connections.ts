@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { BrokerReadProvider } from "@/providers/broker-read/types";
+import { clearBrokerReadCacheForUser, withBrokerReadCache } from "@/providers/broker-read/cache";
 import type { MarketDataProvider } from "@/providers/market-data/types";
 import { withMarketDataCache } from "@/providers/market-data/cache";
 import { SchwabBrokerReadProvider } from "@/providers/schwab/broker-read";
@@ -48,7 +50,7 @@ export type ResolvedMarketDataProvider =
 
 export type ResolvedPersonalBrokerProvider =
   | {
-      provider: SchwabBrokerReadProvider;
+      provider: BrokerReadProvider;
       source: "USER_SCHWAB";
       label: string;
       connectionId: string;
@@ -74,6 +76,8 @@ export async function getSchwabDeveloperCredentialSummaryForUser(userId: string)
 }
 
 export async function disconnectSchwabForUser(userId: string) {
+  clearSchwabBrokerReadCacheForUser(userId);
+
   const connection = await prisma.brokerConnection.findFirst({
     where: { userId, provider: "SCHWAB" },
     orderBy: { updatedAt: "desc" },
@@ -141,7 +145,14 @@ export async function getSchwabMarketDataProvider(userId: string) {
   return getSchwabMarketDataProviderForUser(userId);
 }
 
-export async function resolvePersonalBrokerProviderForUser(userId: string): Promise<ResolvedPersonalBrokerProvider> {
+type ResolvePersonalBrokerProviderOptions = {
+  bypassCache?: boolean;
+};
+
+export async function resolvePersonalBrokerProviderForUser(
+  userId: string,
+  options: ResolvePersonalBrokerProviderOptions = {},
+): Promise<ResolvedPersonalBrokerProvider> {
   const connection = await prisma.brokerConnection.findFirst({
     where: { userId, provider: "SCHWAB", status: "CONNECTED" },
     orderBy: { updatedAt: "desc" },
@@ -165,19 +176,30 @@ export async function resolvePersonalBrokerProviderForUser(userId: string): Prom
     };
   }
 
+  const provider = new SchwabBrokerReadProvider({
+    accessToken,
+    accountNumbers: accountNumbersFromMetadata(connection.metadata),
+  });
+  const providerKey = schwabBrokerReadCacheKey(userId, connection.id);
+
   return {
-    provider: new SchwabBrokerReadProvider({
-      accessToken,
-      accountNumbers: accountNumbersFromMetadata(connection.metadata),
-    }),
+    provider: options.bypassCache ? provider : withBrokerReadCache(provider, providerKey),
     source: "USER_SCHWAB",
     label: "User Schwab brokerage authorization",
     connectionId: connection.id,
   };
 }
 
-export async function getSchwabBrokerReadProviderForUser(userId: string) {
-  return (await resolvePersonalBrokerProviderForUser(userId)).provider;
+export async function getSchwabBrokerReadProviderForUser(userId: string, options: ResolvePersonalBrokerProviderOptions = {}) {
+  return (await resolvePersonalBrokerProviderForUser(userId, options)).provider;
+}
+
+export function clearSchwabBrokerReadCacheForUser(userId: string) {
+  clearBrokerReadCacheForUser(userId);
+}
+
+function schwabBrokerReadCacheKey(userId: string, connectionId: string) {
+  return `schwab:user:${userId}:connection:${connectionId}`;
 }
 
 function summarizeSchwabConnection(connection: {

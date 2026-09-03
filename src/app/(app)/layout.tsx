@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   Bell,
   ChartNoAxesCombined,
@@ -15,6 +14,7 @@ import {
 } from "lucide-react";
 import { Initials } from "@/components/ui";
 import { AppearanceControl } from "@/components/appearance-control";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { requireCurrentUser } from "@/lib/auth";
 import { getUnreadNotificationCount } from "@/lib/app-data";
 import { signOutAction } from "./actions";
@@ -51,10 +51,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             {navItems.map((item) => {
               const Icon = item.icon;
               return (
-                <Link
+                <IntentPrefetchLink
                   key={item.href}
                   href={item.href}
-                  prefetch={false}
                   className="flex min-h-11 items-center gap-3 rounded-md px-3 text-sm text-zinc-300 transition hover:bg-zinc-900 hover:text-zinc-50"
                 >
                   <Icon className="size-4" aria-hidden />
@@ -64,7 +63,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                       {unread}
                     </span>
                   ) : null}
-                </Link>
+                </IntentPrefetchLink>
               );
             })}
           </nav>
@@ -107,15 +106,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               {navItems.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <Link
+                  <IntentPrefetchLink
                     key={item.href}
                     href={item.href}
-                    prefetch={false}
                     className="flex min-h-12 flex-col items-center justify-center gap-1 rounded-md bg-zinc-900 text-[11px] text-zinc-300"
                   >
                     <Icon className="size-4" aria-hidden />
                     {item.label}
-                  </Link>
+                  </IntentPrefetchLink>
                 );
               })}
             </nav>

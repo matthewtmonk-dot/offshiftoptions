@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 
 type TrackerScope = "mine" | "buddy" | "both";
 type ViewMode = "open" | "history" | "performance" | "accounts";
@@ -23,10 +23,9 @@ export function TrackerTabs({ scope, view }: { scope: TrackerScope; view: ViewMo
         const active = activeView === mode;
         const pending = active && view !== mode;
         return (
-          <Link
+          <IntentPrefetchLink
             key={mode}
             href={trackerHref(scope, mode)}
-            prefetch={false}
             aria-current={active ? "page" : undefined}
             aria-busy={pending ? true : undefined}
             onClick={() => setSelection({ serverView: view, clientView: mode })}
@@ -34,7 +33,7 @@ export function TrackerTabs({ scope, view }: { scope: TrackerScope; view: ViewMo
           >
             {label}
             {pending ? <span className="ml-1.5 size-1.5 animate-pulse rounded-full bg-current" aria-hidden /> : null}
-          </Link>
+          </IntentPrefetchLink>
         );
       })}
     </div>

@@ -20,6 +20,7 @@ import {
   saveSchwabDeveloperCredentialForUser,
 } from "@/providers/schwab/developer-credentials";
 import {
+  clearSchwabBrokerReadCacheForUser,
   getSchwabBrokerReadProviderForUser,
   getSchwabMarketDataProviderForUser,
   recordSchwabAccountSyncResult,
@@ -142,7 +143,8 @@ export type SchwabAccountSyncResult = {
  * value Schwab did not return, and never touches another user's accounts or tokens.
  */
 export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAccountSyncResult> {
-  const provider = await getSchwabBrokerReadProviderForUser(userId);
+  clearSchwabBrokerReadCacheForUser(userId);
+  const provider = await getSchwabBrokerReadProviderForUser(userId, { bypassCache: true });
   if (!provider) {
     throw new ValidationError("Connect Schwab in Account settings before syncing.");
   }
@@ -195,11 +197,12 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
   }
 
   await recordSchwabAccountSyncResult(userId, { succeededAt: syncedAt });
+  clearSchwabBrokerReadCacheForUser(userId);
   return { syncedAccounts: accounts.length, accounts };
 }
 
-export async function getSchwabOpenPositionsForUser(userId: string) {
-  const provider = await getSchwabBrokerReadProviderForUser(userId);
+export async function getSchwabOpenPositionsForUser(userId: string, options: { bypassCache?: boolean } = {}) {
+  const provider = await getSchwabBrokerReadProviderForUser(userId, options);
   if (!provider) {
     return null;
   }

@@ -49,18 +49,11 @@ export async function getBrokerActivityAwaitingReviewForUser(userId: string): Pr
   }
 
   const openPositions = [...latestBySymbol.values()].filter((position) => Number(position.quantity ?? 0) !== 0);
+  const evidenceByPositionId = await loadBrokerTransactionEvidenceForPositions(userId, openPositions);
   const results: BrokerActivityAwaitingReview[] = [];
 
   for (const position of openPositions) {
-    const [transactionEvidenceCount, openingTransaction] = await Promise.all([
-      prisma.brokerRecord.count({
-        where: { userId, provider: "SCHWAB", kind: "TRANSACTION", symbol: position.symbol ?? undefined },
-      }),
-      prisma.brokerRecord.findFirst({
-        where: { userId, provider: "SCHWAB", kind: "TRANSACTION", symbol: position.symbol ?? undefined, action: "Sell to Open" },
-        orderBy: { occurredAt: "asc" },
-      }),
-    ]);
+    const evidence = evidenceByPositionId.get(position.id) ?? { transactionEvidenceCount: 0, openingTransaction: null };
 
     const classified = classifyBrokerPosition({
       accountId: position.accountId ?? "unknown",
@@ -78,18 +71,83 @@ export async function getBrokerActivityAwaitingReviewForUser(userId: string): Pr
       optionType: classified.optionType,
       strike: classified.strike,
       expiration: classified.expiration?.toISOString() ?? null,
-      transactionEvidenceCount,
+      transactionEvidenceCount: evidence.transactionEvidenceCount,
       likelyCsp: classified.kind === "SHORT_PUT",
       suggestedTicker: position.underlyingSymbol ?? classified.underlying,
       suggestedStrike: classified.strike,
       suggestedExpiration: classified.expiration ? classified.expiration.toISOString().slice(0, 10) : null,
-      suggestedPremium: openingTransaction?.price !== null && openingTransaction?.price !== undefined ? Math.abs(Number(openingTransaction.price)) : null,
-      suggestedTradeDate: openingTransaction?.occurredAt ? openingTransaction.occurredAt.toISOString().slice(0, 10) : null,
+      suggestedPremium:
+        evidence.openingTransaction?.price !== null && evidence.openingTransaction?.price !== undefined
+          ? Math.abs(Number(evidence.openingTransaction.price))
+          : null,
+      suggestedTradeDate: evidence.openingTransaction?.occurredAt
+        ? evidence.openingTransaction.occurredAt.toISOString().slice(0, 10)
+        : null,
       suggestedContracts: Math.abs(Number(position.quantity ?? 0)) || 1,
     });
   }
 
   return results;
+}
+
+type BrokerRecordPosition = Awaited<ReturnType<typeof prisma.brokerRecord.findMany>>[number];
+type BrokerTransactionEvidence = {
+  transactionEvidenceCount: number;
+  openingTransaction: BrokerRecordPosition | null;
+};
+
+async function loadBrokerTransactionEvidenceForPositions(
+  userId: string,
+  positions: BrokerRecordPosition[],
+): Promise<Map<string, BrokerTransactionEvidence>> {
+  const evidenceByPositionId = new Map<string, BrokerTransactionEvidence>();
+  if (positions.length === 0) {
+    return evidenceByPositionId;
+  }
+
+  const symbols = [...new Set(positions.map((position) => position.symbol).filter((symbol): symbol is string => symbol !== null))];
+  const [counts, openingTransactions] =
+    symbols.length === 0
+      ? [[], []]
+      : await Promise.all([
+          prisma.brokerRecord.groupBy({
+            by: ["symbol"],
+            where: { userId, provider: "SCHWAB", kind: "TRANSACTION", symbol: { in: symbols } },
+            _count: { _all: true },
+          }),
+          prisma.brokerRecord.findMany({
+            where: { userId, provider: "SCHWAB", kind: "TRANSACTION", symbol: { in: symbols }, action: "Sell to Open" },
+            orderBy: { occurredAt: "asc" },
+          }),
+        ]);
+  const countBySymbol = new Map(counts.flatMap((row) => (row.symbol === null ? [] : [[row.symbol, row._count._all]])));
+  const openingBySymbol = new Map<string, BrokerRecordPosition>();
+  for (const transaction of openingTransactions) {
+    if (transaction.symbol !== null && !openingBySymbol.has(transaction.symbol)) {
+      openingBySymbol.set(transaction.symbol, transaction);
+    }
+  }
+
+  for (const position of positions) {
+    if (position.symbol !== null) {
+      evidenceByPositionId.set(position.id, {
+        transactionEvidenceCount: countBySymbol.get(position.symbol) ?? 0,
+        openingTransaction: openingBySymbol.get(position.symbol) ?? null,
+      });
+      continue;
+    }
+
+    const [transactionEvidenceCount, openingTransaction] = await Promise.all([
+      prisma.brokerRecord.count({ where: { userId, provider: "SCHWAB", kind: "TRANSACTION" } }),
+      prisma.brokerRecord.findFirst({
+        where: { userId, provider: "SCHWAB", kind: "TRANSACTION", action: "Sell to Open" },
+        orderBy: { occurredAt: "asc" },
+      }),
+    ]);
+    evidenceByPositionId.set(position.id, { transactionEvidenceCount, openingTransaction });
+  }
+
+  return evidenceByPositionId;
 }
 
 /**

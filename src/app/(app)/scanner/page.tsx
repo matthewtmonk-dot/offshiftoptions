@@ -1,5 +1,5 @@
-import Link from "next/link";
 import { RefreshCw, SlidersHorizontal } from "lucide-react";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge } from "@/components/ui";
 import {
   buildExclusionDiagnostics,
@@ -128,15 +128,14 @@ export default async function ScannerPage({
               Run Live Scan
             </button>
           </form>
-          <Link
+          <IntentPrefetchLink
             href="/scanner/settings"
-            prefetch={false}
             title="Scanner Rules"
             aria-label="Scanner Rules"
             className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 px-2.5 text-sm font-medium text-zinc-200 transition hover:border-emerald-400/60 hover:text-emerald-200"
           >
             <SlidersHorizontal className="size-3.5" aria-hidden />
-          </Link>
+          </IntentPrefetchLink>
           <details className="group relative">
             <summary className="flex min-h-9 cursor-pointer list-none items-center gap-1 rounded-md border border-zinc-700 px-2.5 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-50">
               More

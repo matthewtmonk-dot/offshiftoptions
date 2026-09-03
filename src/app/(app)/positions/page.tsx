@@ -1,4 +1,3 @@
-import Link from "next/link";
 import type { ReactNode } from "react";
 import {
   ChevronDown,
@@ -15,6 +14,7 @@ import {
   WalletCards,
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
 import { optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
@@ -148,9 +148,9 @@ export default async function PositionsPage({
         </div>
         <div className="flex flex-wrap gap-2">
           {(["mine", "buddy", "both"] as TrackerScope[]).map((option) => (
-            <Link key={option} href={trackerHref(option, view)} prefetch={false} className={segmentClass(scope === option)}>
+            <IntentPrefetchLink key={option} href={trackerHref(option, view)} className={segmentClass(scope === option)}>
               {option === "mine" ? "Mine" : option === "buddy" ? buddyName : "Both"}
-            </Link>
+            </IntentPrefetchLink>
           ))}
         </div>
       </div>
@@ -656,9 +656,9 @@ function AccountsSection({
             {isOwner ? (
               <p className="mt-3 text-xs text-zinc-500">
                 Log a deposit, withdrawal, or adjustment from{" "}
-                <Link href="/account" prefetch={false} className="text-emerald-300 hover:text-emerald-200">
+                <IntentPrefetchLink href="/account" className="text-emerald-300 hover:text-emerald-200">
                   Account
-                </Link>
+                </IntentPrefetchLink>
                 .
               </p>
             ) : null}
@@ -690,9 +690,9 @@ function SchwabPositionsPanel({
           <ShieldCheck className="size-4 text-sky-300" aria-hidden />
           Your Schwab Positions
         </h2>
-        <Link href="/account" prefetch={false} className="text-xs font-medium text-emerald-300 hover:text-emerald-200">
+        <IntentPrefetchLink href="/account" className="text-xs font-medium text-emerald-300 hover:text-emerald-200">
           Manage connection
-        </Link>
+        </IntentPrefetchLink>
       </div>
       {positions.length === 0 ? (
         <p className="text-sm text-zinc-400">Schwab reports no open positions right now.</p>

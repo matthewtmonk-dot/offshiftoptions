@@ -1,5 +1,6 @@
-import Link from "next/link";
+import { cache, Suspense } from "react";
 import { ThumbsUp } from "lucide-react";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { getDashboardData } from "@/lib/app-data";
 import { money, percent } from "@/lib/format";
@@ -19,15 +20,16 @@ export const dynamic = "force-dynamic";
 const WEEKLY_TARGET_PERCENT = 1;
 const ruleKeyByName = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.name, definition.key]));
 
+const loadDashboardBrokerData = cache(async (userId: string) => {
+  const schwabPositions = await getSchwabOpenPositionsForUser(userId);
+  const { unlinked: brokerPositions } = await splitBrokerPositionsByCampaignLink(userId, schwabPositions ?? []);
+  return { schwabPositions, brokerPositions };
+});
+
 export default async function DashboardPage() {
   const user = await requireCurrentUser();
-  const [data, schwabPositions] = await Promise.all([getDashboardData(user.id), getSchwabOpenPositionsForUser(user.id)]);
+  const data = await getDashboardData(user.id);
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
-  // Positions already reconciled to an open Campaign are represented by that Campaign in
-  // data.openCampaigns - counting the raw broker position too would double count the same
-  // real-world trade. See src/lib/broker-reconciliation.ts.
-  const { unlinked: brokerPositions } = await splitBrokerPositionsByCampaignLink(user.id, schwabPositions ?? []);
-  const brokerCsp = summarizeCspSecuredCapital(brokerPositions);
 
   const completedPLByAccount = new Map<string, number>();
   const completedForPerformance = data.completedCampaigns.map((campaign) => {
@@ -52,22 +54,19 @@ export default async function DashboardPage() {
   const hasAnyAccountValue = accountRows.some((row) => row.current.value !== null);
   const totalCash = accountRows.reduce((sum, row) => sum + (row.ledger.latestBrokerSnapshot?.cash ?? 0), 0);
   const hasAnyCash = accountRows.some((row) => row.ledger.latestBrokerSnapshot);
+  const latestBrokerSnapshotAt = latestSnapshotAt(
+    accountRows.map((row) => row.ledger.latestBrokerSnapshot?.asOf ?? null),
+  );
   const campaignSecuredCapital = data.openCampaigns.reduce((sum, campaign) => {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
     return sum + (summary.collateralCommitted ?? 0);
   }, 0);
-  // Additive, not reconciled: an OSO campaign and a Schwab position are separate records
-  // with no link between them yet (see Tracker's "Possible match" hint). If the same
-  // real-world trade is tracked as both, it is counted twice here until reconciliation
-  // ships - documented in PROJECT_HANDOFF.md as the deliberate, safest-available interim
-  // behavior rather than silently merging or guessing a link.
-  const securedCapital = campaignSecuredCapital + brokerCsp.total;
-  const openPositionsCount = computeOpenPositionsCount(data.openCampaigns.length, brokerPositions);
+  const openCampaignCount = data.openCampaigns.length;
   const winLoss = summarizeWinLoss(completedForPerformance);
   const weekly = summarizeWeeklyReturns(completedForPerformance, hasAnyAccountValue ? totalValue : null, WEEKLY_TARGET_PERCENT);
 
   const hasManualAccountData = accountRows.some((row) => row.ledger.startingValue !== null && !row.ledger.latestBrokerSnapshot);
-  const hasSchwabAccountData = hasAnyCash || brokerPositions.length > 0;
+  const hasSchwabAccountData = accountRows.some((row) => row.account.source === "SCHWAB" || row.ledger.latestBrokerSnapshot);
   const accountDataSource: "LIVE SCHWAB" | "MANUAL" | "MIXED" | null = hasSchwabAccountData
     ? hasManualAccountData
       ? "MIXED"
@@ -90,9 +89,12 @@ export default async function DashboardPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-400">
         <span>
-          <h1 className="inline text-sm font-semibold text-zinc-100">Hey {user.name}</h1> ·{" "}
+          <h1 className="inline text-sm font-semibold text-zinc-100">Hey {user.name}</h1> -{" "}
           <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "LIVE SCHWAB" : "DEMO SCANNER"}</Badge>{" "}
-          {openPositionsCount} open · win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
+          <Suspense fallback={<>{openCampaignCount} tracked open</>}>
+            <DashboardOpenCountSummary userId={user.id} openCampaignCount={openCampaignCount} />
+          </Suspense>{" "}
+          - win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
         </span>
         <span className="text-xs">No order submission - Off Shift Options never places, changes, or cancels trades.</span>
       </div>
@@ -102,13 +104,20 @@ export default async function DashboardPage() {
           label="Account value"
           value={hasAnyAccountValue ? money(totalValue) : "No data"}
           badge={accountDataSource}
+          detail={latestBrokerSnapshotAt ? `Schwab snapshot ${formatAge(latestBrokerSnapshotAt)}` : undefined}
         />
-        <Stat label="Cash" value={hasAnyCash ? money(totalCash) : "No data"} />
         <Stat
-          label="Secured (CSP)"
-          value={brokerCsp.hasUnknown ? `${money(securedCapital)}+` : money(securedCapital)}
+          label="Cash"
+          value={hasAnyCash ? money(totalCash) : "No data"}
+          detail={latestBrokerSnapshotAt ? `Schwab snapshot ${formatAge(latestBrokerSnapshotAt)}` : undefined}
         />
-        <Stat label="Open positions" value={String(openPositionsCount)} />
+        <Suspense fallback={<DashboardBrokerStatsFallback openCampaignCount={openCampaignCount} securedCapital={campaignSecuredCapital} />}>
+          <DashboardBrokerStats
+            userId={user.id}
+            openCampaignCount={openCampaignCount}
+            campaignSecuredCapital={campaignSecuredCapital}
+          />
+        </Suspense>
         <Stat label="Realized trading P/L" value={money(winLoss.realizedTradingPL)} tone={winLoss.realizedTradingPL} />
       </section>
 
@@ -142,9 +151,9 @@ export default async function DashboardPage() {
         <Panel
           title="Open Positions"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/positions" prefetch={false}>
+            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/positions">
               Tracker
-            </Link>
+            </IntentPrefetchLink>
           }
         >
           <div className="space-y-3">
@@ -163,40 +172,18 @@ export default async function DashboardPage() {
                 </div>
               );
             })}
-            {brokerPositions.slice(0, 4).map((position) => {
-              const display = describeBrokerPositionForDisplay(position);
-              return (
-                <div
-                  key={`${position.accountId}-${position.symbol}`}
-                  className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3"
-                >
-                  <div>
-                    <div className="font-semibold">{display.title}</div>
-                    <div className="text-sm text-zinc-400">{display.detailLine ?? display.quantityLabel}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className={position.marketValue >= 0 ? "text-emerald-300" : "text-red-300"}>
-                      {display.quantityLabel} · {money(position.marketValue)}
-                    </div>
-                    <Badge tone="info">SCHWAB</Badge>
-                  </div>
-                </div>
-              );
-            })}
-            {data.openCampaigns.length === 0 && brokerPositions.length === 0 ? (
-              <EmptyState>
-                No open campaigns. <Link href="/positions" prefetch={false} className="text-emerald-300 hover:text-emerald-200">Start one in the Tracker.</Link>
-              </EmptyState>
-            ) : null}
+            <Suspense fallback={<DashboardBrokerPositionsFallback openCampaignCount={openCampaignCount} />}>
+              <DashboardBrokerPositions userId={user.id} openCampaignCount={openCampaignCount} />
+            </Suspense>
           </div>
         </Panel>
 
         <Panel
           title="Top Setups"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner" prefetch={false}>
+            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner">
               Scanner
-            </Link>
+            </IntentPrefetchLink>
           }
         >
           <div className="space-y-3">
@@ -209,7 +196,7 @@ export default async function DashboardPage() {
                   </div>
                 </div>
                 <Badge tone={label === "Fails" ? "bad" : label === "Verify" ? "neutral" : "good"}>
-                  {score} · {label}
+                  {score} - {label}
                 </Badge>
               </div>
             ))}
@@ -220,9 +207,9 @@ export default async function DashboardPage() {
         <Panel
           title="Buddy Activity"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat" prefetch={false}>
+            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat">
               Chat
-            </Link>
+            </IntentPrefetchLink>
           }
         >
           <div className="space-y-3">
@@ -259,9 +246,9 @@ export default async function DashboardPage() {
         <Panel
           title="Buddy Chat"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat" prefetch={false}>
+            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat">
               Open
-            </Link>
+            </IntentPrefetchLink>
           }
         >
           <div className="space-y-3">
@@ -283,9 +270,9 @@ export default async function DashboardPage() {
         <Panel
           title="Recommendations"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/recommendations" prefetch={false}>
+            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/recommendations">
               Open
-            </Link>
+            </IntentPrefetchLink>
           }
         >
           <div className="space-y-3">
@@ -308,16 +295,175 @@ export default async function DashboardPage() {
   );
 }
 
+async function DashboardOpenCountSummary({
+  userId,
+  openCampaignCount,
+}: {
+  userId: string;
+  openCampaignCount: number;
+}) {
+  const { schwabPositions, brokerPositions } = await loadDashboardBrokerData(userId);
+  if (schwabPositions === null) {
+    return <>{openCampaignCount} tracked open</>;
+  }
+
+  return <>{computeOpenPositionsCount(openCampaignCount, brokerPositions)} open</>;
+}
+
+function DashboardBrokerStatsFallback({
+  openCampaignCount,
+  securedCapital,
+}: {
+  openCampaignCount: number;
+  securedCapital: number;
+}) {
+  return (
+    <>
+      <Stat
+        label="Secured (CSP)"
+        value={openCampaignCount > 0 ? `${money(securedCapital)}+` : "Checking"}
+        detail="Refreshing Schwab positions"
+      />
+      <Stat
+        label="Open positions"
+        value={openCampaignCount > 0 ? `${openCampaignCount}+` : "Checking"}
+        detail="Stored campaigns shown first"
+      />
+    </>
+  );
+}
+
+async function DashboardBrokerStats({
+  userId,
+  openCampaignCount,
+  campaignSecuredCapital,
+}: {
+  userId: string;
+  openCampaignCount: number;
+  campaignSecuredCapital: number;
+}) {
+  const { schwabPositions, brokerPositions } = await loadDashboardBrokerData(userId);
+
+  if (schwabPositions === null) {
+    return (
+      <>
+        <Stat
+          label="Secured (CSP)"
+          value={openCampaignCount > 0 ? money(campaignSecuredCapital) : "No broker data"}
+          detail="Schwab unavailable; stored campaigns only"
+        />
+        <Stat
+          label="Open positions"
+          value={openCampaignCount > 0 ? String(openCampaignCount) : "No broker data"}
+          detail="Schwab unavailable; stored campaigns only"
+        />
+      </>
+    );
+  }
+
+  // Additive, not guessed: reconciled Schwab positions are represented by their
+  // Campaigns, while unlinked live positions remain separate until the user links them.
+  const brokerCsp = summarizeCspSecuredCapital(brokerPositions);
+  const securedCapital = campaignSecuredCapital + brokerCsp.total;
+  const openPositionsCount = computeOpenPositionsCount(openCampaignCount, brokerPositions);
+
+  return (
+    <>
+      <Stat
+        label="Secured (CSP)"
+        value={brokerCsp.hasUnknown ? `${money(securedCapital)}+` : money(securedCapital)}
+        detail="Campaigns + unlinked Schwab"
+      />
+      <Stat label="Open positions" value={String(openPositionsCount)} detail="Campaigns + unlinked Schwab" />
+    </>
+  );
+}
+
+function DashboardBrokerPositionsFallback({ openCampaignCount }: { openCampaignCount: number }) {
+  if (openCampaignCount === 0) {
+    return <EmptyState>No stored open campaigns. Refreshing Schwab positions...</EmptyState>;
+  }
+
+  return <p className="text-sm text-zinc-500">Refreshing Schwab positions...</p>;
+}
+
+async function DashboardBrokerPositions({
+  userId,
+  openCampaignCount,
+}: {
+  userId: string;
+  openCampaignCount: number;
+}) {
+  const { schwabPositions, brokerPositions } = await loadDashboardBrokerData(userId);
+
+  if (schwabPositions === null) {
+    if (openCampaignCount > 0) {
+      return <p className="text-sm text-zinc-500">Live Schwab positions are unavailable right now.</p>;
+    }
+
+    return (
+      <EmptyState>
+        No stored open campaigns.{" "}
+        <IntentPrefetchLink href="/positions" className="text-emerald-300 hover:text-emerald-200">
+          Start one in the Tracker.
+        </IntentPrefetchLink>
+      </EmptyState>
+    );
+  }
+
+  if (brokerPositions.length === 0) {
+    if (openCampaignCount > 0) {
+      return null;
+    }
+
+    return (
+      <EmptyState>
+        No open campaigns or available Schwab positions.{" "}
+        <IntentPrefetchLink href="/positions" className="text-emerald-300 hover:text-emerald-200">
+          Start one in the Tracker.
+        </IntentPrefetchLink>
+      </EmptyState>
+    );
+  }
+
+  return (
+    <>
+      {brokerPositions.slice(0, 4).map((position) => {
+        const display = describeBrokerPositionForDisplay(position);
+        return (
+          <div
+            key={`${position.accountId}-${position.symbol}`}
+            className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3"
+          >
+            <div>
+              <div className="font-semibold">{display.title}</div>
+              <div className="text-sm text-zinc-400">{display.detailLine ?? display.quantityLabel}</div>
+            </div>
+            <div className="text-right">
+              <div className={position.marketValue >= 0 ? "text-emerald-300" : "text-red-300"}>
+                {display.quantityLabel} - {money(position.marketValue)}
+              </div>
+              <Badge tone="info">SCHWAB</Badge>
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function Stat({
   label,
   value,
   tone,
   badge,
+  detail,
 }: {
   label: string;
   value: string;
   tone?: number;
   badge?: "LIVE SCHWAB" | "MANUAL" | "MIXED" | null;
+  detail?: string;
 }) {
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   return (
@@ -339,8 +485,37 @@ function Stat({
         ) : null}
       </div>
       <div className={`mt-1 text-xl font-semibold ${toneClass}`}>{value}</div>
+      {detail ? <div className="mt-1 text-xs text-zinc-500">{detail}</div> : null}
     </div>
   );
+}
+
+function latestSnapshotAt(dates: (Date | null)[]) {
+  return dates.reduce<Date | null>((latest, date) => {
+    if (!date) {
+      return latest;
+    }
+    return !latest || date > latest ? date : latest;
+  }, null);
+}
+
+function formatAge(date: Date) {
+  const elapsedMs = Math.max(0, Date.now() - date.getTime());
+  const elapsedMinutes = Math.floor(elapsedMs / 60_000);
+  if (elapsedMinutes < 1) {
+    return "just now";
+  }
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes}m ago`;
+  }
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) {
+    return `${elapsedHours}h ago`;
+  }
+
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  return `${elapsedDays}d ago`;
 }
 
 function weeklyToneClass(percentValue: number | null) {

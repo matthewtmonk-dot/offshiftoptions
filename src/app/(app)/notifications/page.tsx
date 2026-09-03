@@ -1,5 +1,5 @@
-import Link from "next/link";
 import { Check, ExternalLink } from "lucide-react";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { requireCurrentUser } from "@/lib/auth";
 import { getNotificationsPageData } from "@/lib/app-data";
@@ -46,9 +46,9 @@ export default async function NotificationsPage() {
                 </div>
                 <div className="flex gap-2">
                   {notification.href ? (
-                    <Link href={notification.href} prefetch={false} className="inline-flex min-h-10 items-center justify-center rounded-md border border-zinc-700 px-3 text-zinc-300 hover:border-zinc-500" aria-label="Open notification">
+                    <IntentPrefetchLink href={notification.href} className="inline-flex min-h-10 items-center justify-center rounded-md border border-zinc-700 px-3 text-zinc-300 hover:border-zinc-500" aria-label="Open notification">
                       <ExternalLink className="size-4" aria-hidden />
-                    </Link>
+                    </IntentPrefetchLink>
                   ) : null}
                   {!notification.readAt ? (
                     <form action={markNotificationReadAction}>

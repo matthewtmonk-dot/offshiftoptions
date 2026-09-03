@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useState } from "react";
-import Link from "next/link";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import {
   ArrowDownUp,
   ChevronDown,
@@ -588,14 +588,13 @@ function CandidateInspector({
             </button>
           );
         })}
-        <Link
+        <IntentPrefetchLink
           href="/research"
-          prefetch={false}
           className="ml-1 inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 text-xs font-medium text-zinc-300 hover:border-emerald-400/60 hover:text-emerald-200"
         >
           <Search className="size-3.5" aria-hidden />
           Open in Research
-        </Link>
+        </IntentPrefetchLink>
       </div>
       <section>
         <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Stock</h3>
