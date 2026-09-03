@@ -74,10 +74,9 @@ export default async function ScannerPage({
   searchParams: Promise<ScannerSearchParams>;
 }) {
   const user = await requireCurrentUser();
-  await ensureMyLstScannerProfileForUser(user.id);
 
   const params = await searchParams;
-  const [profile, buddies, researchItems] = await Promise.all([
+  const [initialProfile, buddies, researchItems] = await Promise.all([
     getScannerPageData(user.id),
     prisma.user.findMany({ where: { id: { not: user.id } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.watchlistItem.findMany({
@@ -85,6 +84,11 @@ export default async function ScannerPage({
       select: { ticker: true, researchStatus: true },
     }),
   ]);
+  let profile = initialProfile;
+  if (!profile) {
+    await ensureMyLstScannerProfileForUser(user.id);
+    profile = await getScannerPageData(user.id);
+  }
   const run = profile?.scanRuns[0];
   const researchByTicker = new Map(researchItems.map((item) => [item.ticker, item.researchStatus]));
   const allResults = (run?.results ?? []).map((result) => toViewResult(result, researchByTicker));
@@ -126,6 +130,7 @@ export default async function ScannerPage({
           </form>
           <Link
             href="/scanner/settings"
+            prefetch={false}
             title="Scanner Rules"
             aria-label="Scanner Rules"
             className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 px-2.5 text-sm font-medium text-zinc-200 transition hover:border-emerald-400/60 hover:text-emerald-200"

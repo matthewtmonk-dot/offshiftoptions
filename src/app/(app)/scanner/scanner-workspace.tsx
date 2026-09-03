@@ -38,6 +38,13 @@ type SortKey =
   | "earningsDistance";
 
 type QuickKey = "all" | "pass" | "near" | "watchlist" | "strongest" | "premium" | "liquid" | "low-rsi" | "far-earnings";
+type QuickResearchStatus = "LIKE" | "WATCH" | "NEUTRAL" | "AVOID" | "NEVER_TRADE";
+type ScannerStatusOverride = {
+  baseResult: ScannerViewResult;
+  baseStatus: QuickResearchStatus | null;
+  nextStatus: QuickResearchStatus;
+};
+type ScannerResearchStatusChange = (result: ScannerViewResult, status: QuickResearchStatus) => void;
 
 type OptionalColumnKey = "delta" | "annualizedRor" | "spreadPercent" | "distanceOtm";
 
@@ -93,6 +100,9 @@ export function ScannerWorkspace({
   diagnostics: ExclusionDiagnostic;
   modeLabel: string;
 }) {
+  const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, ScannerStatusOverride | undefined>>({});
+  const [pendingStatuses, setPendingStatuses] = useState<Record<string, QuickResearchStatus | undefined>>({});
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [quick, setQuick] = useState<QuickKey>("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [showExcluded, setShowExcluded] = useState(false);
@@ -104,10 +114,21 @@ export function ScannerWorkspace({
   });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const excludedCount = useMemo(() => results.filter((result) => result.researchStatus === "NEVER_TRADE").length, [results]);
+  const optimisticResults = useMemo(
+    () =>
+      results.map((result) => {
+        const optimisticStatus = optimisticStatuses[result.record.id];
+        return optimisticStatus && optimisticStatus.baseResult === result && optimisticStatus.baseStatus === result.researchStatus
+          ? { ...result, researchStatus: optimisticStatus.nextStatus }
+          : result;
+      }),
+    [results, optimisticStatuses],
+  );
+
+  const excludedCount = useMemo(() => optimisticResults.filter((result) => result.researchStatus === "NEVER_TRADE").length, [optimisticResults]);
   const actionable = useMemo(
-    () => (showExcluded ? results : results.filter((result) => result.researchStatus !== "NEVER_TRADE")),
-    [results, showExcluded],
+    () => (showExcluded ? optimisticResults : optimisticResults.filter((result) => result.researchStatus !== "NEVER_TRADE")),
+    [optimisticResults, showExcluded],
   );
   const counts = useMemo(
     () => ({
@@ -129,6 +150,69 @@ export function ScannerWorkspace({
         next.delete(id);
       } else {
         next.add(id);
+      }
+      return next;
+    });
+  }
+
+  async function changeResearchStatus(result: ScannerViewResult, nextStatus: QuickResearchStatus) {
+    if (result.researchStatus === nextStatus) {
+      return;
+    }
+
+    const serverResult = results.find((candidate) => candidate.record.id === result.record.id) ?? result;
+    const existingOverride = optimisticStatuses[result.record.id];
+    const activeOverride =
+      existingOverride?.baseResult === serverResult && existingOverride.baseStatus === serverResult.researchStatus
+        ? existingOverride
+        : undefined;
+    const baseResult = activeOverride?.baseResult ?? serverResult;
+    const baseStatus = activeOverride?.baseStatus ?? serverResult.researchStatus;
+    const previousStatus = result.researchStatus;
+    setStatusError(null);
+    setPendingStatuses((prev) => ({ ...prev, [result.record.ticker]: nextStatus }));
+    setOptimisticStatuses((prev) => ({
+      ...prev,
+      [result.record.id]: { baseResult, baseStatus, nextStatus },
+    }));
+
+    const formData = new FormData();
+    formData.set("ticker", result.record.ticker);
+    formData.set("status", nextStatus);
+    formData.set("returnTo", "/scanner");
+
+    try {
+      const actionResult = await setResearchStatusAction(formData);
+      if (!actionResult.ok) {
+        rollBackScannerStatus(result.record.id, baseResult, baseStatus, previousStatus);
+        setStatusError(actionResult.error);
+      }
+    } catch {
+      rollBackScannerStatus(result.record.id, baseResult, baseStatus, previousStatus);
+      setStatusError("Research status could not be saved. Try again in a moment.");
+    } finally {
+      setPendingStatuses((prev) => {
+        const next = { ...prev };
+        delete next[result.record.ticker];
+        return next;
+      });
+    }
+  }
+
+  function rollBackScannerStatus(
+    resultId: string,
+    baseResult: ScannerViewResult,
+    baseStatus: QuickResearchStatus | null,
+    previousStatus: QuickResearchStatus | null,
+  ) {
+    setOptimisticStatuses((prev) => {
+      const next = { ...prev };
+      if (previousStatus === baseStatus) {
+        delete next[resultId];
+      } else if (previousStatus) {
+        next[resultId] = { baseResult, baseStatus, nextStatus: previousStatus };
+      } else {
+        delete next[resultId];
       }
       return next;
     });
@@ -275,6 +359,10 @@ export function ScannerWorkspace({
         </details>
       </div>
 
+      {statusError ? (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{statusError}</div>
+      ) : null}
+
       <div data-testid="scanner-desktop-table" className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/60 lg:block">
         <table className="w-full min-w-[960px] border-separate border-spacing-0 text-left text-xs">
           <thead>
@@ -361,7 +449,12 @@ export function ScannerWorkspace({
                   {isOpen ? (
                     <tr>
                       <td colSpan={columnCount} className="border-b border-zinc-900 bg-zinc-950/60 px-3 py-3">
-                        <CandidateInspector result={result} buddies={buddies} />
+                        <CandidateInspector
+                          result={result}
+                          buddies={buddies}
+                          pendingStatus={pendingStatuses[result.record.ticker]}
+                          onResearchStatusChange={changeResearchStatus}
+                        />
                       </td>
                     </tr>
                   ) : null}
@@ -379,7 +472,13 @@ export function ScannerWorkspace({
 
       <div data-testid="scanner-mobile-cards" className="grid gap-3 lg:hidden">
         {visible.map((result) => (
-          <CandidateCard key={result.record.id} result={result} buddies={buddies} />
+          <CandidateCard
+            key={result.record.id}
+            result={result}
+            buddies={buddies}
+            pendingStatus={pendingStatuses[result.record.ticker]}
+            onResearchStatusChange={changeResearchStatus}
+          />
         ))}
         {!visible.length ? <EmptyState>No scanner candidates match this view.</EmptyState> : null}
       </div>
@@ -387,7 +486,17 @@ export function ScannerWorkspace({
   );
 }
 
-function CandidateCard({ result, buddies }: { result: ScannerViewResult; buddies: ScannerBuddy[] }) {
+function CandidateCard({
+  result,
+  buddies,
+  pendingStatus,
+  onResearchStatusChange,
+}: {
+  result: ScannerViewResult;
+  buddies: ScannerBuddy[];
+  pendingStatus?: QuickResearchStatus;
+  onResearchStatusChange: ScannerResearchStatusChange;
+}) {
   const status = statusInfo(result);
 
   return (
@@ -417,7 +526,12 @@ function CandidateCard({ result, buddies }: { result: ScannerViewResult; buddies
         </dl>
       </summary>
       <div className="border-t border-zinc-800 p-3">
-        <CandidateInspector result={result} buddies={buddies} />
+        <CandidateInspector
+          result={result}
+          buddies={buddies}
+          pendingStatus={pendingStatus}
+          onResearchStatusChange={onResearchStatusChange}
+        />
       </div>
     </details>
   );
@@ -432,7 +546,7 @@ function MobileDatum({ label, value }: { label: string; value: React.ReactNode }
   );
 }
 
-const quickResearchChoices: { key: "LIKE" | "WATCH" | "NEUTRAL" | "AVOID" | "NEVER_TRADE"; label: string }[] = [
+const quickResearchChoices: { key: QuickResearchStatus; label: string }[] = [
   { key: "LIKE", label: "Like" },
   { key: "WATCH", label: "Watch" },
   { key: "NEUTRAL", label: "Neutral" },
@@ -440,30 +554,43 @@ const quickResearchChoices: { key: "LIKE" | "WATCH" | "NEUTRAL" | "AVOID" | "NEV
   { key: "NEVER_TRADE", label: "Exclude" },
 ];
 
-function CandidateInspector({ result, buddies }: { result: ScannerViewResult; buddies: ScannerBuddy[] }) {
+function CandidateInspector({
+  result,
+  buddies,
+  pendingStatus,
+  onResearchStatusChange,
+}: {
+  result: ScannerViewResult;
+  buddies: ScannerBuddy[];
+  pendingStatus?: QuickResearchStatus;
+  onResearchStatusChange: ScannerResearchStatusChange;
+}) {
   return (
     <div className="grid gap-5 rounded-md border border-zinc-800 bg-zinc-950 p-4 xl:grid-cols-[1fr_1fr_0.8fr]">
       <div className="flex flex-wrap items-center gap-1.5 xl:col-span-3">
         <span className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Research</span>
-        {quickResearchChoices.map((choice) => (
-          <form key={choice.key} action={setResearchStatusAction}>
-            <input type="hidden" name="ticker" value={result.record.ticker} />
-            <input type="hidden" name="status" value={choice.key} />
-            <input type="hidden" name="returnTo" value="/scanner" />
+        {quickResearchChoices.map((choice) => {
+          const isActive = result.researchStatus === choice.key;
+          return (
             <button
-              type="submit"
+              key={choice.key}
+              type="button"
+              aria-pressed={isActive}
+              disabled={Boolean(pendingStatus)}
+              onClick={() => onResearchStatusChange(result, choice.key)}
               className={`inline-flex min-h-8 items-center rounded-md border px-2.5 text-xs font-medium transition ${
-                result.researchStatus === choice.key
+                isActive
                   ? "border-emerald-400/70 bg-emerald-400/15 text-emerald-100"
                   : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"
-              }`}
+              } ${pendingStatus === choice.key ? "animate-pulse" : ""} disabled:cursor-wait disabled:opacity-75`}
             >
               {choice.label}
             </button>
-          </form>
-        ))}
+          );
+        })}
         <Link
           href="/research"
+          prefetch={false}
           className="ml-1 inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 text-xs font-medium text-zinc-300 hover:border-emerald-400/60 hover:text-emerald-200"
         >
           <Search className="size-3.5" aria-hidden />

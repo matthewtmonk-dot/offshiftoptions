@@ -290,6 +290,7 @@ export default async function AccountPage({
                   {schwabOauthReady ? (
                     <Link
                       href="/api/schwab/connect"
+                      prefetch={false}
                       className="text-xs font-medium text-zinc-400 underline decoration-zinc-600 underline-offset-4 hover:text-zinc-200"
                     >
                       {schwabConnection?.connected ? "Reconnect Schwab" : "Connect Schwab"}

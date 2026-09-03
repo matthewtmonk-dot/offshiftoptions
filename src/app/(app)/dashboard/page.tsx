@@ -142,7 +142,7 @@ export default async function DashboardPage() {
         <Panel
           title="Open Positions"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/positions">
+            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/positions" prefetch={false}>
               Tracker
             </Link>
           }
@@ -185,7 +185,7 @@ export default async function DashboardPage() {
             })}
             {data.openCampaigns.length === 0 && brokerPositions.length === 0 ? (
               <EmptyState>
-                No open campaigns. <Link href="/positions" className="text-emerald-300 hover:text-emerald-200">Start one in the Tracker.</Link>
+                No open campaigns. <Link href="/positions" prefetch={false} className="text-emerald-300 hover:text-emerald-200">Start one in the Tracker.</Link>
               </EmptyState>
             ) : null}
           </div>
@@ -194,7 +194,7 @@ export default async function DashboardPage() {
         <Panel
           title="Top Setups"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner">
+            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner" prefetch={false}>
               Scanner
             </Link>
           }
@@ -220,7 +220,7 @@ export default async function DashboardPage() {
         <Panel
           title="Buddy Activity"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat">
+            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat" prefetch={false}>
               Chat
             </Link>
           }
@@ -259,7 +259,7 @@ export default async function DashboardPage() {
         <Panel
           title="Buddy Chat"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat">
+            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat" prefetch={false}>
               Open
             </Link>
           }
@@ -283,7 +283,7 @@ export default async function DashboardPage() {
         <Panel
           title="Recommendations"
           action={
-            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/recommendations">
+            <Link className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/recommendations" prefetch={false}>
               Open
             </Link>
           }

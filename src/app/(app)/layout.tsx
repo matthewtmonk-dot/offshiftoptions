@@ -54,6 +54,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                 <Link
                   key={item.href}
                   href={item.href}
+                  prefetch={false}
                   className="flex min-h-11 items-center gap-3 rounded-md px-3 text-sm text-zinc-300 transition hover:bg-zinc-900 hover:text-zinc-50"
                 >
                   <Icon className="size-4" aria-hidden />
@@ -109,6 +110,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                   <Link
                     key={item.href}
                     href={item.href}
+                    prefetch={false}
                     className="flex min-h-12 flex-col items-center justify-center gap-1 rounded-md bg-zinc-900 text-[11px] text-zinc-300"
                   >
                     <Icon className="size-4" aria-hidden />

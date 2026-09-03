@@ -273,7 +273,14 @@ export async function getPositionsPageData(userId: string) {
   });
 }
 
-export async function getTrackerPageData(userId: string, scope: TrackerScope) {
+type TrackerPageDataOptions = {
+  includeLegacyTrades?: boolean;
+  includePerformanceCampaigns?: boolean;
+};
+
+export async function getTrackerPageData(userId: string, scope: TrackerScope, options: TrackerPageDataOptions = {}) {
+  const includeLegacyTrades = options.includeLegacyTrades ?? true;
+  const includePerformanceCampaigns = options.includePerformanceCampaigns ?? true;
   const buddyCampaignWhere = {
     ownerId: { not: userId },
     OR: [{ visibility: "SHARED" as const }, { visibility: "INHERIT" as const, account: { visibility: "SHARED" as const } }],
@@ -332,13 +339,15 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope) {
         events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] },
       },
     }),
-    // ALWAYS scoped to the current user regardless of `scope` - performance/win-rate must
-    // never silently combine Matt and Eric's results into one figure (see PROJECT_HANDOFF.md).
-    prisma.campaign.findMany({
-      where: { ownerId: userId, status: "CLOSED" },
-      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
-    }),
-    getPositionsPageData(userId),
+    includePerformanceCampaigns
+      ? prisma.campaign.findMany({
+          // ALWAYS scoped to the current user regardless of `scope` - performance/win-rate must
+          // never silently combine Matt and Eric's results into one figure (see PROJECT_HANDOFF.md).
+          where: { ownerId: userId, status: "CLOSED" },
+          include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+        })
+      : Promise.resolve([]),
+    includeLegacyTrades ? getPositionsPageData(userId) : Promise.resolve([]),
   ]);
 
   return { users, ownAccounts, visibleAccounts, campaigns, ownCompletedCampaigns, legacyTrades };

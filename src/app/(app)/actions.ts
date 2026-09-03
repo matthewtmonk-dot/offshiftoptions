@@ -108,14 +108,14 @@ export async function setResearchStatusAction(formData: FormData) {
     await setResearchStatusForUser(user.id, formData.get("ticker"), formData.get("status"));
   } catch (error) {
     if (error instanceof ValidationError) {
-      redirectWithError(actionReturnPath(formData, "/scanner"), error.message);
+      return { ok: false as const, error: error.message };
     }
     throw error;
   }
 
   revalidatePath("/research");
   revalidatePath("/scanner");
-  revalidatePath("/dashboard");
+  return { ok: true as const };
 }
 
 export async function updateResearchDetailsAction(formData: FormData) {

@@ -46,7 +46,7 @@ export default async function NotificationsPage() {
                 </div>
                 <div className="flex gap-2">
                   {notification.href ? (
-                    <Link href={notification.href} className="inline-flex min-h-10 items-center justify-center rounded-md border border-zinc-700 px-3 text-zinc-300 hover:border-zinc-500" aria-label="Open notification">
+                    <Link href={notification.href} prefetch={false} className="inline-flex min-h-10 items-center justify-center rounded-md border border-zinc-700 px-3 text-zinc-300 hover:border-zinc-500" aria-label="Open notification">
                       <ExternalLink className="size-4" aria-hidden />
                     </Link>
                   ) : null}

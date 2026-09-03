@@ -38,8 +38,15 @@ import type {
 } from "./page";
 
 type StatusKey = "all" | "LIKE" | "WATCH" | "NEUTRAL" | "AVOID" | "NEVER_TRADE";
+type ResearchStatusChoice = Exclude<StatusKey, "all">;
+type ResearchStatusOverride = {
+  baseItem: ResearchItemRecord;
+  baseStatus: ResearchStatusChoice;
+  nextStatus: ResearchStatusChoice;
+};
 type SortKey = "added" | "ticker" | "score" | "price";
 type OptionalColumnKey = "wouldOwn" | "monthlyOnly" | "rollFriendliness" | "grades" | "history";
+type ResearchStatusChange = (item: ResearchItemRecord, status: ResearchStatusChoice) => void;
 
 const statusTabs: { key: StatusKey; label: string }[] = [
   { key: "all", label: "All" },
@@ -50,7 +57,7 @@ const statusTabs: { key: StatusKey; label: string }[] = [
   { key: "NEVER_TRADE", label: "Excluded" },
 ];
 
-const statusChoices: { key: Exclude<StatusKey, "all">; label: string }[] = [
+const statusChoices: { key: ResearchStatusChoice; label: string }[] = [
   { key: "LIKE", label: "Like" },
   { key: "WATCH", label: "Watch" },
   { key: "NEUTRAL", label: "Neutral" },
@@ -89,6 +96,9 @@ export function ResearchWorkspace({
   error?: string;
 }) {
   const [status, setStatus] = useState<StatusKey>("all");
+  const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, ResearchStatusOverride | undefined>>({});
+  const [pendingStatuses, setPendingStatuses] = useState<Record<string, ResearchStatusChoice | undefined>>({});
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("added");
   const [columns, setColumns] = useState<Record<OptionalColumnKey, boolean>>({
     wouldOwn: false,
@@ -99,16 +109,27 @@ export function ResearchWorkspace({
   });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
+  const optimisticItems = useMemo(
+    () =>
+      items.map((item) => {
+        const optimisticStatus = optimisticStatuses[item.id];
+        return optimisticStatus && optimisticStatus.baseItem === item && optimisticStatus.baseStatus === item.researchStatus
+          ? { ...item, researchStatus: optimisticStatus.nextStatus }
+          : item;
+      }),
+    [items, optimisticStatuses],
+  );
+
   const counts = useMemo(() => {
-    const result: Record<StatusKey, number> = { all: items.length, LIKE: 0, WATCH: 0, NEUTRAL: 0, AVOID: 0, NEVER_TRADE: 0 };
-    for (const item of items) {
+    const result: Record<StatusKey, number> = { all: optimisticItems.length, LIKE: 0, WATCH: 0, NEUTRAL: 0, AVOID: 0, NEVER_TRADE: 0 };
+    for (const item of optimisticItems) {
       result[item.researchStatus] += 1;
     }
     return result;
-  }, [items]);
+  }, [optimisticItems]);
 
   const visible = useMemo(() => {
-    const filtered = status === "all" ? items : items.filter((item) => item.researchStatus === status);
+    const filtered = status === "all" ? optimisticItems : optimisticItems.filter((item) => item.researchStatus === status);
     return [...filtered].sort((left, right) => {
       if (sort === "ticker") {
         return left.ticker.localeCompare(right.ticker);
@@ -121,7 +142,7 @@ export function ResearchWorkspace({
       }
       return new Date(right.addedAt).getTime() - new Date(left.addedAt).getTime();
     });
-  }, [items, status, sort, scanByTicker]);
+  }, [optimisticItems, status, sort, scanByTicker]);
 
   const activeColumns = optionalColumns.filter((column) => columns[column.key]);
   const columnCount = 6 + activeColumns.length;
@@ -133,6 +154,67 @@ export function ResearchWorkspace({
         next.delete(id);
       } else {
         next.add(id);
+      }
+      return next;
+    });
+  }
+
+  async function changeResearchStatus(item: ResearchItemRecord, nextStatus: ResearchStatusChoice) {
+    if (item.researchStatus === nextStatus) {
+      return;
+    }
+
+    const serverItem = items.find((candidate) => candidate.id === item.id) ?? item;
+    const existingOverride = optimisticStatuses[item.id];
+    const activeOverride =
+      existingOverride?.baseItem === serverItem && existingOverride.baseStatus === serverItem.researchStatus
+        ? existingOverride
+        : undefined;
+    const baseItem = activeOverride?.baseItem ?? serverItem;
+    const baseStatus = activeOverride?.baseStatus ?? serverItem.researchStatus;
+    const previousStatus = item.researchStatus;
+    setStatusError(null);
+    setPendingStatuses((prev) => ({ ...prev, [item.ticker]: nextStatus }));
+    setOptimisticStatuses((prev) => ({
+      ...prev,
+      [item.id]: { baseItem, baseStatus, nextStatus },
+    }));
+
+    const formData = new FormData();
+    formData.set("ticker", item.ticker);
+    formData.set("status", nextStatus);
+    formData.set("returnTo", "/research");
+
+    try {
+      const result = await setResearchStatusAction(formData);
+      if (!result.ok) {
+        rollBackResearchStatus(item.id, baseItem, baseStatus, previousStatus);
+        setStatusError(result.error);
+      }
+    } catch {
+      rollBackResearchStatus(item.id, baseItem, baseStatus, previousStatus);
+      setStatusError("Research status could not be saved. Try again in a moment.");
+    } finally {
+      setPendingStatuses((prev) => {
+        const next = { ...prev };
+        delete next[item.ticker];
+        return next;
+      });
+    }
+  }
+
+  function rollBackResearchStatus(
+    itemId: string,
+    baseItem: ResearchItemRecord,
+    baseStatus: ResearchStatusChoice,
+    previousStatus: ResearchStatusChoice,
+  ) {
+    setOptimisticStatuses((prev) => {
+      const next = { ...prev };
+      if (previousStatus === baseStatus) {
+        delete next[itemId];
+      } else {
+        next[itemId] = { baseItem, baseStatus, nextStatus: previousStatus };
       }
       return next;
     });
@@ -164,6 +246,9 @@ export function ResearchWorkspace({
 
       {error ? (
         <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{error}</div>
+      ) : null}
+      {statusError ? (
+        <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{statusError}</div>
       ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -284,7 +369,14 @@ export function ResearchWorkspace({
                   {isOpen ? (
                     <tr>
                       <td colSpan={columnCount} className="border-b border-zinc-900 bg-zinc-950/60 px-3 py-3">
-                        <ResearchDetail item={item} buddies={buddies} scan={scan} history={history} />
+                        <ResearchDetail
+                          item={item}
+                          buddies={buddies}
+                          scan={scan}
+                          history={history}
+                          pendingStatus={pendingStatuses[item.ticker]}
+                          onStatusChange={changeResearchStatus}
+                        />
                       </td>
                     </tr>
                   ) : null}
@@ -302,7 +394,15 @@ export function ResearchWorkspace({
 
       <div className="grid gap-3 lg:hidden" data-testid="research-mobile-cards">
         {visible.map((item) => (
-          <ResearchMobileCard key={item.id} item={item} buddies={buddies} scan={scanByTicker[item.ticker]} history={campaignByTicker[item.ticker]} />
+          <ResearchMobileCard
+            key={item.id}
+            item={item}
+            buddies={buddies}
+            scan={scanByTicker[item.ticker]}
+            history={campaignByTicker[item.ticker]}
+            pendingStatus={pendingStatuses[item.ticker]}
+            onStatusChange={changeResearchStatus}
+          />
         ))}
         {!visible.length ? <EmptyState>No researched tickers in this view yet.</EmptyState> : null}
       </div>
@@ -332,11 +432,15 @@ function ResearchMobileCard({
   buddies,
   scan,
   history,
+  pendingStatus,
+  onStatusChange,
 }: {
   item: ResearchItemRecord;
   buddies: ResearchBuddy[];
   scan?: ResearchScanSnapshot;
   history?: ResearchCampaignSummary;
+  pendingStatus?: ResearchStatusChoice;
+  onStatusChange: ResearchStatusChange;
 }) {
   return (
     <details className="rounded-lg border border-zinc-800 bg-zinc-900">
@@ -356,7 +460,14 @@ function ResearchMobileCard({
         </div>
       </summary>
       <div className="border-t border-zinc-800 p-3">
-        <ResearchDetail item={item} buddies={buddies} scan={scan} history={history} />
+        <ResearchDetail
+          item={item}
+          buddies={buddies}
+          scan={scan}
+          history={history}
+          pendingStatus={pendingStatus}
+          onStatusChange={onStatusChange}
+        />
       </div>
     </details>
   );
@@ -376,11 +487,15 @@ function ResearchDetail({
   buddies,
   scan,
   history,
+  pendingStatus,
+  onStatusChange,
 }: {
   item: ResearchItemRecord;
   buddies: ResearchBuddy[];
   scan?: ResearchScanSnapshot;
   history?: ResearchCampaignSummary;
+  pendingStatus?: ResearchStatusChoice;
+  onStatusChange: ResearchStatusChange;
 }) {
   const proNotes = item.notes.filter((note) => note.category === "PRO");
   const conNotes = item.notes.filter((note) => note.category === "CON");
@@ -393,23 +508,25 @@ function ResearchDetail({
         <div>
           <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Status</h3>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {statusChoices.map((choice) => (
-              <form key={choice.key} action={setResearchStatusAction}>
-                <input type="hidden" name="ticker" value={item.ticker} />
-                <input type="hidden" name="status" value={choice.key} />
-                <input type="hidden" name="returnTo" value="/research" />
+            {statusChoices.map((choice) => {
+              const isActive = item.researchStatus === choice.key;
+              return (
                 <button
-                  type="submit"
+                  key={choice.key}
+                  type="button"
+                  aria-pressed={isActive}
+                  disabled={Boolean(pendingStatus)}
+                  onClick={() => onStatusChange(item, choice.key)}
                   className={`inline-flex min-h-8 items-center rounded-md border px-2.5 text-xs font-medium transition ${
-                    item.researchStatus === choice.key
+                    isActive
                       ? "border-emerald-400/70 bg-emerald-400/15 text-emerald-100"
                       : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"
-                  }`}
+                  } ${pendingStatus === choice.key ? "animate-pulse" : ""} disabled:cursor-wait disabled:opacity-75`}
                 >
                   {choice.label}
                 </button>
-              </form>
-            ))}
+              );
+            })}
           </div>
         </div>
 

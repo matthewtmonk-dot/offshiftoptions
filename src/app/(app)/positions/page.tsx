@@ -44,6 +44,7 @@ import {
   toggleCampaignVisibilityAction,
   toggleTradingAccountVisibilityAction,
 } from "../actions";
+import { TrackerTabs } from "./tracker-tabs";
 
 export const dynamic = "force-dynamic";
 
@@ -67,14 +68,21 @@ export default async function PositionsPage({
   const view = parseViewMode(firstParam(query.view));
   const error = firstParam(query.error);
   const previewBatchId = firstParam(query.previewBatch);
+  const needsOpenBrokerData = view === "open";
+  const needsAccountsImportData = view === "accounts";
   const [data, schwabPositions, brokerActivityAwaitingReview, importBatches, pendingImport] = await Promise.all([
-    getTrackerPageData(user.id, scope),
-    getSchwabOpenPositionsForUser(user.id),
-    getBrokerActivityAwaitingReviewForUser(user.id),
-    getBrokerImportBatchesForUser(user.id),
-    previewBatchId ? getPendingBrokerImportBatchForUser(user.id, previewBatchId) : Promise.resolve(null),
+    getTrackerPageData(user.id, scope, {
+      includeLegacyTrades: needsOpenBrokerData,
+      includePerformanceCampaigns: view === "performance",
+    }),
+    needsOpenBrokerData ? getSchwabOpenPositionsForUser(user.id) : Promise.resolve(null),
+    needsAccountsImportData ? getBrokerActivityAwaitingReviewForUser(user.id) : Promise.resolve([]),
+    needsAccountsImportData ? getBrokerImportBatchesForUser(user.id) : Promise.resolve([]),
+    needsAccountsImportData && previewBatchId ? getPendingBrokerImportBatchForUser(user.id, previewBatchId) : Promise.resolve(null),
   ]);
-  const { linked: linkedSchwabPositions } = await splitBrokerPositionsByCampaignLink(user.id, schwabPositions ?? []);
+  const { linked: linkedSchwabPositions } = needsOpenBrokerData
+    ? await splitBrokerPositionsByCampaignLink(user.id, schwabPositions ?? [])
+    : { linked: [] };
   const linkedSchwabSymbols = new Set(linkedSchwabPositions.map((position) => position.symbol));
   const buddyName = data.users[0]?.name ?? "Buddy";
   const rows = data.campaigns.map((campaign) => ({
@@ -140,7 +148,7 @@ export default async function PositionsPage({
         </div>
         <div className="flex flex-wrap gap-2">
           {(["mine", "buddy", "both"] as TrackerScope[]).map((option) => (
-            <Link key={option} href={trackerHref(option, view)} className={segmentClass(scope === option)}>
+            <Link key={option} href={trackerHref(option, view)} prefetch={false} className={segmentClass(scope === option)}>
               {option === "mine" ? "Mine" : option === "buddy" ? buddyName : "Both"}
             </Link>
           ))}
@@ -181,20 +189,7 @@ export default async function PositionsPage({
       </section>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-1">
-          {(
-            [
-              ["open", "Open"],
-              ["history", "History"],
-              ["performance", "Performance"],
-              ["accounts", "Accounts"],
-            ] as [ViewMode, string][]
-          ).map(([mode, label]) => (
-            <Link key={mode} href={trackerHref(scope, mode)} className={tabClass(view === mode)}>
-              {label}
-            </Link>
-          ))}
-        </div>
+        <TrackerTabs scope={scope} view={view} />
         <p className="text-xs text-zinc-500">Tracking + live read-only Schwab data. Trade execution stays in thinkorswim.</p>
       </div>
 
@@ -661,7 +656,7 @@ function AccountsSection({
             {isOwner ? (
               <p className="mt-3 text-xs text-zinc-500">
                 Log a deposit, withdrawal, or adjustment from{" "}
-                <Link href="/account" className="text-emerald-300 hover:text-emerald-200">
+                <Link href="/account" prefetch={false} className="text-emerald-300 hover:text-emerald-200">
                   Account
                 </Link>
                 .
@@ -695,7 +690,7 @@ function SchwabPositionsPanel({
           <ShieldCheck className="size-4 text-sky-300" aria-hidden />
           Your Schwab Positions
         </h2>
-        <Link href="/account" className="text-xs font-medium text-emerald-300 hover:text-emerald-200">
+        <Link href="/account" prefetch={false} className="text-xs font-medium text-emerald-300 hover:text-emerald-200">
           Manage connection
         </Link>
       </div>
@@ -1314,12 +1309,6 @@ function trackerHref(scope: TrackerScope, view: ViewMode) {
     params.set("view", view);
   }
   return `/positions?${params.toString()}`;
-}
-
-function tabClass(active: boolean) {
-  return `rounded px-3 py-1.5 text-sm transition ${
-    active ? "bg-emerald-400 text-black" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
-  }`;
 }
 
 function segmentClass(active: boolean) {
