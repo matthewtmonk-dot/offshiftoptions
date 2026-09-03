@@ -319,20 +319,24 @@ export async function runDemoScannerAction() {
   revalidatePath("/dashboard");
 }
 
-export async function runLiveSchwabScannerAction() {
+export type RunLiveScanResult =
+  | { ok: true; scanned: number; nearMatches: number; elapsedMs: number }
+  | { ok: false; error: string };
+
+export async function runLiveSchwabScannerAction(): Promise<RunLiveScanResult> {
   const user = await requireCurrentUser();
 
   try {
-    await rerunLiveSchwabScannerForUser(user.id);
+    const summary = await rerunLiveSchwabScannerForUser(user.id);
+    revalidatePath("/scanner");
+    revalidatePath("/dashboard");
+    return { ok: true, ...summary };
   } catch (error) {
     if (error instanceof ValidationError) {
-      redirectWithError("/scanner", error.message);
+      return { ok: false, error: error.message };
     }
     throw error;
   }
-
-  revalidatePath("/scanner");
-  revalidatePath("/dashboard");
 }
 
 export async function createTradingAccountAction(formData: FormData) {

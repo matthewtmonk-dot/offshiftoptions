@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
 import type { NoteCategory, ReactionTargetType, ResearchStatus, RollFriendliness, WouldOwnStatus } from "@/generated/prisma/enums";
 import { evaluateDemoScan, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
+import { getNearMisses } from "@/domain/scanner/scanner";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
+import { mapWithConcurrency } from "./concurrency";
 import {
   assertCanMutateRecord,
   assertCanReadInheritedRecord,
@@ -1218,7 +1220,22 @@ export async function rerunDemoScannerForUser(userId: string, profileId?: string
   return persistScannerRun(userId, profile.id, "DEMO", evaluateDemoScan(rules));
 }
 
-export async function rerunLiveSchwabScannerForUser(userId: string) {
+export type LiveScanRunSummary = {
+  scanned: number;
+  nearMatches: number;
+  elapsedMs: number;
+};
+
+/**
+ * Bounds concurrent ScanResult inserts for a single run. Unlike SCAN_FETCH_CONCURRENCY
+ * (external, rate-limit-sensitive), this only has to respect the local Postgres
+ * connection pool, so a higher bound is safe; it stays a fixed limit rather than an
+ * unbounded Promise.all so a large research-augmented universe can't burst the pool.
+ */
+const SCAN_PERSIST_CONCURRENCY = 6;
+
+export async function rerunLiveSchwabScannerForUser(userId: string): Promise<LiveScanRunSummary> {
+  const startedAt = Date.now();
   const profile = await ensureMyLstScannerProfileForUser(userId);
   const provider = await getSchwabMarketDataProviderForUser(userId);
   if (!provider) {
@@ -1235,8 +1252,14 @@ export async function rerunLiveSchwabScannerForUser(userId: string) {
 
   try {
     const candidates = await evaluateLiveMarketScan({ provider, rules, universe });
-    return persistScannerRun(userId, profile.id, "LIVE:SCHWAB", candidates);
-  } catch {
+    await persistScannerRun(userId, profile.id, "LIVE:SCHWAB", candidates);
+    return {
+      scanned: candidates.length,
+      nearMatches: candidates.filter((candidate) => getNearMisses(candidate.summary.results).length === 1).length,
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    console.error("Live Schwab scan failed", error);
     throw new ValidationError("LIVE DATA UNAVAILABLE: Schwab market data did not return a complete scan. Demo data was not substituted.");
   }
 }
@@ -1259,8 +1282,8 @@ async function persistScannerRun(
     },
   });
 
-  for (const candidate of candidates) {
-    await prisma.scanResult.create({
+  await mapWithConcurrency(candidates, SCAN_PERSIST_CONCURRENCY, (candidate) =>
+    prisma.scanResult.create({
       data: {
         runId: run.id,
         ticker: candidate.ticker,
@@ -1282,8 +1305,8 @@ async function persistScannerRun(
           })),
         },
       },
-    });
-  }
+    }),
+  );
 
   return run;
 }

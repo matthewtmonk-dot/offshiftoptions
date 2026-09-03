@@ -19,7 +19,8 @@ import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
 import { prisma } from "@/lib/prisma";
 import { ensureMyLstScannerProfileForUser } from "@/lib/workflows";
-import { runDemoScannerAction, runLiveSchwabScannerAction } from "../actions";
+import { runDemoScannerAction } from "../actions";
+import { LiveScanButton } from "./live-scan-button";
 import { ScannerWorkspace } from "./scanner-workspace";
 
 export const dynamic = "force-dynamic";
@@ -119,15 +120,7 @@ export default async function ScannerPage({
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <form action={runLiveSchwabScannerAction}>
-            <button
-              type="submit"
-              className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-sky-400/40 bg-sky-400/10 px-3 text-sm font-medium text-sky-100 transition hover:border-sky-300 hover:bg-sky-400/15"
-            >
-              <RefreshCw className="size-3.5" aria-hidden />
-              Run Live Scan
-            </button>
-          </form>
+          <LiveScanButton />
           <IntentPrefetchLink
             href="/scanner/settings"
             title="Scanner Rules"

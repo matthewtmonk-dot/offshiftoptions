@@ -9,6 +9,7 @@ import {
   wilderRsi,
 } from "@/domain/finance/calculations";
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle } from "@/providers/market-data/types";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import { DEMO_SCAN_CANDIDATES } from "./profile";
 import { evaluateCandidate, setupScore, type ScannerRule } from "./scanner";
 
@@ -36,6 +37,21 @@ type StockStageCandidate = {
 export const STARTER_LIVE_SCAN_UNIVERSE = [...new Set(DEMO_SCAN_CANDIDATES.map((candidate) => candidate.ticker))];
 const STOCK_STAGE_RULE_KEYS = new Set(["price", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
 
+/**
+ * Caps how many quote/history or option-chain requests run in flight at once for a
+ * single live scan. Schwab does not publish a per-connection concurrent-request limit,
+ * so this is a conservative, easily-tunable bound rather than a documented ceiling:
+ * it still gives most of the available wall-clock improvement over one-at-a-time
+ * fetching on a scan-sized universe (10-30 tickers) without bursting a single user's
+ * OAuth-scoped connection with dozens of simultaneous requests. Revisit if production
+ * use shows either throttling (lower it) or comfortable headroom (raise it).
+ */
+export const SCAN_FETCH_CONCURRENCY = 4;
+
+type StockStageOutcome =
+  | { ticker: string; ok: true; candidate: StockStageCandidate }
+  | { ticker: string; ok: false; error: unknown };
+
 export async function evaluateLiveMarketScan({
   provider,
   rules,
@@ -43,10 +59,27 @@ export async function evaluateLiveMarketScan({
   asOf = new Date(),
   maxOptionChainLookups = 8,
 }: LiveScanOptions): Promise<LiveScanCandidate[]> {
-  const stockStage = [];
-  for (const ticker of universe.map((item) => item.toUpperCase())) {
-    const [quote, candles] = await Promise.all([provider.getQuote(ticker), provider.getPriceHistory(ticker, 80)]);
-    stockStage.push(buildStockStageCandidate(ticker, quote, candles));
+  const tickers = universe.map((item) => item.toUpperCase());
+  const stockOutcomes = await mapWithConcurrency<string, StockStageOutcome>(tickers, SCAN_FETCH_CONCURRENCY, async (ticker) => {
+    try {
+      const [quote, candles] = await Promise.all([provider.getQuote(ticker), provider.getPriceHistory(ticker, 80)]);
+      return { ticker, ok: true, candidate: buildStockStageCandidate(ticker, quote, candles) };
+    } catch (error) {
+      return { ticker, ok: false, error };
+    }
+  });
+
+  const stockStage = stockOutcomes
+    .filter((outcome): outcome is StockStageOutcome & { ok: true } => outcome.ok)
+    .map((outcome) => outcome.candidate);
+  const unavailableTickers = stockOutcomes.filter((outcome): outcome is StockStageOutcome & { ok: false } => !outcome.ok);
+
+  // A single bad ticker should not sink the whole scan (partial results are useful and
+  // are surfaced as UNKNOWN below). But if every ticker failed, this is a systemic
+  // problem (auth, outage, etc.), not a per-ticker one - surface it as a real failure
+  // instead of returning an all-UNKNOWN scan that looks like it ran successfully.
+  if (stockStage.length === 0 && unavailableTickers.length > 0) {
+    throw unavailableTickers[0].error;
   }
 
   const shortlist = stockStage
@@ -54,15 +87,32 @@ export async function evaluateLiveMarketScan({
     .sort((left, right) => stockStageRank(left) - stockStageRank(right))
     .slice(0, maxOptionChainLookups);
   const shortlistTickers = new Set(shortlist.map((candidate) => candidate.ticker));
-  const optionsByTicker = new Map<string, OptionContractSnapshot[]>();
 
-  for (const candidate of shortlist) {
-    optionsByTicker.set(candidate.ticker, await provider.getOptionChain(candidate.ticker));
+  const optionOutcomes = await mapWithConcurrency(shortlist, SCAN_FETCH_CONCURRENCY, async (candidate) => {
+    try {
+      return { ticker: candidate.ticker, ok: true as const, options: await provider.getOptionChain(candidate.ticker) };
+    } catch {
+      return { ticker: candidate.ticker, ok: false as const, options: [] as OptionContractSnapshot[] };
+    }
+  });
+  const optionsByTicker = new Map<string, OptionContractSnapshot[]>();
+  const optionChainFailedTickers = new Set<string>();
+  for (const outcome of optionOutcomes) {
+    optionsByTicker.set(outcome.ticker, outcome.options);
+    if (!outcome.ok) {
+      optionChainFailedTickers.add(outcome.ticker);
+    }
   }
 
-  return stockStage.map((candidate) => {
+  const evaluated = stockStage.map((candidate) => {
     const values = shortlistTickers.has(candidate.ticker)
-      ? bestPutValues(candidate, optionsByTicker.get(candidate.ticker) ?? [], rules, asOf)
+      ? optionChainFailedTickers.has(candidate.ticker)
+        ? {
+            ...candidate.values,
+            ...unknownOptionValues(),
+            scanNote: "Option-chain data was unavailable for this ticker; result marked UNKNOWN.",
+          }
+        : bestPutValues(candidate, optionsByTicker.get(candidate.ticker) ?? [], rules, asOf)
       : {
           ...candidate.values,
           ...unknownOptionValues(),
@@ -75,6 +125,17 @@ export async function evaluateLiveMarketScan({
       summary: evaluateCandidate(rules, values),
     };
   });
+
+  const unavailable = unavailableTickers.map((outcome) => {
+    const values = {
+      ...unknownStockValues(),
+      ...unknownOptionValues(),
+      scanNote: "Live market data was unavailable for this ticker; result marked UNKNOWN.",
+    };
+    return { ticker: outcome.ticker, values, summary: evaluateCandidate(rules, values) };
+  });
+
+  return [...evaluated, ...unavailable];
 }
 
 function buildStockStageCandidate(ticker: string, quote: MarketQuote, candles: PriceCandle[]): StockStageCandidate {
@@ -167,6 +228,21 @@ function candidateValues(candidate: StockStageCandidate, option: OptionContractS
     spreadPercent: bidAskSpreadPercent(option.bid, option.ask),
     openInterest: option.openInterest ?? null,
     optionVolume: option.volume ?? null,
+  };
+}
+
+function unknownStockValues() {
+  return {
+    price: null,
+    priceChange: null,
+    priceChangePercent: null,
+    stockVolume: null,
+    rsi: null,
+    bbPercent: null,
+    doNotTrade: null,
+    debtToEquity: null,
+    earningsDate: null,
+    earningsDistance: null,
   };
 }
 
