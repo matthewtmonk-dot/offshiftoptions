@@ -156,7 +156,7 @@ export async function getScannerPageData(userId: string) {
  * with this stock before" per ticker).
  */
 export async function getResearchPageData(userId: string) {
-  const [users, ownWatchlist, visibleItems, latestRun, campaigns] = await Promise.all([
+  const [users, ownWatchlist, visibleItems, latestRun, campaigns, settings] = await Promise.all([
     prisma.user.findMany({
       where: { id: { not: userId } },
       orderBy: { name: "asc" },
@@ -205,9 +205,13 @@ export async function getResearchPageData(userId: string) {
       orderBy: { openedAt: "desc" },
       include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
     }),
+    prisma.userSettings.findUnique({
+      where: { userId },
+      select: { researchColumns: true, researchSortKey: true },
+    }),
   ]);
 
-  return { users, ownWatchlist, visibleItems, latestRun, campaigns };
+  return { users, ownWatchlist, visibleItems, latestRun, campaigns, settings };
 }
 
 export async function getRecommendationsPageData(userId: string) {

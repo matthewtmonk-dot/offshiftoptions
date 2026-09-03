@@ -114,6 +114,26 @@ enum RollFriendliness {
   DIFFICULT
 }
 
+// User's own manually-entered read of LSEG's analyst consensus. Not fetched from LSEG (OSO
+// has no authorized LSEG provider and does not scrape) - see PROJECT_HANDOFF.md Research
+// section. UNKNOWN is the explicit "not entered / unclear" state, distinct from a field
+// that's simply never been touched (also UNKNOWN, since that's the column default).
+enum LsegRecommendation {
+  BUY
+  HOLD
+  SELL
+  UNKNOWN
+}
+
+// User's own judgment of multi-year profitability. Never derived from a single year's EPS -
+// there is no verified multi-year financial-statements provider wired up yet.
+enum ProfitabilityAssessment {
+  PROFITABLE
+  MIXED
+  UNPROFITABLE
+  UNKNOWN
+}
+
 enum NoteCategory {
   PRO
   CON
@@ -294,9 +314,16 @@ model UserSettings {
   appearance          AppearanceMode @default(SYSTEM)
   enableInAppNotify   Boolean        @default(true)
   enableWebPushNotify Boolean        @default(false)
-  createdAt           DateTime       @default(now())
-  updatedAt           DateTime       @updatedAt
-  user                User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Per-user Research table view preference (2026-09 Research customization slice). An
+  // empty array means "no saved preference yet" - the Research page falls back to its
+  // built-in default column set, so a user who has never touched Columns sees the same
+  // thing they always have. Order is preserved (it doubles as the user's column order).
+  // Entirely per-user: one user changing this can never affect another user's settings row.
+  researchColumns String[] @default([])
+  researchSortKey String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model SharingPreferences {
@@ -539,18 +566,46 @@ model WatchlistItem {
   manualLsegRating     String?
   manualLsegScore      String?
   manualLsegTarget     String?
+  // LSEG's Buy/Hold/Sell consensus is a separate concept from the free-text "LSEG rating"
+  // above (e.g. a letter/numeric grade) - both manual, both unverified against any actual
+  // authorized LSEG feed (see PROJECT_HANDOFF.md Research section - OSO does not scrape LSEG).
+  manualLsegRecommendation LsegRecommendation @default(UNKNOWN)
   // Verified fundamentals (auto, from Schwab's quote "fundamental" field group) - left
   // unpopulated in this slice. No live Schwab connection was available locally to verify
   // field names/units against a real response; see PROJECT_HANDOFF.md Research section for
   // the exact next step before wiring these up. Never treat as a live quote.
-  fundamentalPeRatio       Decimal?  @db.Decimal(10, 2)
-  fundamentalPegRatio      Decimal?  @db.Decimal(10, 2)
-  fundamentalDebtToEquity  Decimal?  @db.Decimal(10, 4)
-  fundamentalCurrentRatio  Decimal?  @db.Decimal(10, 4)
-  fundamentalEps           Decimal?  @db.Decimal(10, 4)
-  fundamentalDividendYield Decimal?  @db.Decimal(10, 4)
-  fundamentalSource        String?
-  fundamentalAsOf          DateTime?
+  fundamentalPeRatio        Decimal?  @db.Decimal(10, 2)
+  fundamentalPegRatio       Decimal?  @db.Decimal(10, 2)
+  fundamentalDebtToEquity   Decimal?  @db.Decimal(10, 4)
+  fundamentalCurrentRatio   Decimal?  @db.Decimal(10, 4)
+  fundamentalEps            Decimal?  @db.Decimal(10, 4)
+  fundamentalDividendYield  Decimal?  @db.Decimal(10, 4)
+  fundamentalDividendAmount Decimal?  @db.Decimal(10, 4)
+  fundamentalSource         String?
+  fundamentalAsOf           DateTime?
+  // Manual fallback counterparts for the verified-auto columns above. Kept in SEPARATE
+  // columns (never written into the fundamentalXxx columns directly) so that wiring up a
+  // real, verified auto source later can never silently clobber something the user typed,
+  // and a manually-typed value can never masquerade as live/verified data. Display always
+  // prefers fundamentalXxx (auto) over manualXxx (fallback) when both are present. PEG,
+  // Debt/Equity, and Current Ratio have no verified auto source at all right now - see
+  // PROJECT_HANDOFF.md Research section - so today these are the only populated slot for
+  // those three, but they stay ready for that auto source to arrive without a schema change.
+  manualPeRatio        Decimal? @db.Decimal(10, 2)
+  manualPegRatio       Decimal? @db.Decimal(10, 2)
+  manualDebtToEquity   Decimal? @db.Decimal(10, 4)
+  manualCurrentRatio   Decimal? @db.Decimal(10, 4)
+  manualDividendYield  Decimal? @db.Decimal(10, 4)
+  manualDividendAmount Decimal? @db.Decimal(10, 4)
+  // Simple "does it pay a dividend?" tri-state - null means not entered/unknown, distinct
+  // from false (confirmed no dividend). Prominent on its own since yield/amount can both be
+  // blank even when the answer to this simpler question is known.
+  paysDividend Boolean?
+  // "Are they profitable over the past several years?" - a deliberately simple, structured
+  // manual judgment. Never computed from a single year's EPS; there is no verified
+  // multi-year financial-statements provider wired up (see PROJECT_HANDOFF.md).
+  profitability     ProfitabilityAssessment @default(UNKNOWN)
+  profitabilityNote String?
 
   watchlist   Watchlist           @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
   owner       User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)

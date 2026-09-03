@@ -35,6 +35,7 @@ import {
   toggleTradingAccountVisibilityForUser,
   toggleWatchlistItemVisibilityForUser,
   updateRecommendationStatusForUser,
+  updateResearchColumnsForUser,
   updateResearchDetailsForUser,
   updateScannerSettingsForUser,
 } from "@/lib/workflows";
@@ -132,6 +133,28 @@ export async function updateResearchDetailsAction(formData: FormData) {
 
   revalidatePath("/research");
   revalidatePath("/scanner");
+}
+
+export type UpdateResearchColumnsResult = { ok: true; columns: string[]; sortKey: string | null } | { ok: false; error: string };
+
+/**
+ * Saves the current user's Research column visibility/order/sort. Called directly from the
+ * client (not a <form>) whenever the Columns menu changes, so it never blocks on a
+ * revalidate/redirect - it's a background preference save, not a data mutation the rest of
+ * the page needs to reflect immediately.
+ */
+export async function updateResearchColumnsAction(columns: string[], sortKey: string | null): Promise<UpdateResearchColumnsResult> {
+  const user = await requireCurrentUser();
+
+  try {
+    const result = await updateResearchColumnsForUser(user.id, columns, sortKey);
+    return { ok: true, ...result };
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
+  }
 }
 
 export async function removeWatchlistItemAction(formData: FormData) {

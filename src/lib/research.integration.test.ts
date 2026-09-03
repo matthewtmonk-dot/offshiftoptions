@@ -161,4 +161,124 @@ maybeDescribe("Research (Watchlist->Research) privacy, isolation, and personal-r
   it("rejects an invalid research status rather than silently accepting it", async () => {
     await expect(workflows.setResearchStatusForUser(userA.id, "ZZZJ", "BOGUS")).rejects.toThrow("Invalid research status");
   });
+
+  it("persists the new fundamental/external-research/profitability/dividend fields exactly as entered, with blank staying null (not 0)", async () => {
+    const item = await workflows.setResearchStatusForUser(userA.id, "ZZZK", "LIKE");
+    const formData = new FormData();
+    formData.set("manualPeRatio", "18.5");
+    formData.set("manualPegRatio", "-1.2");
+    formData.set("manualDebtToEquity", "0.42");
+    formData.set("manualCurrentRatio", "1.8");
+    formData.set("manualLsegRecommendation", "BUY");
+    formData.set("profitability", "PROFITABLE");
+    formData.set("profitabilityNote", "Profitable 4 of last 5 years");
+    formData.set("paysDividend", "YES");
+    formData.set("manualDividendYield", "2.1");
+    formData.set("manualDividendAmount", "0.88");
+    // manualCurrentRatio's counterpart (current ratio auto column) intentionally left blank.
+
+    const updated = await workflows.updateResearchDetailsForUser(userA.id, item.id, formData);
+    expect(updated).toMatchObject({
+      manualLsegRecommendation: "BUY",
+      profitability: "PROFITABLE",
+      profitabilityNote: "Profitable 4 of last 5 years",
+      paysDividend: true,
+    });
+    expect(Number(updated?.manualPeRatio)).toBe(18.5);
+    expect(Number(updated?.manualPegRatio)).toBe(-1.2);
+    expect(Number(updated?.manualDebtToEquity)).toBe(0.42);
+    expect(Number(updated?.manualCurrentRatio)).toBe(1.8);
+    expect(Number(updated?.manualDividendYield)).toBe(2.1);
+    expect(Number(updated?.manualDividendAmount)).toBe(0.88);
+    // Never auto-populated by this manual-only path - stays reserved for a future verified source.
+    expect(updated?.fundamentalPeRatio).toBeNull();
+  });
+
+  it("persists a blank manual numeric field as null, never as 0", async () => {
+    const item = await workflows.setResearchStatusForUser(userA.id, "ZZZL", "LIKE");
+    const formData = new FormData();
+    formData.set("manualPeRatio", "");
+    formData.set("manualDebtToEquity", "");
+
+    const updated = await workflows.updateResearchDetailsForUser(userA.id, item.id, formData);
+    expect(updated?.manualPeRatio).toBeNull();
+    expect(updated?.manualDebtToEquity).toBeNull();
+  });
+
+  it("treats an absent paysDividend selection as unknown (null), not false", async () => {
+    const item = await workflows.setResearchStatusForUser(userA.id, "ZZZM", "LIKE");
+    const updated = await workflows.updateResearchDetailsForUser(userA.id, item.id, new FormData());
+    expect(updated?.paysDividend).toBeNull();
+  });
+
+  it("rejects an invalid LSEG recommendation / profitability value rather than silently accepting it", async () => {
+    const item = await workflows.setResearchStatusForUser(userA.id, "ZZZN", "LIKE");
+    const formData = new FormData();
+    formData.set("manualLsegRecommendation", "STRONG_BUY_NOT_REAL");
+    formData.set("profitability", "SUPER_PROFITABLE_NOT_REAL");
+
+    const updated = await workflows.updateResearchDetailsForUser(userA.id, item.id, formData);
+    expect(updated?.manualLsegRecommendation).toBe("UNKNOWN");
+    expect(updated?.profitability).toBe("UNKNOWN");
+  });
+});
+
+const runColumnPreferenceTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
+const maybeDescribeColumns = runColumnPreferenceTests ? describe : describe.skip;
+
+maybeDescribeColumns("Per-user Research column/sort preferences", () => {
+  let prisma: typeof import("./prisma").prisma;
+  let workflows: typeof import("./workflows");
+  let userA: { id: string };
+  let userB: { id: string };
+  const userIds: string[] = [];
+
+  beforeAll(async () => {
+    prisma = (await import("./prisma")).prisma;
+    workflows = await import("./workflows");
+
+    const passwordHash = await hash("not-used", 4);
+    const timestamp = Date.now();
+    userA = await prisma.user.create({
+      data: { name: "Columns User A", email: `columns-a-${timestamp}@lst.local`, passwordHash },
+      select: { id: true },
+    });
+    userB = await prisma.user.create({
+      data: { name: "Columns User B", email: `columns-b-${timestamp}@lst.local`, passwordHash },
+      select: { id: true },
+    });
+    userIds.push(userA.id, userB.id);
+  });
+
+  afterAll(async () => {
+    await prisma.userSettings.deleteMany({ where: { userId: { in: userIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await prisma.$disconnect();
+  });
+
+  it("saves a user's column order and sort key, sanitizing out unknown keys", async () => {
+    const result = await workflows.updateResearchColumnsForUser(userA.id, ["company", "bogusColumn", "peRatio"], "ticker");
+    expect(result).toEqual({ columns: ["company", "peRatio"], sortKey: "ticker" });
+
+    const saved = await prisma.userSettings.findUniqueOrThrow({ where: { userId: userA.id } });
+    expect(saved.researchColumns).toEqual(["company", "peRatio"]);
+    expect(saved.researchSortKey).toBe("ticker");
+  });
+
+  it("one user's column change never touches another user's saved preference", async () => {
+    await workflows.updateResearchColumnsForUser(userA.id, ["company"], "added");
+    await workflows.updateResearchColumnsForUser(userB.id, ["wouldOwn", "notes"], "price");
+
+    const savedA = await prisma.userSettings.findUniqueOrThrow({ where: { userId: userA.id } });
+    const savedB = await prisma.userSettings.findUniqueOrThrow({ where: { userId: userB.id } });
+    expect(savedA.researchColumns).toEqual(["company"]);
+    expect(savedB.researchColumns).toEqual(["wouldOwn", "notes"]);
+    expect(savedA.researchSortKey).toBe("added");
+    expect(savedB.researchSortKey).toBe("price");
+  });
+
+  it("rejects an invalid sort key rather than persisting it", async () => {
+    const result = await workflows.updateResearchColumnsForUser(userA.id, ["company"], "not-a-real-sort-key");
+    expect(result.sortKey).toBeNull();
+  });
 });

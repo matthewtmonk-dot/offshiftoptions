@@ -1,8 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
-import type { NoteCategory, ReactionTargetType, ResearchStatus, RollFriendliness, WouldOwnStatus } from "@/generated/prisma/enums";
+import type {
+  LsegRecommendation,
+  NoteCategory,
+  ProfitabilityAssessment,
+  ReactionTargetType,
+  ResearchStatus,
+  RollFriendliness,
+  WouldOwnStatus,
+} from "@/generated/prisma/enums";
 import { evaluateDemoScan, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { getNearMisses } from "@/domain/scanner/scanner";
+import { sanitizeResearchColumns, isResearchSortKey } from "@/domain/research/columns";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
 import { mapWithConcurrency } from "./concurrency";
 import {
@@ -32,6 +41,8 @@ const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
 const RESEARCH_STATUSES = new Set<ResearchStatus>(["LIKE", "WATCH", "NEUTRAL", "AVOID", "NEVER_TRADE"]);
 const WOULD_OWN_STATUSES = new Set<WouldOwnStatus>(["YES", "NO", "CONDITIONAL"]);
 const ROLL_FRIENDLINESS_VALUES = new Set<RollFriendliness>(["UNKNOWN", "FRIENDLY", "DIFFICULT"]);
+const LSEG_RECOMMENDATIONS = new Set<LsegRecommendation>(["BUY", "HOLD", "SELL", "UNKNOWN"]);
+const PROFITABILITY_ASSESSMENTS = new Set<ProfitabilityAssessment>(["PROFITABLE", "MIXED", "UNPROFITABLE", "UNKNOWN"]);
 const ACCOUNT_VISIBILITIES = new Set<Visibility>(["PRIVATE", "SHARED"]);
 const RECORD_VISIBILITIES = new Set<InheritedVisibility>(["INHERIT", "PRIVATE", "SHARED"]);
 const MANUAL_LEDGER_ENTRY_TYPES = new Set<AccountLedgerEntryType>(["DEPOSIT", "WITHDRAWAL", "MANUAL_ADJUSTMENT"]);
@@ -629,6 +640,16 @@ export async function updateResearchDetailsForUser(userId: string, itemId: strin
   const rollFriendliness = ROLL_FRIENDLINESS_VALUES.has(rollFriendlinessRaw as RollFriendliness)
     ? (rollFriendlinessRaw as RollFriendliness)
     : "UNKNOWN";
+  const lsegRecommendationRaw = String(formData.get("manualLsegRecommendation") ?? "UNKNOWN");
+  const manualLsegRecommendation = LSEG_RECOMMENDATIONS.has(lsegRecommendationRaw as LsegRecommendation)
+    ? (lsegRecommendationRaw as LsegRecommendation)
+    : "UNKNOWN";
+  const profitabilityRaw = String(formData.get("profitability") ?? "UNKNOWN");
+  const profitability = PROFITABILITY_ASSESSMENTS.has(profitabilityRaw as ProfitabilityAssessment)
+    ? (profitabilityRaw as ProfitabilityAssessment)
+    : "UNKNOWN";
+  const paysDividendRaw = String(formData.get("paysDividend") ?? "");
+  const paysDividend = paysDividendRaw === "YES" ? true : paysDividendRaw === "NO" ? false : null;
 
   return prisma.watchlistItem.update({
     where: { id: item.id },
@@ -646,8 +667,36 @@ export async function updateResearchDetailsForUser(userId: string, itemId: strin
       manualLsegRating: trimText(formData.get("manualLsegRating"), 50) || null,
       manualLsegScore: trimText(formData.get("manualLsegScore"), 50) || null,
       manualLsegTarget: trimText(formData.get("manualLsegTarget"), 50) || null,
+      manualLsegRecommendation,
+      manualPeRatio: parseOptionalDecimal(formData.get("manualPeRatio"), "P/E"),
+      manualPegRatio: parseOptionalDecimal(formData.get("manualPegRatio"), "PEG"),
+      manualDebtToEquity: parseOptionalDecimal(formData.get("manualDebtToEquity"), "debt/equity ratio"),
+      manualCurrentRatio: parseOptionalDecimal(formData.get("manualCurrentRatio"), "current ratio"),
+      paysDividend,
+      manualDividendYield: parseOptionalDecimal(formData.get("manualDividendYield"), "dividend yield"),
+      manualDividendAmount: parseOptionalDecimal(formData.get("manualDividendAmount"), "dividend amount"),
+      profitability,
+      profitabilityNote: trimText(formData.get("profitabilityNote"), 500) || null,
     },
   });
+}
+
+/**
+ * Per-user Research table view preference (visible/hidden columns, their order, and the
+ * active sort key). Entirely scoped to `userId` via the UserSettings upsert key - one
+ * user's Columns choice can never write to another user's row.
+ */
+export async function updateResearchColumnsForUser(userId: string, columnsInput: unknown, sortKeyInput: unknown) {
+  const columns = sanitizeResearchColumns(columnsInput);
+  const sortKey = isResearchSortKey(sortKeyInput) ? sortKeyInput : null;
+
+  await prisma.userSettings.upsert({
+    where: { userId },
+    update: { researchColumns: columns, researchSortKey: sortKey },
+    create: { userId, researchColumns: columns, researchSortKey: sortKey },
+  });
+
+  return { columns, sortKey };
 }
 
 /**
@@ -1347,6 +1396,28 @@ function parseOptionalMoney(value: unknown, label: string) {
 
   const parsed = Number(text);
   if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new ValidationError(`Enter a valid ${label}.`);
+  }
+
+  return parsed;
+}
+
+/**
+ * For manual fundamentals (P/E, PEG, D/E, current ratio, dividend yield/amount) where an
+ * empty input must persist as null, never 0 - a real P/E of "blank" and a real P/E of 0 are
+ * not the same thing, and 0 is not a meaningful value for any of these fields anyway.
+ * Negative values are allowed (e.g. negative P/E from negative earnings) since rejecting
+ * them would make it impossible to honestly record what a real value is; display layers are
+ * responsible for showing negative/non-meaningful values as "N/M", not this parser.
+ */
+function parseOptionalDecimal(value: unknown, label: string) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) {
     throw new ValidationError(`Enter a valid ${label}.`);
   }
 
