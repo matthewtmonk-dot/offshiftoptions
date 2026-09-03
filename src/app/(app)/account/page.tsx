@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { KeyRound, Link2, Plus, RefreshCw, Save, ShieldCheck, Unplug } from "lucide-react";
+import { KeyRound, Link2, Plus, RefreshCw, Save, SearchCheck, ShieldCheck, Unplug } from "lucide-react";
 import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
@@ -286,7 +286,7 @@ export default async function AccountPage({
                     <div className="break-all text-xs">{SCHWAB_PRODUCTION_CALLBACK_URL}</div>
                   </div>
                 </div>
-                <div className="mt-3">
+                <div className="mt-3 flex flex-wrap items-center gap-3">
                   {schwabOauthReady ? (
                     <Link
                       href="/api/schwab/connect"
@@ -298,6 +298,16 @@ export default async function AccountPage({
                   ) : (
                     <span className="text-xs text-zinc-500">Connect after developer app setup</span>
                   )}
+                  {schwabConnection?.connected ? (
+                    <Link
+                      href="/account/schwab-fundamentals"
+                      prefetch={false}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
+                    >
+                      <SearchCheck className="size-3" aria-hidden />
+                      Verify Schwab Fundamental Fields
+                    </Link>
+                  ) : null}
                 </div>
               </details>
             </div>
