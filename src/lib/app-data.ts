@@ -299,7 +299,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
         ? buddyAccountWhere
         : { OR: [{ userId }, buddyAccountWhere] };
 
-  const [users, ownAccounts, visibleAccounts, campaigns, ownCompletedCampaigns, legacyTrades] = await Promise.all([
+  const [users, ownAccounts, visibleAccounts, campaigns, ownPerformanceCampaigns, legacyTrades] = await Promise.all([
     prisma.user.findMany({ where: { id: { not: userId } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.tradingAccount.findMany({
       where: { userId },
@@ -343,14 +343,129 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
       ? prisma.campaign.findMany({
           // ALWAYS scoped to the current user regardless of `scope` - performance/win-rate must
           // never silently combine Matt and Eric's results into one figure (see PROJECT_HANDOFF.md).
-          where: { ownerId: userId, status: "CLOSED" },
-          include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+          where: { ownerId: userId },
+          orderBy: [{ status: "asc" }, { openedAt: "desc" }],
+          include: {
+            events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] },
+            linkedBrokerRecords: {
+              where: {
+                userId,
+                provider: "SCHWAB",
+                kind: "POSITION",
+                status: "CONFIRMED",
+              },
+              orderBy: [{ observedAt: "desc" }, { updatedAt: "desc" }],
+              select: {
+                id: true,
+                accountId: true,
+                symbol: true,
+                underlyingSymbol: true,
+                quantity: true,
+                amount: true,
+                observedAt: true,
+                metadata: true,
+              },
+            },
+          },
         })
       : Promise.resolve([]),
     includeLegacyTrades ? getPositionsPageData(userId) : Promise.resolve([]),
   ]);
 
-  return { users, ownAccounts, visibleAccounts, campaigns, ownCompletedCampaigns, legacyTrades };
+  const optionMarksForPerformance = includePerformanceCampaigns
+    ? await loadLatestOptionMarksForCampaigns(ownPerformanceCampaigns)
+    : [];
+  const ownCompletedCampaigns = ownPerformanceCampaigns.filter((campaign) => campaign.status === "CLOSED");
+
+  return {
+    users,
+    ownAccounts,
+    visibleAccounts,
+    campaigns,
+    ownCompletedCampaigns,
+    ownPerformanceCampaigns,
+    optionMarksForPerformance,
+    legacyTrades,
+  };
+}
+
+type CampaignWithEventsForMarks = {
+  ticker: string;
+  events: Array<{
+    type: string;
+    optionType: string | null;
+    strike: unknown;
+    expiration: Date | null;
+  }>;
+};
+
+async function loadLatestOptionMarksForCampaigns(campaigns: CampaignWithEventsForMarks[]) {
+  const underlyings = [
+    ...new Set(campaigns.map((campaign) => campaign.ticker.toUpperCase())),
+  ];
+
+  if (underlyings.length === 0) {
+    return [];
+  }
+
+  const snapshots = await prisma.optionContractSnapshot.findMany({
+    where: {
+      underlyingSymbol: { in: underlyings },
+      optionType: "PUT",
+    },
+    orderBy: [{ capturedAt: "desc" }],
+    select: {
+      id: true,
+      symbol: true,
+      underlyingSymbol: true,
+      optionType: true,
+      strike: true,
+      expiration: true,
+      bid: true,
+      ask: true,
+      mark: true,
+      capturedAt: true,
+    },
+  });
+
+  const latestByContract = new Map<string, (typeof snapshots)[number]>();
+  for (const snapshot of snapshots) {
+    const key = optionContractKey(snapshot.underlyingSymbol, snapshot.expiration, snapshot.strike, snapshot.optionType);
+    if (!latestByContract.has(key)) {
+      latestByContract.set(key, snapshot);
+    }
+  }
+
+  return [...latestByContract.values()];
+}
+
+export function optionContractKey(
+  underlyingSymbol: string,
+  expiration: Date | string,
+  strike: unknown,
+  optionType: string,
+) {
+  return [
+    underlyingSymbol.toUpperCase(),
+    toDateKey(expiration),
+    decimalKey(strike),
+    optionType.toUpperCase(),
+  ].join("|");
+}
+
+function toDateKey(value: Date | string) {
+  return (value instanceof Date ? value : new Date(value)).toISOString().slice(0, 10);
+}
+
+function decimalKey(value: unknown) {
+  const candidate = value as { toNumber?: () => number; toString?: () => string };
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof candidate?.toNumber === "function"
+        ? candidate.toNumber()
+        : Number(candidate?.toString?.() ?? value);
+  return Number.isFinite(parsed) ? parsed.toFixed(4) : String(value);
 }
 
 export async function getAccountPageData(userId: string) {

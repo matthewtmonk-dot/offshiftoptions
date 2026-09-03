@@ -18,16 +18,21 @@ export type CampaignEventKind =
 export type CampaignStatusInput = "OPEN" | "ASSIGNED" | "CLOSED";
 
 export type CampaignEventInput = {
+  id?: string;
   type: CampaignEventKind;
   occurredAt: Date | string;
   sortOrder?: unknown;
+  groupKey?: string | null;
+  optionType?: "PUT" | "CALL" | null;
   contracts?: unknown;
   shares?: unknown;
   strike?: unknown;
+  expiration?: Date | string | null;
   premium?: unknown;
   cashAmount?: unknown;
   fees?: unknown;
   underlyingPrice?: unknown;
+  notes?: string | null;
 };
 
 export type CampaignCurrentStage =

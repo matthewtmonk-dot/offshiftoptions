@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { summarizeWeeklyReturns, summarizeWinLoss } from "./performance";
+import {
+  summarizeCampaignProgress,
+  summarizeContributionAdjustedGoal,
+  summarizeWeeklyReturns,
+  summarizeWinLoss,
+  tradingProfitFromAccountValue,
+} from "./performance";
 
 describe("win/loss accounting", () => {
   it("counts only completed campaigns, never an open one mid-roll", () => {
@@ -98,5 +104,145 @@ describe("weekly return vs target", () => {
     expect(result.totalWeeksTracked).toBe(4);
     expect(result.trailing4WeekAveragePercent).toBe(0.85);
     expect(result.weeksAtOrAboveTarget).toBe(2);
+  });
+});
+
+describe("campaign progress accounting", () => {
+  it("shows an open simple CSP as premium, current P/L, and projected OTM - not realized", () => {
+    const progress = summarizeCampaignProgress({
+      status: "OPEN",
+      currentCostToClose: 20,
+      events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5 }],
+      asOf: new Date("2026-08-08"),
+    });
+
+    expect(progress.netPremiumCollected).toBe(50);
+    expect(progress.currentPL).toBe(30);
+    expect(progress.projectedOtmPL).toBe(50);
+    expect(progress.realizedPL).toBeNull();
+  });
+
+  it("handles a rolled CSP where current P/L and projected OTM are different", () => {
+    const progress = summarizeCampaignProgress({
+      status: "OPEN",
+      currentCostToClose: 55,
+      events: [
+        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
+        { type: "ROLL_PUT_CLOSE", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8 },
+        { type: "ROLL_PUT_OPEN", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 29, contracts: 1, premium: 1.2 },
+      ],
+      asOf: new Date("2026-08-15"),
+    });
+
+    expect(progress.netPremiumCollected).toBe(90);
+    expect(progress.currentCostToClose).toBe(55);
+    expect(progress.currentPL).toBe(35);
+    expect(progress.projectedOtmPL).toBe(90);
+    expect(progress.rollCount).toBe(1);
+  });
+
+  it("allows a rolled campaign to be losing now while projected OTM stays positive", () => {
+    const progress = summarizeCampaignProgress({
+      status: "OPEN",
+      currentCostToClose: 120,
+      events: [
+        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
+        { type: "ROLL_PUT_CLOSE", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8 },
+        { type: "ROLL_PUT_OPEN", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 29, contracts: 1, premium: 1.2 },
+      ],
+    });
+
+    expect(progress.currentPL).toBe(-30);
+    expect(progress.projectedOtmPL).toBe(90);
+  });
+
+  it("reports closed wins and losses as realized, with no OTM projection", () => {
+    const win = summarizeCampaignProgress({
+      status: "CLOSED",
+      events: [
+        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
+        { type: "CLOSE_PUT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1, premium: 0.04 },
+      ],
+    });
+    const loss = summarizeCampaignProgress({
+      status: "CLOSED",
+      events: [
+        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
+        { type: "CLOSE_PUT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1, premium: 0.9 },
+      ],
+    });
+
+    expect(win.realizedPL).toBe(46);
+    expect(win.currentPL).toBe(46);
+    expect(win.projectedOtmPL).toBeNull();
+    expect(loss.realizedPL).toBe(-40);
+  });
+
+  it("does not call assignment an OTM success", () => {
+    const progress = summarizeCampaignProgress({
+      status: "ASSIGNED",
+      events: [
+        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
+        { type: "ASSIGNMENT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1 },
+      ],
+    });
+
+    expect(progress.realizedPL).toBeNull();
+    expect(progress.currentPL).toBeNull();
+    expect(progress.projectedOtmApplicable).toBe(false);
+    expect(progress.projectedOtmPL).toBeNull();
+  });
+});
+
+describe("contribution-adjusted 1% goal", () => {
+  it("keeps deposits out of trading P/L", () => {
+    expect(tradingProfitFromAccountValue({ startingCapital: 10_000, netContributions: 2_000, currentValue: 12_100 })).toBe(100);
+  });
+
+  it("adds deposits to the future target base without counting them as return", () => {
+    const goal = summarizeContributionAdjustedGoal({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-01-01", amount: 10_000 },
+            { type: "DEPOSIT", occurredAt: "2026-01-08", amount: 2_000 },
+          ],
+        },
+      ],
+      currentValue: 12_100,
+      projectedOtmPL: 220,
+      targetWeeklyPercent: 1,
+      asOf: new Date("2026-01-15"),
+    });
+
+    expect(goal.tradingPLNow).toBe(100);
+    expect(goal.targetProfit).toBe(220);
+    expect(goal.actualWeeklyPacePercent).toBe(0.45);
+    expect(goal.projectedWeeklyPacePercent).toBe(1);
+    expect(goal.percentOfTarget).toBe(45.5);
+    expect(goal.projectedPercentOfTarget).toBe(100);
+  });
+
+  it("ignores future ledger entries when calculating today's goal", () => {
+    const goal = summarizeContributionAdjustedGoal({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-01-01", amount: 10_000 },
+            { type: "DEPOSIT", occurredAt: "2026-02-01", amount: 2_000 },
+            { type: "STARTING_VALUE", occurredAt: "2026-02-01", amount: 5_000 },
+          ],
+        },
+      ],
+      currentValue: 10_020,
+      projectedOtmPL: null,
+      targetWeeklyPercent: 1,
+      asOf: new Date("2026-01-08"),
+    });
+
+    expect(goal.startingCapital).toBe(10_000);
+    expect(goal.netContributions).toBe(0);
+    expect(goal.tradingPLNow).toBe(20);
+    expect(goal.targetProfit).toBe(100);
   });
 });

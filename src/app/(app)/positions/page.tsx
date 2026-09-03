@@ -1,14 +1,22 @@
 import type { ReactNode } from "react";
+import { InfoTip } from "@/components/info-tip";
 import {
+  Activity,
+  BarChart3,
   ChevronDown,
   CircleDollarSign,
   ClipboardList,
   Flag,
+  Gauge,
   History,
+  LineChart,
   Lock,
   Plus,
   Repeat2,
   ShieldCheck,
+  Sparkles,
+  Target,
+  Timer,
   TrendingUp,
   Users,
   WalletCards,
@@ -18,11 +26,18 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
 import { optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
-import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
+import {
+  summarizeCampaignProgress,
+  summarizeContributionAdjustedGoal,
+  summarizeWinLoss,
+  type CampaignProgressSummary,
+  type ContributionAdjustedGoalSummary,
+} from "@/domain/finance/performance";
 import { requireCurrentUser } from "@/lib/auth";
-import { getTrackerPageData, normalizeTrackerScope, type TrackerScope } from "@/lib/app-data";
+import { getTrackerPageData, normalizeTrackerScope, optionContractKey, type TrackerScope } from "@/lib/app-data";
 import { money, percent, shortDate, toNumber } from "@/lib/format";
 import { resolveInheritedVisibility } from "@/lib/privacy";
+import type { BrokerPosition } from "@/providers/broker-read/types";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { getPendingBrokerImportBatchForUser, getBrokerImportBatchesForUser, type BrokerImportPreviewRow } from "@/lib/broker-import";
 import {
@@ -49,13 +64,85 @@ import { TrackerTabs } from "./tracker-tabs";
 export const dynamic = "force-dynamic";
 
 const WEEKLY_TARGET_PERCENT = 1;
+const HELP = {
+  scope:
+    "Mine shows your financial results. Eric and Both can show shared campaign history for comparison, but OSO never merges account values into one combined performance result.",
+  knownRealized:
+    "Final profit or loss from campaigns that are closed. Open campaigns can collect premium, but they are not realized wins or losses yet.",
+  netPremium:
+    "Credits received minus debits paid and applicable option fees. Premium collected on an open campaign is cash flow so far, not automatically realized profit.",
+  historyStatus:
+    "Open means the campaign still has an active option leg. Assigned means shares were put to the account and the wheel can continue. Closed means OSO has a final campaign result.",
+  startingValue:
+    "The starting capital logged in the account ledger. Later deposits are kept separate so they do not look like trading profit.",
+  accountCurrentValue:
+    "The current account value OSO uses for performance. If the account is broker-backed, the latest broker snapshot is authoritative and may include the current value or liability of open positions.",
+  netContributions:
+    "Deposits minus withdrawals and manual adjustments. Contributions change the capital base but do not count as trading profit.",
+  tradingPLNow:
+    "Your current trading result after removing deposits and withdrawals. Formula: current account value minus starting capital minus net contributions.",
+  realizedPL:
+    "Final profit or loss from completed campaigns only. Open and assigned campaigns do not become realized results until they are closed.",
+  currentMtm:
+    "An estimate of what marked campaigns are worth right now using a current option mark when available. This can change until the campaign is closed.",
+  projectedOtm:
+    "What eligible open cash-secured puts would make if the remaining short put expires worthless. This is a scenario, not guaranteed profit.",
+  currentPace:
+    "Current contribution-adjusted performance divided by the dated capital OSO has tracked. It is based on account value now, not only closed campaign wins.",
+  onePercentTarget:
+    "OSO's strategy benchmark: roughly 1% per week on the capital at work. It is a goal line, not a promised or expected return.",
+  targetComparison:
+    "OSO compares your current progress with the 1% target path for the dates and capital in the ledger. Ahead or behind is shown in dollars and percent of target.",
+  projectedOtmPace:
+    "This pace assumes eligible open cash-secured puts finish under the projected OTM scenario. It can change and is not realized profit.",
+  winRate:
+    "Only completed campaigns count as wins or losses. Open profitable or losing marks do not change win rate.",
+  capitalSecured:
+    "Cash or account capital currently committed to secure open short puts. For cash-secured puts, OSO uses strike times contracts times 100 shares.",
+  currentCostToClose:
+    "Estimated cost to buy back the open short put today. OSO uses a linked Schwab position when available, otherwise an exact cached option quote.",
+  currentReturn:
+    "Current mark-to-market result divided by secured capital. It can move around while the campaign is open.",
+  projectedReturn:
+    "Projected OTM result divided by secured capital. It assumes the open short put expires worthless.",
+  goalNeed:
+    "How far this campaign's projected return is above or below the 1% target needed for its time open.",
+  rolls:
+    "A roll buys back an existing short put and sells a new one. OSO keeps both legs in the campaign history.",
+  markSource:
+    "Current option value comes from your linked Schwab position when available, otherwise from an exact cached option quote. If OSO cannot establish a reliable mark, current P/L is left unavailable rather than guessed.",
+  colorLegend:
+    "Color guide: green means profitable or on target, amber means unresolved or behind target, red means losing or closed loss, and blue/neutral is informational or open state.",
+  sto:
+    "Sell to Open: opening a short option position and receiving premium.",
+  btc:
+    "Buy to Close: buying back a short option position to close that leg.",
+  roll:
+    "A roll closes one short put and opens another. The net amount shows the credit or debit after both legs and fees.",
+  projectedOtmResult:
+    "Projected result if the remaining open short put expires worthless. This is a scenario, not a completed result.",
+} as const;
 
 type TrackerData = Awaited<ReturnType<typeof getTrackerPageData>>;
 type CampaignRow = TrackerData["campaigns"][number];
 type CampaignEventRow = CampaignRow["events"][number];
 type AccountRow = TrackerData["visibleAccounts"][number];
+type PerformanceCampaignRow = TrackerData["ownPerformanceCampaigns"][number];
+type OptionMarkRow = TrackerData["optionMarksForPerformance"][number];
 type ViewMode = "open" | "history" | "performance" | "accounts";
 type SchwabPositions = Awaited<ReturnType<typeof getSchwabOpenPositionsForUser>>;
+type CurrentCostToCloseSource = {
+  costToClose: number;
+  source: "LINKED_BROKER_POSITION" | "CACHED_OPTION_MARK";
+  label: string;
+  asOf: Date | null;
+};
+type PerformanceCampaignViewRow = {
+  campaign: PerformanceCampaignRow;
+  summary: ReturnType<typeof summarizeCampaign>;
+  progress: CampaignProgressSummary;
+  currentCostSource: CurrentCostToCloseSource | null;
+};
 
 export default async function PositionsPage({
   searchParams,
@@ -90,10 +177,13 @@ export default async function PositionsPage({
     summary: summarizeCampaign({ status: campaign.status, events: campaign.events }),
   }));
   const openRows = rows.filter((row) => row.campaign.status !== "CLOSED");
-  const historyRows = rows.filter((row) => row.campaign.status === "CLOSED");
-  const openCount = openRows.length;
-  const closedCount = historyRows.length;
-  const realizedTotal = rows.reduce((sum, row) => sum + (row.summary.realizedPL ?? 0), 0);
+  const closedRows = rows.filter((row) => row.campaign.status === "CLOSED");
+  const historyRows = rows;
+  const activeCount = openRows.length;
+  const openCampaignCount = rows.filter((row) => row.campaign.status === "OPEN").length;
+  const assignedCampaignCount = rows.filter((row) => row.campaign.status === "ASSIGNED").length;
+  const closedCount = closedRows.length;
+  const realizedTotal = closedRows.reduce((sum, row) => sum + (row.summary.totalCampaignPL ?? row.summary.realizedPL ?? 0), 0);
   const premiumTotal = rows.reduce((sum, row) => sum + row.summary.netOptionPremium, 0);
   const openCampaignTickers = new Set(openRows.map((row) => row.campaign.ticker.toUpperCase()));
 
@@ -123,18 +213,53 @@ export default async function PositionsPage({
   const ownCurrentValues = ownAccountRows.map((row) =>
     currentAccountValue(row.ledger, ownRealizedByAccount.get(row.account.id) ?? 0),
   );
-  const ownBaseline = ownCurrentValues.some((value) => value.value !== null)
+  const ownCurrentTotal = ownCurrentValues.some((value) => value.value !== null)
     ? ownCurrentValues.reduce((sum, value) => sum + (value.value ?? 0), 0)
     : null;
-  const ownStartingTotal = ownAccountRows.reduce((sum, row) => sum + (row.ledger.startingValue ?? 0), 0);
-  const ownContributionsTotal = ownAccountRows.reduce((sum, row) => sum + row.ledger.netContributions, 0);
   const ownWinLoss = summarizeWinLoss(ownCompletedForPerformance);
-  const ownWeekly = summarizeWeeklyReturns(ownCompletedForPerformance, ownBaseline, WEEKLY_TARGET_PERCENT);
+  const optionMarksByKey = new Map(
+    data.optionMarksForPerformance.map((snapshot) => [
+      optionContractKey(snapshot.underlyingSymbol, snapshot.expiration, snapshot.strike, snapshot.optionType),
+      snapshot,
+    ]),
+  );
+  const ownPerformanceRows = data.ownPerformanceCampaigns.map((campaign): PerformanceCampaignViewRow => {
+    const currentCostSource = resolveCurrentCostToClose(campaign, optionMarksByKey);
+    return {
+      campaign,
+      summary: summarizeCampaign({ status: campaign.status, events: campaign.events }),
+      progress: summarizeCampaignProgress({
+        status: campaign.status,
+        events: campaign.events,
+        currentCostToClose: currentCostSource?.costToClose ?? null,
+        targetWeeklyPercent: WEEKLY_TARGET_PERCENT,
+      }),
+      currentCostSource,
+    };
+  });
+  const currentCampaignPLTotal = ownPerformanceRows.some((row) => row.progress.currentPL !== null)
+    ? roundMoney(ownPerformanceRows.reduce((sum, row) => sum + (row.progress.currentPL ?? 0), 0))
+    : null;
+  const currentCampaignPartial = ownPerformanceRows.some(
+    (row) => row.campaign.status !== "CLOSED" && row.progress.projectedOtmApplicable && row.progress.currentPL === null,
+  );
+  const projectedOtmTotal = ownPerformanceRows.some((row) => row.progress.realizedPL !== null || row.progress.projectedOtmPL !== null)
+    ? roundMoney(ownPerformanceRows.reduce((sum, row) => sum + (row.progress.realizedPL ?? row.progress.projectedOtmPL ?? 0), 0))
+    : null;
+  const projectedOtmPartial = ownPerformanceRows.some(
+    (row) => row.campaign.status === "OPEN" && row.progress.projectedOtmApplicable && row.progress.projectedOtmPL === null,
+  );
+  const ownGoal = summarizeContributionAdjustedGoal({
+    accounts: data.ownAccounts,
+    currentValue: ownCurrentTotal,
+    projectedOtmPL: projectedOtmTotal,
+    targetWeeklyPercent: WEEKLY_TARGET_PERCENT,
+  });
 
   // Realized P/L per account for the Accounts tab - bucketed per account, never summed
   // across accounts owned by different users.
   const realizedByAccount = new Map<string, number>();
-  for (const row of historyRows) {
+  for (const row of closedRows) {
     const pl = row.summary.totalCampaignPL ?? row.summary.realizedPL ?? 0;
     realizedByAccount.set(row.campaign.accountId, (realizedByAccount.get(row.campaign.accountId) ?? 0) + pl);
   }
@@ -164,14 +289,16 @@ export default async function PositionsPage({
           icon={<ClipboardList className="size-4" aria-hidden />}
           label="Campaigns"
           value={rows.length}
-          detail={`${openCount} open / ${closedCount} closed`}
+          detail={`${activeCount} active / ${closedCount} closed`}
         />
         <TrackerStat
           icon={<CircleDollarSign className="size-4" aria-hidden />}
           label="Known realized P/L"
           value={signedMoney(realizedTotal)}
-          detail="Open shares can remain unknown"
+          detail="Closed campaigns only"
           tone={realizedTotal}
+          help={HELP.knownRealized}
+          helpTestId="help-known-realized"
         />
         <TrackerStat
           icon={<TrendingUp className="size-4" aria-hidden />}
@@ -179,6 +306,8 @@ export default async function PositionsPage({
           value={signedMoney(premiumTotal)}
           detail="Credits minus debits and option fees"
           tone={premiumTotal}
+          help={HELP.netPremium}
+          helpTestId="help-net-option-premium"
         />
         <TrackerStat
           icon={<WalletCards className="size-4" aria-hidden />}
@@ -190,7 +319,12 @@ export default async function PositionsPage({
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <TrackerTabs scope={scope} view={view} />
-        <p className="text-xs text-zinc-500">Tracking + live read-only Schwab data. Trade execution stays in thinkorswim.</p>
+        <p className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
+          Tracking + live read-only Schwab data. Trade execution stays in thinkorswim.
+          <InfoTip label="Mine, Eric, and Both" align="end" testId="help-tracker-scope">
+            {HELP.scope}
+          </InfoTip>
+        </p>
       </div>
 
       {view === "open" ? (
@@ -227,21 +361,38 @@ export default async function PositionsPage({
       ) : null}
 
       {view === "history" ? (
-        <section className="space-y-3">
+        <section className="space-y-3" data-testid="campaign-history-table">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Campaign History</p>
+              <h2 className="mt-1 inline-flex items-center gap-2 text-lg font-semibold text-zinc-50">
+                Every campaign, not just closed wins
+                <InfoTip label="Campaign status" align="start" testId="help-history-status">
+                  {HELP.historyStatus}
+                </InfoTip>
+              </h2>
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <Badge tone="info">{openCampaignCount} open</Badge>
+              <Badge tone="warn">{assignedCampaignCount} assigned</Badge>
+              <Badge tone="good">{closedCount} closed</Badge>
+            </div>
+          </div>
           {historyRows.map((row) => (
             <CampaignCard key={row.campaign.id} row={row} currentUserId={user.id} />
           ))}
-          {historyRows.length === 0 ? <EmptyState>No closed campaigns yet for this view.</EmptyState> : null}
+          {historyRows.length === 0 ? <EmptyState>No campaigns yet for this view.</EmptyState> : null}
         </section>
       ) : null}
 
       {view === "performance" ? (
         <PerformanceSection
           winLoss={ownWinLoss}
-          weekly={ownWeekly}
-          startingTotal={ownStartingTotal}
-          contributionsTotal={ownContributionsTotal}
-          currentTotal={ownBaseline}
+          goal={ownGoal}
+          campaignRows={ownPerformanceRows}
+          currentCampaignPLTotal={currentCampaignPLTotal}
+          currentCampaignPartial={currentCampaignPartial}
+          projectedOtmPartial={projectedOtmPartial}
         />
       ) : null}
 
@@ -424,10 +575,10 @@ function CampaignCard({
   const accountVisibleToViewer = isOwner || campaign.account.visibility === "SHARED";
   const effectiveVisibility = resolveInheritedVisibility(campaign.visibility, campaign.account.visibility);
   const timeline = timelineGroups(campaign.events);
-  const plValue = summary.totalCampaignPL ?? summary.realizedPL;
+  const plValue = campaign.status === "CLOSED" ? (summary.totalCampaignPL ?? summary.realizedPL) : null;
 
   return (
-    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20">
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
       <summary className="grid cursor-pointer list-none gap-4 p-4 transition hover:bg-zinc-900/70 md:grid-cols-[1fr_auto] md:items-center [&::-webkit-details-marker]:hidden">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -442,8 +593,20 @@ function CampaignCard({
           </div>
         </div>
         <div className="grid grid-cols-[1fr_auto] items-center gap-3 md:min-w-[520px] md:grid-cols-[1fr_1fr_1fr_auto]">
-          <SummaryCell label="Realized" value={signedMoney(summary.realizedPL)} tone={summary.realizedPL} />
-          <SummaryCell label="Premium" value={signedMoney(summary.netOptionPremium)} tone={summary.netOptionPremium} />
+          <SummaryCell
+            label="Realized"
+            value={campaign.status === "CLOSED" ? signedMoney(plValue) : "Not closed"}
+            tone={campaign.status === "CLOSED" ? plValue : null}
+            help={HELP.realizedPL}
+            helpTestId={`help-summary-realized-${campaign.ticker}`}
+          />
+          <SummaryCell
+            label="Premium"
+            value={signedMoney(summary.netOptionPremium)}
+            tone={summary.netOptionPremium}
+            help={HELP.netPremium}
+            helpTestId={`help-summary-premium-${campaign.ticker}`}
+          />
           <SummaryCell label="Days" value={summary.daysActive ?? "UNKNOWN"} />
           <ChevronDown className="size-5 justify-self-end text-zinc-500 transition group-open:rotate-180" aria-hidden />
         </div>
@@ -472,15 +635,37 @@ function CampaignCard({
               <dl className="grid gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
                 <ResultItem label="Opened" value={summary.openedAt ? shortDate(summary.openedAt) : "UNKNOWN"} />
                 <ResultItem label="Closed" value={summary.closedAt ? shortDate(summary.closedAt) : "Not closed"} />
-                <ResultItem label="Total credits" value={money(summary.totalPremiumReceived)} />
-                <ResultItem label="Total debits" value={money(summary.optionDebitsPaid)} />
-                <ResultItem label="Roll net" value={signedMoney(summary.netRollPremium)} tone={summary.netRollPremium} />
-                <ResultItem label="Capital committed" value={summary.collateralCommitted === null ? "UNKNOWN" : money(summary.collateralCommitted)} />
+                <ResultItem
+                  label="Total credits"
+                  value={money(summary.totalPremiumReceived)}
+                  help="Premium credits received from selling option legs, before subtracting closing debits."
+                />
+                <ResultItem
+                  label="Total debits"
+                  value={money(summary.optionDebitsPaid)}
+                  help="Money paid to buy back option legs, plus applicable option fees in the net result."
+                />
+                <ResultItem
+                  label="Roll net"
+                  value={signedMoney(summary.netRollPremium)}
+                  tone={summary.netRollPremium}
+                  help={HELP.roll}
+                />
+                <ResultItem
+                  label="Capital committed"
+                  value={summary.collateralCommitted === null ? "UNKNOWN" : money(summary.collateralCommitted)}
+                  help={HELP.capitalSecured}
+                />
                 <ResultItem label="Stock cost" value={money(summary.stockCost)} />
                 <ResultItem label="Stock proceeds" value={money(summary.stockProceeds)} />
                 <ResultItem label="Shares held" value={summary.sharesHeld} />
                 <ResultItem label="Adjusted basis" value={summary.adjustedBasis === null ? "UNKNOWN" : money(summary.adjustedBasis)} />
               </dl>
+              {campaign.status !== "CLOSED" ? (
+                <p className="mt-3 text-xs text-zinc-500">
+                  Open option premium is tracked as net premium until this campaign closes.
+                </p>
+              ) : null}
               {summary.unknowns.length ? (
                 <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-xs text-zinc-400">
                   {summary.unknowns[0]}
@@ -575,13 +760,21 @@ function TimelineGroupView({ group }: { group: { key: string; label: string; eve
   const amount = group.events.reduce((sum, event) => sum + (eventAmount(event) ?? 0), 0);
   const hasAmount = group.events.some((event) => eventAmount(event) !== null);
   const note = group.events.find((event) => event.notes)?.notes;
+  const help = eventHelp(group.events[0].type);
 
   return (
     <div className="grid grid-cols-[88px_1fr] gap-3 text-sm">
       <div className="text-xs text-zinc-500">{shortDate(group.events[0].occurredAt)}</div>
       <div className="border-l border-zinc-800 pl-3">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-          <div className="font-semibold text-zinc-100">{group.label}</div>
+          <div className="inline-flex items-center gap-1.5 font-semibold text-zinc-100">
+            {group.label}
+            {help ? (
+              <InfoTip label={group.label} align="start" testId={`help-timeline-${group.label.toLowerCase().replace(/\s+/g, "-")}`}>
+                {help}
+              </InfoTip>
+            ) : null}
+          </div>
           {hasAmount ? <div className={amountClass(amount)}>{signedMoney(amount)}</div> : null}
         </div>
         <div className="space-y-1">
@@ -645,11 +838,21 @@ function AccountsSection({
               ) : null}
             </div>
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-              <ResultItem label="Starting" value={ledger.startingValue === null ? "UNKNOWN" : money(ledger.startingValue)} />
-              <ResultItem label="Contributions" value={money(ledger.netContributions)} tone={ledger.netContributions} />
+              <ResultItem
+                label="Starting"
+                value={ledger.startingValue === null ? "UNKNOWN" : money(ledger.startingValue)}
+                help={HELP.startingValue}
+              />
+              <ResultItem
+                label="Contributions"
+                value={money(ledger.netContributions)}
+                tone={ledger.netContributions}
+                help={HELP.netContributions}
+              />
               <ResultItem
                 label="Current"
                 value={current.value === null ? "No data" : money(current.value)}
+                help={HELP.accountCurrentValue}
               />
               <ResultItem label="Campaigns" value={account._count.campaigns} />
             </dl>
@@ -1031,76 +1234,428 @@ function BrokerActivityAwaitingReviewPanel({
 
 function PerformanceSection({
   winLoss,
-  weekly,
-  startingTotal,
-  contributionsTotal,
-  currentTotal,
+  goal,
+  campaignRows,
+  currentCampaignPLTotal,
+  currentCampaignPartial,
+  projectedOtmPartial,
 }: {
   winLoss: ReturnType<typeof summarizeWinLoss>;
-  weekly: ReturnType<typeof summarizeWeeklyReturns>;
-  startingTotal: number;
-  contributionsTotal: number;
-  currentTotal: number | null;
+  goal: ContributionAdjustedGoalSummary;
+  campaignRows: PerformanceCampaignViewRow[];
+  currentCampaignPLTotal: number | null;
+  currentCampaignPartial: boolean;
+  projectedOtmPartial: boolean;
+}) {
+  const openCount = campaignRows.filter((row) => row.campaign.status === "OPEN").length;
+  const assignedCount = campaignRows.filter((row) => row.campaign.status === "ASSIGNED").length;
+  const markedCount = campaignRows.filter((row) => row.progress.currentPL !== null).length;
+  const openProjected = sumKnown(campaignRows.map((row) => (row.campaign.status === "OPEN" ? row.progress.projectedOtmPL : null)));
+  const activePremium = roundMoney(
+    campaignRows
+      .filter((row) => row.campaign.status !== "CLOSED")
+      .reduce((sum, row) => sum + row.progress.netPremiumCollected, 0),
+  );
+
+  return (
+    <section className="space-y-4" data-testid="performance-cockpit">
+      <div className="grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-normal text-emerald-300">Performance Cockpit</p>
+              <h2 className="mt-1 text-xl font-semibold text-zinc-50">Realized, current, projected</h2>
+            </div>
+            <Badge tone="info">Mine only</Badge>
+          </div>
+          <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <PerformanceMetric
+              icon={<WalletCards className="size-4" aria-hidden />}
+              label="Current Account Value"
+              value={goal.currentValue === null ? "No data" : money(goal.currentValue)}
+              detail="Ledger snapshot source"
+              help={HELP.accountCurrentValue}
+              helpTestId="help-current-account-value"
+            />
+            <PerformanceMetric
+              icon={<Gauge className="size-4" aria-hidden />}
+              label="Trading P/L Now"
+              value={goal.tradingPLNow === null ? "Unavailable" : signedMoney(goal.tradingPLNow)}
+              detail="Current - starting - net contributions"
+              tone={goal.tradingPLNow}
+              help={HELP.tradingPLNow}
+              helpTestId="help-trading-pl-now"
+            />
+            <PerformanceMetric
+              icon={<CircleDollarSign className="size-4" aria-hidden />}
+              label="Realized P/L"
+              value={signedMoney(winLoss.realizedTradingPL)}
+              detail="Closed campaigns only"
+              tone={winLoss.realizedTradingPL}
+              help={HELP.realizedPL}
+              helpTestId="help-realized-pl"
+            />
+            <PerformanceMetric
+              icon={<Activity className="size-4" aria-hidden />}
+              label="Current / MTM P/L"
+              value={currentCampaignPLTotal === null ? "Unavailable" : signedMoney(currentCampaignPLTotal)}
+              detail={currentCampaignPartial ? "Partial marks available" : "Closed plus marked open campaigns"}
+              tone={currentCampaignPLTotal}
+              help={HELP.currentMtm}
+              helpTestId="help-current-mtm-pl"
+            />
+            <PerformanceMetric
+              icon={<Target className="size-4" aria-hidden />}
+              label="Projected OTM P/L"
+              value={goal.projectedOtmPL === null ? "Unavailable" : signedMoney(goal.projectedOtmPL)}
+              detail={projectedOtmPartial ? "Partial projection" : "Closed plus open CSP if OTM"}
+              tone={goal.projectedOtmPL}
+              help={HELP.projectedOtm}
+              helpTestId="help-projected-otm-pl"
+            />
+            <PerformanceMetric
+              icon={<Sparkles className="size-4" aria-hidden />}
+              label="1% Goal Pace"
+              value={goal.actualWeeklyPacePercent === null ? "No baseline" : percent(goal.actualWeeklyPacePercent)}
+              detail={`${goal.targetWeeklyPercent}% weekly target`}
+              tone={goal.aheadBehindDollars}
+              help={HELP.currentPace}
+              helpTestId="help-current-pace"
+            />
+          </dl>
+        </div>
+
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+          <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+            <Target className="size-4 text-emerald-300" aria-hidden />
+            1% Goal Tracker
+            <InfoTip label="1% weekly target" align="start" testId="help-one-percent-target">
+              {HELP.onePercentTarget}
+            </InfoTip>
+          </div>
+          <GoalTracker goal={goal} />
+        </div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[0.72fr_1.28fr]">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+          <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+            <LineChart className="size-4 text-sky-300" aria-hidden />
+            Performance vs 1% Target
+            <InfoTip label="Performance vs target" align="start" testId="help-target-comparison">
+              {HELP.targetComparison}
+            </InfoTip>
+          </div>
+          <PerformanceGoalChart goal={goal} />
+        </div>
+
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+          <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+            <BarChart3 className="size-4 text-emerald-300" aria-hidden />
+            Closed Campaign Stats
+          </div>
+          <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+            <ResultItem label="Completed" value={winLoss.completedCount} />
+            <ResultItem label="Wins" value={winLoss.wins} />
+            <ResultItem label="Losses" value={winLoss.losses} />
+            <ResultItem
+              label="Win rate"
+              value={winLoss.winRate === null ? "N/A" : percent(winLoss.winRate, 1)}
+              help={HELP.winRate}
+              helpTestId="help-win-rate"
+            />
+            <ResultItem label="Avg win" value={winLoss.averageWin === null ? "N/A" : money(winLoss.averageWin)} tone={winLoss.averageWin} />
+            <ResultItem label="Avg loss" value={winLoss.averageLoss === null ? "N/A" : money(winLoss.averageLoss)} tone={winLoss.averageLoss} />
+            <ResultItem label="Avg duration" value={winLoss.averageDurationDays === null ? "N/A" : `${winLoss.averageDurationDays} days`} />
+            <ResultItem
+              label="Active premium"
+              value={signedMoney(activePremium)}
+              tone={activePremium}
+              help={HELP.netPremium}
+            />
+          </dl>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            <Badge tone="info">{openCount} open</Badge>
+            <Badge tone="warn">{assignedCount} assigned</Badge>
+            <Badge tone={markedCount > 0 ? "good" : "neutral"}>{markedCount} with current marks</Badge>
+            <Badge tone={openProjected !== null && openProjected > 0 ? "good" : "neutral"}>
+              Open OTM {openProjected === null ? "unavailable" : signedMoney(openProjected)}
+            </Badge>
+          </div>
+          {winLoss.unknownResults > 0 ? (
+            <p className="mt-2 text-xs text-zinc-500">
+              {winLoss.unknownResults} closed campaign{winLoss.unknownResults === 1 ? "" : "s"} without a known final P/L excluded
+              from win/loss math.
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      <CampaignPerformanceTable rows={campaignRows} />
+    </section>
+  );
+}
+
+function PerformanceMetric({
+  icon,
+  label,
+  value,
+  detail,
+  tone,
+  help,
+  helpTestId,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: ReactNode;
+  detail: string;
+  tone?: number | null;
+  help?: string;
+  helpTestId?: string;
 }) {
   return (
-    <section className="space-y-4">
-      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        <p className="text-xs uppercase tracking-normal text-zinc-500">Always your own results - never combined with a buddy&apos;s</p>
-        <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
-          <ResultItem label="Starting value" value={money(startingTotal)} />
-          <ResultItem label="Net contributions" value={money(contributionsTotal)} tone={contributionsTotal} />
-          <ResultItem label="Current value" value={currentTotal === null ? "No data" : money(currentTotal)} />
-        </dl>
-      </div>
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
+      <dt className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-normal text-zinc-500">
+        <span className="text-zinc-400">{icon}</span>
+        <HelpLabel label={label} help={help} testId={helpTestId} />
+      </dt>
+      <dd className={`mt-2 text-xl font-semibold ${toneClass(tone)}`}>{value}</dd>
+      <div className="mt-1 text-xs text-zinc-500">{detail}</div>
+    </div>
+  );
+}
 
-      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        {weekly.status === "INSUFFICIENT_HISTORY" ? (
-          <p className="text-sm text-zinc-400">
-            <span className="font-medium text-zinc-200">INSUFFICIENT HISTORY</span> - complete at least one campaign
-            with a known account value to start tracking weekly return against the {weekly.targetPercent}% target.
-          </p>
-        ) : (
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-            <span className="text-zinc-300">
-              This week{" "}
-              <span className={(weekly.thisWeekPercent ?? 0) >= weekly.targetPercent ? "text-emerald-300" : "text-amber-300"}>
-                {percent(weekly.thisWeekPercent ?? 0)}
-              </span>{" "}
-              of {weekly.targetPercent}% target
-            </span>
-            <span className="text-zinc-500">
-              4-wk avg {weekly.trailing4WeekAveragePercent === null ? "N/A" : percent(weekly.trailing4WeekAveragePercent)}
-            </span>
-            <span className="text-zinc-500">
-              {weekly.weeksAtOrAboveTarget ?? 0} of {weekly.totalWeeksTracked ?? 0} weeks at target
-            </span>
+function GoalTracker({ goal }: { goal: ContributionAdjustedGoalSummary }) {
+  if (goal.status === "NO_STARTING_VALUE") {
+    return <EmptyState>Add a starting value in the Account ledger to activate the 1% goal.</EmptyState>;
+  }
+
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="grid grid-cols-2 gap-3">
+        <ResultItem
+          label="Starting"
+          value={goal.startingCapital === null ? "No data" : money(goal.startingCapital)}
+          help={HELP.startingValue}
+          helpTestId="help-starting-value"
+        />
+        <ResultItem
+          label="Net contributions"
+          value={money(goal.netContributions)}
+          tone={goal.netContributions}
+          help={HELP.netContributions}
+          helpTestId="help-net-contributions"
+        />
+        <ResultItem
+          label="Target profit"
+          value={goal.targetProfit === null ? "No data" : money(goal.targetProfit)}
+          help={HELP.onePercentTarget}
+        />
+        <ResultItem
+          label="Ahead / behind"
+          value={goal.aheadBehindDollars === null ? "No data" : signedMoney(goal.aheadBehindDollars)}
+          tone={goal.aheadBehindDollars}
+          help={HELP.targetComparison}
+          helpTestId="help-ahead-behind"
+        />
+      </div>
+      <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+        <div className="mb-2 flex items-center justify-between gap-3 text-xs uppercase tracking-normal text-zinc-500">
+          <HelpLabel label="Actual pace" help={HELP.currentPace} testId="help-actual-pace" />
+          <span className={toneClass(goal.aheadBehindDollars)}>{goal.percentOfTarget === null ? "N/A" : `${goal.percentOfTarget.toFixed(1)}%`}</span>
+        </div>
+        <Meter value={goal.percentOfTarget} />
+        <div className="mt-2 flex items-center justify-between gap-3 text-xs text-zinc-500">
+          <span>{goal.actualWeeklyPacePercent === null ? "No baseline" : percent(goal.actualWeeklyPacePercent)}</span>
+          <span>Target {percent(goal.targetWeeklyPercent)}</span>
+        </div>
+      </div>
+      <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+        <div className="mb-2 flex items-center justify-between gap-3 text-xs uppercase tracking-normal text-zinc-500">
+          <HelpLabel label="Projected if OTM" help={HELP.projectedOtmPace} testId="help-projected-otm-pace" />
+          <span className={toneClass(goal.projectedOtmPL)}>{goal.projectedPercentOfTarget === null ? "N/A" : `${goal.projectedPercentOfTarget.toFixed(1)}%`}</span>
+        </div>
+        <Meter value={goal.projectedPercentOfTarget} />
+        <div className="mt-2 text-xs text-zinc-500">{goal.projectedWeeklyPacePercent === null ? "No projection" : `${percent(goal.projectedWeeklyPacePercent)} weekly pace`}</div>
+      </div>
+    </div>
+  );
+}
+
+function PerformanceGoalChart({ goal }: { goal: ContributionAdjustedGoalSummary }) {
+  const rows = [
+    { label: "Target", value: goal.targetProfit, tone: "bg-sky-300" },
+    { label: "Trading now", value: goal.tradingPLNow, tone: goalTone(goal.tradingPLNow) },
+    { label: "If open CSPs expire OTM", value: goal.projectedOtmPL, tone: goalTone(goal.projectedOtmPL) },
+  ];
+  const max = Math.max(1, ...rows.map((row) => Math.abs(row.value ?? 0)));
+
+  return (
+    <div className="space-y-3">
+      <div className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
+        Color guide
+        <InfoTip label="Performance color guide" align="start" testId="help-color-guide">
+          {HELP.colorLegend}
+        </InfoTip>
+      </div>
+      {rows.map((row) => {
+        const width = row.value === null ? 0 : Math.max(4, Math.min(100, (Math.abs(row.value) / max) * 100));
+        return (
+          <div key={row.label}>
+            <div className="mb-1 flex items-center justify-between gap-3 text-xs text-zinc-500">
+              <span>{row.label}</span>
+              <span className={toneClass(row.value)}>{row.value === null ? "Unavailable" : signedMoney(row.value)}</span>
+            </div>
+            <div className="h-3 rounded-full bg-zinc-900">
+              <div className={`h-3 rounded-full ${row.tone}`} style={{ width: `${width}%` }} />
+            </div>
           </div>
-        )}
-        <p className="mt-2 text-xs text-zinc-500">
-          Simple realized-return-per-week against current account value, not a time-weighted rate of return. See
-          PROJECT_HANDOFF.md for the documented methodology and its limitations.
-        </p>
-      </div>
+        );
+      })}
+    </div>
+  );
+}
 
-      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        <dl className="grid gap-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
-          <ResultItem label="Completed" value={winLoss.completedCount} />
-          <ResultItem label="Wins" value={winLoss.wins} />
-          <ResultItem label="Losses" value={winLoss.losses} />
-          <ResultItem label="Win rate" value={winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`} />
-          <ResultItem label="Avg win" value={winLoss.averageWin === null ? "N/A" : money(winLoss.averageWin)} tone={winLoss.averageWin} />
-          <ResultItem label="Avg loss" value={winLoss.averageLoss === null ? "N/A" : money(winLoss.averageLoss)} tone={winLoss.averageLoss} />
-          <ResultItem label="Avg duration" value={winLoss.averageDurationDays === null ? "N/A" : `${winLoss.averageDurationDays} days`} />
-          <ResultItem label="Realized trading P/L" value={money(winLoss.realizedTradingPL)} tone={winLoss.realizedTradingPL} />
-        </dl>
-        {winLoss.unknownResults > 0 ? (
-          <p className="mt-2 text-xs text-zinc-500">
-            {winLoss.unknownResults} closed campaign{winLoss.unknownResults === 1 ? "" : "s"} without a known final P/L excluded
-            from win/loss math.
-          </p>
-        ) : null}
+function CampaignPerformanceTable({ rows }: { rows: PerformanceCampaignViewRow[] }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" data-testid="performance-campaign-table">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+          <ClipboardList className="size-4 text-emerald-300" aria-hidden />
+          Campaign Performance
+        </div>
+        <Badge tone="neutral">{rows.length} total</Badge>
       </div>
-    </section>
+      {rows.length === 0 ? (
+        <EmptyState>No campaigns yet.</EmptyState>
+      ) : (
+        <div className="overflow-x-auto">
+          <div className="min-w-[980px] divide-y divide-zinc-800">
+            <div className="grid grid-cols-[1.05fr_0.75fr_0.85fr_0.9fr_0.9fr_0.9fr_0.85fr_0.7fr_0.7fr] gap-3 px-3 pb-2 text-[11px] font-semibold uppercase tracking-normal text-zinc-500">
+              <span>Ticker</span>
+              <HelpLabel label="Status" help={HELP.historyStatus} testId="help-campaign-status" align="start" />
+              <HelpLabel label="Secured Capital" help={HELP.capitalSecured} testId="help-secured-capital" align="start" />
+              <HelpLabel label="Net Premium" help={HELP.netPremium} testId="help-campaign-net-premium" align="start" />
+              <HelpLabel label="Current P/L" help={HELP.currentMtm} testId="help-campaign-current-pl" align="start" />
+              <HelpLabel label="Projected OTM" help={HELP.projectedOtm} testId="help-campaign-projected-otm" align="start" />
+              <HelpLabel label="Goal Need" help={HELP.goalNeed} testId="help-goal-need" align="start" />
+              <HelpLabel label="Rolls" help={HELP.rolls} testId="help-rolls" align="start" />
+              <span>Days</span>
+            </div>
+            {rows.map((row) => (
+              <CampaignPerformanceRow key={row.campaign.id} row={row} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
+  const { campaign, progress } = row;
+  const goalDelta =
+    progress.projectedReturnPercent === null || progress.requiredReturnPercent === null
+      ? null
+      : roundMoney(progress.projectedReturnPercent - progress.requiredReturnPercent);
+
+  return (
+    <details className="group" data-testid={`performance-campaign-${campaign.ticker}`}>
+      <summary className="grid cursor-pointer list-none grid-cols-[1.05fr_0.75fr_0.85fr_0.9fr_0.9fr_0.9fr_0.85fr_0.7fr_0.7fr] gap-3 px-3 py-3 text-sm transition hover:bg-zinc-900/70 [&::-webkit-details-marker]:hidden">
+        <span className="min-w-0">
+          <span className="font-semibold text-zinc-50">{campaign.ticker}</span>
+          <span className="mt-0.5 block truncate text-xs text-zinc-500">{campaign.accountId ? shortDate(campaign.openedAt) : "Campaign"}</span>
+        </span>
+        <span>
+          <Badge tone={statusTone(campaign.status, progress.realizedPL ?? progress.currentPL)}>{campaign.status}</Badge>
+        </span>
+        <span>{progress.collateralCommitted === null ? "UNKNOWN" : money(progress.collateralCommitted)}</span>
+        <span className={toneClass(progress.netPremiumCollected)}>{signedMoney(progress.netPremiumCollected)}</span>
+        <span className={toneClass(progress.currentPL)}>
+          {progress.currentPL === null ? "Unavailable" : signedMoney(progress.currentPL)}
+        </span>
+        <span className={toneClass(progress.projectedOtmPL)}>
+          {progress.projectedOtmPL === null ? (progress.projectedOtmApplicable ? "Unavailable" : "N/A") : signedMoney(progress.projectedOtmPL)}
+        </span>
+        <span className={toneClass(goalDelta)}>
+          {goalDelta === null ? "N/A" : `${goalDelta >= 0 ? "+" : ""}${goalDelta.toFixed(2)} pts`}
+        </span>
+        <span>{progress.rollCount}</span>
+        <span className="inline-flex items-center gap-1">
+          <Timer className="size-3.5 text-zinc-500" aria-hidden />
+          {progress.daysActive ?? "UNKNOWN"}
+        </span>
+      </summary>
+      <div className="grid gap-4 border-t border-zinc-800 bg-zinc-900/40 px-3 py-4 text-sm lg:grid-cols-[1fr_1fr]">
+        <div>
+          <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-500">
+            Accounting Split
+            <InfoTip label="Campaign accounting split" align="start">
+              Realized, current, and projected results answer different questions. OSO keeps them separate so open campaigns do not look closed.
+            </InfoTip>
+          </div>
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <ResultItem
+              label="Realized P/L"
+              value={progress.realizedPL === null ? "Not closed" : signedMoney(progress.realizedPL)}
+              tone={progress.realizedPL}
+              help={HELP.realizedPL}
+            />
+            <ResultItem
+              label="Current cost to close"
+              value={progress.currentCostToClose === null ? "Unavailable" : money(progress.currentCostToClose)}
+              help={HELP.currentCostToClose}
+            />
+            <ResultItem
+              label="Current return"
+              value={progress.currentReturnPercent === null ? "N/A" : percent(progress.currentReturnPercent)}
+              tone={progress.currentReturnPercent}
+              help={HELP.currentReturn}
+            />
+            <ResultItem
+              label="Projected return"
+              value={progress.projectedReturnPercent === null ? "N/A" : percent(progress.projectedReturnPercent)}
+              tone={progress.projectedReturnPercent}
+              help={HELP.projectedReturn}
+            />
+          </dl>
+        </div>
+        <div>
+          <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-500">
+            Current Mark Source
+            <InfoTip label="Mark source" align="start" testId="help-mark-source">
+              {HELP.markSource}
+            </InfoTip>
+          </div>
+          {row.currentCostSource ? (
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/70 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={row.currentCostSource.source === "LINKED_BROKER_POSITION" ? "info" : "neutral"}>
+                  {row.currentCostSource.label}
+                </Badge>
+                <span className="text-zinc-400">{money(row.currentCostSource.costToClose)} cost to close</span>
+              </div>
+              <p className="mt-2 text-xs text-zinc-500">
+                {row.currentCostSource.asOf ? `As of ${shortDate(row.currentCostSource.asOf)}.` : "Snapshot date unavailable."}
+              </p>
+            </div>
+          ) : (
+            <EmptyState>Current mark unavailable for this campaign.</EmptyState>
+          )}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function Meter({ value }: { value: number | null }) {
+  const width = value === null ? 0 : Math.max(4, Math.min(100, value));
+  const tone = value === null ? "bg-zinc-700" : value >= 100 ? "bg-emerald-300" : value >= 60 ? "bg-amber-300" : "bg-red-300";
+
+  return (
+    <div className="h-2.5 rounded-full bg-zinc-950">
+      <div className={`h-2.5 rounded-full ${tone}`} style={{ width: `${width}%` }} />
+    </div>
   );
 }
 
@@ -1129,18 +1684,22 @@ function TrackerStat({
   value,
   detail,
   tone,
+  help,
+  helpTestId,
 }: {
   icon: ReactNode;
   label: string;
   value: ReactNode;
   detail: string;
   tone?: number | null;
+  help?: string;
+  helpTestId?: string;
 }) {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
       <div className="flex items-center gap-2 text-xs uppercase tracking-normal text-zinc-500">
         <span className="text-zinc-400">{icon}</span>
-        {label}
+        <HelpLabel label={label} help={help} testId={helpTestId} />
       </div>
       <div className={`mt-2 text-2xl font-semibold ${toneClass(tone)}`}>{value}</div>
       <div className="mt-1 text-xs text-zinc-500">{detail}</div>
@@ -1148,21 +1707,72 @@ function TrackerStat({
   );
 }
 
-function SummaryCell({ label, value, tone }: { label: string; value: ReactNode; tone?: number | null }) {
+function SummaryCell({
+  label,
+  value,
+  tone,
+  help,
+  helpTestId,
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: number | null;
+  help?: string;
+  helpTestId?: string;
+}) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</div>
+      <div className="text-[11px] uppercase tracking-normal text-zinc-500">
+        <HelpLabel label={label} help={help} testId={helpTestId} />
+      </div>
       <div className={`mt-1 text-sm font-semibold ${toneClass(tone)}`}>{value}</div>
     </div>
   );
 }
 
-function ResultItem({ label, value, tone }: { label: string; value: ReactNode; tone?: number | null }) {
+function ResultItem({
+  label,
+  value,
+  tone,
+  help,
+  helpTestId,
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: number | null;
+  help?: string;
+  helpTestId?: string;
+}) {
   return (
     <div className="border-t border-zinc-800 pt-2">
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs uppercase tracking-normal text-zinc-500">
+        <HelpLabel label={label} help={help} testId={helpTestId} />
+      </dt>
       <dd className={`mt-1 font-medium ${toneClass(tone)}`}>{value}</dd>
     </div>
+  );
+}
+
+function HelpLabel({
+  label,
+  help,
+  testId,
+  align = "center",
+}: {
+  label: string;
+  help?: string;
+  testId?: string;
+  align?: "start" | "center" | "end";
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {label}
+      {help ? (
+        <InfoTip label={label} align={align} testId={testId}>
+          {help}
+        </InfoTip>
+      ) : null}
+    </span>
   );
 }
 
@@ -1276,6 +1886,22 @@ function eventLabel(type: string) {
   }
 }
 
+function eventHelp(type: string) {
+  switch (type) {
+    case "SELL_PUT":
+    case "SELL_COVERED_CALL":
+      return HELP.sto;
+    case "CLOSE_PUT":
+    case "CLOSE_COVERED_CALL":
+      return HELP.btc;
+    case "ROLL_PUT_CLOSE":
+    case "ROLL_PUT_OPEN":
+      return HELP.roll;
+    default:
+      return null;
+  }
+}
+
 function entrySnapshotText(value: unknown) {
   if (!value || typeof value !== "object") {
     return "Stored with the campaign for future performance reports.";
@@ -1292,6 +1918,139 @@ function entrySnapshotText(value: unknown) {
   }
 
   return "Stored with the campaign for future performance reports.";
+}
+
+function resolveCurrentCostToClose(
+  campaign: PerformanceCampaignRow,
+  optionMarksByKey: Map<string, OptionMarkRow>,
+): CurrentCostToCloseSource | null {
+  if (campaign.status !== "OPEN") {
+    return null;
+  }
+
+  for (const record of campaign.linkedBrokerRecords) {
+    const position = brokerPositionFromRecord(record);
+    if (!position) {
+      continue;
+    }
+    if (classifyBrokerPosition(position).kind !== "SHORT_PUT") {
+      continue;
+    }
+
+    return {
+      costToClose: roundMoney(Math.abs(position.marketValue)),
+      source: "LINKED_BROKER_POSITION",
+      label: "Linked Schwab position",
+      asOf: record.observedAt ?? null,
+    };
+  }
+
+  const activePut = findActiveOpenPutEvent(campaign.events);
+  if (!activePut) {
+    return null;
+  }
+
+  const snapshot = optionMarksByKey.get(optionContractKey(campaign.ticker, activePut.expiration, activePut.strike, "PUT"));
+  if (!snapshot) {
+    return null;
+  }
+
+  const mark = toNullableNumber(snapshot.mark);
+  const bid = toNullableNumber(snapshot.bid);
+  const ask = toNullableNumber(snapshot.ask);
+  const midpoint = bid === null || ask === null ? null : (bid + ask) / 2;
+  const markPerShare = mark !== null && mark > 0 ? mark : midpoint;
+  if (markPerShare === null) {
+    return null;
+  }
+
+  return {
+    costToClose: roundMoney(markPerShare * activePut.contracts * 100),
+    source: "CACHED_OPTION_MARK",
+    label: "Cached option mark",
+    asOf: snapshot.capturedAt,
+  };
+}
+
+function brokerPositionFromRecord(record: PerformanceCampaignRow["linkedBrokerRecords"][number]): BrokerPosition | null {
+  const symbol = record.symbol;
+  const quantity = toNullableNumber(record.quantity);
+  const marketValue = toNullableNumber(record.amount);
+  if (!symbol || quantity === null || marketValue === null) {
+    return null;
+  }
+
+  const metadata = objectValue(record.metadata);
+  const putCallRaw = stringValue(metadata?.putCall);
+  return {
+    accountId: record.accountId ?? stringValue(metadata?.accountId) ?? "linked-broker-record",
+    symbol,
+    quantity,
+    marketValue,
+    assetType: stringValue(metadata?.assetType),
+    putCall: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
+    strikePrice: toNullableNumber(metadata?.strikePrice),
+    underlyingSymbol: record.underlyingSymbol ?? stringValue(metadata?.underlyingSymbol),
+  };
+}
+
+function findActiveOpenPutEvent(events: PerformanceCampaignRow["events"]) {
+  const lastTradeEvent =
+    [...events]
+      .sort((left, right) => {
+        const dateDelta = new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime();
+        return dateDelta === 0 ? left.sortOrder - right.sortOrder : dateDelta;
+      })
+      .reverse()
+      .find((event) => event.type !== "NOTE") ?? null;
+
+  if (!lastTradeEvent || (lastTradeEvent.type !== "SELL_PUT" && lastTradeEvent.type !== "ROLL_PUT_OPEN")) {
+    return null;
+  }
+  if (lastTradeEvent.optionType === "CALL") {
+    return null;
+  }
+
+  const contracts = toNullableNumber(lastTradeEvent.contracts);
+  const strike = toNullableNumber(lastTradeEvent.strike);
+  if (contracts === null || contracts <= 0 || strike === null || strike <= 0 || !lastTradeEvent.expiration) {
+    return null;
+  }
+
+  return {
+    contracts,
+    strike,
+    expiration: lastTradeEvent.expiration,
+  };
+}
+
+function sumKnown(values: Array<number | null>) {
+  const known = values.filter((value): value is number => value !== null);
+  return known.length ? roundMoney(known.reduce((sum, value) => sum + value, 0)) : null;
+}
+
+function goalTone(value: number | null) {
+  if (value === null) {
+    return "bg-zinc-700";
+  }
+  return value >= 0 ? "bg-emerald-300" : "bg-red-300";
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const parsed = toNumber(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function firstParam(value: string | string[] | undefined) {
