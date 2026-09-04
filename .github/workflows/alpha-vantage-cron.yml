@@ -1,0 +1,20 @@
+name: Alpha Vantage Fundamentals Queue
+
+on:
+  schedule:
+    - cron: "10 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  process-fundamentals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Process Alpha Vantage fundamentals queue
+        env:
+          CRON_SECRET: ${{ secrets.OSO_CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 300 \
+            -X POST \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            https://offshiftoptions.com/api/internal/alpha-vantage/process
