@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { optionLegValue, summarizeCampaign } from "./campaigns";
+import { getCurrentOpenPut, optionLegValue, summarizeCampaign, type CampaignEventInput } from "./campaigns";
 
 describe("campaign financial summaries", () => {
   it("values a standard option leg from per-share premium and contract count", () => {
@@ -146,5 +146,57 @@ describe("campaign financial summaries", () => {
     expect(summary.unrealizedPL).toBe(100);
     expect(summary.totalCampaignPL).toBe(150);
     expect(summary.finalResult).toBe("GAIN");
+  });
+});
+
+describe("getCurrentOpenPut", () => {
+  it("returns the strike/contracts/expiration of the most recent SELL_PUT", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 17.5, contracts: 2, premium: 0.5, expiration: "2026-09-11" },
+    ];
+    expect(getCurrentOpenPut(events)).toEqual({ strike: 17.5, contracts: 2, expiration: new Date("2026-09-11") });
+  });
+
+  it("returns the most recent ROLL_PUT_OPEN, not an earlier closed SELL_PUT", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1, premium: 0.4, expiration: "2026-08-14" },
+      { type: "ROLL_PUT_CLOSE", occurredAt: "2026-08-14T14:00:00Z", strike: 15, contracts: 1, premium: 0.1, expiration: "2026-08-14", groupKey: "roll1" },
+      { type: "ROLL_PUT_OPEN", occurredAt: "2026-08-14T14:00:00Z", sortOrder: 1, strike: 16, contracts: 1, premium: 0.5, expiration: "2026-08-28", groupKey: "roll1" },
+    ];
+    expect(getCurrentOpenPut(events)).toEqual({ strike: 16, contracts: 1, expiration: new Date("2026-08-28") });
+  });
+
+  it("returns null when the most recent trade event closed the put (no active put right now)", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1, premium: 0.4, expiration: "2026-08-14" },
+      { type: "CLOSE_PUT", occurredAt: "2026-08-10T14:00:00Z", strike: 15, contracts: 1, premium: 0.1 },
+    ];
+    expect(getCurrentOpenPut(events)).toBeNull();
+  });
+
+  it("returns null once assigned - the campaign no longer has an open put", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1, premium: 0.4, expiration: "2026-08-14" },
+      { type: "ASSIGNMENT", occurredAt: "2026-08-14T20:30:00Z", strike: 15, contracts: 1 },
+    ];
+    expect(getCurrentOpenPut(events)).toBeNull();
+  });
+
+  it("ignores trailing NOTE events and still finds the real most recent trade event", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1, premium: 0.4, expiration: "2026-08-14" },
+      { type: "NOTE", occurredAt: "2026-08-05T14:00:00Z", notes: "watching earnings" },
+    ];
+    expect(getCurrentOpenPut(events)).toEqual({ strike: 15, contracts: 1, expiration: new Date("2026-08-14") });
+  });
+
+  it("returns null for an incomplete SELL_PUT missing strike/contracts/expiration", () => {
+    expect(getCurrentOpenPut([{ type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", contracts: 1, premium: 0.4 }])).toBeNull();
+    expect(getCurrentOpenPut([{ type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, premium: 0.4 }])).toBeNull();
+    expect(getCurrentOpenPut([{ type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1 }])).toBeNull();
+  });
+
+  it("returns null for an empty event list", () => {
+    expect(getCurrentOpenPut([])).toBeNull();
   });
 });

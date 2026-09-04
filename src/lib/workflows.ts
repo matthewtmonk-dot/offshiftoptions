@@ -699,6 +699,32 @@ export async function updateResearchColumnsForUser(userId: string, columnsInput:
   return { columns, sortKey };
 }
 
+export const MIN_ROLL_BUFFER_PERCENT = 0.1;
+export const MAX_ROLL_BUFFER_PERCENT = 25;
+
+/**
+ * Per-user Roll Buffer % - an OSO decision-support preference (explicitly NOT a confirmed
+ * proprietary LST numeric rule) controlling the width of the amber "near strike" zone on the
+ * Roll Status badge (see src/domain/finance/rollStatus.ts). Entirely scoped to `userId` via the
+ * UserSettings upsert key - Matt and Eric may each choose a different threshold, and one user's
+ * change can never affect the other's row.
+ */
+export async function updateRollBufferPercentForUser(userId: string, rollBufferPercentInput: unknown) {
+  const parsed = Number(rollBufferPercentInput);
+  if (!Number.isFinite(parsed) || parsed < MIN_ROLL_BUFFER_PERCENT || parsed > MAX_ROLL_BUFFER_PERCENT) {
+    throw new ValidationError(`Roll Buffer must be between ${MIN_ROLL_BUFFER_PERCENT}% and ${MAX_ROLL_BUFFER_PERCENT}%.`);
+  }
+  const rollBufferPercent = Math.round(parsed * 100) / 100;
+
+  await prisma.userSettings.upsert({
+    where: { userId },
+    update: { rollBufferPercent },
+    create: { userId, rollBufferPercent },
+  });
+
+  return { rollBufferPercent };
+}
+
 /**
  * Tickers this user has actively researched (LIKE/WATCH/NEUTRAL - i.e. not AVOID/NEVER_TRADE)
  * so the live Schwab scanner's universe can include previously-researched names, not just the

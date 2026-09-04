@@ -1,16 +1,19 @@
-import { cache, Suspense } from "react";
+import { cache, Suspense, type ReactNode } from "react";
 import { ThumbsUp } from "lucide-react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
+import { RollStatusBadge, RollStatusUnavailableBadge } from "@/components/roll-status-badge";
 import { getDashboardData } from "@/lib/app-data";
 import { money, percent } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
+import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { splitBrokerPositionsByCampaignLink } from "@/lib/broker-reconciliation";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { computeOpenPositionsCount, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
-import { summarizeCampaign } from "@/domain/finance/campaigns";
+import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
+import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { honestSetupLabel, honestSetupScore, type CriterionResult, type ScanSummary } from "@/domain/scanner/scanner";
 import { addReactionAction } from "../actions";
@@ -157,21 +160,17 @@ export default async function DashboardPage() {
           }
         >
           <div className="space-y-3">
-            {data.openCampaigns.slice(0, 4).map((campaign) => {
-              const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-              return (
-                <div key={campaign.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-                  <div>
-                    <div className="font-semibold">{campaign.ticker}</div>
-                    <div className="text-sm text-zinc-400">{summary.currentStage}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className={(summary.realizedPL ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}>{money(summary.realizedPL ?? 0)}</div>
-                    <Badge tone={campaign.status === "ASSIGNED" ? "warn" : "info"}>{campaign.status}</Badge>
-                  </div>
-                </div>
-              );
-            })}
+            <Suspense
+              fallback={data.openCampaigns.slice(0, 4).map((campaign) => (
+                <DashboardOpenPositionRow key={campaign.id} campaign={campaign} rollStatusSlot={null} />
+              ))}
+            >
+              <DashboardOpenPositionsWithRollStatus
+                userId={user.id}
+                campaigns={data.openCampaigns.slice(0, 4)}
+                rollBufferPercent={Number(data.settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT)}
+              />
+            </Suspense>
             <Suspense fallback={<DashboardBrokerPositionsFallback openCampaignCount={openCampaignCount} />}>
               <DashboardBrokerPositions userId={user.id} openCampaignCount={openCampaignCount} />
             </Suspense>
@@ -310,6 +309,75 @@ async function DashboardOpenCountSummary({
   return <>{computeOpenPositionsCount(openCampaignCount, brokerPositions)} open</>;
 }
 
+type DashboardOpenCampaign = Awaited<ReturnType<typeof getDashboardData>>["openCampaigns"][number];
+
+function DashboardOpenPositionRow({
+  campaign,
+  rollStatusSlot,
+}: {
+  campaign: DashboardOpenCampaign;
+  rollStatusSlot: ReactNode;
+}) {
+  const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+  const openPut = getCurrentOpenPut(campaign.events);
+
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+      <div>
+        <div className="font-semibold">{campaign.ticker}</div>
+        <div className="text-sm text-zinc-400">
+          {summary.currentStage}
+          {openPut ? ` · ${money(openPut.strike)} Put` : ""}
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        {rollStatusSlot}
+        <div className="text-right">
+          <div className={(summary.realizedPL ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}>{money(summary.realizedPL ?? 0)}</div>
+          <Badge tone={campaign.status === "ASSIGNED" ? "warn" : "info"}>{campaign.status}</Badge>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Fetches live quotes once for every distinct ticker with a currently-open put across the
+ * given campaigns, then renders each row with its Roll Status badge (see
+ * src/domain/finance/rollStatus.ts). Falls back to an honest "unavailable" badge - never a
+ * guessed status - when the viewer has no live Schwab connection or a quote lookup fails.
+ */
+async function DashboardOpenPositionsWithRollStatus({
+  userId,
+  campaigns,
+  rollBufferPercent,
+}: {
+  userId: string;
+  campaigns: DashboardOpenCampaign[];
+  rollBufferPercent: number;
+}) {
+  const openPutsByCampaignId = new Map(campaigns.map((campaign) => [campaign.id, getCurrentOpenPut(campaign.events)]));
+  const tickersNeedingQuotes = campaigns
+    .filter((campaign) => openPutsByCampaignId.get(campaign.id))
+    .map((campaign) => campaign.ticker);
+  const prices = await getLiveQuotePricesForUser(userId, tickersNeedingQuotes);
+
+  return (
+    <>
+      {campaigns.map((campaign) => {
+        const openPut = openPutsByCampaignId.get(campaign.id) ?? null;
+        const price = openPut ? (prices.get(campaign.ticker.toUpperCase()) ?? null) : null;
+        const rollStatus =
+          openPut && price !== null
+            ? computeRollStatus({ currentPrice: price, strike: openPut.strike, rollBufferPercent })
+            : null;
+        const rollStatusSlot = openPut ? rollStatus ? <RollStatusBadge status={rollStatus} /> : <RollStatusUnavailableBadge /> : null;
+        return <DashboardOpenPositionRow key={campaign.id} campaign={campaign} rollStatusSlot={rollStatusSlot} />;
+      })}
+    </>
+  );
+}
+
 function DashboardBrokerStatsFallback({
   openCampaignCount,
   securedCapital,
@@ -440,8 +508,9 @@ async function DashboardBrokerPositions({
               <div className="text-sm text-zinc-400">{display.detailLine ?? display.quantityLabel}</div>
             </div>
             <div className="text-right">
-              <div className={position.marketValue >= 0 ? "text-emerald-300" : "text-red-300"}>
-                {display.quantityLabel} - {money(position.marketValue)}
+              <div className="text-zinc-200">{display.quantityLabel}</div>
+              <div className="text-xs text-zinc-500">
+                {display.valueLabel}: {money(display.value)}
               </div>
               <Badge tone="info">SCHWAB</Badge>
             </div>

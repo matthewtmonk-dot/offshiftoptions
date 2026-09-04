@@ -321,6 +321,12 @@ model UserSettings {
   // Entirely per-user: one user changing this can never affect another user's settings row.
   researchColumns String[] @default([])
   researchSortKey String?
+  // OSO decision-support preference (2026-09 Roll Status slice) - NOT a confirmed proprietary
+  // LST numeric rule, never hard-coded elsewhere. Controls the amber "near strike" zone width
+  // for the Roll Status badge on open cash-secured puts (Dashboard/Tracker). Purely per-user -
+  // Matt and Eric may choose different thresholds, and changing one's own value can never
+  // affect the other's row. Defaults to 3.0% for every existing and new row.
+  rollBufferPercent Decimal  @default(3.0) @db.Decimal(5, 2)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)

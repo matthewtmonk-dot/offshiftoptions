@@ -112,21 +112,37 @@ describe("computeOpenPositionsCount", () => {
 });
 
 describe("describeBrokerPositionForDisplay", () => {
-  it("renders a short put as human-readable ticker/date/strike with contract terminology", () => {
+  it("renders a short put as human-readable ticker/date/strike with neutral 'Short N put' terminology", () => {
     const display = describeBrokerPositionForDisplay(shortPut());
     expect(display.title).toBe("RIOT");
     expect(display.detailLine).toBe("Sep 4, 2026 · $17.50 Put");
-    expect(display.quantityLabel).toBe("-1 contract");
+    expect(display.quantityLabel).toBe("Short 1 put");
   });
 
-  it("pluralizes contracts for a multi-contract position", () => {
+  it("pluralizes for a multi-contract position", () => {
     const display = describeBrokerPositionForDisplay(shortPut({ quantity: -2 }));
-    expect(display.quantityLabel).toBe("-2 contracts");
+    expect(display.quantityLabel).toBe("Short 2 puts");
   });
 
   it("uses share terminology for an equity position", () => {
     const display = describeBrokerPositionForDisplay({ accountId: "acct-1", symbol: "RIOT", quantity: 100, marketValue: 1500 });
     expect(display.quantityLabel).toBe("100 sh");
     expect(display.detailLine).toBeNull();
+  });
+
+  it("shows a short option's liability as a positive 'Cost to close', never a signed loss - being short is not automatically a loss", () => {
+    const display = describeBrokerPositionForDisplay(shortPut({ quantity: -1, marketValue: -16.5 }));
+    expect(display.valueLabel).toBe("Cost to close");
+    expect(display.value).toBe(16.5);
+  });
+
+  it("labels a long option or equity position as plain 'Market value', unmodified", () => {
+    const longOption = describeBrokerPositionForDisplay(shortPut({ quantity: 1, marketValue: 16.5 }));
+    expect(longOption.valueLabel).toBe("Market value");
+    expect(longOption.value).toBe(16.5);
+
+    const equity = describeBrokerPositionForDisplay({ accountId: "acct-1", symbol: "RIOT", quantity: 100, marketValue: 1500 });
+    expect(equity.valueLabel).toBe("Market value");
+    expect(equity.value).toBe(1500);
   });
 });

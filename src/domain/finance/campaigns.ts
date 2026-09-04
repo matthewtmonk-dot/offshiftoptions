@@ -230,6 +230,39 @@ export function summarizeCampaign({
   };
 }
 
+export type CurrentOpenPut = {
+  strike: number;
+  contracts: number;
+  expiration: Date;
+};
+
+/**
+ * The campaign's currently-open short put, if any. The most recent non-NOTE event must be
+ * SELL_PUT or ROLL_PUT_OPEN (anything else - CLOSE_PUT, ASSIGNMENT, etc. - means there is no
+ * active put right now) and must not be a CALL. Returns null rather than guessing whenever the
+ * data doesn't clearly describe one. Shared by the Tracker's cost-to-close resolution and the
+ * Roll Status badge (src/domain/finance/rollStatus.ts) so there is exactly one definition of
+ * "what put is currently open," not a copy per caller.
+ */
+export function getCurrentOpenPut(events: CampaignEventInput[]): CurrentOpenPut | null {
+  const lastTradeEvent = [...events].sort(compareEvents).reverse().find((event) => event.type !== "NOTE") ?? null;
+
+  if (!lastTradeEvent || (lastTradeEvent.type !== "SELL_PUT" && lastTradeEvent.type !== "ROLL_PUT_OPEN")) {
+    return null;
+  }
+  if (lastTradeEvent.optionType === "CALL") {
+    return null;
+  }
+
+  const contracts = numeric(lastTradeEvent.contracts);
+  const strike = numeric(lastTradeEvent.strike);
+  if (contracts === null || contracts <= 0 || strike === null || strike <= 0 || !lastTradeEvent.expiration) {
+    return null;
+  }
+
+  return { contracts, strike, expiration: toDate(lastTradeEvent.expiration) };
+}
+
 function compareEvents(left: CampaignEventInput, right: CampaignEventInput) {
   const dateDelta = toDate(left.occurredAt).getTime() - toDate(right.occurredAt).getTime();
   if (dateDelta !== 0) {

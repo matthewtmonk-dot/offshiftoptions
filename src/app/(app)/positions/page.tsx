@@ -23,9 +23,10 @@ import {
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
+import { RollStatusBadge, RollStatusUnavailableBadge } from "@/components/roll-status-badge";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
-import { optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
+import { getCurrentOpenPut, optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
 import {
   summarizeCampaignProgress,
   summarizeContributionAdjustedGoal,
@@ -33,9 +34,11 @@ import {
   type CampaignProgressSummary,
   type ContributionAdjustedGoalSummary,
 } from "@/domain/finance/performance";
+import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, type RollStatus } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { getTrackerPageData, normalizeTrackerScope, optionContractKey, type TrackerScope } from "@/lib/app-data";
 import { money, percent, shortDate, toNumber } from "@/lib/format";
+import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { resolveInheritedVisibility } from "@/lib/privacy";
 import type { BrokerPosition } from "@/providers/broker-read/types";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
@@ -186,6 +189,28 @@ export default async function PositionsPage({
   const realizedTotal = closedRows.reduce((sum, row) => sum + (row.summary.totalCampaignPL ?? row.summary.realizedPL ?? 0), 0);
   const premiumTotal = rows.reduce((sum, row) => sum + row.summary.netOptionPremium, 0);
   const openCampaignTickers = new Set(openRows.map((row) => row.campaign.ticker.toUpperCase()));
+
+  // Roll Status (see PROJECT_HANDOFF.md) - always uses the VIEWER's own Roll Buffer setting,
+  // never the campaign owner's, so a Buddy-scope card reflects what the person looking at it
+  // configured for themselves. Only computed for the Open view, where it's actually shown.
+  const rollBufferPercent = Number(data.settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
+  const openPutsByCampaignId = new Map(openRows.map((row) => [row.campaign.id, getCurrentOpenPut(row.campaign.events)]));
+  const rollStatusByCampaignId = new Map<string, RollStatus | "UNAVAILABLE">();
+  if (view === "open") {
+    const tickersNeedingQuotes = openRows
+      .filter((row) => openPutsByCampaignId.get(row.campaign.id))
+      .map((row) => row.campaign.ticker);
+    const prices = await getLiveQuotePricesForUser(user.id, tickersNeedingQuotes);
+    for (const row of openRows) {
+      const openPut = openPutsByCampaignId.get(row.campaign.id);
+      if (!openPut) {
+        continue;
+      }
+      const price = prices.get(row.campaign.ticker.toUpperCase()) ?? null;
+      const status = price !== null ? computeRollStatus({ currentPrice: price, strike: openPut.strike, rollBufferPercent }) : null;
+      rollStatusByCampaignId.set(row.campaign.id, status ?? "UNAVAILABLE");
+    }
+  }
 
   // Performance is always computed from the current user's own completed campaigns and own
   // accounts, never from the scope-filtered `campaigns`/`visibleAccounts` lists above - so
@@ -346,7 +371,12 @@ export default async function PositionsPage({
 
           <div className="space-y-3">
             {openRows.map((row) => (
-              <CampaignCard key={row.campaign.id} row={row} currentUserId={user.id} />
+              <CampaignCard
+                key={row.campaign.id}
+                row={row}
+                currentUserId={user.id}
+                rollStatus={rollStatusByCampaignId.get(row.campaign.id) ?? null}
+              />
             ))}
             {openRows.length === 0 ? (
               <EmptyState>
@@ -566,9 +596,11 @@ function NewAccountPanel({ buddyName, defaultOpen }: { buddyName: string; defaul
 function CampaignCard({
   row,
   currentUserId,
+  rollStatus = null,
 }: {
   row: { campaign: CampaignRow; summary: ReturnType<typeof summarizeCampaign> };
   currentUserId: string;
+  rollStatus?: RollStatus | "UNAVAILABLE" | null;
 }) {
   const { campaign, summary } = row;
   const isOwner = campaign.ownerId === currentUserId;
@@ -585,6 +617,11 @@ function CampaignCard({
             <span className="text-2xl font-semibold text-zinc-50">{campaign.ticker}</span>
             <Badge tone={statusTone(campaign.status, plValue)}>{campaign.status}</Badge>
             <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} />
+            {rollStatus === "UNAVAILABLE" ? (
+              <RollStatusUnavailableBadge />
+            ) : rollStatus ? (
+              <RollStatusBadge status={rollStatus} />
+            ) : null}
           </div>
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-400">
             <span>{isOwner ? "You" : campaign.owner.name}</span>
@@ -919,7 +956,7 @@ function SchwabPositionsPanel({
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="text-zinc-400">
-                    {display.quantityLabel} · Market value: {money(position.marketValue)}
+                    {display.quantityLabel} · {display.valueLabel}: {money(display.value)}
                   </span>
                   <Badge tone={isLinked ? "good" : isMatch ? "info" : "neutral"}>
                     {isLinked ? "Linked to Campaign" : isMatch ? "Possible match" : "Unlinked"}
@@ -1945,7 +1982,7 @@ function resolveCurrentCostToClose(
     };
   }
 
-  const activePut = findActiveOpenPutEvent(campaign.events);
+  const activePut = getCurrentOpenPut(campaign.events);
   if (!activePut) {
     return null;
   }
@@ -1991,36 +2028,6 @@ function brokerPositionFromRecord(record: PerformanceCampaignRow["linkedBrokerRe
     putCall: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
     strikePrice: toNullableNumber(metadata?.strikePrice),
     underlyingSymbol: record.underlyingSymbol ?? stringValue(metadata?.underlyingSymbol),
-  };
-}
-
-function findActiveOpenPutEvent(events: PerformanceCampaignRow["events"]) {
-  const lastTradeEvent =
-    [...events]
-      .sort((left, right) => {
-        const dateDelta = new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime();
-        return dateDelta === 0 ? left.sortOrder - right.sortOrder : dateDelta;
-      })
-      .reverse()
-      .find((event) => event.type !== "NOTE") ?? null;
-
-  if (!lastTradeEvent || (lastTradeEvent.type !== "SELL_PUT" && lastTradeEvent.type !== "ROLL_PUT_OPEN")) {
-    return null;
-  }
-  if (lastTradeEvent.optionType === "CALL") {
-    return null;
-  }
-
-  const contracts = toNullableNumber(lastTradeEvent.contracts);
-  const strike = toNullableNumber(lastTradeEvent.strike);
-  if (contracts === null || contracts <= 0 || strike === null || strike <= 0 || !lastTradeEvent.expiration) {
-    return null;
-  }
-
-  return {
-    contracts,
-    strike,
-    expiration: lastTradeEvent.expiration,
   };
 }
 

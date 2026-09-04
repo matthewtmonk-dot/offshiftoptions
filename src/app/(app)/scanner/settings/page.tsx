@@ -1,4 +1,5 @@
 import { RotateCcw, Save } from "lucide-react";
+import { InfoTip } from "@/components/info-tip";
 import { Badge, EmptyState, FieldLabel, Panel } from "@/components/ui";
 import {
   diffScannerRulesFromLstCore,
@@ -7,10 +8,11 @@ import {
   SCANNER_RULE_DEFINITIONS,
   type ScannerRuleDefinition,
 } from "@/domain/scanner/profile";
+import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { ensureMyLstScannerProfileForUser } from "@/lib/workflows";
-import { resetScannerSettingsToLstCoreAction, updateScannerSettingsAction } from "../../actions";
+import { ensureMyLstScannerProfileForUser, MAX_ROLL_BUFFER_PERCENT, MIN_ROLL_BUFFER_PERCENT } from "@/lib/workflows";
+import { resetScannerSettingsToLstCoreAction, updateRollBufferAction, updateScannerSettingsAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +28,11 @@ export default async function ScannerSettingsPage({
     where: { profileId: profile.id },
     orderBy: { sortOrder: "asc" },
   });
+  const settings = await prisma.userSettings.findUnique({
+    where: { userId: user.id },
+    select: { rollBufferPercent: true },
+  });
+  const rollBufferPercent = Number(settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
   const rulesByKey = new Map(rules.map((rule) => [rule.key, rule]));
   const diff = diffScannerRulesFromLstCore(rules);
   const diffByKey = new Map(diff.map((entry) => [entry.key, entry]));
@@ -48,7 +55,11 @@ export default async function ScannerSettingsPage({
       ) : null}
       {params.saved ? (
         <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
-          {params.saved === "core" ? "Reset to LST Core." : "Scanner settings saved."}
+          {params.saved === "core"
+            ? "Reset to LST Core."
+            : params.saved === "rollbuffer"
+              ? "Roll Buffer saved."
+              : "Scanner settings saved."}
         </div>
       ) : null}
 
@@ -68,6 +79,45 @@ export default async function ScannerSettingsPage({
           </button>
         </form>
       </div>
+
+      <form action={updateRollBufferAction}>
+        <Panel
+          title="Decision Support Preferences"
+          action={
+            <button
+              type="submit"
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300"
+            >
+              <Save className="size-4" aria-hidden />
+              Save
+            </button>
+          }
+        >
+          <div className="max-w-sm space-y-2">
+            <div className="flex items-center gap-1.5">
+              <FieldLabel>Roll Buffer (%)</FieldLabel>
+              <InfoTip label="Roll Buffer" testId="help-roll-buffer">
+                Your Roll Buffer controls OSO&apos;s near-strike color zone. The default is 3%. This is an
+                adjustable OSO decision aid, not a confirmed proprietary LST numeric rule.
+              </InfoTip>
+            </div>
+            <input
+              name="rollBufferPercent"
+              type="number"
+              step="0.1"
+              min={MIN_ROLL_BUFFER_PERCENT}
+              max={MAX_ROLL_BUFFER_PERCENT}
+              defaultValue={rollBufferPercent}
+              className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+              required
+            />
+            <p className="text-xs text-zinc-500">
+              Controls the amber &quot;Near Strike&quot; zone on your open cash-secured puts (Dashboard and Tracker).
+              Yours alone - your buddy can set a different value.
+            </p>
+          </div>
+        </Panel>
+      </form>
 
       <form action={updateScannerSettingsAction} className="space-y-4">
         <Panel

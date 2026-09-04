@@ -18,7 +18,7 @@ export async function getUnreadNotificationCount(userId: string) {
 }
 
 export async function getDashboardData(userId: string) {
-  const [account, ownAccounts, openCampaigns, completedCampaigns, openTrades, watchlistItems, incomingRecommendations, activities, conversation, profile] =
+  const [account, ownAccounts, openCampaigns, completedCampaigns, openTrades, watchlistItems, incomingRecommendations, activities, conversation, profile, settings] =
     await Promise.all([
       prisma.tradingAccount.findFirst({
         where: { userId },
@@ -105,6 +105,10 @@ export async function getDashboardData(userId: string) {
           },
         },
       }),
+      prisma.userSettings.findUnique({
+        where: { userId },
+        select: { rollBufferPercent: true },
+      }),
     ]);
 
   return {
@@ -120,6 +124,7 @@ export async function getDashboardData(userId: string) {
     conversation,
     recentMessages: [...(conversation?.messages ?? [])].reverse(),
     latestScanRun: profile?.scanRuns[0] ?? null,
+    settings,
   };
 }
 
@@ -303,7 +308,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
         ? buddyAccountWhere
         : { OR: [{ userId }, buddyAccountWhere] };
 
-  const [users, ownAccounts, visibleAccounts, campaigns, ownPerformanceCampaigns, legacyTrades] = await Promise.all([
+  const [users, ownAccounts, visibleAccounts, campaigns, ownPerformanceCampaigns, legacyTrades, settings] = await Promise.all([
     prisma.user.findMany({ where: { id: { not: userId } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.tradingAccount.findMany({
       where: { userId },
@@ -374,6 +379,10 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
         })
       : Promise.resolve([]),
     includeLegacyTrades ? getPositionsPageData(userId) : Promise.resolve([]),
+    prisma.userSettings.findUnique({
+      where: { userId },
+      select: { rollBufferPercent: true },
+    }),
   ]);
 
   const optionMarksForPerformance = includePerformanceCampaigns
@@ -390,6 +399,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
     ownPerformanceCampaigns,
     optionMarksForPerformance,
     legacyTrades,
+    settings,
   };
 }
 

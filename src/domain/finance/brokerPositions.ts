@@ -91,22 +91,42 @@ export function computeOpenPositionsCount(openCampaignCount: number, brokerPosit
 export type BrokerPositionDisplay = {
   title: string;
   detailLine: string | null;
+  /** Neutral "Short 1 put"/"Long 1 put"/"100 sh" phrasing - never a bare signed number, since
+   * a negative quantity just means short, not a loss. */
   quantityLabel: string;
+  /** "Cost to close" for a short option (Schwab's market value there is a payoff liability,
+   * not profit/loss) - "Market value" otherwise. Pair with `value`, and never color either by
+   * sign - a verified P/L figure is the only thing allowed red/green treatment. */
+  valueLabel: string;
+  /** Already sign-adjusted to match `valueLabel`: a short option's liability is shown as a
+   * positive cost, everything else is Schwab's raw market value. */
+  value: number;
 };
+
+function optionQuantityLabel(quantity: number, optionType: "PUT" | "CALL" | null): string {
+  const direction = quantity < 0 ? "Short" : "Long";
+  const count = Math.abs(quantity);
+  const noun = optionType === "PUT" ? "put" : optionType === "CALL" ? "call" : "contract";
+  return `${direction} ${count} ${noun}${count === 1 ? "" : "s"}`;
+}
 
 /**
  * Shared human-readable formatting for a broker position, used by both the Dashboard and
- * Tracker so an option position never renders as a raw OCC symbol or as "-1 sh".
+ * Tracker so an option position never renders as a raw OCC symbol, a bare "-1 sh", or a short
+ * position's liability styled as a loss.
  */
 export function describeBrokerPositionForDisplay(position: BrokerPosition): BrokerPositionDisplay {
   const classified = classifyBrokerPosition(position);
   const isOption = classified.kind !== "EQUITY_OR_OTHER";
+  const isShortOption = isOption && position.quantity < 0;
   const quantityLabel = isOption
-    ? `${position.quantity} ${Math.abs(position.quantity) === 1 ? "contract" : "contracts"}`
+    ? optionQuantityLabel(position.quantity, classified.optionType)
     : `${position.quantity} sh`;
+  const valueLabel = isShortOption ? "Cost to close" : "Market value";
+  const value = isShortOption ? Math.abs(position.marketValue) : position.marketValue;
 
   if (!isOption || classified.strike === null || classified.expiration === null || classified.optionType === null) {
-    return { title: classified.underlying, detailLine: null, quantityLabel };
+    return { title: classified.underlying, detailLine: null, quantityLabel, valueLabel, value };
   }
 
   const optionLabel = classified.optionType === "PUT" ? "Put" : "Call";
@@ -120,5 +140,7 @@ export function describeBrokerPositionForDisplay(position: BrokerPosition): Brok
     title: classified.underlying,
     detailLine: `${expirationLabel} · $${classified.strike.toFixed(2)} ${optionLabel}`,
     quantityLabel,
+    valueLabel,
+    value,
   };
 }

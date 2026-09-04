@@ -37,6 +37,7 @@ import {
   updateRecommendationStatusForUser,
   updateResearchColumnsForUser,
   updateResearchDetailsForUser,
+  updateRollBufferPercentForUser,
   updateScannerSettingsForUser,
 } from "@/lib/workflows";
 import type { AppearanceMode } from "@/generated/prisma/enums";
@@ -333,6 +334,24 @@ export async function updateScannerSettingsAction(formData: FormData) {
   revalidatePath("/scanner");
   revalidatePath("/dashboard");
   redirect("/scanner/settings?saved=1");
+}
+
+export async function updateRollBufferAction(formData: FormData) {
+  const user = await requireCurrentUser();
+
+  try {
+    await updateRollBufferPercentForUser(user.id, formData.get("rollBufferPercent"));
+  } catch (error) {
+    if (error instanceof Error) {
+      redirectWithError("/scanner/settings", error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/scanner/settings");
+  revalidatePath("/dashboard");
+  revalidatePath("/positions");
+  redirect("/scanner/settings?saved=rollbuffer");
 }
 
 export async function resetScannerSettingsToLstCoreAction() {
