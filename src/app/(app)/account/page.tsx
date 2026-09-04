@@ -9,6 +9,7 @@ import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/ac
 import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { money, shortDateTime } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
+import { getAlphaVantageConfigStatus } from "@/providers/alpha-vantage/config";
 import {
   addAccountLedgerEntryAction,
   changePasswordAction,
@@ -34,6 +35,7 @@ export default async function AccountPage({
     getAccountPageData(user.id),
   ]);
   const schwabOauthReady = Boolean(schwabDeveloperCredential?.configured) || schwabConfig.configured;
+  const alphaVantageConfig = getAlphaVantageConfigStatus();
 
   const realizedPLByAccount = new Map<string, number>();
   for (const campaign of accountData.completedCampaigns) {
@@ -327,6 +329,31 @@ export default async function AccountPage({
             ) : (
               <p className="text-xs text-zinc-500">No connection to disconnect.</p>
             )}
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="Fundamentals Data Providers">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm">
+          <div>
+            <div className="font-medium text-zinc-200">Alpha Vantage (company fundamentals)</div>
+            <p className="mt-1 max-w-xl text-xs text-zinc-500">
+              Read-only diagnostic for Alpha Vantage&apos;s OVERVIEW endpoint. Shared server key, 25 requests/day - nothing is saved to
+              Research/Scanner/Tracker yet.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Badge tone={alphaVantageConfig.configured ? "good" : "warn"}>{alphaVantageConfig.configured ? "Configured" : "Not configured"}</Badge>
+            {alphaVantageConfig.configured ? (
+              <Link
+                href="/account/alpha-vantage-fundamentals"
+                prefetch={false}
+                className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
+              >
+                <SearchCheck className="size-3" aria-hidden />
+                Verify Alpha Vantage Fundamental Fields
+              </Link>
+            ) : null}
           </div>
         </div>
       </Panel>

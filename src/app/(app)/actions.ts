@@ -48,6 +48,7 @@ import {
   skipBrokerReconciliationForUser,
 } from "@/lib/broker-reconciliation";
 import { ValidationError } from "@/lib/tickers";
+import { runAlphaVantageOverviewDiagnostic, type AlphaVantageDiagnosticResult } from "@/lib/alpha-vantage-diagnostic";
 
 function redirectWithError(path: string, error: string): never {
   redirect(`${path}?error=${encodeURIComponent(error)}`);
@@ -715,4 +716,22 @@ export async function addAccountLedgerEntryAction(formData: FormData) {
 
   revalidatePath("/positions");
   revalidatePath("/dashboard");
+}
+
+export type RunAlphaVantageDiagnosticResult = { ok: true; result: AlphaVantageDiagnosticResult } | { ok: false; error: string };
+
+/**
+ * Manual, click-to-run only - never called from a page load or Link prefetch. Alpha Vantage's
+ * free tier is 25 requests/day total, so this must never fire automatically (see
+ * src/lib/alpha-vantage-diagnostic.ts and PROJECT_HANDOFF.md's Alpha Vantage section).
+ */
+export async function runAlphaVantageOverviewDiagnosticAction(): Promise<RunAlphaVantageDiagnosticResult> {
+  await requireCurrentUser();
+
+  try {
+    const result = await runAlphaVantageOverviewDiagnostic();
+    return { ok: true, result };
+  } catch {
+    return { ok: false, error: "Alpha Vantage diagnostic failed unexpectedly." };
+  }
 }
