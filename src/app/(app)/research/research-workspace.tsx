@@ -577,7 +577,7 @@ function ResearchMobileCard({
           </div>
           {scan?.price != null ? <span className="text-sm font-medium text-zinc-200">{money(scan.price)}</span> : null}
         </div>
-        <div className="text-xs text-zinc-400">{item.companyName ?? "Company name not entered yet"}</div>
+        <div className="text-xs text-zinc-400">{resolveAutoOrManual(scan?.companyDescription ?? null, item.companyName) ?? "Company name not entered yet"}</div>
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-400">
           <span>Would own: {wouldOwnText(item)}</span>
           {history ? <span>{history.count} campaign{history.count === 1 ? "" : "s"}</span> : null}
@@ -649,6 +649,12 @@ function ResearchDetail({
 
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Company</h4>
+            {scan?.companyDescription ? (
+              <p className="mt-1 text-[11px] text-zinc-600">
+                Schwab Trader API: <span className="text-zinc-400">{scan.companyDescription}</span> - shown above/in the table when
+                available. The name below is your own manual entry, used as a fallback if Schwab data isn&apos;t available.
+              </p>
+            ) : null}
             <div className="mt-2 space-y-2">
               <input
                 name="companyName"
@@ -666,9 +672,11 @@ function ResearchDetail({
           </div>
 
           <div>
-            <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Fundamentals (manual entry)</h4>
+            <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Fundamentals</h4>
             <p className="mt-1 text-[11px] text-zinc-600">
-              Manual · not yet auto-verified against a live Schwab connection. Leave blank if unknown - a blank field displays as
+              P/E, EPS, and Dividend use a verified Schwab Trader API value automatically when available
+              {item.fundamentalAsOf ? ` (last verified ${shortDateTime(item.fundamentalAsOf)})` : ""}. PEG, Debt/Equity, and Current
+              Ratio remain fully manual - Schwab does not provide them. Leave a field blank if unknown - a blank field displays as
               &quot;—&quot;, never as 0.
             </p>
             <div className="mt-2 grid grid-cols-2 gap-2">
@@ -676,13 +684,13 @@ function ResearchDetail({
                 name="manualPeRatio"
                 label="P/E"
                 value={resolveAutoOrManual(item.fundamentalPeRatio, item.manualPeRatio)}
-                tip="Price divided by trailing earnings per share. A negative or zero value isn't meaningful, so OSO shows N/M instead of a misleading number."
+                tip="Price divided by trailing earnings per share. Schwab can return a negative P/E when a company has negative (net loss) earnings - OSO shows that real negative number rather than hiding it, since it's meaningful (some other financial services instead show 'N/M' for this case). This field is a manual fallback only - Schwab's own verified value is used automatically when available."
               />
               <FundamentalInput
                 name="manualPegRatio"
                 label="PEG"
                 value={resolveAutoOrManual(item.fundamentalPegRatio, item.manualPegRatio)}
-                tip="P/E divided by expected earnings growth rate. Like P/E, a negative or zero value isn't meaningful (N/M)."
+                tip="P/E divided by expected earnings growth rate. Like P/E, a negative or zero value isn't meaningful (N/M). Fully manual - Schwab does not provide PEG."
               />
               <FundamentalInput
                 name="manualDebtToEquity"
@@ -697,8 +705,21 @@ function ResearchDetail({
                 tip="Current assets divided by current liabilities. Above 1 generally means the company can cover near-term obligations."
               />
             </div>
+            {numericOrNull(item.fundamentalEps) !== null ? (
+              <div className="mt-2">
+                <Datum label="EPS (Schwab Trader API)" value={numericOrNull(item.fundamentalEps)!.toFixed(2)} />
+              </div>
+            ) : null}
             <div className="mt-2">
               <FieldLabel>Dividend</FieldLabel>
+              {numericOrNull(item.fundamentalDividendYield) !== null || numericOrNull(item.fundamentalDividendAmount) !== null ? (
+                <p className="mt-1 text-[11px] text-zinc-600">
+                  Schwab Trader API reports {money(numericOrNull(item.fundamentalDividendAmount) ?? 0)}/sh ·{" "}
+                  {(numericOrNull(item.fundamentalDividendYield) ?? 0).toFixed(2)}% yield
+                  {item.fundamentalAsOf ? ` (as of ${shortDateTime(item.fundamentalAsOf)})` : ""} - shown in the table above this
+                  manual fallback. $0 / 0% is a real reported value (no dividend), not a missing one.
+                </p>
+              ) : null}
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <select
                   name="paysDividend"
@@ -875,6 +896,7 @@ function ResearchDetail({
               <Datum label="Price" value={scan.price != null ? money(scan.price) : dash()} />
               <Datum label="RSI" value={scan.rsi != null ? scan.rsi.toFixed(1) : dash()} />
               <Datum label="BB %" value={scan.bbPercent != null ? `${scan.bbPercent.toFixed(2)}%` : dash()} />
+              {scan.companyDescription ? <Datum label="Company (Schwab)" value={scan.companyDescription} /> : null}
             </dl>
           ) : (
             <p className="mt-2 text-sm text-zinc-500">Not seen in the most recent scan run.</p>
@@ -1079,8 +1101,17 @@ function renderResearchCell(
   history: ResearchCampaignSummary | undefined,
 ) {
   switch (key) {
-    case "company":
-      return item.companyName ? <span className="block max-w-[200px] truncate">{item.companyName}</span> : dash();
+    case "company": {
+      const autoCompany = scan?.companyDescription ?? null;
+      const value = resolveAutoOrManual(autoCompany, item.companyName);
+      return value ? (
+        <span className="block max-w-[200px] truncate" title={autoCompany ? "Schwab Trader API" : "Manual entry"}>
+          {value}
+        </span>
+      ) : (
+        dash()
+      );
+    }
     case "currentPrice":
       return scan?.price != null ? (
         <span title={`${sourceLabel(scan.source)} · Updated ${shortDateTime(scan.asOf)}`}>{money(scan.price)}</span>
@@ -1118,11 +1149,13 @@ function renderResearchCell(
     case "currentRatio":
       return ratioCell(resolveAutoOrManual(item.fundamentalCurrentRatio, item.manualCurrentRatio), { allowZero: true });
     case "peRatio":
-      return ratioCell(resolveAutoOrManual(item.fundamentalPeRatio, item.manualPeRatio), { allowZero: false });
+      return peRatioCell(item.fundamentalPeRatio, item.manualPeRatio);
+    case "eps":
+      return epsCell(item.fundamentalEps);
     case "pegRatio":
       return ratioCell(resolveAutoOrManual(item.fundamentalPegRatio, item.manualPegRatio), { allowZero: false });
     case "dividend":
-      return dividendCell(item);
+      return dividendCell(item, scan);
     case "profitability":
       return profitabilityChip(item.profitability, item.profitabilityNote);
     case "wouldOwn":
@@ -1159,15 +1192,63 @@ function ratioCell(value: unknown, options: { allowZero: boolean }) {
   return <span title="Manual entry">{numeric.toFixed(2)}</span>;
 }
 
-function dividendCell(item: ResearchItemRecord) {
+/**
+ * P/E is shown as its real, signed value whenever Schwab or a manual entry supplies one -
+ * a negative P/E (from negative/loss earnings) is a genuine, meaningful data point, not
+ * noise to hide. Only an exact 0 (never a value a real quote should produce) is treated as
+ * not meaningful, matching the same convention already used for the other ratio fields.
+ */
+function peRatioCell(auto: unknown, manual: unknown) {
+  const value = resolveAutoOrManual(numericOrNull(auto), numericOrNull(manual));
+  if (value === null) {
+    return dash();
+  }
+  if (value === 0) {
+    return (
+      <span title="Not meaningful (exactly zero)" className="text-zinc-500">
+        N/M
+      </span>
+    );
+  }
+  return <span title={auto !== null && auto !== undefined ? "Schwab Trader API" : "Manual entry"}>{value.toFixed(2)}</span>;
+}
+
+/** EPS has no manual-entry counterpart - it's auto-only (Schwab Trader API) or absent. */
+function epsCell(value: unknown) {
+  const numeric = numericOrNull(value);
+  return numeric === null ? dash() : <span title="Schwab Trader API">{numeric.toFixed(2)}</span>;
+}
+
+function dividendCell(item: ResearchItemRecord, scan?: ResearchScanSnapshot) {
+  const autoYield = numericOrNull(item.fundamentalDividendYield);
+  const autoAmount = numericOrNull(item.fundamentalDividendAmount);
+  if (autoYield !== null || autoAmount !== null) {
+    // Verified Schwab data exists (even if $0 / 0% - a real, confirmed "no dividend", not an
+    // absence) - show it directly as the primary signal. This never writes to or overrides
+    // the user's own manual paysDividend judgment, only changes what's displayed here.
+    const paysBasedOnAuto = (autoAmount ?? 0) > 0 || (autoYield ?? 0) > 0;
+    const freqSuffix = scan?.dividendFrequency != null ? ` · ${scan.dividendFrequency}x/yr` : "";
+    return (
+      <span title="Schwab Trader API">
+        {paysBasedOnAuto ? "Yes" : "No"}
+        {autoYield !== null ? ` · ${autoYield.toFixed(2)}%` : ""}
+        {freqSuffix}
+      </span>
+    );
+  }
+
   if (item.paysDividend === null || item.paysDividend === undefined) {
     return dash();
   }
   if (!item.paysDividend) {
     return "No";
   }
-  const yieldValue = numericOrNull(resolveAutoOrManual(item.fundamentalDividendYield, item.manualDividendYield));
-  return <span>Yes{yieldValue !== null ? ` · ${yieldValue.toFixed(2)}%` : ""}</span>;
+  const manualYield = numericOrNull(item.manualDividendYield);
+  return (
+    <span title="Manual entry">
+      Yes{manualYield !== null ? ` · ${manualYield.toFixed(2)}%` : ""}
+    </span>
+  );
 }
 
 function profitabilityChip(value: ResearchItemRecord["profitability"], note?: string | null) {

@@ -274,4 +274,59 @@ describe("live market-data scanner", () => {
 
     expect(concurrentResults).toEqual(serializedResults);
   });
+
+  it("carries verified Schwab fundamentals as a sibling of values, never merged into scoring, and preserves real negative/zero values", async () => {
+    const provider: MarketDataProvider = {
+      async getQuote(symbol) {
+        return {
+          symbol,
+          price: 12,
+          asOf: new Date("2026-09-04T21:00:00Z"),
+          companyDescription: `${symbol} REAL COMPANY NAME`,
+          fundamentals: { peRatio: -27.5, eps: -0.9, dividendAmount: 0, dividendYield: 0, dividendFrequency: 0 },
+        };
+      },
+      async getPriceHistory(symbol, days) {
+        return Array.from({ length: days }, (_, index) => ({
+          symbol,
+          date: new Date(Date.UTC(2026, 7, index + 1)),
+          open: 12,
+          high: 12.5,
+          low: 11.5,
+          close: 12,
+          volume: 1000,
+        }));
+      },
+      async getOptionChain() {
+        return [];
+      },
+      async getInstrument(symbol) {
+        return { symbol, description: symbol, assetType: "EQUITY" };
+      },
+      async getMarketHours() {
+        return { isOpen: false };
+      },
+    };
+
+    const results = await evaluateLiveMarketScan({ provider, rules, universe: ["APLD"] });
+    const apld = results.find((result) => result.ticker === "APLD");
+
+    // Negative/zero values must survive exactly - never dropped, never coerced to null/0-as-absent.
+    expect(apld?.verifiedFundamentals).toEqual({ peRatio: -27.5, eps: -0.9, dividendAmount: 0, dividendYield: 0, dividendFrequency: 0 });
+    expect(apld?.values.companyDescription).toBe("APLD REAL COMPANY NAME");
+    expect(apld?.values.dividendFrequency).toBe(0);
+
+    // None of the new fields are Scanner rule keys, so scoring must be identical to a run
+    // where the provider supplies no fundamentals/company data at all.
+    const plainProvider: MarketDataProvider = {
+      ...provider,
+      async getQuote(symbol) {
+        return { symbol, price: 12, asOf: new Date("2026-09-04T21:00:00Z") };
+      },
+    };
+    const plainResults = await evaluateLiveMarketScan({ provider: plainProvider, rules, universe: ["APLD"] });
+    const plainApld = plainResults.find((result) => result.ticker === "APLD");
+    expect(apld?.summary).toEqual(plainApld?.summary);
+    expect(apld?.summary.status).toBe(plainApld?.summary.status);
+  });
 });

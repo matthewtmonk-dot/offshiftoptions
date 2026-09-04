@@ -7,6 +7,8 @@ export function normalizeSchwabQuoteResponse(symbol: string, payload: unknown): 
   const record = objectValue(payload)?.[normalizedSymbol] ?? firstObjectValue(payload);
   const quote = objectValue(objectValue(record)?.quote);
   const regular = objectValue(objectValue(record)?.regular);
+  const reference = objectValue(objectValue(record)?.reference);
+  const fundamental = objectValue(objectValue(record)?.fundamental);
 
   const price =
     numberValue(quote?.lastPrice) ??
@@ -32,6 +34,16 @@ export function normalizeSchwabQuoteResponse(symbol: string, payload: unknown): 
       numberValue(quote?.netPercentChange) ?? numberValue(regular?.regularMarketPercentChange) ?? undefined,
     volume: integerValue(quote?.totalVolume) ?? integerValue(regular?.regularMarketTradeSize) ?? undefined,
     asOf,
+    companyDescription: stringValue(reference?.description),
+    fundamentals: fundamental
+      ? {
+          peRatio: numberValue(fundamental.peRatio),
+          eps: numberValue(fundamental.eps),
+          dividendAmount: numberValue(fundamental.divAmount),
+          dividendYield: numberValue(fundamental.divYield),
+          dividendFrequency: numberValue(fundamental.divFreq),
+        }
+      : null,
   };
 }
 
@@ -181,6 +193,12 @@ function arrayValue(value: unknown): unknown[] {
 }
 
 function numberValue(value: unknown): number | null {
+  // `Number(null)` is 0 (finite!) - guard explicitly so an explicit null/undefined value is
+  // never mistaken for a real, present 0. A real 0 (e.g. Schwab's divYield: 0) must still
+  // come through as 0, not be swallowed by this guard.
+  if (value === null || value === undefined) {
+    return null;
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }

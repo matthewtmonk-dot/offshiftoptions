@@ -8,7 +8,7 @@ import {
   distanceToStrikePercent,
   wilderRsi,
 } from "@/domain/finance/calculations";
-import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle } from "@/providers/market-data/types";
+import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { DEMO_SCAN_CANDIDATES } from "./profile";
 import { evaluateCandidate, setupScore, type ScannerRule } from "./scanner";
@@ -17,6 +17,15 @@ export type LiveScanCandidate = {
   ticker: string;
   values: Record<string, number | string | boolean | null | undefined>;
   summary: ReturnType<typeof evaluateCandidate>;
+  /**
+   * Verified Schwab `fundamental` field-group values for this ticker, carried as a sibling
+   * to `values` (never merged into it) so it can never be read by a Scanner rule or affect
+   * scoring - Scanner rule evaluation only ever looks up the specific keys its own rules
+   * name, so an extra field here is structurally inert for scoring either way, but keeping
+   * it separate makes that guarantee obvious by construction rather than by convention.
+   * Null/undefined when the provider didn't supply verified fundamentals (e.g. demo data).
+   */
+  verifiedFundamentals?: QuoteFundamentals | null;
 };
 
 export type LiveScanOptions = {
@@ -32,6 +41,7 @@ type StockStageCandidate = {
   quote: MarketQuote;
   candles: PriceCandle[];
   values: Record<string, number | string | boolean | null | undefined>;
+  verifiedFundamentals?: QuoteFundamentals | null;
 };
 
 export const STARTER_LIVE_SCAN_UNIVERSE = [...new Set(DEMO_SCAN_CANDIDATES.map((candidate) => candidate.ticker))];
@@ -123,6 +133,7 @@ export async function evaluateLiveMarketScan({
       ticker: candidate.ticker,
       values,
       summary: evaluateCandidate(rules, values),
+      verifiedFundamentals: candidate.verifiedFundamentals ?? null,
     };
   });
 
@@ -132,7 +143,7 @@ export async function evaluateLiveMarketScan({
       ...unknownOptionValues(),
       scanNote: "Live market data was unavailable for this ticker; result marked UNKNOWN.",
     };
-    return { ticker: outcome.ticker, values, summary: evaluateCandidate(rules, values) };
+    return { ticker: outcome.ticker, values, summary: evaluateCandidate(rules, values), verifiedFundamentals: null };
   });
 
   return [...evaluated, ...unavailable];
@@ -158,7 +169,13 @@ function buildStockStageCandidate(ticker: string, quote: MarketQuote, candles: P
       debtToEquity: null,
       earningsDate: null,
       earningsDistance: null,
+      // Ephemeral, scan-snapshot-only fields (no reserved WatchlistItem column exists for
+      // either) - Research reads these the same way it already reads Current Price, from
+      // the persisted ScanResult snapshot, never written back onto WatchlistItem itself.
+      companyDescription: quote.companyDescription ?? null,
+      dividendFrequency: quote.fundamentals?.dividendFrequency ?? null,
     },
+    verifiedFundamentals: quote.fundamentals ?? null,
   };
 }
 
@@ -243,6 +260,8 @@ function unknownStockValues() {
     debtToEquity: null,
     earningsDate: null,
     earningsDistance: null,
+    companyDescription: null,
+    dividendFrequency: null,
   };
 }
 

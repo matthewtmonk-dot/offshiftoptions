@@ -85,4 +85,57 @@ describe("Schwab market-data normalizers", () => {
       normalizeSchwabAccountNumbers([{ accountNumber: "123456789", hashValue: "hash-value" }]),
     ).toEqual([{ accountNumberLast4: "6789", hashValue: "hash-value" }]);
   });
+
+  it("normalizes reference/fundamental fields using real verified production values (APLD, 2026-09)", () => {
+    // Real values from Matt's production Schwab Trader API connection (read-only fundamentals
+    // diagnostic, after-hours run) - see PROJECT_HANDOFF.md Research section. peRatio/eps are
+    // genuinely negative; divAmount/divYield/divFreq are genuinely 0 - both must survive
+    // normalization exactly, never becoming null (for the reals) or 0 (for a truly-absent field).
+    const quote = normalizeSchwabQuoteResponse("APLD", {
+      APLD: {
+        reference: { description: "APPLIED DIGITAL CORP" },
+        fundamental: { peRatio: -27.50359, eps: -0.9057, divAmount: 0, divYield: 0, divFreq: 0 },
+        quote: { lastPrice: 10.5 },
+      },
+    });
+
+    expect(quote.companyDescription).toBe("APPLIED DIGITAL CORP");
+    expect(quote.fundamentals).toEqual({
+      peRatio: -27.50359,
+      eps: -0.9057,
+      dividendAmount: 0,
+      dividendYield: 0,
+      dividendFrequency: 0,
+    });
+  });
+
+  it("maps a genuinely absent fundamental field to null, never to 0 or undefined-as-zero", () => {
+    const quote = normalizeSchwabQuoteResponse("RIOT", {
+      RIOT: {
+        reference: {},
+        // peRatio omitted entirely (as Schwab's real response does for verified-absent fields)
+        // and eps explicitly null, to cover both shapes of "no value".
+        fundamental: { eps: null, divAmount: 0 },
+        quote: { lastPrice: 9.1 },
+      },
+    });
+
+    expect(quote.fundamentals).toEqual({
+      peRatio: null,
+      eps: null,
+      dividendAmount: 0,
+      dividendYield: null,
+      dividendFrequency: null,
+    });
+    expect(quote.companyDescription).toBeNull();
+  });
+
+  it("leaves companyDescription/fundamentals unset when the provider supplies no reference/fundamental group at all (e.g. demo data)", () => {
+    const quote = normalizeSchwabQuoteResponse("CORZ", {
+      CORZ: { quote: { lastPrice: 4.2 } },
+    });
+
+    expect(quote.companyDescription).toBeNull();
+    expect(quote.fundamentals).toBeNull();
+  });
 });

@@ -35,6 +35,7 @@ export const RESEARCH_COLUMN_DEFINITIONS: ResearchColumnDefinition[] = [
   { key: "debtToEquity", label: "Debt / Equity", group: "FUNDAMENTALS" },
   { key: "currentRatio", label: "Current Ratio", group: "FUNDAMENTALS" },
   { key: "peRatio", label: "P/E", group: "FUNDAMENTALS" },
+  { key: "eps", label: "EPS", group: "FUNDAMENTALS" },
   { key: "pegRatio", label: "PEG", group: "FUNDAMENTALS" },
   { key: "dividend", label: "Dividend", group: "FUNDAMENTALS" },
   { key: "profitability", label: "Profitability", group: "FUNDAMENTALS" },

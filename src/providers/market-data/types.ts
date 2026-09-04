@@ -1,3 +1,11 @@
+export type QuoteFundamentals = {
+  peRatio: number | null;
+  eps: number | null;
+  dividendAmount: number | null;
+  dividendYield: number | null;
+  dividendFrequency: number | null;
+};
+
 export type MarketQuote = {
   symbol: string;
   price: number;
@@ -5,6 +13,12 @@ export type MarketQuote = {
   changePercent?: number;
   volume?: number;
   asOf: Date;
+  /** Company/legal name from Schwab's `reference` quote field group, when present. Never
+   * fabricated - undefined/null when the provider didn't supply it (e.g. demo data). */
+  companyDescription?: string | null;
+  /** Verified values from Schwab's `fundamental` quote field group. Optional/undefined for
+   * providers that don't supply it (e.g. demo data) - never guessed or backfilled. */
+  fundamentals?: QuoteFundamentals | null;
 };
 
 export type PriceCandle = {

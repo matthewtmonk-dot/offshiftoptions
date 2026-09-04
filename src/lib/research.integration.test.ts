@@ -282,3 +282,112 @@ maybeDescribeColumns("Per-user Research column/sort preferences", () => {
     expect(result.sortKey).toBeNull();
   });
 });
+
+const runFundamentalsSyncTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
+const maybeDescribeFundamentalsSync = runFundamentalsSyncTests ? describe : describe.skip;
+
+maybeDescribeFundamentalsSync("syncVerifiedFundamentalsForUser - verified Schwab fundamentals persistence", () => {
+  let prisma: typeof import("./prisma").prisma;
+  let workflows: typeof import("./workflows");
+  let userA: { id: string };
+  let userB: { id: string };
+  const userIds: string[] = [];
+
+  beforeAll(async () => {
+    prisma = (await import("./prisma")).prisma;
+    workflows = await import("./workflows");
+
+    const passwordHash = await hash("not-used", 4);
+    const timestamp = Date.now();
+    userA = await prisma.user.create({
+      data: { name: "Fundamentals Sync User A", email: `fundamentals-sync-a-${timestamp}@lst.local`, passwordHash },
+      select: { id: true },
+    });
+    userB = await prisma.user.create({
+      data: { name: "Fundamentals Sync User B", email: `fundamentals-sync-b-${timestamp}@lst.local`, passwordHash },
+      select: { id: true },
+    });
+    userIds.push(userA.id, userB.id);
+  });
+
+  afterAll(async () => {
+    await prisma.watchlistItem.deleteMany({ where: { ownerId: { in: userIds } } });
+    await prisma.watchlist.deleteMany({ where: { ownerId: { in: userIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await prisma.$disconnect();
+  });
+
+  function fakeSummary() {
+    return { status: "UNKNOWN" as const, passed: 0, total: 0, results: [] };
+  }
+
+  it("persists real negative P/E, real negative EPS, and real 0 dividend fields exactly - never dropped, never coerced to null/blank", async () => {
+    const item = await workflows.setResearchStatusForUser(userA.id, "ZFUNDA", "WATCH");
+
+    await workflows.syncVerifiedFundamentalsForUser(userA.id, [
+      {
+        ticker: "ZFUNDA",
+        values: {},
+        summary: fakeSummary(),
+        verifiedFundamentals: { peRatio: -27.50359, eps: -0.9057, dividendAmount: 0, dividendYield: 0, dividendFrequency: 0 },
+      },
+    ]);
+
+    const updated = await prisma.watchlistItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(Number(updated.fundamentalPeRatio)).toBeCloseTo(-27.5, 1);
+    expect(Number(updated.fundamentalEps)).toBeCloseTo(-0.9057, 4);
+    expect(Number(updated.fundamentalDividendAmount)).toBe(0);
+    expect(Number(updated.fundamentalDividendYield)).toBe(0);
+    expect(updated.fundamentalSource).toBe("Schwab Trader API");
+    expect(updated.fundamentalAsOf).not.toBeNull();
+  });
+
+  it("never overwrites a previously-captured real value with a later ABSENT/null fetch", async () => {
+    const item = await workflows.setResearchStatusForUser(userA.id, "ZFUNDB", "WATCH");
+    await workflows.syncVerifiedFundamentalsForUser(userA.id, [
+      { ticker: "ZFUNDB", values: {}, summary: fakeSummary(), verifiedFundamentals: { peRatio: 18.4, eps: 0.5, dividendAmount: null, dividendYield: null, dividendFrequency: null } },
+    ]);
+
+    // A later scan where Schwab happened to return nothing usable for this ticker (e.g. a
+    // transient issue) must not blank out the good value captured above.
+    await workflows.syncVerifiedFundamentalsForUser(userA.id, [
+      { ticker: "ZFUNDB", values: {}, summary: fakeSummary(), verifiedFundamentals: { peRatio: null, eps: null, dividendAmount: null, dividendYield: null, dividendFrequency: null } },
+    ]);
+
+    const updated = await prisma.watchlistItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(Number(updated.fundamentalPeRatio)).toBeCloseTo(18.4, 1);
+    expect(Number(updated.fundamentalEps)).toBeCloseTo(0.5, 1);
+  });
+
+  it("only ever writes to the calling user's own existing Research rows - never creates a row, never touches another user's", async () => {
+    // User B has no ZFUNDC research item at all - the ticker merely appearing in a scan
+    // must never create one, and must never touch User A's item for a different ticker.
+    const userAItem = await workflows.setResearchStatusForUser(userA.id, "ZFUNDC", "WATCH");
+    const userBItem = await workflows.setResearchStatusForUser(userB.id, "ZFUNDD", "WATCH");
+
+    await workflows.syncVerifiedFundamentalsForUser(userB.id, [
+      { ticker: "ZFUNDC", values: {}, summary: fakeSummary(), verifiedFundamentals: { peRatio: 99, eps: 99, dividendAmount: 99, dividendYield: 99, dividendFrequency: 99 } },
+    ]);
+
+    const userAItemAfter = await prisma.watchlistItem.findUniqueOrThrow({ where: { id: userAItem.id } });
+    expect(userAItemAfter.fundamentalPeRatio).toBeNull();
+
+    const userBItemAfter = await prisma.watchlistItem.findUniqueOrThrow({ where: { id: userBItem.id } });
+    expect(userBItemAfter.fundamentalPeRatio).toBeNull();
+
+    const noNewRow = await prisma.watchlistItem.findFirst({ where: { ownerId: userB.id, ticker: "ZFUNDC" } });
+    expect(noNewRow).toBeNull();
+  });
+
+  it("does nothing when a ticker has no verified fundamentals at all (e.g. a demo-scan candidate)", async () => {
+    const item = await workflows.setResearchStatusForUser(userA.id, "ZFUNDE", "WATCH");
+
+    await workflows.syncVerifiedFundamentalsForUser(userA.id, [
+      { ticker: "ZFUNDE", values: {}, summary: fakeSummary(), verifiedFundamentals: null },
+    ]);
+
+    const unchanged = await prisma.watchlistItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(unchanged.fundamentalPeRatio).toBeNull();
+    expect(unchanged.fundamentalSource).toBeNull();
+  });
+});

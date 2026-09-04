@@ -33,6 +33,11 @@ export type ResearchScanSnapshot = {
   bbPercent: number | null;
   source: string;
   asOf: Date;
+  /** Ephemeral, scan-snapshot-only fields - no reserved WatchlistItem column exists for
+   * either, so (like Current Price) they're read fresh from the latest scan run rather
+   * than persisted. Absent/stale exactly when the ticker wasn't in the most recent scan. */
+  companyDescription: string | null;
+  dividendFrequency: number | null;
 };
 
 export type ResearchCampaignSummary = {
@@ -171,6 +176,8 @@ function buildScanSnapshot(
     bbPercent: snapshotNumber(result.snapshotJson, "bbPercent"),
     source,
     asOf,
+    companyDescription: snapshotString(result.snapshotJson, "companyDescription"),
+    dividendFrequency: snapshotNumber(result.snapshotJson, "dividendFrequency"),
   };
 }
 
@@ -201,4 +208,13 @@ function snapshotNumber(snapshot: unknown, key: string) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function snapshotString(snapshot: unknown, key: string) {
+  if (!snapshot || typeof snapshot !== "object" || !(key in snapshot)) {
+    return null;
+  }
+
+  const value = (snapshot as Record<string, unknown>)[key];
+  return typeof value === "string" && value ? value : null;
 }

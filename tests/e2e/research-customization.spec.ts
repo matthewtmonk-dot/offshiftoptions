@@ -9,6 +9,25 @@ async function loginAs(page: Page, name: "Matt" | "Eric") {
   await expect(page.getByRole("heading", { name: new RegExp(`Hey ${name}`) })).toBeVisible();
 }
 
+/** Opens the Columns dropdown if it isn't already open - avoids assuming toggle state, since
+ * the summary click toggles a native <details> open/closed either way. */
+async function openColumnsMenu(page: Page) {
+  const menu = page.getByTestId("research-columns-menu");
+  if (!(await menu.isVisible())) {
+    await page.getByText("Columns", { exact: true }).click();
+  }
+  return menu;
+}
+
+/** Closes the Columns dropdown if it's open - it otherwise sits on top of the table and can
+ * intercept later clicks (e.g. expanding a row). */
+async function closeColumnsMenu(page: Page) {
+  const menu = page.getByTestId("research-columns-menu");
+  if (await menu.isVisible()) {
+    await page.getByText("Columns", { exact: true }).click();
+  }
+}
+
 test.describe("Research customization - per-user column layouts", () => {
   test("Matt keeps his existing simple default: Company/Scanner/Current Price/RSI-BB, no Eric-only columns", async ({ page }) => {
     await page.setViewportSize({ width: 1366, height: 768 });
@@ -55,8 +74,7 @@ test.describe("Research customization - per-user column layouts", () => {
     await loginAs(page, "Matt");
     await page.goto("/research");
 
-    await page.getByText("Columns", { exact: true }).click();
-    const menu = page.getByTestId("research-columns-menu");
+    const menu = await openColumnsMenu(page);
     for (const group of ["Core", "Technical", "Fundamentals", "External Research", "Personal", "History"]) {
       await expect(menu.getByText(group, { exact: true })).toBeVisible();
     }
@@ -73,8 +91,9 @@ test.describe("Research customization - per-user column layouts", () => {
 
     await loginAs(mattPage, "Matt");
     await mattPage.goto("/research");
-    await mattPage.getByText("Columns", { exact: true }).click();
-    await mattPage.getByTestId("research-columns-menu").locator("label", { hasText: "P/E" }).click();
+    const mattMenu = await openColumnsMenu(mattPage);
+    await mattMenu.getByRole("checkbox", { name: "P/E" }).setChecked(true);
+    await closeColumnsMenu(mattPage);
     await expect(mattPage.getByTestId("research-desktop-table").locator("thead th", { hasText: "P/E" })).toBeVisible();
 
     await loginAs(ericPage, "Eric");
@@ -84,6 +103,11 @@ test.describe("Research customization - per-user column layouts", () => {
     await expect(ericPage.getByTestId("research-desktop-table").locator("thead th", { hasText: "P/E" })).toBeVisible();
     await expect(ericPage.getByTestId("research-desktop-table").locator("thead th", { hasText: "RSI / BB" })).toHaveCount(0);
 
+    // Restore Matt's column state - researchColumns is server-persisted per user, so leaving
+    // P/E toggled on here would leak into every later test run against Matt.
+    const mattMenuAgain = await openColumnsMenu(mattPage);
+    await mattMenuAgain.getByRole("checkbox", { name: "P/E" }).setChecked(false);
+
     await mattContext.close();
     await ericContext.close();
   });
@@ -92,8 +116,8 @@ test.describe("Research customization - per-user column layouts", () => {
     await loginAs(page, "Matt");
     await page.goto("/research");
 
-    await page.getByText("Columns", { exact: true }).click();
-    await page.getByTestId("research-columns-menu").locator("label", { hasText: "Would Own" }).click();
+    const menu = await openColumnsMenu(page);
+    await menu.getByRole("checkbox", { name: "Would Own" }).setChecked(true);
     await expect(page.getByTestId("research-desktop-table").locator("thead th", { hasText: "Would Own" })).toBeVisible();
 
     await page.getByRole("button", { name: "Sign out" }).click();
@@ -104,8 +128,8 @@ test.describe("Research customization - per-user column layouts", () => {
     await expect(page.getByTestId("research-desktop-table").locator("thead th", { hasText: "Would Own" })).toBeVisible();
 
     // Clean up so this test is re-runnable without reseeding.
-    await page.getByText("Columns", { exact: true }).click();
-    await page.getByTestId("research-columns-menu").locator("label", { hasText: "Would Own" }).click();
+    const menuAgain = await openColumnsMenu(page);
+    await menuAgain.getByRole("checkbox", { name: "Would Own" }).setChecked(false);
   });
 });
 
@@ -137,6 +161,75 @@ test.describe("Research customization - manual fundamentals persistence", () => 
     await expect(table.locator('input[name="manualPeRatio"]')).toHaveValue("22.4");
     await expect(table.locator('select[name="manualLsegRecommendation"]')).toHaveValue("BUY");
     await expect(table.locator('select[name="profitability"]')).toHaveValue("PROFITABLE");
+  });
+
+  test("a negative P/E displays as the real number, not N/M - and the InfoTip explains why", async ({ page }) => {
+    await loginAs(page, "Matt");
+    await page.goto("/research");
+
+    // Add P/E to Matt's visible columns so the dense-table cell (not just the edit form) is
+    // checkable. Uses setChecked (idempotent) rather than a blind click, since researchColumns
+    // is server-persisted per user and another test may have already left this checked.
+    const menu = await openColumnsMenu(page);
+    await menu.getByRole("checkbox", { name: "P/E" }).setChecked(true);
+    await closeColumnsMenu(page);
+
+    const table = page.getByTestId("research-desktop-table");
+    const row = table.getByRole("row", { name: /CORZ/ }).first();
+    await row.click();
+    await table.locator('input[name="manualPeRatio"]').fill("-27.5");
+    await table.getByRole("button", { name: "Save research details" }).click();
+    await expect(page).toHaveURL(/\/research/);
+
+    // Force-remount to see the freshly-saved value (same defaultValue characteristic noted above).
+    await row.click();
+    await row.click();
+
+    const peColumnCell = table.locator("tbody tr").filter({ hasText: "CORZ" }).first().locator("td").filter({ hasText: "-27.50" });
+    await expect(peColumnCell).toBeVisible();
+    await expect(table.getByText("N/M")).toHaveCount(0);
+
+    const helpButton = table.getByTestId("help-research-manualPeRatio");
+    await helpButton.focus();
+    const tooltip = page.locator('[role="tooltip"]').filter({ hasText: "negative" });
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText("N/M");
+
+    // Clean up the column toggle so this test is re-runnable without reseeding.
+    const menuAgain = await openColumnsMenu(page);
+    await menuAgain.getByRole("checkbox", { name: "P/E" }).setChecked(false);
+  });
+
+  test("EPS is available through Columns (auto-only, no default-layout bloat) and a manual dividend yield of 0 displays as 0%, not blank", async ({ page }) => {
+    await loginAs(page, "Matt");
+    await page.goto("/research");
+
+    const defaultTable = page.getByTestId("research-desktop-table");
+    await expect(defaultTable.locator("thead th", { hasText: "EPS" })).toHaveCount(0);
+
+    const menu = await openColumnsMenu(page);
+    await expect(menu.locator("label", { hasText: "EPS" })).toBeVisible();
+    await menu.getByRole("checkbox", { name: "EPS" }).setChecked(true);
+    await menu.getByRole("checkbox", { name: "Dividend" }).setChecked(true);
+    await closeColumnsMenu(page);
+    await expect(defaultTable.locator("thead th", { hasText: "EPS" })).toBeVisible();
+
+    // Set a manual dividend of exactly 0 (a real, confirmed "no dividend"), and confirm it is
+    // not blanked to a dash.
+    const row = defaultTable.getByRole("row", { name: /CORZ/ }).first();
+    await row.click();
+    await defaultTable.locator('select[name="paysDividend"]').selectOption("YES");
+    await defaultTable.locator('input[name="manualDividendYield"]').fill("0");
+    await defaultTable.getByRole("button", { name: "Save research details" }).click();
+    await expect(page).toHaveURL(/\/research/);
+
+    const dividendCell = defaultTable.locator("tbody tr").filter({ hasText: "CORZ" }).first();
+    await expect(dividendCell.getByText("0.00%")).toBeVisible();
+
+    // Clean up.
+    const menuAgain = await openColumnsMenu(page);
+    await menuAgain.getByRole("checkbox", { name: "EPS" }).setChecked(false);
+    await menuAgain.getByRole("checkbox", { name: "Dividend" }).setChecked(false);
   });
 });
 

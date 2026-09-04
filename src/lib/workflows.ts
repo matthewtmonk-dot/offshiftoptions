@@ -1302,6 +1302,7 @@ export async function rerunLiveSchwabScannerForUser(userId: string): Promise<Liv
   try {
     const candidates = await evaluateLiveMarketScan({ provider, rules, universe });
     await persistScannerRun(userId, profile.id, "LIVE:SCHWAB", candidates);
+    await syncVerifiedFundamentalsForUser(userId, candidates);
     return {
       scanned: candidates.length,
       nearMatches: candidates.filter((candidate) => getNearMisses(candidate.summary.results).length === 1).length,
@@ -1311,6 +1312,63 @@ export async function rerunLiveSchwabScannerForUser(userId: string): Promise<Liv
     console.error("Live Schwab scan failed", error);
     throw new ValidationError("LIVE DATA UNAVAILABLE: Schwab market data did not return a complete scan. Demo data was not substituted.");
   }
+}
+
+/**
+ * Persists verified Schwab fundamentals (P/E, EPS, dividend amount/yield) onto the calling
+ * user's OWN existing Research rows, reusing the quote data a live scan already fetched -
+ * this makes zero additional Schwab requests. Only ever touches WatchlistItem rows owned by
+ * `userId` (never creates a new row just because a ticker appeared in a scan - adding to
+ * Research stays an explicit user action). A field is only ever written when this fetch
+ * actually returned a real value (including a real negative or 0); a transient ABSENT/NULL
+ * on one scan run must never blank out a value captured on an earlier, successful one.
+ */
+export async function syncVerifiedFundamentalsForUser(userId: string, candidates: LiveScanCandidate[]) {
+  const fundamentalsByTicker = new Map(
+    candidates
+      .filter((candidate) => candidate.verifiedFundamentals)
+      .map((candidate) => [candidate.ticker, candidate.verifiedFundamentals!]),
+  );
+  if (!fundamentalsByTicker.size) {
+    return;
+  }
+
+  const items = await prisma.watchlistItem.findMany({
+    where: { ownerId: userId, ticker: { in: [...fundamentalsByTicker.keys()] } },
+    select: { id: true, ticker: true },
+  });
+  if (!items.length) {
+    return;
+  }
+
+  const now = new Date();
+  await mapWithConcurrency(items, SCAN_PERSIST_CONCURRENCY, async (item) => {
+    const fundamentals = fundamentalsByTicker.get(item.ticker);
+    if (!fundamentals) {
+      return;
+    }
+
+    const hasRealValue =
+      fundamentals.peRatio !== null ||
+      fundamentals.eps !== null ||
+      fundamentals.dividendAmount !== null ||
+      fundamentals.dividendYield !== null;
+    if (!hasRealValue) {
+      return;
+    }
+
+    await prisma.watchlistItem.update({
+      where: { id: item.id },
+      data: {
+        ...(fundamentals.peRatio !== null ? { fundamentalPeRatio: fundamentals.peRatio } : {}),
+        ...(fundamentals.eps !== null ? { fundamentalEps: fundamentals.eps } : {}),
+        ...(fundamentals.dividendAmount !== null ? { fundamentalDividendAmount: fundamentals.dividendAmount } : {}),
+        ...(fundamentals.dividendYield !== null ? { fundamentalDividendYield: fundamentals.dividendYield } : {}),
+        fundamentalSource: "Schwab Trader API",
+        fundamentalAsOf: now,
+      },
+    });
+  });
 }
 
 function jsonReady(values: Record<string, number | string | boolean | null | undefined>) {
