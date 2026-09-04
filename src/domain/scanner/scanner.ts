@@ -163,6 +163,44 @@ export function honestSetupLabel(summary: ScanSummary, gatingKeys: ReadonlySet<s
   return setupScoreLabel(honestSetupScore(summary, gatingKeys));
 }
 
+/**
+ * Reconstructs a persisted `ScanCriterionResult.actualValue` (always stored as a string or
+ * null - see persistScannerRun in workflows.ts) back into the typed value `CriterionResult`
+ * expects. Shared by every reader of persisted scan criteria (Research's scan snapshot, the
+ * Alpha Vantage queue's Near-tier classification) so there is exactly one definition of how a
+ * stored criterion round-trips, not a copy per caller.
+ */
+export function parseStoredCriterionActualValue(raw: string | null): CriterionResult["actualValue"] {
+  if (raw === null || raw === "") {
+    return null;
+  }
+  if (raw === "true") {
+    return true;
+  }
+  if (raw === "false") {
+    return false;
+  }
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : raw;
+}
+
+/**
+ * Reconstructs a persisted `ScanCriterionResult.desiredValue` back into the typed value
+ * `CriterionResult` expects. It's stored via `JSON.stringify(result.desiredValue)`
+ * (persistScannerRun in workflows.ts) specifically so a BETWEEN rule's `[low, high]` tuple
+ * survives as a real array, not a string - `criterionGap()`'s `Array.isArray(desired)` check
+ * depends on this. Falls back to the raw string if it somehow isn't valid JSON (defensive,
+ * matches the guarded-parse convention already used for scan snapshot JSON elsewhere).
+ */
+export function parseStoredCriterionDesiredValue(raw: string): CriterionResult["desiredValue"] {
+  try {
+    return JSON.parse(raw) as CriterionResult["desiredValue"];
+  } catch {
+    return raw;
+  }
+}
+
 export function getNearMisses(results: CriterionResult[]): CriterionGap[] {
   return results.flatMap((result) => {
     const gap = criterionGap(result);

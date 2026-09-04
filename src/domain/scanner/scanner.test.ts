@@ -13,8 +13,11 @@ import {
   getNearMisses,
   honestSetupLabel,
   honestSetupScore,
+  parseStoredCriterionActualValue,
+  parseStoredCriterionDesiredValue,
   setupScore,
   setupScoreLabel,
+  type CriterionResult,
   type ScannerRule,
 } from "./scanner";
 
@@ -192,5 +195,42 @@ describe("scanner engine", () => {
         formData,
       ),
     ).toEqual([12, 60]);
+  });
+});
+
+describe("persisted-criterion reconstruction helpers (shared by Research's scan snapshot and the Alpha Vantage queue's Near-tier)", () => {
+  it("parses stored actualValue sentinels back to null/boolean/number, and a plain string otherwise", () => {
+    expect(parseStoredCriterionActualValue(null)).toBeNull();
+    expect(parseStoredCriterionActualValue("")).toBeNull();
+    expect(parseStoredCriterionActualValue("true")).toBe(true);
+    expect(parseStoredCriterionActualValue("false")).toBe(false);
+    expect(parseStoredCriterionActualValue("38000")).toBe(38000);
+    expect(parseStoredCriterionActualValue("not-a-number")).toBe("not-a-number");
+  });
+
+  it("parses a stored desiredValue back into its real type, including a BETWEEN tuple as a real array (not a stringified array)", () => {
+    expect(parseStoredCriterionDesiredValue(JSON.stringify([10, 50]))).toEqual([10, 50]);
+    expect(parseStoredCriterionDesiredValue(JSON.stringify(40))).toBe(40);
+    expect(parseStoredCriterionDesiredValue(JSON.stringify("text"))).toBe("text");
+  });
+
+  it("falls back to the raw string if desiredValue somehow isn't valid JSON, rather than throwing", () => {
+    expect(parseStoredCriterionDesiredValue("not-json")).toBe("not-json");
+  });
+
+  it("a BETWEEN criterion reconstructed via these helpers is correctly classified as a near miss by getNearMisses - proving the fix for a prior bug where an unparsed desiredValue string broke Array.isArray()", () => {
+    const reconstructed: CriterionResult = {
+      key: "price",
+      name: "Price",
+      actualValue: parseStoredCriterionActualValue("52"),
+      operator: "BETWEEN",
+      desiredValue: parseStoredCriterionDesiredValue(JSON.stringify([10, 50])),
+      status: "FAIL",
+      explanation: "",
+    };
+
+    const misses = getNearMisses([reconstructed]);
+    expect(misses).toHaveLength(1);
+    expect(misses[0].near).toBe(true);
   });
 });

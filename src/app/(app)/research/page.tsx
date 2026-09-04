@@ -3,6 +3,8 @@ import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/pro
 import {
   honestSetupLabel,
   honestSetupScore,
+  parseStoredCriterionActualValue,
+  parseStoredCriterionDesiredValue,
   type CriterionResult,
   type CriterionStatus,
   type ScannerOperator,
@@ -12,7 +14,11 @@ import { DEFAULT_RESEARCH_COLUMNS, sanitizeResearchColumns, isResearchSortKey, t
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { requireCurrentUser } from "@/lib/auth";
 import { getResearchPageData, normalizeTrackerScope, type TrackerScope } from "@/lib/app-data";
+import { getTickerFundamentalsMap } from "@/lib/alpha-vantage-fundamentals";
+import type { TickerFundamentals } from "@/generated/prisma/client";
 import { ResearchWorkspace } from "./research-workspace";
+
+export type ResearchAlphaVantageFundamentals = TickerFundamentals;
 
 export const dynamic = "force-dynamic";
 
@@ -96,6 +102,14 @@ export default async function ResearchPage({
   const columns = savedColumns.length ? savedColumns : DEFAULT_RESEARCH_COLUMNS;
   const sortKey: ResearchSortKey = isResearchSortKey(settings?.researchSortKey) ? settings!.researchSortKey : "added";
 
+  // Read-only lookup against the SHARED (not per-user) Alpha Vantage fundamentals cache -
+  // never triggers a fetch. See PROJECT_HANDOFF.md Alpha Vantage API section: Schwab-provided
+  // fields (Company/Current Price/P-E/EPS/Dividend) are never replaced by this - only fields
+  // Schwab doesn't provide (Sector/Industry/PEG-when-Schwab-absent/profitability/analyst/etc)
+  // are ever shown from it.
+  const researchTickers = [...(ownWatchlist?.items ?? []), ...visibleItems].map((item) => item.ticker);
+  const avFundamentalsByTicker = await getTickerFundamentalsMap(researchTickers);
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -117,6 +131,7 @@ export default async function ResearchPage({
         buddies={users}
         scanByTicker={Object.fromEntries(scanByTicker)}
         campaignByTicker={Object.fromEntries(campaignByTicker)}
+        avFundamentalsByTicker={Object.fromEntries(avFundamentalsByTicker)}
         initialColumns={columns}
         initialSortKey={sortKey}
         error={params.error}
@@ -154,9 +169,9 @@ function buildScanSnapshot(
   const criteria: CriterionResult[] = result.criterionResults.map((criterion) => ({
     key: ruleKeyByName.get(criterion.criterionName) ?? criterion.criterionName,
     name: criterion.criterionName,
-    actualValue: parseActualValue(criterion.actualValue),
+    actualValue: parseStoredCriterionActualValue(criterion.actualValue),
     operator: criterion.operator as ScannerOperator,
-    desiredValue: criterion.desiredValue,
+    desiredValue: parseStoredCriterionDesiredValue(criterion.desiredValue),
     status: criterion.status as CriterionStatus,
     explanation: criterion.explanation,
   }));
@@ -179,21 +194,6 @@ function buildScanSnapshot(
     companyDescription: snapshotString(result.snapshotJson, "companyDescription"),
     dividendFrequency: snapshotNumber(result.snapshotJson, "dividendFrequency"),
   };
-}
-
-function parseActualValue(raw: string | null) {
-  if (raw === null || raw === "") {
-    return null;
-  }
-  if (raw === "true") {
-    return true;
-  }
-  if (raw === "false") {
-    return false;
-  }
-
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : raw;
 }
 
 function snapshotNumber(snapshot: unknown, key: string) {

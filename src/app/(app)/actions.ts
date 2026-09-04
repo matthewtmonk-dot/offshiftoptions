@@ -47,12 +47,18 @@ import {
   confirmBrokerPositionAsCampaignForUser,
   skipBrokerReconciliationForUser,
 } from "@/lib/broker-reconciliation";
-import { ValidationError } from "@/lib/tickers";
+import { ValidationError, requireTicker } from "@/lib/tickers";
 import {
   runAlphaVantageOverviewDiagnostic,
   runAlphaVantageRemainingTickersDiagnostic,
   type AlphaVantageDiagnosticResult,
 } from "@/lib/alpha-vantage-diagnostic";
+import {
+  processAlphaVantageFundamentalsQueue,
+  refreshSingleTickerFundamentals,
+  type ProcessQueueSummary,
+  type ManualRefreshResult,
+} from "@/lib/alpha-vantage-fundamentals";
 
 function redirectWithError(path: string, error: string): never {
   redirect(`${path}?error=${encodeURIComponent(error)}`);
@@ -752,5 +758,45 @@ export async function runAlphaVantageRemainingTickersDiagnosticAction(): Promise
     return { ok: true, result };
   } catch {
     return { ok: false, error: "Alpha Vantage diagnostic failed unexpectedly." };
+  }
+}
+
+export type ProcessAlphaVantageQueueResult = { ok: true; summary: ProcessQueueSummary } | { ok: false; error: string };
+
+/**
+ * Manual, click-to-run "Process fundamentals queue" - the only trigger for automatic (AUTO
+ * budget) fundamentals fetching in this slice. Never called from Scanner or Research render
+ * paths or from Run Live Scan - see PROJECT_HANDOFF.md Alpha Vantage API section for why
+ * (no confirmed Hostinger persistent-worker/cron support yet).
+ */
+export async function processAlphaVantageFundamentalsQueueAction(): Promise<ProcessAlphaVantageQueueResult> {
+  await requireCurrentUser();
+
+  try {
+    const summary = await processAlphaVantageFundamentalsQueue();
+    revalidatePath("/account");
+    return { ok: true, summary };
+  } catch {
+    return { ok: false, error: "Processing the fundamentals queue failed unexpectedly." };
+  }
+}
+
+export type RefreshTickerFundamentalsResult = { ok: true; result: ManualRefreshResult } | { ok: false; error: string };
+
+/** Manual single-ticker refresh, drawing from the 3-call manual reserve once the auto cap is hit. */
+export async function refreshTickerFundamentalsAction(ticker: string, force: boolean): Promise<RefreshTickerFundamentalsResult> {
+  await requireCurrentUser();
+
+  try {
+    const normalized = requireTicker(ticker);
+    const result = await refreshSingleTickerFundamentals(normalized, { force });
+    revalidatePath("/research");
+    revalidatePath("/account");
+    return { ok: true, result };
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
   }
 }

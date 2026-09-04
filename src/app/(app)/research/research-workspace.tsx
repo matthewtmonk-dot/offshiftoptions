@@ -39,7 +39,9 @@ import {
   updateResearchColumnsAction,
   updateResearchDetailsAction,
 } from "../actions";
+import { summarizeAlphaVantageAnalystConsensus } from "@/domain/research/alphaVantageAnalyst";
 import type {
+  ResearchAlphaVantageFundamentals,
   ResearchBuddy,
   ResearchBuddyItemRecord,
   ResearchCampaignSummary,
@@ -90,6 +92,7 @@ export function ResearchWorkspace({
   buddies,
   scanByTicker,
   campaignByTicker,
+  avFundamentalsByTicker,
   initialColumns,
   initialSortKey,
   error,
@@ -101,6 +104,7 @@ export function ResearchWorkspace({
   buddies: ResearchBuddy[];
   scanByTicker: Record<string, ResearchScanSnapshot>;
   campaignByTicker: Record<string, ResearchCampaignSummary>;
+  avFundamentalsByTicker: Record<string, ResearchAlphaVantageFundamentals>;
   initialColumns: string[];
   initialSortKey: ResearchSortKey;
   error?: string;
@@ -362,6 +366,7 @@ export function ResearchWorkspace({
                   const isOpen = expanded.has(item.id);
                   const scan = scanByTicker[item.ticker];
                   const history = campaignByTicker[item.ticker];
+                  const avFundamentals = avFundamentalsByTicker[item.ticker];
                   const buddyItem = scope === "both" ? buddyStatusByTicker.get(item.ticker) : undefined;
                   return (
                     <Fragment key={item.id}>
@@ -392,7 +397,7 @@ export function ResearchWorkspace({
                         </td>
                         {activeColumns.map((column) => (
                           <td key={column.key} className="border-b border-zinc-900 px-3 py-2 whitespace-nowrap">
-                            {renderResearchCell(column.key, item, scan, history)}
+                            {renderResearchCell(column.key, item, scan, history, avFundamentals)}
                           </td>
                         ))}
                       </tr>
@@ -1099,6 +1104,7 @@ function renderResearchCell(
   item: ResearchItemRecord,
   scan: ResearchScanSnapshot | undefined,
   history: ResearchCampaignSummary | undefined,
+  avFundamentals: ResearchAlphaVantageFundamentals | undefined,
 ) {
   switch (key) {
     case "company": {
@@ -1118,14 +1124,17 @@ function renderResearchCell(
       ) : (
         dash()
       );
-    case "industry":
-      return item.whatItDoes ? (
-        <span className="block max-w-[220px] truncate" title={item.whatItDoes}>
-          {item.whatItDoes}
+    case "industry": {
+      const autoIndustry = avFundamentals?.industry ?? null;
+      const value = resolveAutoOrManual(autoIndustry, item.whatItDoes);
+      return value ? (
+        <span className="block max-w-[220px] truncate" title={autoIndustry ? `${autoIndustry} · Alpha Vantage` : "Manual entry"}>
+          {value}
         </span>
       ) : (
         dash()
       );
+    }
     case "scanner":
       return scan ? <ScannerChip score={scan.score} label={scan.label} /> : dash();
     case "rsiBb":
@@ -1153,11 +1162,15 @@ function renderResearchCell(
     case "eps":
       return epsCell(item.fundamentalEps);
     case "pegRatio":
-      return ratioCell(resolveAutoOrManual(item.fundamentalPegRatio, item.manualPegRatio), { allowZero: false });
+      return pegRatioCell(item, avFundamentals);
     case "dividend":
       return dividendCell(item, scan);
     case "profitability":
-      return profitabilityChip(item.profitability, item.profitabilityNote);
+      return profitabilityChip(item.profitability, item.profitabilityNote, avFundamentals);
+    case "avAnalystTarget":
+      return avAnalystTargetCell(avFundamentals);
+    case "avAnalystConsensus":
+      return avAnalystConsensusCell(avFundamentals);
     case "wouldOwn":
       return wouldOwnText(item);
     case "monthlyOnly":
@@ -1251,9 +1264,79 @@ function dividendCell(item: ResearchItemRecord, scan?: ResearchScanSnapshot) {
   );
 }
 
-function profitabilityChip(value: ResearchItemRecord["profitability"], note?: string | null) {
-  if (value === "UNKNOWN") {
+/**
+ * Three-tier precedence: Schwab's reserved-auto column (currently always null - confirmed
+ * genuinely absent from Schwab's quote fundamentals), then Alpha Vantage's shared cache
+ * (verified present for some tickers, e.g. APLD PEGRatio=1.829, but not universally available -
+ * RIOT/CORZ both returned NULL in production verification), then the user's manual entry.
+ * Never persisted onto WatchlistItem - read live from the shared cache at render time, like
+ * Current Price/Company already are.
+ */
+function pegRatioCell(item: ResearchItemRecord, avFundamentals: ResearchAlphaVantageFundamentals | undefined) {
+  const auto = resolveAutoOrManual(numericOrNull(item.fundamentalPegRatio), numericOrNull(avFundamentals?.pegRatio ?? null));
+  const value = resolveAutoOrManual(auto, numericOrNull(item.manualPegRatio));
+  if (value === null) {
     return dash();
+  }
+  if (value <= 0) {
+    return (
+      <span title="Not meaningful (zero or negative)" className="text-zinc-500">
+        N/M
+      </span>
+    );
+  }
+  return <span title={auto !== null ? "Alpha Vantage" : "Manual entry"}>{value.toFixed(2)}</span>;
+}
+
+function avAnalystTargetCell(avFundamentals: ResearchAlphaVantageFundamentals | undefined) {
+  const value = numericOrNull(avFundamentals?.analystTargetPrice ?? null);
+  return value === null ? dash() : <span title="Alpha Vantage Analyst Target">{money(value)}</span>;
+}
+
+/**
+ * A simple, explicit, tested DISPLAY summary of Alpha Vantage's own published Strong Buy/Buy/
+ * Hold/Sell/Strong Sell counts - see summarizeAlphaVantageAnalystConsensus(). This is NOT LSEG
+ * and NOT Schwab's own rating - always labeled "Alpha Vantage Analyst Consensus", never mixed
+ * with the existing manual LSEG fields.
+ */
+function avAnalystConsensusCell(avFundamentals: ResearchAlphaVantageFundamentals | undefined) {
+  if (!avFundamentals) {
+    return dash();
+  }
+  const consensus = summarizeAlphaVantageAnalystConsensus({
+    strongBuy: numericOrNull(avFundamentals.analystStrongBuy),
+    buy: numericOrNull(avFundamentals.analystBuy),
+    hold: numericOrNull(avFundamentals.analystHold),
+    sell: numericOrNull(avFundamentals.analystSell),
+    strongSell: numericOrNull(avFundamentals.analystStrongSell),
+  });
+  if (!consensus) {
+    return dash();
+  }
+  return (
+    <span title={`Alpha Vantage Analyst Consensus - ${consensus.totalAnalysts} analyst${consensus.totalAnalysts === 1 ? "" : "s"}`}>
+      {consensus.label} ({consensus.totalAnalysts})
+    </span>
+  );
+}
+
+function profitabilityChip(
+  value: ResearchItemRecord["profitability"],
+  note: string | null | undefined,
+  avFundamentals: ResearchAlphaVantageFundamentals | undefined,
+) {
+  const avProfitMargin = numericOrNull(avFundamentals?.profitMargin ?? null);
+  const avReturnOnEquity = numericOrNull(avFundamentals?.returnOnEquityTtm ?? null);
+  const avNote =
+    avProfitMargin !== null || avReturnOnEquity !== null
+      ? `Alpha Vantage: ${avProfitMargin !== null ? `${(avProfitMargin * 100).toFixed(1)}% profit margin` : "profit margin unavailable"}${
+          avReturnOnEquity !== null ? ` · ${(avReturnOnEquity * 100).toFixed(1)}% ROE` : ""
+        }`
+      : null;
+  const combinedTitle = [note, avNote].filter(Boolean).join(" - ") || undefined;
+
+  if (value === "UNKNOWN") {
+    return avNote ? <span title={combinedTitle} className="text-xs text-zinc-500">{avNote}</span> : dash();
   }
   const tone =
     value === "PROFITABLE"
@@ -1262,7 +1345,7 @@ function profitabilityChip(value: ResearchItemRecord["profitability"], note?: st
         ? "border-amber-400/40 bg-amber-400/15 text-amber-100"
         : "border-red-400/40 bg-red-400/15 text-red-100";
   return (
-    <span title={note ?? undefined} className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${tone}`}>
+    <span title={combinedTitle} className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${tone}`}>
       {value}
     </span>
   );

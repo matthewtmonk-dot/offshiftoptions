@@ -32,6 +32,8 @@ export const RESEARCH_COLUMN_DEFINITIONS: ResearchColumnDefinition[] = [
   { key: "lsegRecommendation", label: "LSEG Recommendation", group: "EXTERNAL" },
   { key: "lsegRating", label: "LSEG Rating", group: "EXTERNAL" },
   { key: "lsegTarget", label: "LSEG Target Price", group: "EXTERNAL" },
+  { key: "avAnalystTarget", label: "Analyst Target (Alpha Vantage)", group: "EXTERNAL" },
+  { key: "avAnalystConsensus", label: "Analyst Consensus (Alpha Vantage)", group: "EXTERNAL" },
   { key: "debtToEquity", label: "Debt / Equity", group: "FUNDAMENTALS" },
   { key: "currentRatio", label: "Current Ratio", group: "FUNDAMENTALS" },
   { key: "peRatio", label: "P/E", group: "FUNDAMENTALS" },

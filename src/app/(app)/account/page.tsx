@@ -10,6 +10,10 @@ import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { money, shortDateTime } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
 import { getAlphaVantageConfigStatus } from "@/providers/alpha-vantage/config";
+import { getAlphaVantageUsageToday, ALPHA_VANTAGE_AUTO_DAILY_LIMIT, ALPHA_VANTAGE_TOTAL_DAILY_LIMIT, ALPHA_VANTAGE_MANUAL_RESERVE } from "@/lib/alpha-vantage-budget";
+import { getAlphaVantageCacheSummary } from "@/lib/alpha-vantage-fundamentals";
+import { InfoTip } from "@/components/info-tip";
+import { AlphaVantageQueueButton } from "./alpha-vantage-queue-button";
 import {
   addAccountLedgerEntryAction,
   changePasswordAction,
@@ -28,11 +32,13 @@ export default async function AccountPage({
 }) {
   const user = await requireCurrentUser();
   const params = await searchParams;
-  const [schwabConnection, schwabDeveloperCredential, schwabConfig, accountData] = await Promise.all([
+  const [schwabConnection, schwabDeveloperCredential, schwabConfig, accountData, alphaVantageUsage, alphaVantageCache] = await Promise.all([
     getSchwabConnectionSummaryForUser(user.id),
     getSchwabDeveloperCredentialSummaryForUser(user.id),
     Promise.resolve(getSchwabConfigStatus()),
     getAccountPageData(user.id),
+    getAlphaVantageUsageToday(),
+    getAlphaVantageCacheSummary(),
   ]);
   const schwabOauthReady = Boolean(schwabDeveloperCredential?.configured) || schwabConfig.configured;
   const alphaVantageConfig = getAlphaVantageConfigStatus();
@@ -334,27 +340,54 @@ export default async function AccountPage({
       </Panel>
 
       <Panel title="Fundamentals Data Providers">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm">
-          <div>
-            <div className="font-medium text-zinc-200">Alpha Vantage (company fundamentals)</div>
-            <p className="mt-1 max-w-xl text-xs text-zinc-500">
-              Read-only diagnostic for Alpha Vantage&apos;s OVERVIEW endpoint. Shared server key, 25 requests/day - nothing is saved to
-              Research/Scanner/Tracker yet.
-            </p>
+        <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-1.5 font-medium text-zinc-200">
+                Alpha Vantage (company fundamentals)
+                <InfoTip label="How Alpha Vantage usage is tracked">
+                  OSO tracks requests it makes. Alpha Vantage does not expose an authoritative remaining-call count or reset signal, so
+                  this may differ from the provider&apos;s actual quota.
+                </InfoTip>
+              </div>
+              <p className="mt-1 max-w-xl text-xs text-zinc-500">
+                Shared server key, {ALPHA_VANTAGE_TOTAL_DAILY_LIMIT} requests/day - Sector, Industry, PEG, profitability, and analyst
+                data feed Research once cached; Schwab-provided fields are never replaced.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <Badge tone={alphaVantageConfig.configured ? "good" : "warn"}>{alphaVantageConfig.configured ? "Configured" : "Not configured"}</Badge>
+              {alphaVantageConfig.configured ? (
+                <Link
+                  href="/account/alpha-vantage-fundamentals"
+                  prefetch={false}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
+                >
+                  <SearchCheck className="size-3" aria-hidden />
+                  Verify Fields
+                </Link>
+              ) : null}
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <Badge tone={alphaVantageConfig.configured ? "good" : "warn"}>{alphaVantageConfig.configured ? "Configured" : "Not configured"}</Badge>
-            {alphaVantageConfig.configured ? (
-              <Link
-                href="/account/alpha-vantage-fundamentals"
-                prefetch={false}
-                className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
-              >
-                <SearchCheck className="size-3" aria-hidden />
-                Verify Alpha Vantage Fundamental Fields
-              </Link>
-            ) : null}
-          </div>
+
+          {alphaVantageConfig.configured ? (
+            <div className="border-t border-zinc-800 pt-3">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <AlphaVantageStat label="OSO tracked" value={`${alphaVantageUsage.totalCount} / ${ALPHA_VANTAGE_TOTAL_DAILY_LIMIT} calls`} />
+                <AlphaVantageStat
+                  label="Auto budget left (OSO tracked)"
+                  value={`${alphaVantageUsage.autoRemaining} / ${ALPHA_VANTAGE_AUTO_DAILY_LIMIT}`}
+                />
+                <AlphaVantageStat label="Manual reserve" value={String(ALPHA_VANTAGE_MANUAL_RESERVE)} />
+                <AlphaVantageStat label="Cached tickers" value={String(alphaVantageCache.cachedTickers)} />
+                <AlphaVantageStat label="Stale/missing queued" value={String(alphaVantageCache.staleOrMissingQueued)} />
+                <div className="flex items-end">
+                  <AlphaVantageQueueButton />
+                </div>
+              </div>
+              <p className="mt-2 text-[11px] text-zinc-500">Resets with OSO&apos;s UTC usage day.</p>
+            </div>
+          ) : null}
         </div>
       </Panel>
 
@@ -502,4 +535,13 @@ function schwabMessage(status: string | undefined) {
     default:
       return null;
   }
+}
+
+function AlphaVantageStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</div>
+      <div className="font-medium text-zinc-100">{value}</div>
+    </div>
+  );
 }
