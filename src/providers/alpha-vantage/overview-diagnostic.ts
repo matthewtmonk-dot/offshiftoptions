@@ -6,6 +6,18 @@ import { fetchAlphaVantageJson, type AlphaVantageFetch } from "./client";
 export const ALPHA_VANTAGE_OVERVIEW_TICKERS = ["APLD", "RIOT", "CORZ"] as const;
 export const ALPHA_VANTAGE_OVERVIEW_FUNCTION = "OVERVIEW";
 
+/**
+ * Confirmed necessary against real production Alpha Vantage on 2026-09-03: back-to-back calls
+ * (no delay) drew "Please consider spreading out your free API requests more sparingly (1
+ * request per second)." on the 2nd call, which our own RATE_LIMITED classification correctly
+ * caught and stopped on - but the fix is to not trigger it in the first place. 1300ms clears
+ * Alpha Vantage's documented 1-request-per-second pacing with margin.
+ */
+export const ALPHA_VANTAGE_REQUEST_DELAY_MS = 1300;
+
+/** The two tickers still needing a real verification call after APLD's 2026-09-03 SUCCESS. */
+export const ALPHA_VANTAGE_REMAINING_VERIFICATION_TICKERS = ["RIOT", "CORZ"] as const;
+
 type FieldGroup = "Identity" | "Classification" | "Valuation" | "Dividend" | "Profitability" | "Growth" | "Analyst" | "Other Fundamental Ratios Checked";
 
 type FieldDefinition = {
@@ -183,11 +195,16 @@ export function buildAlphaVantageOverviewDiagnosticReport({
   };
 }
 
+async function defaultDelay(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Fetches OVERVIEW for each ticker sequentially (never in parallel - Alpha Vantage's free tier
- * has no burst tolerance to speak of) and stops issuing further calls the moment a rate-limit/
- * throttle signal is seen, to preserve the 25/day budget. Remaining tickers are reported as
- * SKIPPED, not silently dropped.
+ * has no burst tolerance to speak of), waiting `delayMs` between calls (never before the first)
+ * to stay under Alpha Vantage's 1-request-per-second pacing limit, and stops issuing further
+ * calls the moment a rate-limit/throttle signal is seen, to preserve the 25/day budget.
+ * Remaining tickers are reported as SKIPPED, not silently dropped.
  */
 export async function buildAlphaVantageOverviewDiagnosticFromApiKey({
   apiKey,
@@ -195,16 +212,21 @@ export async function buildAlphaVantageOverviewDiagnosticFromApiKey({
   fetchFn,
   baseUrl = ALPHA_VANTAGE_BASE_URL,
   now = new Date(),
+  delayFn = defaultDelay,
+  delayMs = ALPHA_VANTAGE_REQUEST_DELAY_MS,
 }: {
   apiKey: string;
   tickers?: readonly string[];
   fetchFn?: AlphaVantageFetch;
   baseUrl?: string;
   now?: Date;
+  delayFn?: (ms: number) => Promise<void>;
+  delayMs?: number;
 }): Promise<AlphaVantageOverviewDiagnosticReport> {
   const normalizedTickers = normalizeTickers(tickers);
   const results: Record<string, AlphaVantageRawTickerResult> = {};
   let stopEarly = false;
+  let hasMadeFirstCall = false;
 
   for (const ticker of normalizedTickers) {
     if (stopEarly) {
@@ -214,6 +236,11 @@ export async function buildAlphaVantageOverviewDiagnosticFromApiKey({
       };
       continue;
     }
+
+    if (hasMadeFirstCall) {
+      await delayFn(delayMs);
+    }
+    hasMadeFirstCall = true;
 
     try {
       const { payload, status, headers } = await fetchAlphaVantageJson({

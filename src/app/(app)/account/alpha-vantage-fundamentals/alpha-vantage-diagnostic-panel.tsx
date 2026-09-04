@@ -4,21 +4,26 @@ import { useState } from "react";
 import { PlayCircle, TriangleAlert } from "lucide-react";
 import { Badge, Panel } from "@/components/ui";
 import { shortDateTime } from "@/lib/format";
-import { runAlphaVantageOverviewDiagnosticAction } from "../../actions";
+import { runAlphaVantageOverviewDiagnosticAction, runAlphaVantageRemainingTickersDiagnosticAction } from "../../actions";
 import type { AlphaVantageDiagnosticResult } from "@/lib/alpha-vantage-diagnostic";
 import type { AlphaVantageFieldPresence, AlphaVantageTickerOutcome } from "@/providers/alpha-vantage/overview-diagnostic";
 
-type PanelState = { status: "idle" } | { status: "pending" } | { status: "done"; result: AlphaVantageDiagnosticResult } | { status: "error"; message: string };
+type RunVariant = "ALL" | "REMAINING";
+type PanelState =
+  | { status: "idle" }
+  | { status: "pending"; variant: RunVariant }
+  | { status: "done"; result: AlphaVantageDiagnosticResult }
+  | { status: "error"; message: string };
 
 export function AlphaVantageDiagnosticPanel() {
   const [state, setState] = useState<PanelState>({ status: "idle" });
   const pending = state.status === "pending";
 
-  async function run() {
+  async function run(variant: RunVariant) {
     if (pending) return;
-    setState({ status: "pending" });
+    setState({ status: "pending", variant });
     try {
-      const response = await runAlphaVantageOverviewDiagnosticAction();
+      const response = variant === "ALL" ? await runAlphaVantageOverviewDiagnosticAction() : await runAlphaVantageRemainingTickersDiagnosticAction();
       if (response.ok) {
         setState({ status: "done", result: response.result });
       } else {
@@ -34,21 +39,38 @@ export function AlphaVantageDiagnosticPanel() {
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-3 text-sm text-amber-100">
         <TriangleAlert className="size-4 shrink-0" aria-hidden />
         <span>
-          Each run costs up to 3 of the 25 Alpha Vantage requests allowed today. This panel never runs on page load, navigation, or link
-          prefetch - only this button makes a request. Don&apos;t click repeatedly.
+          Each run below costs up to the number of Alpha Vantage requests shown on its button, paced roughly 1.3s apart, out of the 25
+          allowed today. This panel never runs on page load, navigation, or link prefetch - only these buttons make a request.
+          Don&apos;t click repeatedly.
         </span>
       </div>
 
-      <button
-        type="button"
-        onClick={run}
-        disabled={pending}
-        data-testid="run-alpha-vantage-diagnostic-button"
-        className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-sky-400/40 bg-sky-400/10 px-4 text-sm font-medium text-sky-100 transition hover:border-sky-300 hover:bg-sky-400/15 disabled:cursor-wait disabled:opacity-75"
-      >
-        <PlayCircle className={`size-4 ${pending ? "motion-safe:animate-pulse" : ""}`} aria-hidden />
-        {pending ? "Calling Alpha Vantage…" : "Run Alpha Vantage OVERVIEW Diagnostic (APLD, RIOT, CORZ)"}
-      </button>
+      <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={() => run("ALL")}
+          disabled={pending}
+          data-testid="run-alpha-vantage-diagnostic-button"
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-sky-400/40 bg-sky-400/10 px-4 text-sm font-medium text-sky-100 transition hover:border-sky-300 hover:bg-sky-400/15 disabled:cursor-wait disabled:opacity-75"
+        >
+          <PlayCircle className={`size-4 ${state.status === "pending" && state.variant === "ALL" ? "motion-safe:animate-pulse" : ""}`} aria-hidden />
+          {state.status === "pending" && state.variant === "ALL" ? "Calling Alpha Vantage…" : "Run Full Diagnostic (APLD, RIOT, CORZ - up to 3 calls)"}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => run("REMAINING")}
+          disabled={pending}
+          data-testid="run-alpha-vantage-remaining-diagnostic-button"
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-emerald-400/40 bg-emerald-400/10 px-4 text-sm font-medium text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-400/15 disabled:cursor-wait disabled:opacity-75"
+        >
+          <PlayCircle className={`size-4 ${state.status === "pending" && state.variant === "REMAINING" ? "motion-safe:animate-pulse" : ""}`} aria-hidden />
+          {state.status === "pending" && state.variant === "REMAINING" ? "Calling Alpha Vantage…" : "Verify remaining tickers (RIOT, CORZ - up to 2 calls)"}
+        </button>
+      </div>
+      <p className="text-xs text-zinc-500">
+        Use &quot;Verify remaining tickers&quot; if APLD already returned a real result in an earlier run - it never re-calls APLD.
+      </p>
 
       {state.status === "error" ? (
         <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{state.message}</div>

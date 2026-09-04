@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  ALPHA_VANTAGE_REMAINING_VERIFICATION_TICKERS,
+  ALPHA_VANTAGE_REQUEST_DELAY_MS,
   buildAlphaVantageOverviewDiagnosticFromApiKey,
   buildAlphaVantageOverviewDiagnosticReport,
   type AlphaVantageRawTickerResult,
@@ -227,5 +229,146 @@ describe("Alpha Vantage OVERVIEW diagnostic - live sequential fetch orchestratio
     expect(observedUrl).toContain("apikey=test-key");
     expect(observedUrl).toContain("function=OVERVIEW");
     expect(observedUrl).toContain("symbol=APLD");
+  });
+});
+
+describe("Alpha Vantage OVERVIEW diagnostic - request pacing (2026-09-03 production fix)", () => {
+  function fetchFnReturning(symbolToPayload: (symbol: string) => unknown) {
+    return (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const symbol = new URL(url).searchParams.get("symbol") ?? "";
+      return new Response(JSON.stringify(symbolToPayload(symbol)), { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  it("waits at least 1250ms between calls, using the exported delay constant", async () => {
+    expect(ALPHA_VANTAGE_REQUEST_DELAY_MS).toBeGreaterThanOrEqual(1250);
+
+    const delayFn = vi.fn<(ms: number) => Promise<void>>(async () => {});
+    const fetchFn = fetchFnReturning((symbol) => ({ Symbol: symbol }));
+
+    await buildAlphaVantageOverviewDiagnosticFromApiKey({ apiKey: "test-key", fetchFn, delayFn, now: new Date() });
+
+    expect(delayFn).toHaveBeenCalledTimes(2); // 3 tickers -> 2 gaps
+    for (const call of delayFn.mock.calls) {
+      expect(call[0]).toBeGreaterThanOrEqual(1250);
+    }
+  });
+
+  it("never delays before the first request", async () => {
+    const delayFn = vi.fn(async () => {});
+    const callOrder: string[] = [];
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      callOrder.push("fetch");
+      const url = typeof input === "string" ? input : input.toString();
+      const symbol = new URL(url).searchParams.get("symbol") ?? "";
+      return new Response(JSON.stringify({ Symbol: symbol }), { status: 200 });
+    }) as unknown as typeof fetch;
+    delayFn.mockImplementation(async () => {
+      callOrder.push("delay");
+    });
+
+    await buildAlphaVantageOverviewDiagnosticFromApiKey({ apiKey: "test-key", fetchFn, delayFn, now: new Date() });
+
+    expect(callOrder[0]).toBe("fetch"); // first action is a fetch, never a delay
+    expect(callOrder).toEqual(["fetch", "delay", "fetch", "delay", "fetch"]);
+  });
+
+  it("does not delay before a call that never happens because of an earlier throttle stop", async () => {
+    const delayFn = vi.fn(async () => {});
+    const fetchFn = fetchFnReturning(() => ({ Information: "Please consider spreading out your free API requests more sparingly (1 request per second)." }));
+
+    const report = await buildAlphaVantageOverviewDiagnosticFromApiKey({ apiKey: "test-key", fetchFn, delayFn, now: new Date() });
+
+    // Only the 1st ticker is actually fetched (no delay before it); the throttle stops the 2nd
+    // and 3rd from ever being attempted, so there is no delay call for them either.
+    expect(delayFn).not.toHaveBeenCalled();
+    expect(report.results.map((r) => r.outcome)).toEqual(["RATE_LIMITED", "SKIPPED", "SKIPPED"]);
+    expect(report.callsConsumed).toBe(1);
+  });
+
+  it("still stops issuing further calls after a real throttle response, with pacing enabled", async () => {
+    const calls: string[] = [];
+    const delayFn = vi.fn(async () => {});
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const symbol = new URL(url).searchParams.get("symbol") ?? "";
+      calls.push(symbol);
+      if (symbol === "RIOT") {
+        return new Response(
+          JSON.stringify({ Information: "Please consider spreading out your free API requests more sparingly (1 request per second)." }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ Symbol: symbol }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const report = await buildAlphaVantageOverviewDiagnosticFromApiKey({ apiKey: "test-key", fetchFn, delayFn, now: new Date() });
+
+    expect(calls).toEqual(["APLD", "RIOT"]); // CORZ never called
+    expect(report.results.map((r) => r.outcome)).toEqual(["SUCCESS", "RATE_LIMITED", "SKIPPED"]);
+    expect(report.callsConsumed).toBe(2);
+  });
+
+  it("supports running only a ticker subset (RIOT, CORZ) without ever calling APLD", async () => {
+    const calls: string[] = [];
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const symbol = new URL(url).searchParams.get("symbol") ?? "";
+      calls.push(symbol);
+      return new Response(JSON.stringify({ Symbol: symbol }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const report = await buildAlphaVantageOverviewDiagnosticFromApiKey({
+      apiKey: "test-key",
+      tickers: ALPHA_VANTAGE_REMAINING_VERIFICATION_TICKERS,
+      fetchFn,
+      delayFn: vi.fn(async () => {}),
+      now: new Date(),
+    });
+
+    expect(calls).toEqual(["RIOT", "CORZ"]);
+    expect(calls).not.toContain("APLD");
+    expect(report.tickers).toEqual(["RIOT", "CORZ"]);
+  });
+
+  it("caps the remaining-tickers follow-up at 2 requests total", async () => {
+    const fetchFn = fetchFnReturning((symbol) => ({ Symbol: symbol }));
+
+    const report = await buildAlphaVantageOverviewDiagnosticFromApiKey({
+      apiKey: "test-key",
+      tickers: ALPHA_VANTAGE_REMAINING_VERIFICATION_TICKERS,
+      fetchFn,
+      delayFn: vi.fn(async () => {}),
+      now: new Date(),
+    });
+
+    expect(report.maxCallsAllowed).toBe(2);
+    expect(report.callsConsumed).toBeLessThanOrEqual(2);
+  });
+
+  it("uses the real setTimeout-based delay by default when no delayFn is injected (smoke test, short-circuited via a 0ms override)", async () => {
+    const fetchFn = fetchFnReturning((symbol) => ({ Symbol: symbol }));
+    const start = Date.now();
+
+    await buildAlphaVantageOverviewDiagnosticFromApiKey({ apiKey: "test-key", tickers: ["APLD"], fetchFn, delayMs: 0, now: new Date() });
+
+    // Single ticker -> zero gaps -> should resolve near-instantly even with the real default delay implementation.
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it("never leaks the API key in the remaining-tickers (RIOT, CORZ) follow-up report either", async () => {
+    const sentinelKey = "sentinel-remaining-tickers-key-must-never-leak";
+    const fetchFn = fetchFnReturning((symbol) => ({ Symbol: symbol, Description: `Some text mentioning ${sentinelKey} inline` }));
+
+    const report = await buildAlphaVantageOverviewDiagnosticFromApiKey({
+      apiKey: sentinelKey,
+      tickers: ALPHA_VANTAGE_REMAINING_VERIFICATION_TICKERS,
+      fetchFn,
+      delayFn: vi.fn(async () => {}),
+      now: new Date(),
+    });
+
+    expect(JSON.stringify(report)).not.toContain(sentinelKey);
   });
 });

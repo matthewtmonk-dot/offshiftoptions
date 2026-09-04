@@ -48,7 +48,11 @@ import {
   skipBrokerReconciliationForUser,
 } from "@/lib/broker-reconciliation";
 import { ValidationError } from "@/lib/tickers";
-import { runAlphaVantageOverviewDiagnostic, type AlphaVantageDiagnosticResult } from "@/lib/alpha-vantage-diagnostic";
+import {
+  runAlphaVantageOverviewDiagnostic,
+  runAlphaVantageRemainingTickersDiagnostic,
+  type AlphaVantageDiagnosticResult,
+} from "@/lib/alpha-vantage-diagnostic";
 
 function redirectWithError(path: string, error: string): never {
   redirect(`${path}?error=${encodeURIComponent(error)}`);
@@ -730,6 +734,21 @@ export async function runAlphaVantageOverviewDiagnosticAction(): Promise<RunAlph
 
   try {
     const result = await runAlphaVantageOverviewDiagnostic();
+    return { ok: true, result };
+  } catch {
+    return { ok: false, error: "Alpha Vantage diagnostic failed unexpectedly." };
+  }
+}
+
+/**
+ * Temporary follow-up for the 2026-09-03 production verification: APLD already has a real
+ * SUCCESS result, so this only re-checks RIOT and CORZ (max 2 calls, never re-calls APLD).
+ */
+export async function runAlphaVantageRemainingTickersDiagnosticAction(): Promise<RunAlphaVantageDiagnosticResult> {
+  await requireCurrentUser();
+
+  try {
+    const result = await runAlphaVantageRemainingTickersDiagnostic();
     return { ok: true, result };
   } catch {
     return { ok: false, error: "Alpha Vantage diagnostic failed unexpectedly." };
