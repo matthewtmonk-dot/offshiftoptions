@@ -10,7 +10,7 @@ async function loginAs(page: Page, name: "Matt" | "Eric") {
 }
 
 /** Opens the Columns dropdown if it isn't already open - avoids assuming toggle state, since
- * the summary click toggles a native <details> open/closed either way. */
+ * clicking the button toggles it open/closed either way. */
 async function openColumnsMenu(page: Page) {
   const menu = page.getByTestId("research-columns-menu");
   if (!(await menu.isVisible())) {
@@ -313,6 +313,39 @@ test.describe("Research customization - mobile and accessibility", () => {
       }, theme);
       await expect(page.getByRole("heading", { name: "Research", exact: true })).toBeVisible();
       await expect(page.getByTestId("research-desktop-table")).toBeVisible();
+    }
+  });
+
+  test("Columns dropdown closes on outside click, closes on Escape, and stays open for inside interaction", async ({ page }) => {
+    await loginAs(page, "Matt");
+    await page.goto("/research");
+    const menu = page.getByTestId("research-columns-menu");
+
+    await page.getByText("Columns", { exact: true }).click();
+    await expect(menu).toBeVisible();
+
+    // Clicking an interactive control inside the menu (a checkbox label) must not close it.
+    await menu.getByText("EPS", { exact: true }).click();
+    await expect(menu).toBeVisible();
+    await menu.getByText("EPS", { exact: true }).click();
+    await expect(menu).toBeVisible();
+
+    // Clicking anywhere outside the menu closes it.
+    await page.getByRole("heading", { name: "Research", exact: true }).click();
+    await expect(menu).toBeHidden();
+
+    // Reopen, then Escape closes it too.
+    await page.getByText("Columns", { exact: true }).click();
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+
+    // Stable after repeated open/close cycles.
+    for (let i = 0; i < 3; i++) {
+      await page.getByText("Columns", { exact: true }).click();
+      await expect(menu).toBeVisible();
+      await page.getByText("Columns", { exact: true }).click();
+      await expect(menu).toBeHidden();
     }
   });
 });

@@ -28,7 +28,15 @@ function applyAppearanceToDocument(value: Appearance) {
   }
 }
 
-export function AppearanceControl({ current, compact = false }: { current: Appearance; compact?: boolean }) {
+export function AppearanceControl({
+  current,
+  compact = false,
+  className = "",
+}: {
+  current: Appearance;
+  compact?: boolean;
+  className?: string;
+}) {
   const [value, setValue] = useState<Appearance>(current);
   const [isPending, startTransition] = useTransition();
 
@@ -45,7 +53,7 @@ export function AppearanceControl({ current, compact = false }: { current: Appea
 
   if (compact) {
     return (
-      <div role="radiogroup" aria-label="Appearance" className="inline-flex rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
+      <div role="radiogroup" aria-label="Appearance" className={`inline-flex shrink-0 rounded-md border border-zinc-800 bg-zinc-900 p-0.5 ${className}`}>
         {OPTIONS.map((option) => {
           const Icon = option.icon;
           const active = value === option.value;

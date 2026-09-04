@@ -150,19 +150,23 @@ export function AppSidebar({
         </nav>
 
         <div className={`mt-8 rounded-lg border border-zinc-800 bg-zinc-900 ${collapsed ? "p-2" : "p-3"}`}>
-          <div className={`flex items-center gap-2 ${collapsed ? "flex-col" : "justify-between"}`}>
-            <div className={`flex items-center gap-2 ${collapsed ? "" : ""}`} title={collapsed ? `${userName} · ${userEmail}` : undefined}>
+          <div className={`flex items-center gap-2 ${collapsed ? "flex-col" : "min-w-0 justify-between"}`}>
+            <div
+              className={`flex min-w-0 items-center gap-2 ${collapsed ? "" : ""}`}
+              title={collapsed ? `${userName} · ${userEmail}` : undefined}
+            >
               <Initials name={userName} />
               {!collapsed ? (
-                <div>
-                  <div className="text-sm font-semibold text-zinc-100">{userName}</div>
-                  <div className="text-xs text-zinc-500">{userEmail}</div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-zinc-100">{userName}</div>
+                  <div className="truncate text-xs text-zinc-500">{userEmail}</div>
                 </div>
               ) : null}
             </div>
             {/* The 3-option theme picker doesn't fit a ~72px rail - reachable by expanding
-                (the toggle above is always visible), not force-fit into the collapsed rail. */}
-            {!collapsed ? <AppearanceControl current={appearance} compact /> : null}
+                (the toggle above is always visible), not force-fit into the collapsed rail.
+                shrink-0 keeps it fully visible even when the name/email column truncates. */}
+            {!collapsed ? <AppearanceControl current={appearance} compact className="shrink-0" /> : null}
           </div>
           <form action={signOutAction} className="mt-3">
             <button

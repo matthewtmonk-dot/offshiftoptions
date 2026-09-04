@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowDownUp,
   ChevronDown,
@@ -409,6 +409,7 @@ export function ResearchWorkspace({
                               buddies={buddies}
                               scan={scan}
                               history={history}
+                              avFundamentals={avFundamentals}
                               pendingStatus={pendingStatuses[item.ticker]}
                               onStatusChange={changeResearchStatus}
                             />
@@ -435,6 +436,7 @@ export function ResearchWorkspace({
                 buddies={buddies}
                 scan={scanByTicker[item.ticker]}
                 history={campaignByTicker[item.ticker]}
+                avFundamentals={avFundamentalsByTicker[item.ticker]}
                 pendingStatus={pendingStatuses[item.ticker]}
                 onStatusChange={changeResearchStatus}
               />
@@ -490,70 +492,107 @@ function ColumnsMenu({
   onToggle: (key: string) => void;
   onMove: (key: string, direction: -1 | 1) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (rootRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
   return (
-    <details className="group relative">
-      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50">
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        aria-haspopup="true"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50"
+      >
         Columns
         <ChevronDown className="size-3.5" aria-hidden />
-      </summary>
-      <div
-        data-testid="research-columns-menu"
-        className="absolute left-0 top-full z-20 mt-1 max-h-96 w-72 overflow-y-auto space-y-3 rounded-md border border-zinc-800 bg-zinc-900 p-3 shadow-lg shadow-black/30"
-      >
-        {COLUMN_GROUP_ORDER.map((group) => {
-          const definitions = RESEARCH_COLUMN_DEFINITIONS.filter((definition) => definition.group === group);
-          if (!definitions.length) {
-            return null;
-          }
-          return (
-            <div key={group}>
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-normal text-zinc-500">{RESEARCH_COLUMN_GROUP_LABELS[group]}</div>
-              <div className="space-y-0.5">
-                {definitions.map((definition) => {
-                  const index = columns.indexOf(definition.key);
-                  const active = index >= 0;
-                  return (
-                    <div key={definition.key} className="flex min-h-8 items-center gap-1 rounded px-2 text-xs text-zinc-300 hover:bg-zinc-800">
-                      <label className="flex flex-1 min-h-8 items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={active}
-                          onChange={() => onToggle(definition.key)}
-                          className="size-3.5 accent-emerald-400"
-                        />
-                        {definition.label}
-                      </label>
-                      {active ? (
-                        <div className="flex items-center gap-0.5">
-                          <button
-                            type="button"
-                            aria-label={`Move ${definition.label} earlier`}
-                            disabled={index === 0}
-                            onClick={() => onMove(definition.key, -1)}
-                            className="rounded px-1 text-zinc-500 hover:text-zinc-100 disabled:opacity-30"
-                          >
-                            ↑
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`Move ${definition.label} later`}
-                            disabled={index === columns.length - 1}
-                            onClick={() => onMove(definition.key, 1)}
-                            className="rounded px-1 text-zinc-500 hover:text-zinc-100 disabled:opacity-30"
-                          >
-                            ↓
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
+      </button>
+      {open ? (
+        <div
+          data-testid="research-columns-menu"
+          className="absolute left-0 top-full z-20 mt-1 max-h-96 w-72 overflow-y-auto space-y-3 rounded-md border border-zinc-800 bg-zinc-900 p-3 shadow-lg shadow-black/30"
+        >
+          {COLUMN_GROUP_ORDER.map((group) => {
+            const definitions = RESEARCH_COLUMN_DEFINITIONS.filter((definition) => definition.group === group);
+            if (!definitions.length) {
+              return null;
+            }
+            return (
+              <div key={group}>
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-normal text-zinc-500">{RESEARCH_COLUMN_GROUP_LABELS[group]}</div>
+                <div className="space-y-0.5">
+                  {definitions.map((definition) => {
+                    const index = columns.indexOf(definition.key);
+                    const active = index >= 0;
+                    return (
+                      <div key={definition.key} className="flex min-h-8 items-center gap-1 rounded px-2 text-xs text-zinc-300 hover:bg-zinc-800">
+                        <label className="flex flex-1 min-h-8 items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={active}
+                            onChange={() => onToggle(definition.key)}
+                            className="size-3.5 accent-emerald-400"
+                          />
+                          {definition.label}
+                        </label>
+                        {active ? (
+                          <div className="flex items-center gap-0.5">
+                            <button
+                              type="button"
+                              aria-label={`Move ${definition.label} earlier`}
+                              disabled={index === 0}
+                              onClick={() => onMove(definition.key, -1)}
+                              className="rounded px-1 text-zinc-500 hover:text-zinc-100 disabled:opacity-30"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Move ${definition.label} later`}
+                              disabled={index === columns.length - 1}
+                              onClick={() => onMove(definition.key, 1)}
+                              className="rounded px-1 text-zinc-500 hover:text-zinc-100 disabled:opacity-30"
+                            >
+                              ↓
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
-    </details>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -562,6 +601,7 @@ function ResearchMobileCard({
   buddies,
   scan,
   history,
+  avFundamentals,
   pendingStatus,
   onStatusChange,
 }: {
@@ -569,6 +609,7 @@ function ResearchMobileCard({
   buddies: ResearchBuddy[];
   scan?: ResearchScanSnapshot;
   history?: ResearchCampaignSummary;
+  avFundamentals?: ResearchAlphaVantageFundamentals;
   pendingStatus?: ResearchStatusChoice;
   onStatusChange: ResearchStatusChange;
 }) {
@@ -594,6 +635,7 @@ function ResearchMobileCard({
           buddies={buddies}
           scan={scan}
           history={history}
+          avFundamentals={avFundamentals}
           pendingStatus={pendingStatus}
           onStatusChange={onStatusChange}
         />
@@ -607,6 +649,7 @@ function ResearchDetail({
   buddies,
   scan,
   history,
+  avFundamentals,
   pendingStatus,
   onStatusChange,
 }: {
@@ -614,6 +657,7 @@ function ResearchDetail({
   buddies: ResearchBuddy[];
   scan?: ResearchScanSnapshot;
   history?: ResearchCampaignSummary;
+  avFundamentals?: ResearchAlphaVantageFundamentals;
   pendingStatus?: ResearchStatusChoice;
   onStatusChange: ResearchStatusChange;
 }) {
@@ -622,7 +666,9 @@ function ResearchDetail({
   const generalNotes = item.notes.filter((note) => note.category === "GENERAL");
 
   return (
-    <div className="grid gap-5 rounded-md border border-zinc-800 bg-zinc-950 p-4 xl:grid-cols-[1fr_1fr_0.8fr]">
+    <div className="space-y-4">
+      <ResearchAutoDataSection item={item} avFundamentals={avFundamentals} />
+      <div className="grid gap-5 rounded-md border border-zinc-800 bg-zinc-950 p-4 xl:grid-cols-[1fr_1fr_0.8fr]">
       <section className="space-y-4">
         <div>
           <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">My Decision</h3>
@@ -680,9 +726,9 @@ function ResearchDetail({
             <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Fundamentals</h4>
             <p className="mt-1 text-[11px] text-zinc-600">
               P/E, EPS, and Dividend use a verified Schwab Trader API value automatically when available
-              {item.fundamentalAsOf ? ` (last verified ${shortDateTime(item.fundamentalAsOf)})` : ""}. PEG, Debt/Equity, and Current
-              Ratio remain fully manual - Schwab does not provide them. Leave a field blank if unknown - a blank field displays as
-              &quot;—&quot;, never as 0.
+              {item.fundamentalAsOf ? ` (last verified ${shortDateTime(item.fundamentalAsOf)})` : ""}. PEG and Current Ratio use a
+              verified Alpha Vantage value automatically when available. Debt/Equity remains fully manual - no verified auto source
+              exists for it yet. Leave a field blank if unknown - a blank field displays as &quot;—&quot;, never as 0.
             </p>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <FundamentalInput
@@ -694,20 +740,23 @@ function ResearchDetail({
               <FundamentalInput
                 name="manualPegRatio"
                 label="PEG"
-                value={resolveAutoOrManual(item.fundamentalPegRatio, item.manualPegRatio)}
-                tip="P/E divided by expected earnings growth rate. Like P/E, a negative or zero value isn't meaningful (N/M). Fully manual - Schwab does not provide PEG."
+                value={resolveAutoOrManual(resolveAutoOrManual(item.fundamentalPegRatio, avFundamentals?.pegRatio ?? null), item.manualPegRatio)}
+                tip="P/E divided by expected earnings growth rate. Like P/E, a negative or zero value isn't meaningful (N/M). Uses a verified Alpha Vantage value automatically when available."
               />
               <FundamentalInput
                 name="manualDebtToEquity"
                 label="Debt / Equity"
                 value={resolveAutoOrManual(item.fundamentalDebtToEquity, item.manualDebtToEquity)}
-                tip="Total liabilities divided by shareholder equity. Higher generally means more leverage/risk."
+                tip="Total liabilities divided by shareholder equity. Higher generally means more leverage/risk. Fully manual - no verified auto source exists for this yet (see PROJECT_HANDOFF.md's Alpha Vantage section)."
               />
               <FundamentalInput
                 name="manualCurrentRatio"
                 label="Current Ratio"
-                value={resolveAutoOrManual(item.fundamentalCurrentRatio, item.manualCurrentRatio)}
-                tip="Current assets divided by current liabilities. Above 1 generally means the company can cover near-term obligations."
+                value={resolveAutoOrManual(
+                  resolveAutoOrManual(item.fundamentalCurrentRatio, avFundamentals?.balanceSheetCurrentRatio ?? null),
+                  item.manualCurrentRatio,
+                )}
+                tip="Total current assets divided by total current liabilities, from the latest quarterly balance sheet. Uses a verified Alpha Vantage value automatically when available."
               />
             </div>
             {numericOrNull(item.fundamentalEps) !== null ? (
@@ -1010,6 +1059,110 @@ function ResearchDetail({
           ) : null}
         </div>
       </section>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Compact, read-only, progressive-disclosure summary of everything auto-populated for this
+ * ticker (Schwab + Alpha Vantage) - organized by category rather than one long field list, and
+ * collapsed by default so the expanded row never becomes a wall of data. Reuses the exact same
+ * cell-renderer functions the dense table uses (currentRatioCell, pegRatioCell,
+ * avAnalystTargetCell, avAnalystConsensusCell) so a value's formatting/source tooltip is never
+ * defined twice. Renders nothing at all when there is genuinely no auto data for this ticker.
+ */
+function ResearchAutoDataSection({
+  item,
+  avFundamentals,
+}: {
+  item: ResearchItemRecord;
+  avFundamentals: ResearchAlphaVantageFundamentals | undefined;
+}) {
+  const industry = avFundamentals?.industry ?? null;
+  const sector = avFundamentals?.sector ?? null;
+  const marketCap = numericOrNull(avFundamentals?.marketCapitalization ?? null);
+  const bookValue = numericOrNull(avFundamentals?.bookValue ?? null);
+  const priceToBook = numericOrNull(avFundamentals?.priceToBookRatio ?? null);
+  const evToEbitda = numericOrNull(avFundamentals?.evToEbitda ?? null);
+  const beta = numericOrNull(avFundamentals?.beta ?? null);
+  const revenueGrowth = numericOrNull(avFundamentals?.quarterlyRevenueGrowthYoy ?? null);
+  const currentRatioKnown = numericOrNull(item.fundamentalCurrentRatio) !== null || numericOrNull(avFundamentals?.balanceSheetCurrentRatio ?? null) !== null;
+  const pegKnown = numericOrNull(item.fundamentalPegRatio) !== null || numericOrNull(avFundamentals?.pegRatio ?? null) !== null;
+  const analystKnown = numericOrNull(avFundamentals?.analystTargetPrice ?? null) !== null || (avFundamentals?.analystStrongBuy ?? avFundamentals?.analystBuy ?? avFundamentals?.analystHold ?? avFundamentals?.analystSell ?? avFundamentals?.analystStrongSell) != null;
+
+  const hasAnything =
+    Boolean(industry) ||
+    Boolean(sector) ||
+    marketCap !== null ||
+    bookValue !== null ||
+    priceToBook !== null ||
+    evToEbitda !== null ||
+    beta !== null ||
+    revenueGrowth !== null ||
+    currentRatioKnown ||
+    pegKnown ||
+    analystKnown;
+
+  if (!hasAnything) {
+    return null;
+  }
+
+  return (
+    <details className="rounded-md border border-zinc-800 bg-zinc-900/60">
+      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-normal text-zinc-400">
+        Auto Data (Schwab / Alpha Vantage)
+        <ChevronDown className="size-3.5" aria-hidden />
+      </summary>
+      <div className="space-y-3 border-t border-zinc-800 p-3 text-xs">
+        {industry || sector || marketCap !== null ? (
+          <AutoDataGroup label="Company">
+            {sector ? <AutoDatum label="Sector" value={sector} /> : null}
+            {industry ? <AutoDatum label="Industry" value={industry} /> : null}
+            {marketCap !== null ? <AutoDatum label="Market Cap" value={money(marketCap)} /> : null}
+          </AutoDataGroup>
+        ) : null}
+        <AutoDataGroup label="Financial Health">
+          <AutoDatum label="Current Ratio" node={currentRatioCell(item, avFundamentals)} />
+          <AutoDatum label="Debt / Equity" node={ratioCell(resolveAutoOrManual(item.fundamentalDebtToEquity, item.manualDebtToEquity), { allowZero: true })} />
+        </AutoDataGroup>
+        <AutoDataGroup label="Valuation">
+          <AutoDatum label="PEG" node={pegRatioCell(item, avFundamentals)} />
+          {bookValue !== null ? <AutoDatum label="Book Value" value={bookValue.toFixed(2)} /> : null}
+          {priceToBook !== null ? <AutoDatum label="Price/Book" value={priceToBook.toFixed(2)} /> : null}
+          {evToEbitda !== null ? <AutoDatum label="EV/EBITDA" value={evToEbitda.toFixed(2)} /> : null}
+          {beta !== null ? <AutoDatum label="Beta" value={beta.toFixed(2)} /> : null}
+        </AutoDataGroup>
+        {revenueGrowth !== null ? (
+          <AutoDataGroup label="Growth">
+            <AutoDatum label="Revenue Growth (YoY)" value={`${(revenueGrowth * 100).toFixed(1)}%`} />
+          </AutoDataGroup>
+        ) : null}
+        {analystKnown ? (
+          <AutoDataGroup label="Analyst">
+            <AutoDatum label="Target" node={avAnalystTargetCell(avFundamentals)} />
+            <AutoDatum label="Consensus" node={avAnalystConsensusCell(avFundamentals)} />
+          </AutoDataGroup>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function AutoDataGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-normal text-sky-300">{label}</div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">{children}</div>
+    </div>
+  );
+}
+
+function AutoDatum({ label, value, node }: { label: string; value?: string | null; node?: ReactNode }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-normal text-zinc-500">{label}</div>
+      <div className="text-zinc-200">{node ?? value ?? dash()}</div>
     </div>
   );
 }
@@ -1156,7 +1309,7 @@ function renderResearchCell(
     case "debtToEquity":
       return ratioCell(resolveAutoOrManual(item.fundamentalDebtToEquity, item.manualDebtToEquity), { allowZero: true });
     case "currentRatio":
-      return ratioCell(resolveAutoOrManual(item.fundamentalCurrentRatio, item.manualCurrentRatio), { allowZero: true });
+      return currentRatioCell(item, avFundamentals);
     case "peRatio":
       return peRatioCell(item.fundamentalPeRatio, item.manualPeRatio);
     case "eps":
@@ -1272,6 +1425,26 @@ function dividendCell(item: ResearchItemRecord, scan?: ResearchScanSnapshot) {
  * Never persisted onto WatchlistItem - read live from the shared cache at render time, like
  * Current Price/Company already are.
  */
+/**
+ * Current Ratio's auto tier is verified (see PROJECT_HANDOFF.md's Alpha Vantage/Roll Status
+ * slice): totalCurrentAssets / totalCurrentLiabilities from Alpha Vantage's latest quarterly
+ * BALANCE_SHEET report, computed server-side (src/providers/alpha-vantage/balance-sheet.ts) -
+ * this cell only picks which already-computed value to show and never derives the ratio
+ * itself. Debt/Equity has no verified auto source yet, so its cell (ratioCell(...) above)
+ * stays manual-only - do not add an Alpha Vantage tier there until Debt/Equity is verified.
+ */
+function currentRatioCell(item: ResearchItemRecord, avFundamentals: ResearchAlphaVantageFundamentals | undefined) {
+  const schwabAuto = numericOrNull(item.fundamentalCurrentRatio);
+  const avAuto = numericOrNull(avFundamentals?.balanceSheetCurrentRatio ?? null);
+  const auto = resolveAutoOrManual(schwabAuto, avAuto);
+  const value = resolveAutoOrManual(auto, numericOrNull(item.manualCurrentRatio));
+  if (value === null) {
+    return dash();
+  }
+  const source = schwabAuto !== null ? "Schwab Trader API" : avAuto !== null ? "Alpha Vantage" : "Manual entry";
+  return <span title={source}>{value.toFixed(2)}</span>;
+}
+
 function pegRatioCell(item: ResearchItemRecord, avFundamentals: ResearchAlphaVantageFundamentals | undefined) {
   const auto = resolveAutoOrManual(numericOrNull(item.fundamentalPegRatio), numericOrNull(avFundamentals?.pegRatio ?? null));
   const value = resolveAutoOrManual(auto, numericOrNull(item.manualPegRatio));

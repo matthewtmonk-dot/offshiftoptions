@@ -52,7 +52,9 @@ import { ValidationError, requireTicker } from "@/lib/tickers";
 import {
   runAlphaVantageOverviewDiagnostic,
   runAlphaVantageRemainingTickersDiagnostic,
+  runAlphaVantageBalanceSheetDiagnostic,
   type AlphaVantageDiagnosticResult,
+  type AlphaVantageBalanceSheetDiagnosticResult,
 } from "@/lib/alpha-vantage-diagnostic";
 import {
   processAlphaVantageFundamentalsQueue,
@@ -777,6 +779,26 @@ export async function runAlphaVantageRemainingTickersDiagnosticAction(): Promise
     return { ok: true, result };
   } catch {
     return { ok: false, error: "Alpha Vantage diagnostic failed unexpectedly." };
+  }
+}
+
+export type RunAlphaVantageBalanceSheetDiagnosticResult =
+  | { ok: true; result: AlphaVantageBalanceSheetDiagnosticResult }
+  | { ok: false; error: string };
+
+/**
+ * TEMPORARY one-ticker (APLD) BALANCE_SHEET verification - see
+ * src/providers/alpha-vantage/balance-sheet-diagnostic.ts. Manual, click-to-run only; costs at
+ * most 1 tracked Alpha Vantage call against the shared daily budget.
+ */
+export async function runAlphaVantageBalanceSheetDiagnosticAction(): Promise<RunAlphaVantageBalanceSheetDiagnosticResult> {
+  await requireCurrentUser();
+
+  try {
+    const result = await runAlphaVantageBalanceSheetDiagnostic();
+    return { ok: true, result };
+  } catch {
+    return { ok: false, error: "Alpha Vantage balance sheet diagnostic failed unexpectedly." };
   }
 }
 

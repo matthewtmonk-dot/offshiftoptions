@@ -355,4 +355,22 @@ maybeDescribe("database-backed Phase 1B workflows", () => {
     // LST Core default price band is $10-$50 - see src/domain/scanner/profile.ts.
     expect(ericPriceRule.valueJson).toMatchObject({ desired: [10, 50] });
   });
+
+  it("Run Live Scan gives an honest LIVE DATA UNAVAILABLE error for a user with no usable Schwab connection - never a fake/demo live scan, and never Matt's connection used on Eric's behalf", async () => {
+    // Neither seeded user has a real provider:SCHWAB/status:CONNECTED row in this local
+    // environment (see PROJECT_HANDOFF.md - no live Schwab connection is available in this
+    // sandbox), so this exercises the exact path a user with no Schwab connection hits -
+    // the same one Matt observed Eric hit when clicking "Run Live Scan". Market-data routing
+    // (src/lib/broker-connections.ts) is strictly per-user by construction - there is no code
+    // path anywhere that could substitute another user's connection, so this failure for Eric
+    // is expected/correct behavior given the currently-unverified shared-provider policy
+    // (see docs/SCHWAB_INTEGRATION.md), not a bug to route around.
+    await expect(workflows.rerunLiveSchwabScannerForUser(eric.id)).rejects.toThrow(/LIVE DATA UNAVAILABLE/);
+
+    const liveRun = await prisma.scanRun.findFirst({
+      where: { ownerId: eric.id, source: "LIVE:SCHWAB" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(liveRun).toBeNull();
+  });
 });

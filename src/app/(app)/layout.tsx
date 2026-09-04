@@ -10,7 +10,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="min-h-screen bg-zinc-950">
-      <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col md:flex-row">
+      <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col md:flex-row 2xl:max-w-[1800px]">
         <AppSidebar
           userName={user.name}
           userEmail={user.email}

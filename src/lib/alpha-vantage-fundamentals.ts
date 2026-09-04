@@ -13,6 +13,7 @@ import {
   ALPHA_VANTAGE_REQUEST_DELAY_MS,
 } from "@/providers/alpha-vantage/overview-diagnostic";
 import { fetchAlphaVantageOverviewForTicker, type AlphaVantageOverviewFetchResult } from "@/providers/alpha-vantage/overview";
+import { fetchAlphaVantageBalanceSheetForTicker, type AlphaVantageBalanceSheetFetchResult } from "@/providers/alpha-vantage/balance-sheet";
 import { STARTER_LIVE_SCAN_UNIVERSE } from "@/domain/scanner/live-scan";
 import {
   getNearMisses,
@@ -393,4 +394,438 @@ export async function getAlphaVantageCacheSummary(now: Date = new Date()): Promi
     getFundamentalsQueueCandidates(now).then((tickers) => tickers.length),
   ]);
   return { cachedTickers, staleOrMissingQueued };
+}
+
+// ===== BALANCE_SHEET (Current Ratio / Debt-Equity) =====
+//
+// Tracked independently from OVERVIEW above via its own balanceSheet*FetchedAt/StaleAfter/
+// LastAttempt* columns on the same TickerFundamentals row - a ticker's OVERVIEW being fresh
+// never implies its BALANCE_SHEET is, and vice versa. Shares the exact same daily budget,
+// global run lock, and pacing constant as OVERVIEW (see processAlphaVantageBalanceSheetQueue
+// below) - there is only ever one combined 25/day Alpha Vantage budget, never a second one.
+// Debt/Equity is NOT computed anywhere in this section - only Current Ratio - see
+// src/providers/alpha-vantage/balance-sheet.ts for why.
+
+export type BalanceSheetQueueTickerOutcome = {
+  ticker: string;
+  outcome: AlphaVantageBalanceSheetFetchResult["outcome"];
+  message?: string;
+};
+
+function toBalanceSheetQueueOutcome(ticker: string, result: AlphaVantageBalanceSheetFetchResult): BalanceSheetQueueTickerOutcome {
+  return {
+    ticker,
+    outcome: result.outcome,
+    ...("message" in result ? { message: result.message } : {}),
+  };
+}
+
+async function applyBalanceSheetResultToCache(ticker: string, result: AlphaVantageBalanceSheetFetchResult, now: Date): Promise<void> {
+  if (result.outcome === "SUCCESS") {
+    const f = result.fields;
+    const fiscalDateEnding = f.fiscalDateEnding ? new Date(f.fiscalDateEnding) : null;
+    const validFiscalDateEnding = fiscalDateEnding && !Number.isNaN(fiscalDateEnding.getTime()) ? fiscalDateEnding : null;
+    await prisma.tickerFundamentals.upsert({
+      where: { ticker },
+      create: {
+        ticker,
+        balanceSheetCurrentRatio: f.currentRatio,
+        balanceSheetFiscalDateEnding: validFiscalDateEnding,
+        balanceSheetFetchedAt: now,
+        balanceSheetStaleAfter: new Date(now.getTime() + ALPHA_VANTAGE_FUNDAMENTALS_TTL_MS),
+        balanceSheetLastAttemptAt: now,
+        balanceSheetLastAttemptStatus: "SUCCESS",
+        balanceSheetLastErrorMessage: null,
+      },
+      update: {
+        balanceSheetCurrentRatio: f.currentRatio,
+        balanceSheetFiscalDateEnding: validFiscalDateEnding,
+        balanceSheetFetchedAt: now,
+        balanceSheetStaleAfter: new Date(now.getTime() + ALPHA_VANTAGE_FUNDAMENTALS_TTL_MS),
+        balanceSheetLastAttemptAt: now,
+        balanceSheetLastAttemptStatus: "SUCCESS",
+        balanceSheetLastErrorMessage: null,
+      },
+    });
+    return;
+  }
+
+  const attemptStatus = result.outcome;
+  const message = "message" in result ? result.message : undefined;
+  const backoffStaleAfter = attemptStatus === "RATE_LIMITED" ? undefined : new Date(now.getTime() + ALPHA_VANTAGE_FAILURE_BACKOFF_MS);
+
+  await prisma.tickerFundamentals.upsert({
+    where: { ticker },
+    create: {
+      ticker,
+      balanceSheetLastAttemptAt: now,
+      balanceSheetLastAttemptStatus: attemptStatus,
+      balanceSheetLastErrorMessage: message ?? null,
+      ...(backoffStaleAfter ? { balanceSheetStaleAfter: backoffStaleAfter } : {}),
+    },
+    update: {
+      balanceSheetLastAttemptAt: now,
+      balanceSheetLastAttemptStatus: attemptStatus,
+      balanceSheetLastErrorMessage: message ?? null,
+      ...(backoffStaleAfter ? { balanceSheetStaleAfter: backoffStaleAfter } : {}),
+    },
+  });
+}
+
+/**
+ * Priority order for BALANCE_SHEET, deliberately narrower than OVERVIEW's queue: (1) every
+ * ticker in any user's Research, (2) Scanner PASS candidates only, as a lower-priority tail
+ * used only when Research tickers are already fresh. Scanner "Near" candidates and the starter
+ * scanner universe are NOT included - balance sheet data is only useful for tickers a user is
+ * actually tracking closely, and this endpoint must not be spent scanning the full universe.
+ */
+export async function getBalanceSheetQueueCandidates(now: Date = new Date()): Promise<string[]> {
+  const researchTickers = await prisma.watchlistItem.findMany({ select: { ticker: true }, distinct: ["ticker"] });
+  const researchList = researchTickers.map((r) => r.ticker);
+
+  const latestRunPerUser = await prisma.scanRun.findMany({
+    distinct: ["ownerId"],
+    orderBy: [{ ownerId: "asc" }, { createdAt: "desc" }],
+    select: { id: true },
+  });
+  const runIds = latestRunPerUser.map((run) => run.id);
+  const passResults = runIds.length
+    ? await prisma.scanResult.findMany({ where: { runId: { in: runIds }, summaryStatus: "PASS" }, select: { ticker: true }, distinct: ["ticker"] })
+    : [];
+  const passList = passResults.map((r) => r.ticker);
+
+  const ordered = [...researchList, ...passList];
+  const deduped = [...new Set(ordered.map((t) => t.trim().toUpperCase()).filter(Boolean))];
+  if (!deduped.length) {
+    return [];
+  }
+
+  const freshRows = await prisma.tickerFundamentals.findMany({
+    where: { ticker: { in: deduped }, balanceSheetStaleAfter: { gt: now } },
+    select: { ticker: true },
+  });
+  const freshSet = new Set(freshRows.map((r) => r.ticker));
+  return deduped.filter((ticker) => !freshSet.has(ticker));
+}
+
+export type ProcessBalanceSheetQueueSummary = {
+  outcomes: BalanceSheetQueueTickerOutcome[];
+  callsConsumed: number;
+  stoppedReason: ProcessQueueStoppedReason;
+  usage: AlphaVantageUsageSnapshot;
+};
+
+/**
+ * The automatic BALANCE_SHEET queue pass - reuses the exact same AUTO budget reservation,
+ * global run lock, and ALPHA_VANTAGE_REQUEST_DELAY_MS pacing as processAlphaVantageFundamentalsQueue.
+ * Called after the OVERVIEW pass in the same cron invocation (see
+ * src/app/api/internal/alpha-vantage/process/route.ts) so both endpoints draw from one shared
+ * daily counter - if OVERVIEW's queue consumes the full AUTO budget on a given day, this pass
+ * simply reserves 0 calls and returns BUDGET_EXHAUSTED immediately, spending nothing extra.
+ */
+export async function processAlphaVantageBalanceSheetQueue(options: ProcessQueueOptions = {}): Promise<ProcessBalanceSheetQueueSummary> {
+  const now = options.now ?? new Date();
+  const apiKey = getAlphaVantageApiKey();
+  if (!apiKey) {
+    return { outcomes: [], callsConsumed: 0, stoppedReason: "NO_API_KEY", usage: await getAlphaVantageUsageToday(now) };
+  }
+
+  const acquired = await tryAcquireAlphaVantageRunLock(now);
+  if (!acquired) {
+    return { outcomes: [], callsConsumed: 0, stoppedReason: "LOCK_UNAVAILABLE", usage: await getAlphaVantageUsageToday(now) };
+  }
+
+  try {
+    const candidates = await getBalanceSheetQueueCandidates(now);
+    const limited = typeof options.maxTickers === "number" ? candidates.slice(0, options.maxTickers) : candidates;
+
+    const outcomes: BalanceSheetQueueTickerOutcome[] = [];
+    let stoppedReason: ProcessQueueStoppedReason = "COMPLETE";
+    let hasMadeFirstCall = false;
+
+    for (const ticker of limited) {
+      const reservation = await reserveAlphaVantageCall("AUTO", now);
+      if (!reservation.reserved) {
+        stoppedReason = "BUDGET_EXHAUSTED";
+        break;
+      }
+
+      if (hasMadeFirstCall) {
+        await defaultDelay(ALPHA_VANTAGE_REQUEST_DELAY_MS);
+      }
+      hasMadeFirstCall = true;
+
+      const result = await fetchAlphaVantageBalanceSheetForTicker({ apiKey, ticker, fetchFn: options.fetchFn });
+      await applyBalanceSheetResultToCache(ticker, result, now);
+      outcomes.push(toBalanceSheetQueueOutcome(ticker, result));
+
+      if (result.outcome === "RATE_LIMITED") {
+        stoppedReason = "RATE_LIMITED";
+        break;
+      }
+    }
+
+    return { outcomes, callsConsumed: outcomes.length, stoppedReason, usage: await getAlphaVantageUsageToday(now) };
+  } finally {
+    await releaseAlphaVantageRunLock(now);
+  }
+}
+
+export type BalanceSheetManualRefreshResult =
+  | { status: "NO_API_KEY" }
+  | { status: "ALREADY_FRESH"; record: TickerFundamentals }
+  | { status: "LOCK_UNAVAILABLE" }
+  | { status: "BUDGET_EXHAUSTED"; usage: AlphaVantageUsageSnapshot }
+  | { status: "DONE"; outcome: BalanceSheetQueueTickerOutcome; usage: AlphaVantageUsageSnapshot };
+
+/**
+ * Manual, single-ticker BALANCE_SHEET refresh - the symmetric equivalent of
+ * refreshSingleTickerFundamentals() above, for exactly one named ticker rather than the
+ * priority queue. Uses the MANUAL budget kind and the same run lock. Not currently wired to any
+ * production UI this slice (only the queue and the temporary APLD diagnostic are) - exists so a
+ * specific ticker's Current Ratio can be forced without waiting for/depending on the queue's
+ * candidate ordering, and so tests can assert on one exact ticker's outcome deterministically.
+ */
+export async function refreshSingleTickerBalanceSheet(ticker: string, options: ManualRefreshOptions = {}): Promise<BalanceSheetManualRefreshResult> {
+  const now = options.now ?? new Date();
+  const normalized = ticker.trim().toUpperCase();
+  const apiKey = getAlphaVantageApiKey();
+  if (!apiKey) {
+    return { status: "NO_API_KEY" };
+  }
+
+  if (!options.force) {
+    const existing = await prisma.tickerFundamentals.findUnique({ where: { ticker: normalized } });
+    if (existing?.balanceSheetStaleAfter && existing.balanceSheetStaleAfter > now) {
+      return { status: "ALREADY_FRESH", record: existing };
+    }
+  }
+
+  const acquired = await tryAcquireAlphaVantageRunLock(now);
+  if (!acquired) {
+    return { status: "LOCK_UNAVAILABLE" };
+  }
+
+  try {
+    const reservation = await reserveAlphaVantageCall("MANUAL", now);
+    if (!reservation.reserved) {
+      return { status: "BUDGET_EXHAUSTED", usage: reservation.usage };
+    }
+
+    const result = await fetchAlphaVantageBalanceSheetForTicker({ apiKey, ticker: normalized, fetchFn: options.fetchFn });
+    await applyBalanceSheetResultToCache(normalized, result, now);
+    return { status: "DONE", outcome: toBalanceSheetQueueOutcome(normalized, result), usage: await getAlphaVantageUsageToday(now) };
+  } finally {
+    await releaseAlphaVantageRunLock(now);
+  }
+}
+
+// ===== UNIFIED WORK QUEUE (fixes OVERVIEW/BALANCE_SHEET budget starvation) =====
+//
+// Running processAlphaVantageFundamentalsQueue() then processAlphaVantageBalanceSheetQueue()
+// back-to-back (the original cron wiring) let a broad OVERVIEW pass spend the ENTIRE 22-call
+// AUTO budget before BALANCE_SHEET ever got a single call, even for a Research ticker missing
+// both. OSO's goal is a complete one-stop Research workspace, so Research completeness across
+// BOTH endpoints must outrank broad Scanner-only OVERVIEW refreshes. getUnifiedAlphaVantageWorkQueue
+// below builds one priority-ordered {ticker, endpoint} list spanning both endpoints, and
+// processAlphaVantageQueues() drains it under a single shared budget/lock/pacing loop, so a
+// higher-priority BALANCE_SHEET item can never be starved merely because lower-priority
+// OVERVIEW work exists ahead of it in a separate queue. This is additive - the two
+// single-endpoint functions above are unchanged and still used by the manual "Process
+// fundamentals queue" button (OVERVIEW only) and by their own existing tests.
+
+type TickerTiers = {
+  research: string[];
+  scannerPass: string[];
+  scannerNear: string[];
+  starterUniverse: string[];
+};
+
+function normalizeTickerList(tickers: string[]): string[] {
+  return [...new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
+}
+
+/**
+ * The same four raw (deduped, NOT freshness-filtered) ticker tiers getFundamentalsQueueCandidates
+ * and getBalanceSheetQueueCandidates each independently compute - factored out here so the
+ * unified queue builder below can apply per-endpoint freshness and priority ordering without a
+ * second, drifting copy of the Scanner Near reconstruction logic (parseStoredCriterionActualValue/
+ * parseStoredCriterionDesiredValue/getNearMisses - see getFundamentalsQueueCandidates's own
+ * docstring for why this must stay the canonical Scanner predicate, not an approximation).
+ */
+async function getTickerTiers(): Promise<TickerTiers> {
+  const researchTickers = await prisma.watchlistItem.findMany({ select: { ticker: true }, distinct: ["ticker"] });
+  const research = normalizeTickerList(researchTickers.map((row) => row.ticker));
+
+  const latestRunPerUser = await prisma.scanRun.findMany({
+    distinct: ["ownerId"],
+    orderBy: [{ ownerId: "asc" }, { createdAt: "desc" }],
+    select: { id: true },
+  });
+  const runIds = latestRunPerUser.map((run) => run.id);
+
+  const passResults = runIds.length
+    ? await prisma.scanResult.findMany({ where: { runId: { in: runIds }, summaryStatus: "PASS" }, select: { ticker: true }, distinct: ["ticker"] })
+    : [];
+  const scannerPass = normalizeTickerList(passResults.map((row) => row.ticker));
+
+  const otherResults = runIds.length
+    ? await prisma.scanResult.findMany({
+        where: { runId: { in: runIds }, summaryStatus: { not: "PASS" } },
+        select: { ticker: true, criterionResults: { select: { actualValue: true, operator: true, desiredValue: true, status: true, criterionName: true } } },
+      })
+    : [];
+  const scannerNear = normalizeTickerList(
+    otherResults
+      .filter((result) => {
+        const criteria: CriterionResult[] = result.criterionResults.map((criterion) => ({
+          key: criterion.criterionName,
+          name: criterion.criterionName,
+          actualValue: parseStoredCriterionActualValue(criterion.actualValue),
+          operator: criterion.operator as ScannerOperator,
+          desiredValue: parseStoredCriterionDesiredValue(criterion.desiredValue),
+          status: criterion.status as CriterionStatus,
+          explanation: "",
+        }));
+        return getNearMisses(criteria).length === 1;
+      })
+      .map((result) => result.ticker),
+  );
+
+  return { research, scannerPass, scannerNear, starterUniverse: normalizeTickerList([...STARTER_LIVE_SCAN_UNIVERSE]) };
+}
+
+export type AlphaVantageEndpoint = "OVERVIEW" | "BALANCE_SHEET";
+export type AlphaVantageWorkItem = { ticker: string; endpoint: AlphaVantageEndpoint };
+
+/**
+ * Unified, priority-ordered work-item queue spanning both Alpha Vantage endpoints:
+ *   1. Research tickers missing/stale OVERVIEW
+ *   2. Research tickers missing/stale BALANCE_SHEET
+ *   3. Scanner PASS tickers missing/stale OVERVIEW
+ *   4. Scanner PASS tickers missing/stale BALANCE_SHEET
+ *   5. Scanner Near tickers missing/stale OVERVIEW (BALANCE_SHEET is never spent on this tier)
+ *   6. Starter scanner universe tickers missing/stale OVERVIEW (BALANCE_SHEET is never spent here either)
+ * A ticker that qualifies for more than one tier (e.g. it's in Research AND a Scanner PASS
+ * result) is only ever processed once per endpoint, at its highest-priority tier - never twice,
+ * never re-fetched because a lower tier also mentions it. Privacy-safe by construction, same as
+ * the two single-endpoint queues: only bare ticker strings ever leave this function.
+ */
+export async function getUnifiedAlphaVantageWorkQueue(now: Date = new Date()): Promise<AlphaVantageWorkItem[]> {
+  const tiers = await getTickerTiers();
+  const allTickers = normalizeTickerList([...tiers.research, ...tiers.scannerPass, ...tiers.scannerNear, ...tiers.starterUniverse]);
+
+  const freshnessRows = allTickers.length
+    ? await prisma.tickerFundamentals.findMany({
+        where: { ticker: { in: allTickers } },
+        select: { ticker: true, staleAfter: true, balanceSheetStaleAfter: true },
+      })
+    : [];
+  const overviewFresh = new Set(freshnessRows.filter((row) => row.staleAfter && row.staleAfter > now).map((row) => row.ticker));
+  const balanceSheetFresh = new Set(
+    freshnessRows.filter((row) => row.balanceSheetStaleAfter && row.balanceSheetStaleAfter > now).map((row) => row.ticker),
+  );
+
+  const items: AlphaVantageWorkItem[] = [];
+  const added = new Set<string>();
+
+  function addTier(tickers: string[], endpoint: AlphaVantageEndpoint, freshSet: Set<string>) {
+    for (const ticker of tickers) {
+      const key = `${ticker}:${endpoint}`;
+      if (added.has(key) || freshSet.has(ticker)) {
+        continue;
+      }
+      added.add(key);
+      items.push({ ticker, endpoint });
+    }
+  }
+
+  addTier(tiers.research, "OVERVIEW", overviewFresh);
+  addTier(tiers.research, "BALANCE_SHEET", balanceSheetFresh);
+  addTier(tiers.scannerPass, "OVERVIEW", overviewFresh);
+  addTier(tiers.scannerPass, "BALANCE_SHEET", balanceSheetFresh);
+  addTier(tiers.scannerNear, "OVERVIEW", overviewFresh);
+  addTier(tiers.starterUniverse, "OVERVIEW", overviewFresh);
+
+  return items;
+}
+
+export type UnifiedQueueTickerOutcome = {
+  ticker: string;
+  endpoint: AlphaVantageEndpoint;
+  outcome: AlphaVantageOverviewFetchResult["outcome"] | AlphaVantageBalanceSheetFetchResult["outcome"];
+  message?: string;
+};
+
+export type ProcessUnifiedQueueSummary = {
+  outcomes: UnifiedQueueTickerOutcome[];
+  callsConsumed: number;
+  stoppedReason: ProcessQueueStoppedReason;
+  usage: AlphaVantageUsageSnapshot;
+};
+
+/**
+ * Drains getUnifiedAlphaVantageWorkQueue() under one shared budget reservation, global run
+ * lock, and 1300ms pacing loop - this is the production entry point for the scheduled cron
+ * (src/app/api/internal/alpha-vantage/process/route.ts). Reserving AUTO budget per work item
+ * (not per ticker) means a Research ticker needing both endpoints correctly costs two
+ * reservations, exactly as expected ("A Research ticker may legitimately cost 1+1 calls when
+ * both are missing/stale - that is acceptable"). Stops immediately on budget exhaustion or a
+ * real throttle response, same semantics as the two single-endpoint queues.
+ */
+export async function processAlphaVantageQueues(options: ProcessQueueOptions = {}): Promise<ProcessUnifiedQueueSummary> {
+  const now = options.now ?? new Date();
+  const apiKey = getAlphaVantageApiKey();
+  if (!apiKey) {
+    return { outcomes: [], callsConsumed: 0, stoppedReason: "NO_API_KEY", usage: await getAlphaVantageUsageToday(now) };
+  }
+
+  const acquired = await tryAcquireAlphaVantageRunLock(now);
+  if (!acquired) {
+    return { outcomes: [], callsConsumed: 0, stoppedReason: "LOCK_UNAVAILABLE", usage: await getAlphaVantageUsageToday(now) };
+  }
+
+  try {
+    const workItems = await getUnifiedAlphaVantageWorkQueue(now);
+    const limited = typeof options.maxTickers === "number" ? workItems.slice(0, options.maxTickers) : workItems;
+
+    const outcomes: UnifiedQueueTickerOutcome[] = [];
+    let stoppedReason: ProcessQueueStoppedReason = "COMPLETE";
+    let hasMadeFirstCall = false;
+
+    for (const item of limited) {
+      const reservation = await reserveAlphaVantageCall("AUTO", now);
+      if (!reservation.reserved) {
+        stoppedReason = "BUDGET_EXHAUSTED";
+        break;
+      }
+
+      if (hasMadeFirstCall) {
+        await defaultDelay(ALPHA_VANTAGE_REQUEST_DELAY_MS);
+      }
+      hasMadeFirstCall = true;
+
+      if (item.endpoint === "OVERVIEW") {
+        const result = await fetchAlphaVantageOverviewForTicker({ apiKey, ticker: item.ticker, fetchFn: options.fetchFn });
+        await applyFetchResultToCache(item.ticker, result, now);
+        outcomes.push({ ticker: item.ticker, endpoint: "OVERVIEW", outcome: result.outcome, ...("message" in result ? { message: result.message } : {}) });
+        if (result.outcome === "RATE_LIMITED") {
+          stoppedReason = "RATE_LIMITED";
+          break;
+        }
+      } else {
+        const result = await fetchAlphaVantageBalanceSheetForTicker({ apiKey, ticker: item.ticker, fetchFn: options.fetchFn });
+        await applyBalanceSheetResultToCache(item.ticker, result, now);
+        outcomes.push({ ticker: item.ticker, endpoint: "BALANCE_SHEET", outcome: result.outcome, ...("message" in result ? { message: result.message } : {}) });
+        if (result.outcome === "RATE_LIMITED") {
+          stoppedReason = "RATE_LIMITED";
+          break;
+        }
+      }
+    }
+
+    return { outcomes, callsConsumed: outcomes.length, stoppedReason, usage: await getAlphaVantageUsageToday(now) };
+  } finally {
+    await releaseAlphaVantageRunLock(now);
+  }
 }

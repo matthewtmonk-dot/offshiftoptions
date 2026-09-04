@@ -914,6 +914,24 @@ model TickerFundamentals {
   priceToBookRatio           Decimal?  @db.Decimal(12, 4)
   evToEbitda                 Decimal?  @db.Decimal(12, 4)
   beta                       Decimal?  @db.Decimal(10, 4)
+  // BALANCE_SHEET-derived fields (2026-09 slice) - tracked independently from the OVERVIEW
+  // fields above via their own fetchedAt/staleAfter/lastAttempt* set below, since balance
+  // sheets are quarterly/slow-moving and must not be considered "fresh" merely because
+  // OVERVIEW was recently refreshed (and vice versa). currentRatio = totalCurrentAssets /
+  // totalCurrentLiabilities from the latest usable quarterly report; NULL when the report is
+  // unavailable or the denominator isn't a real positive number - never guessed. debtToEquity
+  // is NOT populated as of this slice - the exact Alpha Vantage debt-component fields have not
+  // yet been verified against a real response (see the one-ticker APLD diagnostic), so writing
+  // to it without that verification would risk an invented ratio; the column exists now so a
+  // future slice can start populating it without another migration.
+  balanceSheetCurrentRatio   Decimal?  @db.Decimal(12, 4)
+  balanceSheetDebtToEquity   Decimal?  @db.Decimal(12, 4)
+  balanceSheetFiscalDateEnding DateTime?
+  balanceSheetFetchedAt      DateTime?
+  balanceSheetStaleAfter     DateTime?
+  balanceSheetLastAttemptAt  DateTime?
+  balanceSheetLastAttemptStatus String?
+  balanceSheetLastErrorMessage String?
   source                     String    @default("Alpha Vantage")
   // Set only on a real SUCCESS classification - a failed/empty/rate-limited attempt never
   // touches fetchedAt/staleAfter or any value field above, so a transient failure can never
@@ -930,6 +948,7 @@ model TickerFundamentals {
   updatedAt                  DateTime  @updatedAt
 
   @@index([staleAfter])
+  @@index([balanceSheetStaleAfter])
 }
 
 // OSO's own tracked count of real Alpha Vantage requests made "today" (UTC calendar date) -

@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { hash } from "bcryptjs";
+import { STARTER_LIVE_SCAN_UNIVERSE } from "@/domain/scanner/live-scan";
 
 const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
 const maybeDescribe = runDatabaseTests ? describe : describe.skip;
@@ -394,6 +395,342 @@ maybeDescribe("Alpha Vantage shared fundamentals cache and priority queue", () =
 
       // The reservation already incremented autoCount to 1 by the time the outbound call fires.
       expect(reservedCountAtCallTime).toBe(1);
+    });
+  });
+
+  describe("BALANCE_SHEET (Current Ratio) - endpoint-specific freshness, priority, and safety", () => {
+    function balanceSheetPayload(overrides: Record<string, unknown> = {}) {
+      return {
+        symbol: testTickers[0],
+        quarterlyReports: [{ fiscalDateEnding: "2026-06-30", ...overrides }],
+      };
+    }
+
+    // These SUCCESS-value assertions target testTickers[0] directly via
+    // refreshSingleTickerBalanceSheet rather than the priority queue, for the same reason the
+    // pre-existing OVERVIEW value-assertion tests above use refreshSingleTickerFundamentals
+    // instead of processAlphaVantageFundamentalsQueue: this local dev database has real
+    // Matt/Eric seeded scan history, so the unscoped-by-design Research/Scanner-PASS candidate
+    // queries (see getBalanceSheetQueueCandidates) are not guaranteed to order a specific test
+    // ticker first, making maxTickers-limited queue runs non-deterministic about which ticker
+    // actually gets fetched. Queue-level tests below (dedupe/priority/budget/lock/pacing) don't
+    // have this problem since they assert on queue mechanics, not a specific ticker's value.
+
+    it("stores Current Ratio, fiscal date, and independent BALANCE_SHEET freshness on a real SUCCESS", async () => {
+      const result = await fundamentals.refreshSingleTickerBalanceSheet(testTickers[0], {
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning(balanceSheetPayload({ totalCurrentAssets: "5000000", totalCurrentLiabilities: "2000000" })),
+      });
+      expect(result.status).toBe("DONE");
+
+      const row = await prisma.tickerFundamentals.findUnique({ where: { ticker: testTickers[0] } });
+      expect(Number(row?.balanceSheetCurrentRatio)).toBe(2.5);
+      expect(row?.balanceSheetFiscalDateEnding?.toISOString().slice(0, 10)).toBe("2026-06-30");
+      expect(row?.balanceSheetFetchedAt).not.toBeNull();
+      expect(row?.balanceSheetStaleAfter).not.toBeNull();
+      // Debt/Equity is never computed by this slice - stays null regardless of a SUCCESS balance sheet fetch.
+      expect(row?.balanceSheetDebtToEquity).toBeNull();
+    });
+
+    it("treats a zero denominator as unavailable (null), never dividing by zero", async () => {
+      await fundamentals.refreshSingleTickerBalanceSheet(testTickers[0], {
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning(balanceSheetPayload({ totalCurrentAssets: "5000000", totalCurrentLiabilities: "0" })),
+      });
+
+      const row = await prisma.tickerFundamentals.findUnique({ where: { ticker: testTickers[0] } });
+      expect(row?.balanceSheetCurrentRatio).toBeNull();
+    });
+
+    it("normalizes a None/missing quarterly field to null rather than a fabricated ratio", async () => {
+      await fundamentals.refreshSingleTickerBalanceSheet(testTickers[0], {
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning(balanceSheetPayload({ totalCurrentAssets: "None", totalCurrentLiabilities: "2000000" })),
+      });
+
+      const row = await prisma.tickerFundamentals.findUnique({ where: { ticker: testTickers[0] } });
+      expect(row?.balanceSheetCurrentRatio).toBeNull();
+    });
+
+    it("does not fabricate a ratio when Alpha Vantage returns no quarterly reports at all (EMPTY)", async () => {
+      await fundamentals.refreshSingleTickerBalanceSheet(testTickers[0], {
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning({ symbol: testTickers[0], quarterlyReports: [] }),
+      });
+
+      const row = await prisma.tickerFundamentals.findUnique({ where: { ticker: testTickers[0] } });
+      expect(row?.balanceSheetCurrentRatio).toBeNull();
+      expect(row?.balanceSheetLastAttemptStatus).toBe("EMPTY");
+    });
+
+    it("tracks BALANCE_SHEET freshness independently from OVERVIEW - a fresh OVERVIEW row does not exempt BALANCE_SHEET from the queue", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await prisma.tickerFundamentals.create({
+        data: {
+          ticker: testTickers[0],
+          fetchedAt: TEST_NOW,
+          staleAfter: new Date(TEST_NOW.getTime() + 24 * 60 * 60 * 1000), // OVERVIEW fresh
+          // balanceSheetStaleAfter intentionally left unset (never fetched).
+        },
+      });
+
+      const candidates = await fundamentals.getBalanceSheetQueueCandidates(TEST_NOW);
+      expect(candidates).toContain(testTickers[0]);
+    });
+
+    it("excludes a ticker whose BALANCE_SHEET data is still fresh, even if OVERVIEW has gone stale", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await prisma.tickerFundamentals.create({
+        data: {
+          ticker: testTickers[0],
+          staleAfter: new Date(TEST_NOW.getTime() - 24 * 60 * 60 * 1000), // OVERVIEW stale
+          balanceSheetStaleAfter: new Date(TEST_NOW.getTime() + 24 * 60 * 60 * 1000), // BALANCE_SHEET fresh
+        },
+      });
+
+      const candidates = await fundamentals.getBalanceSheetQueueCandidates(TEST_NOW);
+      expect(candidates).not.toContain(testTickers[0]);
+    });
+
+    it("collapses Matt+Eric researching the same ticker into one BALANCE_SHEET queue candidate entry", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[1], "LIKE");
+      await workflows.setResearchStatusForUser(userB.id, testTickers[1], "WATCH");
+
+      const candidates = await fundamentals.getBalanceSheetQueueCandidates(TEST_NOW);
+      expect(candidates.filter((t) => t === testTickers[1]).length).toBe(1);
+    });
+
+    it("prioritizes Research tickers ahead of Scanner PASS candidates", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[2], "WATCH");
+      const profile = await workflows.ensureMyLstScannerProfileForUser(userA.id);
+      const run = await prisma.scanRun.create({ data: { profileId: profile.id, ownerId: userA.id, source: "DEMO" } });
+      await prisma.scanResult.create({
+        data: { runId: run.id, ticker: testTickers[3], summaryStatus: "PASS", passedCriteria: 8, totalCriteria: 8, snapshotJson: {} },
+      });
+
+      const candidates = await fundamentals.getBalanceSheetQueueCandidates(TEST_NOW);
+      expect(candidates.indexOf(testTickers[2])).toBeLessThan(candidates.indexOf(testTickers[3]));
+    });
+
+    it("never includes the starter scanner universe or Scanner Near candidates - only Research and Scanner PASS", async () => {
+      const candidates = await fundamentals.getBalanceSheetQueueCandidates(TEST_NOW);
+      expect(candidates).not.toContain("AAPL"); // a plausible starter-universe ticker never queued here without Research/PASS backing
+    });
+
+    it("never leaks which user or research status a queued ticker belongs to - only bare ticker strings", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[3], "NEVER_TRADE");
+      const candidates = await fundamentals.getBalanceSheetQueueCandidates(TEST_NOW);
+      expect(candidates).toContain(testTickers[3]);
+      expect(candidates.every((t) => typeof t === "string")).toBe(true);
+    });
+
+    it("shares the exact same daily budget as OVERVIEW - exhausting AUTO via OVERVIEW blocks BALANCE_SHEET too", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await prisma.alphaVantageDailyUsage.create({ data: { date: TEST_DATE_ONLY, autoCount: 22, manualCount: 0 } });
+
+      const summary = await fundamentals.processAlphaVantageBalanceSheetQueue({
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning(balanceSheetPayload()),
+      });
+      expect(summary.stoppedReason).toBe("BUDGET_EXHAUSTED");
+      expect(summary.callsConsumed).toBe(0);
+    });
+
+    it("respects the same global run lock as the OVERVIEW queue", async () => {
+      expect(await budget.tryAcquireAlphaVantageRunLock(TEST_NOW)).toBe(true);
+      try {
+        await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+        const summary = await fundamentals.processAlphaVantageBalanceSheetQueue({
+          now: TEST_NOW,
+          fetchFn: fetchFnReturning(balanceSheetPayload()),
+        });
+        expect(summary.stoppedReason).toBe("LOCK_UNAVAILABLE");
+        expect(summary.callsConsumed).toBe(0);
+      } finally {
+        await budget.releaseAlphaVantageRunLock(TEST_NOW);
+      }
+    });
+
+    it("stops the BALANCE_SHEET queue immediately on a real throttle response, leaving later tickers untouched", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await workflows.setResearchStatusForUser(userA.id, testTickers[1], "LIKE");
+
+      const summary = await fundamentals.processAlphaVantageBalanceSheetQueue({
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning({ Information: "Please consider spreading out your free API requests more sparingly (1 request per second)." }),
+      });
+
+      expect(summary.stoppedReason).toBe("RATE_LIMITED");
+      expect(summary.callsConsumed).toBe(1);
+      const secondTickerRow = await prisma.tickerFundamentals.findUnique({ where: { ticker: testTickers[1] } });
+      expect(secondTickerRow?.balanceSheetFetchedAt ?? null).toBeNull();
+    });
+  });
+
+  describe("Unified work queue (getUnifiedAlphaVantageWorkQueue / processAlphaVantageQueues) - fixes OVERVIEW/BALANCE_SHEET starvation", () => {
+    // All ordering/dedup assertions below compare the RELATIVE position of the test's own
+    // disposable fixture tickers, never the queue's total length or exact index numbers - this
+    // local dev database has real Matt/Eric seeded Research/Scanner data that legitimately
+    // appears in the same tiers, and asserting on absolute counts/positions would be flaky (see
+    // the BALANCE_SHEET describe block above, where exactly this class of bug was found and
+    // fixed earlier in this file). Comparing two known fixtures' relative order is robust
+    // regardless of how much real data surrounds them.
+
+    it("Research BALANCE_SHEET cannot be starved by Scanner-only OVERVIEW work - it is scheduled first", async () => {
+      // testTickers[0]: Research, OVERVIEW already fresh, BALANCE_SHEET never fetched.
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await prisma.tickerFundamentals.create({
+        data: { ticker: testTickers[0], fetchedAt: TEST_NOW, staleAfter: new Date(TEST_NOW.getTime() + 24 * 60 * 60 * 1000) },
+      });
+
+      // testTickers[1]: Scanner PASS only (not Research), nothing cached at all.
+      const profile = await workflows.ensureMyLstScannerProfileForUser(userA.id);
+      const run = await prisma.scanRun.create({ data: { profileId: profile.id, ownerId: userA.id, source: "DEMO" } });
+      await prisma.scanResult.create({
+        data: { runId: run.id, ticker: testTickers[1], summaryStatus: "PASS", passedCriteria: 8, totalCriteria: 8, snapshotJson: {} },
+      });
+
+      const items = await fundamentals.getUnifiedAlphaVantageWorkQueue(TEST_NOW);
+      const researchBalanceSheetIndex = items.findIndex((item) => item.ticker === testTickers[0] && item.endpoint === "BALANCE_SHEET");
+      const scannerOverviewIndex = items.findIndex((item) => item.ticker === testTickers[1] && item.endpoint === "OVERVIEW");
+
+      expect(researchBalanceSheetIndex).toBeGreaterThanOrEqual(0);
+      expect(scannerOverviewIndex).toBeGreaterThanOrEqual(0);
+      expect(researchBalanceSheetIndex).toBeLessThan(scannerOverviewIndex);
+      // Fresh OVERVIEW for testTickers[0] must not be re-queued.
+      expect(items.some((item) => item.ticker === testTickers[0] && item.endpoint === "OVERVIEW")).toBe(false);
+    });
+
+    it("Research endpoint work outranks Scanner-only work even against the broad starter universe", async () => {
+      // A Research ticker missing everything must sort ahead of the fixed starter universe
+      // (Scanner's lowest-priority tier) for both endpoints it needs.
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "WATCH");
+
+      const items = await fundamentals.getUnifiedAlphaVantageWorkQueue(TEST_NOW);
+      const researchOverviewIndex = items.findIndex((item) => item.ticker === testTickers[0] && item.endpoint === "OVERVIEW");
+      const starterIndices = items
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => item.endpoint === "OVERVIEW" && (STARTER_LIVE_SCAN_UNIVERSE as string[]).includes(item.ticker) && item.ticker !== testTickers[0]);
+
+      expect(researchOverviewIndex).toBeGreaterThanOrEqual(0);
+      for (const { index } of starterIndices) {
+        expect(researchOverviewIndex).toBeLessThan(index);
+      }
+    });
+
+    it("fresh OVERVIEW + stale BALANCE_SHEET triggers only a BALANCE_SHEET item, never OVERVIEW", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await prisma.tickerFundamentals.create({
+        data: {
+          ticker: testTickers[0],
+          fetchedAt: TEST_NOW,
+          staleAfter: new Date(TEST_NOW.getTime() + 24 * 60 * 60 * 1000), // OVERVIEW fresh
+          balanceSheetStaleAfter: new Date(TEST_NOW.getTime() - 24 * 60 * 60 * 1000), // BALANCE_SHEET stale
+        },
+      });
+
+      const items = await fundamentals.getUnifiedAlphaVantageWorkQueue(TEST_NOW);
+      const forTicker = items.filter((item) => item.ticker === testTickers[0]);
+      expect(forTicker).toEqual([{ ticker: testTickers[0], endpoint: "BALANCE_SHEET" }]);
+    });
+
+    it("stale OVERVIEW + fresh BALANCE_SHEET triggers only an OVERVIEW item, never BALANCE_SHEET", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await prisma.tickerFundamentals.create({
+        data: {
+          ticker: testTickers[0],
+          staleAfter: new Date(TEST_NOW.getTime() - 24 * 60 * 60 * 1000), // OVERVIEW stale
+          balanceSheetFetchedAt: TEST_NOW,
+          balanceSheetStaleAfter: new Date(TEST_NOW.getTime() + 24 * 60 * 60 * 1000), // BALANCE_SHEET fresh
+        },
+      });
+
+      const items = await fundamentals.getUnifiedAlphaVantageWorkQueue(TEST_NOW);
+      const forTicker = items.filter((item) => item.ticker === testTickers[0]);
+      expect(forTicker).toEqual([{ ticker: testTickers[0], endpoint: "OVERVIEW" }]);
+    });
+
+    it("a Research ticker missing both endpoints queues both - legitimately up to two calls for one ticker", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      // No TickerFundamentals row at all - both endpoints missing.
+
+      const items = await fundamentals.getUnifiedAlphaVantageWorkQueue(TEST_NOW);
+      const forTicker = items.filter((item) => item.ticker === testTickers[0]);
+      expect(forTicker).toEqual([
+        { ticker: testTickers[0], endpoint: "OVERVIEW" },
+        { ticker: testTickers[0], endpoint: "BALANCE_SHEET" },
+      ]);
+      // Each of these two items reserves its own AUTO budget slot when processed - proven
+      // generically (regardless of which ticker) by the existing "reserves the budget slot
+      // atomically" and per-outcome request-counting tests above, which apply unchanged since
+      // processAlphaVantageQueues reserves via the exact same reserveAlphaVantageCall("AUTO", ...)
+      // call per work item.
+    });
+
+    it("Matt and Eric researching the same ticker still dedupes to exactly one work item per endpoint", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[1], "LIKE");
+      await workflows.setResearchStatusForUser(userB.id, testTickers[1], "WATCH");
+
+      const items = await fundamentals.getUnifiedAlphaVantageWorkQueue(TEST_NOW);
+      expect(items.filter((item) => item.ticker === testTickers[1] && item.endpoint === "OVERVIEW").length).toBe(1);
+      expect(items.filter((item) => item.ticker === testTickers[1] && item.endpoint === "BALANCE_SHEET").length).toBe(1);
+    });
+
+    it("never leaks which user or research status a queued ticker belongs to - only bare ticker/endpoint pairs", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "NEVER_TRADE");
+      const items = await fundamentals.getUnifiedAlphaVantageWorkQueue(TEST_NOW);
+      expect(items.every((item) => typeof item.ticker === "string" && (item.endpoint === "OVERVIEW" || item.endpoint === "BALANCE_SHEET"))).toBe(true);
+    });
+
+    it("total AUTO calls never exceed 22 - the unified processor refuses to run at all once exhausted, regardless of queue size", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      await prisma.alphaVantageDailyUsage.create({ data: { date: TEST_DATE_ONLY, autoCount: 22, manualCount: 0 } });
+
+      const summary = await fundamentals.processAlphaVantageQueues({ now: TEST_NOW, fetchFn: fetchFnReturning({ Symbol: testTickers[0] }) });
+      expect(summary.stoppedReason).toBe("BUDGET_EXHAUSTED");
+      expect(summary.callsConsumed).toBe(0);
+    });
+
+    it("the 3-call manual reserve is never spent by the automatic unified queue", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      // AUTO already at its 22 cap; 3 MANUAL slots remain, but the automatic queue must never draw from them.
+      await prisma.alphaVantageDailyUsage.create({ data: { date: TEST_DATE_ONLY, autoCount: 22, manualCount: 0 } });
+
+      const summary = await fundamentals.processAlphaVantageQueues({ now: TEST_NOW, fetchFn: fetchFnReturning({ Symbol: testTickers[0] }) });
+      expect(summary.stoppedReason).toBe("BUDGET_EXHAUSTED");
+
+      const usage = await budget.getAlphaVantageUsageToday(TEST_NOW);
+      expect(usage.manualCount).toBe(0);
+      expect(usage.autoRemaining).toBe(0);
+      expect(usage.totalRemaining).toBe(3);
+    });
+
+    it("respects the same global run lock as the single-endpoint queues - no separate lock for the unified queue", async () => {
+      expect(await budget.tryAcquireAlphaVantageRunLock(TEST_NOW)).toBe(true);
+      try {
+        await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+        const summary = await fundamentals.processAlphaVantageQueues({ now: TEST_NOW, fetchFn: fetchFnReturning({ Symbol: testTickers[0] }) });
+        expect(summary.stoppedReason).toBe("LOCK_UNAVAILABLE");
+        expect(summary.callsConsumed).toBe(0);
+      } finally {
+        await budget.releaseAlphaVantageRunLock(TEST_NOW);
+      }
+    });
+
+    it("stops the unified queue immediately on a real throttle response, same pacing/stop semantics as the single-endpoint queues", async () => {
+      await workflows.setResearchStatusForUser(userA.id, testTickers[0], "LIKE");
+      const summary = await fundamentals.processAlphaVantageQueues({
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning({ Information: "Please consider spreading out your free API requests more sparingly (1 request per second)." }),
+      });
+      expect(summary.stoppedReason).toBe("RATE_LIMITED");
+      expect(summary.callsConsumed).toBe(1);
+    });
+
+    it("reading cached fundamentals for Research display never makes an Alpha Vantage call or touches the daily budget", async () => {
+      await fundamentals.getTickerFundamentalsMap([testTickers[0], testTickers[1]]);
+      const usage = await budget.getAlphaVantageUsageToday(TEST_NOW);
+      expect(usage.totalCount).toBe(0);
     });
   });
 });

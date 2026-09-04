@@ -13,6 +13,7 @@ import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/ac
 import { computeOpenPositionsCount, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
+import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { honestSetupLabel, honestSetupScore, type CriterionResult, type ScanSummary } from "@/domain/scanner/scanner";
@@ -87,6 +88,7 @@ export default async function DashboardPage() {
     .slice(0, 3);
 
   const dedupedActivities = dedupeActivities(data.activities);
+  const checkpointLabel = getNextLstCheckpointLabel();
 
   return (
     <div className="space-y-6">
@@ -99,7 +101,12 @@ export default async function DashboardPage() {
           </Suspense>{" "}
           - win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
         </span>
-        <span className="text-xs">No order submission - Off Shift Options never places, changes, or cancels trades.</span>
+        <span className="flex flex-col items-end gap-0.5 text-right">
+          <span className="text-xs font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
+            {checkpointLabel}
+          </span>
+          <span className="text-xs">No order submission - Off Shift Options never places, changes, or cancels trades.</span>
+        </span>
       </div>
 
       <section className="grid gap-3 sm:grid-cols-3 xl:grid-cols-5">
