@@ -7,12 +7,7 @@ import {
   buildAlphaVantageOverviewDiagnosticFromApiKey,
   type AlphaVantageOverviewDiagnosticReport,
 } from "@/providers/alpha-vantage/overview-diagnostic";
-import {
-  buildAlphaVantageBalanceSheetDiagnosticFromApiKey,
-  type AlphaVantageBalanceSheetDiagnosticReport,
-} from "@/providers/alpha-vantage/balance-sheet-diagnostic";
 import type { AlphaVantageFetch } from "@/providers/alpha-vantage/client";
-import { reserveAlphaVantageCall, tryAcquireAlphaVantageRunLock, releaseAlphaVantageRunLock } from "./alpha-vantage-budget";
 
 export type AlphaVantageDiagnosticResult =
   | { status: "OK"; report: AlphaVantageOverviewDiagnosticReport }
@@ -68,66 +63,4 @@ export async function runAlphaVantageOverviewDiagnostic(options: DiagnosticOptio
  */
 export async function runAlphaVantageRemainingTickersDiagnostic(options: Omit<DiagnosticOptions, "tickers"> = {}): Promise<AlphaVantageDiagnosticResult> {
   return runAlphaVantageOverviewDiagnostic({ ...options, tickers: ALPHA_VANTAGE_REMAINING_VERIFICATION_TICKERS });
-}
-
-export type AlphaVantageBalanceSheetDiagnosticResult =
-  | { status: "OK"; report: AlphaVantageBalanceSheetDiagnosticReport }
-  | { status: "UNAVAILABLE"; reason: "NO_API_KEY" | "LOCK_UNAVAILABLE" | "BUDGET_EXHAUSTED"; message: string; timestamp: string }
-  | { status: "ERROR"; message: string; timestamp: string };
-
-/**
- * TEMPORARY one-ticker (APLD) BALANCE_SHEET verification tool - see
- * balance-sheet-diagnostic.ts for why this exists and what it's for. Unlike
- * runAlphaVantageOverviewDiagnostic above (which predates the shared budget/lock system and was
- * never retrofitted to use it), this DOES reserve a MANUAL budget slot and hold the same global
- * run lock as the automatic queue/manual refresh paths - "Cost: maximum 1 tracked Alpha Vantage
- * call" means tracked against the real daily budget, not a silent bypass. Never writes to any
- * database table - purely observational.
- */
-export async function runAlphaVantageBalanceSheetDiagnostic(options: DiagnosticOptions = {}): Promise<AlphaVantageBalanceSheetDiagnosticResult> {
-  const now = options.now ?? new Date();
-  const apiKey = getAlphaVantageApiKey();
-  if (!apiKey) {
-    return {
-      status: "UNAVAILABLE",
-      reason: "NO_API_KEY",
-      message: "ALPHA_VANTAGE_API_KEY is not configured on the server. No request was made.",
-      timestamp: now.toISOString(),
-    };
-  }
-
-  const acquired = await tryAcquireAlphaVantageRunLock(now);
-  if (!acquired) {
-    return {
-      status: "UNAVAILABLE",
-      reason: "LOCK_UNAVAILABLE",
-      message: "Another Alpha Vantage request (automatic queue or manual refresh) is already in flight. Try again shortly.",
-      timestamp: now.toISOString(),
-    };
-  }
-
-  try {
-    const reservation = await reserveAlphaVantageCall("MANUAL", now);
-    if (!reservation.reserved) {
-      return {
-        status: "UNAVAILABLE",
-        reason: "BUDGET_EXHAUSTED",
-        message: "Today's Alpha Vantage manual reserve is exhausted. No request was made.",
-        timestamp: now.toISOString(),
-      };
-    }
-
-    try {
-      const report = await buildAlphaVantageBalanceSheetDiagnosticFromApiKey({ apiKey, fetchFn: options.fetchFn, now });
-      return { status: "OK", report };
-    } catch {
-      return {
-        status: "ERROR",
-        message: "Alpha Vantage balance sheet diagnostic failed safely. No raw response or key detail was returned.",
-        timestamp: now.toISOString(),
-      };
-    }
-  } finally {
-    await releaseAlphaVantageRunLock(now);
-  }
 }

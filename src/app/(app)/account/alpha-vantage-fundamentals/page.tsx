@@ -20,9 +20,7 @@ export default async function AlphaVantageFundamentalsDiagnosticPage() {
           <p className="mt-2 max-w-3xl text-sm text-zinc-400">
             Checks APLD, RIOT, and CORZ against Alpha Vantage&apos;s OVERVIEW endpoint using OSO&apos;s shared server-side API key. The
             table is a strict allowlist and does not save anything to Research, Scanner, Tracker, or accounts. This is a shared, low
-            free-tier quota (25 requests/day) - the run only happens when you click a button below. A separate one-ticker BALANCE_SHEET
-            check (APLD only) is also available below, to verify the exact fields needed for Current Ratio and Debt/Equity before those
-            are implemented for real.
+            free-tier quota (25 requests/day) - the run only happens when you click a button below.
           </p>
         </div>
         <Link

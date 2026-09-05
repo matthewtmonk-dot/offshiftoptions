@@ -403,8 +403,10 @@ export async function getAlphaVantageCacheSummary(now: Date = new Date()): Promi
 // never implies its BALANCE_SHEET is, and vice versa. Shares the exact same daily budget,
 // global run lock, and pacing constant as OVERVIEW (see processAlphaVantageBalanceSheetQueue
 // below) - there is only ever one combined 25/day Alpha Vantage budget, never a second one.
-// Debt/Equity is NOT computed anywhere in this section - only Current Ratio - see
-// src/providers/alpha-vantage/balance-sheet.ts for why.
+// Both Current Ratio and Debt/Equity are computed from the same single BALANCE_SHEET request -
+// see src/providers/alpha-vantage/balance-sheet.ts for the verified debtToEquity formula
+// (shortLongTermDebtTotal / totalShareholderEquity, verified 2026-09 against a real production
+// APLD response).
 
 export type BalanceSheetQueueTickerOutcome = {
   ticker: string;
@@ -430,6 +432,7 @@ async function applyBalanceSheetResultToCache(ticker: string, result: AlphaVanta
       create: {
         ticker,
         balanceSheetCurrentRatio: f.currentRatio,
+        balanceSheetDebtToEquity: f.debtToEquity,
         balanceSheetFiscalDateEnding: validFiscalDateEnding,
         balanceSheetFetchedAt: now,
         balanceSheetStaleAfter: new Date(now.getTime() + ALPHA_VANTAGE_FUNDAMENTALS_TTL_MS),
@@ -439,6 +442,7 @@ async function applyBalanceSheetResultToCache(ticker: string, result: AlphaVanta
       },
       update: {
         balanceSheetCurrentRatio: f.currentRatio,
+        balanceSheetDebtToEquity: f.debtToEquity,
         balanceSheetFiscalDateEnding: validFiscalDateEnding,
         balanceSheetFetchedAt: now,
         balanceSheetStaleAfter: new Date(now.getTime() + ALPHA_VANTAGE_FUNDAMENTALS_TTL_MS),

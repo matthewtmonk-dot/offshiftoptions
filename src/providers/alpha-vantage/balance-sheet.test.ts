@@ -90,4 +90,147 @@ describe("fetchAlphaVantageBalanceSheetForTicker", () => {
       expect(result.message).not.toContain("super-secret-key");
     }
   });
+
+  describe("Debt/Equity - shortLongTermDebtTotal / totalShareholderEquity, verified against a real production APLD response", () => {
+    function balanceSheetFetch(overrides: Record<string, unknown>) {
+      return fetchFnReturning({
+        symbol: "APLD",
+        quarterlyReports: [{ fiscalDateEnding: "2026-05-31", ...overrides }],
+      });
+    }
+
+    it("computes the exact verified real-world APLD example (shortLongTermDebtTotal / totalShareholderEquity)", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({ shortLongTermDebtTotal: "509991600", totalShareholderEquity: "1780242000" }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        expect(result.fields.debtToEquity).toBeCloseTo(0.286473, 5);
+        expect(result.fields.fiscalDateEnding).toBe("2026-05-31");
+      }
+    });
+
+    it("never adds shortTermDebt on top of shortLongTermDebtTotal - that would double-count debt already folded into it", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({
+          shortTermDebt: "82491000",
+          shortLongTermDebtTotal: "509991600",
+          totalShareholderEquity: "1780242000",
+        }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        // Would be ~0.333 if shortTermDebt were wrongly added on top - must stay the verified ~0.286.
+        expect(result.fields.debtToEquity).toBeCloseTo(0.286473, 5);
+      }
+    });
+
+    it("never uses totalLiabilities as the numerator - only shortLongTermDebtTotal", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({
+          shortLongTermDebtTotal: "509991600",
+          totalLiabilities: "618573500",
+          totalShareholderEquity: "1780242000",
+        }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        // 618573500 / 1780242000 would be ~0.347 if totalLiabilities were wrongly used.
+        expect(result.fields.debtToEquity).toBeCloseTo(0.286473, 5);
+      }
+    });
+
+    it("preserves a real numeric zero debt value as 0, never null", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({ shortLongTermDebtTotal: "0", totalShareholderEquity: "1780242000" }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        expect(result.fields.debtToEquity).toBe(0);
+      }
+    });
+
+    it("returns null when shortLongTermDebtTotal is missing - never synthesized from other overlapping debt fields", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({
+          shortTermDebt: "82491000",
+          longTermDebt: "400000000",
+          totalShareholderEquity: "1780242000",
+          // shortLongTermDebtTotal intentionally absent
+        }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        expect(result.fields.debtToEquity).toBeNull();
+      }
+    });
+
+    it("returns null when totalShareholderEquity is missing", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({ shortLongTermDebtTotal: "509991600" }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        expect(result.fields.debtToEquity).toBeNull();
+      }
+    });
+
+    it("returns null (not Infinity) when totalShareholderEquity is exactly zero", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({ shortLongTermDebtTotal: "509991600", totalShareholderEquity: "0" }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        expect(result.fields.debtToEquity).toBeNull();
+      }
+    });
+
+    it("returns null (not a misleading negative ratio) when totalShareholderEquity is negative", async () => {
+      const result = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({ shortLongTermDebtTotal: "509991600", totalShareholderEquity: "-50000000" }),
+      });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome === "SUCCESS") {
+        expect(result.fields.debtToEquity).toBeNull();
+      }
+    });
+
+    it("normalizes Alpha Vantage's None/-/empty-string sentinels for either field to null rather than a fabricated ratio", async () => {
+      const noneDebt = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({ shortLongTermDebtTotal: "None", totalShareholderEquity: "1780242000" }),
+      });
+      expect(noneDebt.outcome).toBe("SUCCESS");
+      if (noneDebt.outcome === "SUCCESS") {
+        expect(noneDebt.fields.debtToEquity).toBeNull();
+      }
+
+      const noneEquity = await fetchAlphaVantageBalanceSheetForTicker({
+        apiKey: "key",
+        ticker: "APLD",
+        fetchFn: balanceSheetFetch({ shortLongTermDebtTotal: "509991600", totalShareholderEquity: "-" }),
+      });
+      expect(noneEquity.outcome).toBe("SUCCESS");
+      if (noneEquity.outcome === "SUCCESS") {
+        expect(noneEquity.fields.debtToEquity).toBeNull();
+      }
+    });
+  });
 });

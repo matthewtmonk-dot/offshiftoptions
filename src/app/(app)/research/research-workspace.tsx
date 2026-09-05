@@ -726,9 +726,9 @@ function ResearchDetail({
             <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Fundamentals</h4>
             <p className="mt-1 text-[11px] text-zinc-600">
               P/E, EPS, and Dividend use a verified Schwab Trader API value automatically when available
-              {item.fundamentalAsOf ? ` (last verified ${shortDateTime(item.fundamentalAsOf)})` : ""}. PEG and Current Ratio use a
-              verified Alpha Vantage value automatically when available. Debt/Equity remains fully manual - no verified auto source
-              exists for it yet. Leave a field blank if unknown - a blank field displays as &quot;—&quot;, never as 0.
+              {item.fundamentalAsOf ? ` (last verified ${shortDateTime(item.fundamentalAsOf)})` : ""}. PEG, Current Ratio, and
+              Debt/Equity all use a verified Alpha Vantage value automatically when available. Leave a field blank if unknown - a
+              blank field displays as &quot;—&quot;, never as 0.
             </p>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <FundamentalInput
@@ -746,8 +746,11 @@ function ResearchDetail({
               <FundamentalInput
                 name="manualDebtToEquity"
                 label="Debt / Equity"
-                value={resolveAutoOrManual(item.fundamentalDebtToEquity, item.manualDebtToEquity)}
-                tip="Total liabilities divided by shareholder equity. Higher generally means more leverage/risk. Fully manual - no verified auto source exists for this yet (see PROJECT_HANDOFF.md's Alpha Vantage section)."
+                value={resolveAutoOrManual(
+                  resolveAutoOrManual(item.fundamentalDebtToEquity, avFundamentals?.balanceSheetDebtToEquity ?? null),
+                  item.manualDebtToEquity,
+                )}
+                tip="Debt/Equity = total short- and long-term debt ÷ total shareholder equity, using the latest quarterly Alpha Vantage balance sheet. Higher generally means more leverage/risk. Uses a verified Alpha Vantage value automatically when available."
               />
               <FundamentalInput
                 name="manualCurrentRatio"
@@ -1124,7 +1127,18 @@ function ResearchAutoDataSection({
         ) : null}
         <AutoDataGroup label="Financial Health">
           <AutoDatum label="Current Ratio" node={currentRatioCell(item, avFundamentals)} />
-          <AutoDatum label="Debt / Equity" node={ratioCell(resolveAutoOrManual(item.fundamentalDebtToEquity, item.manualDebtToEquity), { allowZero: true })} />
+          <AutoDatum
+            label={
+              <span className="inline-flex items-center gap-1">
+                Debt / Equity
+                <InfoTip label="Debt / Equity" align="start" testId="help-research-auto-debt-to-equity">
+                  Debt/Equity = total short- and long-term debt ÷ total shareholder equity, using the latest quarterly Alpha
+                  Vantage balance sheet.
+                </InfoTip>
+              </span>
+            }
+            node={debtToEquityCell(item, avFundamentals)}
+          />
         </AutoDataGroup>
         <AutoDataGroup label="Valuation">
           <AutoDatum label="PEG" node={pegRatioCell(item, avFundamentals)} />
@@ -1158,7 +1172,7 @@ function AutoDataGroup({ label, children }: { label: string; children: ReactNode
   );
 }
 
-function AutoDatum({ label, value, node }: { label: string; value?: string | null; node?: ReactNode }) {
+function AutoDatum({ label, value, node }: { label: ReactNode; value?: string | null; node?: ReactNode }) {
   return (
     <div>
       <div className="text-[10px] uppercase tracking-normal text-zinc-500">{label}</div>
@@ -1307,7 +1321,7 @@ function renderResearchCell(
     case "lsegTarget":
       return manualCell(item.manualLsegTarget);
     case "debtToEquity":
-      return ratioCell(resolveAutoOrManual(item.fundamentalDebtToEquity, item.manualDebtToEquity), { allowZero: true });
+      return debtToEquityCell(item, avFundamentals);
     case "currentRatio":
       return currentRatioCell(item, avFundamentals);
     case "peRatio":
@@ -1341,21 +1355,6 @@ function renderResearchCell(
 
 function manualCell(value: string | null) {
   return value ? <span title="Manual entry">{value}</span> : dash();
-}
-
-function ratioCell(value: unknown, options: { allowZero: boolean }) {
-  const numeric = numericOrNull(value);
-  if (numeric === null) {
-    return dash();
-  }
-  if (!options.allowZero && numeric <= 0) {
-    return (
-      <span title="Not meaningful (zero or negative)" className="text-zinc-500">
-        N/M
-      </span>
-    );
-  }
-  return <span title="Manual entry">{numeric.toFixed(2)}</span>;
 }
 
 /**
@@ -1426,12 +1425,12 @@ function dividendCell(item: ResearchItemRecord, scan?: ResearchScanSnapshot) {
  * Current Price/Company already are.
  */
 /**
- * Current Ratio's auto tier is verified (see PROJECT_HANDOFF.md's Alpha Vantage/Roll Status
- * slice): totalCurrentAssets / totalCurrentLiabilities from Alpha Vantage's latest quarterly
+ * Current Ratio's auto tier is verified (see PROJECT_HANDOFF.md's Alpha Vantage API section):
+ * totalCurrentAssets / totalCurrentLiabilities from Alpha Vantage's latest quarterly
  * BALANCE_SHEET report, computed server-side (src/providers/alpha-vantage/balance-sheet.ts) -
  * this cell only picks which already-computed value to show and never derives the ratio
- * itself. Debt/Equity has no verified auto source yet, so its cell (ratioCell(...) above)
- * stays manual-only - do not add an Alpha Vantage tier there until Debt/Equity is verified.
+ * itself. Debt/Equity's own auto tier (debtToEquityCell, below pegRatioCell) is verified the
+ * same way, from the same BALANCE_SHEET request.
  */
 function currentRatioCell(item: ResearchItemRecord, avFundamentals: ResearchAlphaVantageFundamentals | undefined) {
   const schwabAuto = numericOrNull(item.fundamentalCurrentRatio);
@@ -1443,6 +1442,26 @@ function currentRatioCell(item: ResearchItemRecord, avFundamentals: ResearchAlph
   }
   const source = schwabAuto !== null ? "Schwab Trader API" : avAuto !== null ? "Alpha Vantage" : "Manual entry";
   return <span title={source}>{value.toFixed(2)}</span>;
+}
+
+/**
+ * Debt/Equity's auto tier is verified (see PROJECT_HANDOFF.md's Alpha Vantage API section):
+ * shortLongTermDebtTotal / totalShareholderEquity from Alpha Vantage's latest quarterly
+ * BALANCE_SHEET report, computed server-side (src/providers/alpha-vantage/balance-sheet.ts) -
+ * this cell only picks which already-computed value to show. Displayed as a multiplier ("0.29x"),
+ * never a percentage. A null/negative-equity case is already filtered out server-side (never
+ * stored), so a populated auto value here is always a real, meaningful ratio.
+ */
+function debtToEquityCell(item: ResearchItemRecord, avFundamentals: ResearchAlphaVantageFundamentals | undefined) {
+  const schwabAuto = numericOrNull(item.fundamentalDebtToEquity);
+  const avAuto = numericOrNull(avFundamentals?.balanceSheetDebtToEquity ?? null);
+  const auto = resolveAutoOrManual(schwabAuto, avAuto);
+  const value = resolveAutoOrManual(auto, numericOrNull(item.manualDebtToEquity));
+  if (value === null) {
+    return dash();
+  }
+  const source = schwabAuto !== null ? "Schwab Trader API" : avAuto !== null ? "Alpha Vantage" : "Manual entry";
+  return <span title={source}>{value.toFixed(2)}x</span>;
 }
 
 function pegRatioCell(item: ResearchItemRecord, avFundamentals: ResearchAlphaVantageFundamentals | undefined) {

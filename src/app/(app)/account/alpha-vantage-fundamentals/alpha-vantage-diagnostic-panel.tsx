@@ -4,17 +4,9 @@ import { useState } from "react";
 import { PlayCircle, TriangleAlert } from "lucide-react";
 import { Badge, Panel } from "@/components/ui";
 import { shortDateTime } from "@/lib/format";
-import {
-  runAlphaVantageOverviewDiagnosticAction,
-  runAlphaVantageRemainingTickersDiagnosticAction,
-  runAlphaVantageBalanceSheetDiagnosticAction,
-} from "../../actions";
-import type { AlphaVantageDiagnosticResult, AlphaVantageBalanceSheetDiagnosticResult } from "@/lib/alpha-vantage-diagnostic";
+import { runAlphaVantageOverviewDiagnosticAction, runAlphaVantageRemainingTickersDiagnosticAction } from "../../actions";
+import type { AlphaVantageDiagnosticResult } from "@/lib/alpha-vantage-diagnostic";
 import type { AlphaVantageFieldPresence, AlphaVantageTickerOutcome } from "@/providers/alpha-vantage/overview-diagnostic";
-import type {
-  AlphaVantageBalanceSheetDiagnosticRow,
-  AlphaVantageFieldPresence as BalanceSheetFieldPresence,
-} from "@/providers/alpha-vantage/balance-sheet-diagnostic";
 
 type RunVariant = "ALL" | "REMAINING";
 type PanelState =
@@ -23,17 +15,9 @@ type PanelState =
   | { status: "done"; result: AlphaVantageDiagnosticResult }
   | { status: "error"; message: string };
 
-type BalanceSheetPanelState =
-  | { status: "idle" }
-  | { status: "pending" }
-  | { status: "done"; result: AlphaVantageBalanceSheetDiagnosticResult }
-  | { status: "error"; message: string };
-
 export function AlphaVantageDiagnosticPanel() {
   const [state, setState] = useState<PanelState>({ status: "idle" });
   const pending = state.status === "pending";
-  const [balanceSheetState, setBalanceSheetState] = useState<BalanceSheetPanelState>({ status: "idle" });
-  const balanceSheetPending = balanceSheetState.status === "pending";
 
   async function run(variant: RunVariant) {
     if (pending) return;
@@ -47,21 +31,6 @@ export function AlphaVantageDiagnosticPanel() {
       }
     } catch {
       setState({ status: "error", message: "Diagnostic failed unexpectedly. Try again in a moment." });
-    }
-  }
-
-  async function runBalanceSheet() {
-    if (balanceSheetPending) return;
-    setBalanceSheetState({ status: "pending" });
-    try {
-      const response = await runAlphaVantageBalanceSheetDiagnosticAction();
-      if (response.ok) {
-        setBalanceSheetState({ status: "done", result: response.result });
-      } else {
-        setBalanceSheetState({ status: "error", message: response.error });
-      }
-    } catch {
-      setBalanceSheetState({ status: "error", message: "Diagnostic failed unexpectedly. Try again in a moment." });
     }
   }
 
@@ -108,110 +77,6 @@ export function AlphaVantageDiagnosticPanel() {
       ) : null}
 
       {state.status === "done" ? <DiagnosticOutcome result={state.result} /> : null}
-
-      <div className="border-t border-zinc-800 pt-4">
-        <p className="mb-2 text-sm font-medium text-zinc-200">Balance Sheet field verification (temporary, one ticker only)</p>
-        <p className="mb-3 text-xs text-zinc-500">
-          Checks APLD against Alpha Vantage&apos;s BALANCE_SHEET endpoint to see exactly which debt/equity fields are populated, before a
-          Debt/Equity formula is implemented for real. Costs at most 1 tracked call against today&apos;s shared budget (drawn from the
-          manual reserve). Never saves anything.
-        </p>
-        <button
-          type="button"
-          onClick={runBalanceSheet}
-          disabled={balanceSheetPending}
-          data-testid="run-alpha-vantage-balance-sheet-diagnostic-button"
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-violet-400/40 bg-violet-400/10 px-4 text-sm font-medium text-violet-100 transition hover:border-violet-300 hover:bg-violet-400/15 disabled:cursor-wait disabled:opacity-75"
-        >
-          <PlayCircle className={`size-4 ${balanceSheetPending ? "motion-safe:animate-pulse" : ""}`} aria-hidden />
-          {balanceSheetPending ? "Calling Alpha Vantage…" : "Verify Balance Sheet fields (APLD - 1 call)"}
-        </button>
-
-        {balanceSheetState.status === "error" ? (
-          <div className="mt-3 rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{balanceSheetState.message}</div>
-        ) : null}
-
-        {balanceSheetState.status === "done" ? <BalanceSheetDiagnosticOutcome result={balanceSheetState.result} /> : null}
-      </div>
-    </div>
-  );
-}
-
-function BalanceSheetDiagnosticOutcome({ result }: { result: AlphaVantageBalanceSheetDiagnosticResult }) {
-  if (result.status === "UNAVAILABLE" || result.status === "ERROR") {
-    return (
-      <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-300">
-        <p>{result.message}</p>
-        <p className="mt-1 text-xs text-zinc-500">Timestamp: {shortDateTime(result.timestamp)}</p>
-      </div>
-    );
-  }
-
-  const report = result.report;
-  const groups = [...new Set(report.rows.map((row) => row.group))];
-  const outcomeTone = report.outcome === "SUCCESS" ? "good" : report.outcome === "RATE_LIMITED" ? "warn" : "bad";
-
-  return (
-    <div className="mt-3 space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge tone="info">function={report.endpointFunction}</Badge>
-        <Badge tone="good">Read only</Badge>
-        <Badge tone="neutral">Nothing saved</Badge>
-        <Badge tone={outcomeTone}>{report.outcome}</Badge>
-        <span className="text-xs text-zinc-500">{report.ticker} · {shortDateTime(report.timestamp)}</span>
-      </div>
-      {report.message ? <p className="text-sm text-zinc-300">{report.message}</p> : null}
-      <div className="rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-200">
-        Current Ratio (totalCurrentAssets / totalCurrentLiabilities, latest quarterly report):{" "}
-        <span className="font-semibold">{report.computedCurrentRatio === null ? "Unavailable" : report.computedCurrentRatio.toFixed(2)}</span>
-      </div>
-      <div className="space-y-3">
-        {groups.map((group) => (
-          <div key={group}>
-            <p className="mb-1 text-xs font-semibold uppercase tracking-normal text-sky-200">{group}</p>
-            <div className="space-y-1">
-              {report.rows
-                .filter((row) => row.group === group)
-                .map((row) => (
-                  <BalanceSheetFieldRow key={row.key} row={row} />
-                ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function BalanceSheetFieldRow({ row }: { row: AlphaVantageBalanceSheetDiagnosticRow }) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs">
-      <div>
-        <div className="font-medium text-zinc-100">{row.label}</div>
-        <div className="font-mono text-zinc-500">{row.key}</div>
-      </div>
-      <BalanceSheetPresenceValue value={row.presence} />
-    </div>
-  );
-}
-
-function BalanceSheetPresenceValue({ value }: { value: BalanceSheetFieldPresence }) {
-  const stateClass =
-    value.state === "PRESENT_VALUE"
-      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
-      : value.state === "PRESENT_NULL"
-        ? "border-amber-400/30 bg-amber-400/10 text-amber-100"
-        : value.state === "PRESENT_UNDISPLAYED"
-          ? "border-zinc-700 bg-zinc-800 text-zinc-200"
-          : "border-zinc-800 bg-zinc-950 text-zinc-500";
-  const label =
-    value.state === "PRESENT_VALUE" ? "PRESENT" : value.state === "PRESENT_NULL" ? "PRESENT NULL" : value.state === "PRESENT_UNDISPLAYED" ? "PRESENT HIDDEN" : "ABSENT";
-  const displayValue = value.state === "PRESENT_VALUE" ? value.value : value.state === "PRESENT_NULL" ? value.raw : null;
-
-  return (
-    <div className={`inline-flex max-w-64 flex-col gap-1 rounded-md border px-2 py-1 ${stateClass}`}>
-      <span className="text-[11px] font-semibold uppercase tracking-normal">{label}</span>
-      {displayValue ? <span className="break-words text-xs">{displayValue}</span> : null}
     </div>
   );
 }

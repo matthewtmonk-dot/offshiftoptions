@@ -398,7 +398,7 @@ maybeDescribe("Alpha Vantage shared fundamentals cache and priority queue", () =
     });
   });
 
-  describe("BALANCE_SHEET (Current Ratio) - endpoint-specific freshness, priority, and safety", () => {
+  describe("BALANCE_SHEET (Current Ratio / Debt-Equity) - endpoint-specific freshness, priority, and safety", () => {
     function balanceSheetPayload(overrides: Record<string, unknown> = {}) {
       return {
         symbol: testTickers[0],
@@ -428,8 +428,30 @@ maybeDescribe("Alpha Vantage shared fundamentals cache and priority queue", () =
       expect(row?.balanceSheetFiscalDateEnding?.toISOString().slice(0, 10)).toBe("2026-06-30");
       expect(row?.balanceSheetFetchedAt).not.toBeNull();
       expect(row?.balanceSheetStaleAfter).not.toBeNull();
-      // Debt/Equity is never computed by this slice - stays null regardless of a SUCCESS balance sheet fetch.
+      // This payload doesn't include shortLongTermDebtTotal/totalShareholderEquity, so D/E stays
+      // null here - see the dedicated Debt/Equity describe block below for the populated case.
       expect(row?.balanceSheetDebtToEquity).toBeNull();
+    });
+
+    it("stores Debt/Equity using the verified formula on a real SUCCESS with both endpoints' fields present", async () => {
+      const result = await fundamentals.refreshSingleTickerBalanceSheet(testTickers[0], {
+        now: TEST_NOW,
+        fetchFn: fetchFnReturning(
+          balanceSheetPayload({
+            totalCurrentAssets: "5000000",
+            totalCurrentLiabilities: "2000000",
+            shortLongTermDebtTotal: "509991600",
+            totalShareholderEquity: "1780242000",
+          }),
+        ),
+      });
+      expect(result.status).toBe("DONE");
+
+      const row = await prisma.tickerFundamentals.findUnique({ where: { ticker: testTickers[0] } });
+      // One BALANCE_SHEET request populates both Current Ratio and Debt/Equity - no extra call.
+      expect(Number(row?.balanceSheetCurrentRatio)).toBe(2.5);
+      // The column is Decimal(12,4) - stored/rounded to 4 decimal places, not the raw double.
+      expect(Number(row?.balanceSheetDebtToEquity)).toBeCloseTo(0.286473, 4);
     });
 
     it("treats a zero denominator as unavailable (null), never dividing by zero", async () => {

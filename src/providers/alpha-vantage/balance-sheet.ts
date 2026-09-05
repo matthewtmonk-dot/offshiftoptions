@@ -7,14 +7,20 @@ export const ALPHA_VANTAGE_BALANCE_SHEET_FUNCTION = "BALANCE_SHEET" as const;
 
 /**
  * Production fetch-and-normalize path for a single ticker's BALANCE_SHEET response, used by the
- * shared fundamentals cache sync (src/lib/alpha-vantage-fundamentals.ts). Only Current Ratio is
- * computed here - Debt/Equity is deliberately NOT derived anywhere in this file. Alpha Vantage's
- * BALANCE_SHEET exposes several overlapping debt fields (shortTermDebt, currentDebt,
- * longTermDebt, currentLongTermDebt, longTermDebtNoncurrent, shortLongTermDebtTotal) whose exact
- * overlap/composition has not been verified against a real response (see
- * balance-sheet-diagnostic.ts, the one-ticker APLD verification tool) - inventing a formula from
- * documentation alone risks double-counting debt components, so this stays unimplemented until
- * verified. See PROJECT_HANDOFF.md's Alpha Vantage API section.
+ * shared fundamentals cache sync (src/lib/alpha-vantage-fundamentals.ts). Both Current Ratio and
+ * Debt/Equity are computed from the SAME single request - no extra Alpha Vantage call is needed
+ * to get both.
+ *
+ * Debt/Equity formula - verified 2026-09 against a real production APLD BALANCE_SHEET response
+ * via the (now-removed) temporary one-ticker diagnostic:
+ *   debtToEquity = shortLongTermDebtTotal / totalShareholderEquity
+ * `shortLongTermDebtTotal` is Alpha Vantage's own pre-combined short+long-term debt figure and
+ * is used as-is - it is NEVER added to `shortTermDebt`/`currentDebt`/`longTermDebt`/etc, which
+ * would double-count overlapping debt components already folded into it. `totalLiabilities` is
+ * NOT used as the numerator (it includes non-debt liabilities like accounts payable and deferred
+ * revenue, which is a different, less precise metric). If `shortLongTermDebtTotal` itself is
+ * absent for a given ticker/quarter, Debt/Equity is left null rather than synthesized from the
+ * other overlapping fields - see PROJECT_HANDOFF.md's Alpha Vantage API section.
  */
 export type NormalizedBalanceSheetFields = {
   /** ISO date string (Alpha Vantage's own "YYYY-MM-DD" format), e.g. "2026-06-30". */
@@ -23,6 +29,11 @@ export type NormalizedBalanceSheetFields = {
    * whenever either input is missing/unparseable or the denominator isn't a real positive
    * number. Never guessed, never substituted from an annual report. */
   currentRatio: number | null;
+  /** shortLongTermDebtTotal / totalShareholderEquity from the latest quarterly report - null
+   * whenever the numerator is missing or the denominator isn't a real positive number (a
+   * company with zero or negative shareholder equity has no meaningful D/E ratio). A real
+   * numeric zero debt value correctly survives as 0, never collapsed to null. */
+  debtToEquity: number | null;
 };
 
 export type AlphaVantageBalanceSheetFetchResult =
@@ -88,11 +99,19 @@ export async function fetchAlphaVantageBalanceSheetForTicker({
       ? totalCurrentAssets / totalCurrentLiabilities
       : null;
 
+  const shortLongTermDebtTotal = nullableNumber(latest["shortLongTermDebtTotal"]);
+  const totalShareholderEquity = nullableNumber(latest["totalShareholderEquity"]);
+  const debtToEquity =
+    shortLongTermDebtTotal !== null && totalShareholderEquity !== null && totalShareholderEquity > 0
+      ? shortLongTermDebtTotal / totalShareholderEquity
+      : null;
+
   return {
     outcome: "SUCCESS",
     fields: {
       fiscalDateEnding: nullableString(latest["fiscalDateEnding"], apiKey),
       currentRatio,
+      debtToEquity,
     },
   };
 }
