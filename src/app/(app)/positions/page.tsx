@@ -43,6 +43,7 @@ import { resolveInheritedVisibility } from "@/lib/privacy";
 import type { BrokerPosition } from "@/providers/broker-read/types";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { getPendingBrokerImportBatchForUser, getBrokerImportBatchesForUser, type BrokerImportPreviewRow } from "@/lib/broker-import";
+import { NewAccountNameAndTypeFields } from "./new-account-name-field";
 import {
   getBrokerActivityAwaitingReviewForUser,
   splitBrokerPositionsByCampaignLink,
@@ -355,11 +356,11 @@ export default async function PositionsPage({
       {view === "open" ? (
         <section className="space-y-4">
           {data.ownAccounts.length === 0 ? (
-            <NewAccountPanel buddyName={buddyName} defaultOpen />
+            <NewAccountPanel buddyName={buddyName} userName={user.name} defaultOpen />
           ) : (
             <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
               <NewCampaignPanel accounts={data.ownAccounts} buddyName={buddyName} />
-              <NewAccountPanel buddyName={buddyName} />
+              <NewAccountPanel buddyName={buddyName} userName={user.name} />
             </section>
           )}
 
@@ -542,7 +543,15 @@ function NewCampaignPanel({
   );
 }
 
-function NewAccountPanel({ buddyName, defaultOpen }: { buddyName: string; defaultOpen?: boolean }) {
+function NewAccountPanel({
+  buddyName,
+  userName,
+  defaultOpen,
+}: {
+  buddyName: string;
+  userName: string;
+  defaultOpen?: boolean;
+}) {
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" open={defaultOpen}>
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
@@ -554,19 +563,7 @@ function NewAccountPanel({ buddyName, defaultOpen }: { buddyName: string; defaul
       </summary>
       <form action={createTradingAccountAction} className="mt-4 grid gap-4 border-t border-zinc-800 pt-4 sm:grid-cols-2">
         <input type="hidden" name="returnTo" value="/positions" />
-        <div className="space-y-2">
-          <FieldLabel>Name</FieldLabel>
-          <input name="name" required placeholder="Matt IRA" className={inputClass} />
-        </div>
-        <div className="space-y-2">
-          <FieldLabel>Type</FieldLabel>
-          <select name="accountType" defaultValue="IRA" className={inputClass}>
-            <option value="IRA">IRA</option>
-            <option value="Taxable">Taxable</option>
-            <option value="Paper">Paper</option>
-            <option value="Manual">Manual</option>
-          </select>
-        </div>
+        <NewAccountNameAndTypeFields userName={userName} inputClass={inputClass} />
         <div className="space-y-2">
           <FieldLabel>Starting balance</FieldLabel>
           <input name="startingBalance" type="number" step="0.01" min="0" placeholder="10000" className={inputClass} />
