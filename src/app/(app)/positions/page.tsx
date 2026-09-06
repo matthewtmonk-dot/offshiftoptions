@@ -35,7 +35,7 @@ import {
   type CampaignProgressSummary,
   type ContributionAdjustedGoalSummary,
 } from "@/domain/finance/performance";
-import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, type RollStatus } from "@/domain/finance/rollStatus";
+import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isRollGuidanceApplicable, type RollStatus } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { getTrackerPageData, normalizeTrackerScope, optionContractKey, type TrackerScope } from "@/lib/app-data";
 import { money, percent, shortCalendarDate, shortDate, toNumber } from "@/lib/format";
@@ -211,11 +211,15 @@ export default async function PositionsPage({
   const openPutsByCampaignId = new Map(openRows.map((row) => [row.campaign.id, getCurrentOpenPut(row.campaign.events)]));
   const rollStatusByCampaignId = new Map<string, RollStatus | "UNAVAILABLE">();
   if (view === "open") {
-    const tickersNeedingQuotes = openRows
+    // Once a campaign is in Expiration Processing, its fate is already decided and just
+    // awaiting confirmation - HOLD/ROLL guidance no longer applies, and the lifecycle stage
+    // itself (rendered alongside this badge) is the correct guidance to show instead.
+    const rollEligibleRows = openRows.filter((row) => isRollGuidanceApplicable(row.summary.currentStage));
+    const tickersNeedingQuotes = rollEligibleRows
       .filter((row) => openPutsByCampaignId.get(row.campaign.id))
       .map((row) => row.campaign.ticker);
     const prices = await getLiveQuotePricesForUser(user.id, tickersNeedingQuotes);
-    for (const row of openRows) {
+    for (const row of rollEligibleRows) {
       const openPut = openPutsByCampaignId.get(row.campaign.id);
       if (!openPut) {
         continue;

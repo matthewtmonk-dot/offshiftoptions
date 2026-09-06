@@ -15,7 +15,7 @@ import { computeOpenPositionsCount, describeBrokerPositionForDisplay, summarizeC
 import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
-import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
+import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isRollGuidanceApplicable } from "@/domain/finance/rollStatus";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { honestSetupLabel, honestSetupScore, type CriterionResult, type ScanSummary } from "@/domain/scanner/scanner";
 import { addReactionAction } from "../actions";
@@ -374,16 +374,25 @@ async function DashboardOpenPositionsWithRollStatus({
   campaigns: DashboardOpenCampaign[];
   rollBufferPercent: number;
 }) {
+  // Once a campaign is in Expiration Processing, its fate is already decided and just awaiting
+  // confirmation - HOLD/ROLL guidance no longer applies, and the lifecycle stage itself
+  // (rendered alongside this slot in DashboardOpenPositionRow) is the correct guidance instead.
+  const rollEligibleCampaignIds = new Set(
+    campaigns
+      .filter((campaign) => isRollGuidanceApplicable(summarizeCampaign({ status: campaign.status, events: campaign.events }).currentStage))
+      .map((campaign) => campaign.id),
+  );
   const openPutsByCampaignId = new Map(campaigns.map((campaign) => [campaign.id, getCurrentOpenPut(campaign.events)]));
   const tickersNeedingQuotes = campaigns
-    .filter((campaign) => openPutsByCampaignId.get(campaign.id))
+    .filter((campaign) => rollEligibleCampaignIds.has(campaign.id) && openPutsByCampaignId.get(campaign.id))
     .map((campaign) => campaign.ticker);
   const prices = await getLiveQuotePricesForUser(userId, tickersNeedingQuotes);
 
   return (
     <>
       {campaigns.map((campaign) => {
-        const openPut = openPutsByCampaignId.get(campaign.id) ?? null;
+        const rollEligible = rollEligibleCampaignIds.has(campaign.id);
+        const openPut = rollEligible ? (openPutsByCampaignId.get(campaign.id) ?? null) : null;
         const price = openPut ? (prices.get(campaign.ticker.toUpperCase()) ?? null) : null;
         const rollStatus =
           openPut && price !== null

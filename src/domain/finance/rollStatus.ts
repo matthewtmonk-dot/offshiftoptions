@@ -9,6 +9,8 @@
  * price vs. strike) drives the color.
  */
 
+import type { CampaignCurrentStage } from "./campaigns";
+
 export const DEFAULT_ROLL_BUFFER_PERCENT = 3.0;
 
 export type RollStatusColor = "GREEN" | "AMBER" | "RED";
@@ -46,6 +48,17 @@ export function isPastFridayManagementCheckpoint(now: Date = new Date()): boolea
     return true;
   }
   return weekday === "Fri" && hour >= 15;
+}
+
+/**
+ * Once a campaign reaches Expiration Processing, its fate is already decided and only awaiting
+ * confirmation (see PROJECT_HANDOFF.md "Tuesday Sep 8" expiration-confirmation step) - HOLD/ROLL
+ * decision guidance no longer applies, since there's nothing left to hold or roll. This is an
+ * aggregation/rendering guard only: it decides whether to call computeRollStatus() at all, and
+ * never changes that function's own price/strike/buffer semantics.
+ */
+export function isRollGuidanceApplicable(currentStage: CampaignCurrentStage): boolean {
+  return currentStage !== "Expiration processing";
 }
 
 function formatBufferPercent(value: number): string {

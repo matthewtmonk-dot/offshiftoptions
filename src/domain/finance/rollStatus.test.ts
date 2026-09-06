@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isPastFridayManagementCheckpoint } from "./rollStatus";
+import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isPastFridayManagementCheckpoint, isRollGuidanceApplicable } from "./rollStatus";
+import { summarizeCampaign } from "./campaigns";
 
 describe("computeRollStatus", () => {
   it("returns GREEN/HOLD when comfortably above strike and outside the buffer", () => {
@@ -114,5 +115,40 @@ describe("isPastFridayManagementCheckpoint", () => {
   it("is true on Saturday and Sunday", () => {
     expect(isPastFridayManagementCheckpoint(new Date("2026-09-05T12:00:00.000Z"))).toBe(true);
     expect(isPastFridayManagementCheckpoint(new Date("2026-09-06T12:00:00.000Z"))).toBe(true);
+  });
+});
+
+describe("isRollGuidanceApplicable", () => {
+  it("allows roll guidance for a normal open cash-secured put", () => {
+    expect(isRollGuidanceApplicable("Cash-secured put")).toBe(true);
+  });
+
+  it("allows roll guidance for other pre-expiration stages", () => {
+    expect(isRollGuidanceApplicable("Rolled put")).toBe(true);
+    expect(isRollGuidanceApplicable("Assigned shares")).toBe(true);
+    expect(isRollGuidanceApplicable("Covered call")).toBe(true);
+    expect(isRollGuidanceApplicable("Review needed")).toBe(true);
+  });
+
+  it("suppresses roll guidance once a campaign is in Expiration processing", () => {
+    expect(isRollGuidanceApplicable("Expiration processing")).toBe(false);
+  });
+
+  it("end to end: a normal open CSP's own stage keeps roll guidance eligible, an expired-but-unconfirmed one's does not", () => {
+    const stillOpen = summarizeCampaign({
+      status: "OPEN",
+      asOf: new Date("2026-09-04T14:00:00Z"),
+      events: [{ type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 17.5, contracts: 1, premium: 0.28, expiration: "2026-09-04" }],
+    });
+    expect(stillOpen.currentStage).toBe("Cash-secured put");
+    expect(isRollGuidanceApplicable(stillOpen.currentStage)).toBe(true);
+
+    const awaitingConfirmation = summarizeCampaign({
+      status: "OPEN",
+      asOf: new Date("2026-09-05T13:00:00Z"),
+      events: [{ type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 17.5, contracts: 1, premium: 0.28, expiration: "2026-09-04" }],
+    });
+    expect(awaitingConfirmation.currentStage).toBe("Expiration processing");
+    expect(isRollGuidanceApplicable(awaitingConfirmation.currentStage)).toBe(false);
   });
 });
