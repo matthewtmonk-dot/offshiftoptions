@@ -434,7 +434,10 @@ export async function previewSchwabRecordRepairAction(): Promise<SchwabRecordRep
 
 export async function repairSchwabRecordsAction(matchToken: string): Promise<SchwabRecordRepairResult> {
   const user = await requireCurrentUser();
-  return repairMalformedSchwabTransactionRecordsForUser(user.id, matchToken);
+  const result = await repairMalformedSchwabTransactionRecordsForUser(user.id, matchToken);
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+  return result;
 }
 
 export async function runCampaignEventSequenceDiagnosticAction(): Promise<CampaignEventSequenceReport> {
@@ -449,7 +452,10 @@ export async function previewCampaignHistoryRepairAction(): Promise<CampaignHist
 
 export async function repairCampaignHistoryAction(matchToken: string): Promise<CampaignHistoryRepairResult> {
   const user = await requireCurrentUser();
-  return repairCampaignHistoryForUser(user.id, matchToken);
+  const result = await repairCampaignHistoryForUser(user.id, matchToken);
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+  return result;
 }
 
 export async function createTradingAccountAction(formData: FormData) {

@@ -11,7 +11,7 @@ import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { splitBrokerPositionsByCampaignLink } from "@/lib/broker-reconciliation";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
-import { computeOpenPositionsCount, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
+import { describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
@@ -67,10 +67,18 @@ export default async function DashboardPage() {
   const latestBrokerSnapshotAt = latestSnapshotAt(
     accountRows.map((row) => row.ledger.latestBrokerSnapshot?.asOf ?? null),
   );
-  const campaignSecuredCapital = data.openCampaigns.reduce((sum, campaign) => {
+  // Awaiting-expiration is a lifecycle-stage breakdown of the SAME open-campaign count, never a
+  // broker position count - an Expiration Processing campaign has no corresponding Schwab
+  // position once its option expires, so it must never be labeled or summed as one.
+  let campaignSecuredCapital = 0;
+  let awaitingExpirationCount = 0;
+  for (const campaign of data.openCampaigns) {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-    return sum + (summary.collateralCommitted ?? 0);
-  }, 0);
+    campaignSecuredCapital += summary.collateralCommitted ?? 0;
+    if (summary.currentStage === "Expiration processing") {
+      awaitingExpirationCount += 1;
+    }
+  }
   const openCampaignCount = data.openCampaigns.length;
   const winLoss = summarizeWinLoss(completedForPerformance);
   const weekly = summarizeWeeklyReturns(completedForPerformance, hasAnyAccountValue ? totalValue : null, WEEKLY_TARGET_PERCENT);
@@ -102,10 +110,9 @@ export default async function DashboardPage() {
         <span>
           <h1 className="inline text-sm font-semibold text-zinc-100">Hey {user.name}</h1> -{" "}
           <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "LIVE SCHWAB" : "DEMO SCANNER"}</Badge>{" "}
-          <Suspense fallback={<>{openCampaignCount} tracked open</>}>
-            <DashboardOpenCountSummary userId={user.id} openCampaignCount={openCampaignCount} />
-          </Suspense>{" "}
-          - win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
+          {openCampaignCount} campaign{openCampaignCount === 1 ? "" : "s"} open
+          {awaitingExpirationCount > 0 ? ` (${awaitingExpirationCount} awaiting expiration)` : ""} - win rate{" "}
+          {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
         </span>
         <span className="flex flex-col items-end gap-0.5 text-right">
           <span className="text-xs font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
@@ -126,6 +133,11 @@ export default async function DashboardPage() {
           label="Cash"
           value={hasAnyCash ? money(totalCash) : "No data"}
           detail={latestBrokerSnapshotAt ? `Schwab snapshot ${formatAge(latestBrokerSnapshotAt)}` : undefined}
+        />
+        <Stat
+          label="Open campaigns"
+          value={String(openCampaignCount)}
+          detail={awaitingExpirationCount > 0 ? `${awaitingExpirationCount} awaiting expiration confirmation` : "Tracker lifecycle count"}
         />
         <Suspense fallback={<DashboardBrokerStatsFallback openCampaignCount={openCampaignCount} securedCapital={campaignSecuredCapital} />}>
           <DashboardBrokerStats
@@ -312,21 +324,6 @@ export default async function DashboardPage() {
   );
 }
 
-async function DashboardOpenCountSummary({
-  userId,
-  openCampaignCount,
-}: {
-  userId: string;
-  openCampaignCount: number;
-}) {
-  const { schwabPositions, brokerPositions } = await loadDashboardBrokerData(userId);
-  if (schwabPositions === null) {
-    return <>{openCampaignCount} tracked open</>;
-  }
-
-  return <>{computeOpenPositionsCount(openCampaignCount, brokerPositions)} open</>;
-}
-
 type DashboardOpenCampaign = Awaited<ReturnType<typeof getDashboardData>>["openCampaigns"][number];
 
 function DashboardOpenPositionRow({
@@ -419,11 +416,7 @@ function DashboardBrokerStatsFallback({
         value={openCampaignCount > 0 ? `${money(securedCapital)}+` : "Checking"}
         detail="Refreshing Schwab positions"
       />
-      <Stat
-        label="Open positions"
-        value={openCampaignCount > 0 ? `${openCampaignCount}+` : "Checking"}
-        detail="Stored campaigns shown first"
-      />
+      <Stat label="Broker positions" value="Checking" detail="Actual Schwab positions - separate from campaign count" />
     </>
   );
 }
@@ -447,20 +440,18 @@ async function DashboardBrokerStats({
           value={openCampaignCount > 0 ? money(campaignSecuredCapital) : "No broker data"}
           detail="Schwab unavailable; stored campaigns only"
         />
-        <Stat
-          label="Open positions"
-          value={openCampaignCount > 0 ? String(openCampaignCount) : "No broker data"}
-          detail="Schwab unavailable; stored campaigns only"
-        />
+        <Stat label="Broker positions" value="No broker data" detail="Schwab unavailable" />
       </>
     );
   }
 
   // Additive, not guessed: reconciled Schwab positions are represented by their
-  // Campaigns, while unlinked live positions remain separate until the user links them.
+  // Campaigns, while unlinked live positions remain separate until the user links them. This
+  // is dollar-collateral math only - it never implies an unlinked position and a campaign are
+  // the same real-world trade counted once; see "Broker positions" below for the actual,
+  // un-conflated Schwab position count.
   const brokerCsp = summarizeCspSecuredCapital(brokerPositions);
   const securedCapital = campaignSecuredCapital + brokerCsp.total;
-  const openPositionsCount = computeOpenPositionsCount(openCampaignCount, brokerPositions);
 
   return (
     <>
@@ -469,7 +460,11 @@ async function DashboardBrokerStats({
         value={brokerCsp.hasUnknown ? `${money(securedCapital)}+` : money(securedCapital)}
         detail="Campaigns + unlinked Schwab"
       />
-      <Stat label="Open positions" value={String(openPositionsCount)} detail="Campaigns + unlinked Schwab" />
+      <Stat
+        label="Broker positions"
+        value={String(brokerPositions.length)}
+        detail="Actual Schwab positions - separate from campaign count"
+      />
     </>
   );
 }

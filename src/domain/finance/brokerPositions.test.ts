@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BrokerPosition } from "@/providers/broker-read/types";
-import {
-  classifyBrokerPosition,
-  computeOpenPositionsCount,
-  describeBrokerPositionForDisplay,
-  summarizeCspSecuredCapital,
-} from "./brokerPositions";
+import { classifyBrokerPosition, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "./brokerPositions";
 
 function shortPut(overrides: Partial<BrokerPosition> = {}): BrokerPosition {
   return {
@@ -89,25 +84,6 @@ describe("summarizeCspSecuredCapital", () => {
     const summary = summarizeCspSecuredCapital([shortPut({ symbol: "RIOT SOMETHING WEIRD", assetType: "OPTION", putCall: null })]);
     expect(summary.total).toBe(0);
     expect(summary.hasUnknown).toBe(true);
-  });
-});
-
-describe("computeOpenPositionsCount", () => {
-  it("is not zero when there are zero OSO campaigns but Schwab reports open positions (the reported bug)", () => {
-    const positions: BrokerPosition[] = [
-      shortPut({ symbol: "RIOT 260904P00017500" }),
-      shortPut({ symbol: "APLD 260904P00023500" }),
-      shortPut({ symbol: "CORZ 260904P00016500" }),
-    ];
-    expect(computeOpenPositionsCount(0, positions)).toBe(3);
-  });
-
-  it("adds campaigns and broker positions together (documented interim non-deduplicated behavior)", () => {
-    expect(computeOpenPositionsCount(2, [shortPut()])).toBe(3);
-  });
-
-  it("returns just the campaign count when there are no broker positions", () => {
-    expect(computeOpenPositionsCount(4, [])).toBe(4);
   });
 });
 

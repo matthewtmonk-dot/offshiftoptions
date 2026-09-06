@@ -74,20 +74,6 @@ export function summarizeCspSecuredCapital(positions: BrokerPosition[]): CspSecu
   return { total: round(total, 2), hasUnknown };
 }
 
-/**
- * Total "open positions" shown on the Dashboard: manually-tracked OSO campaigns plus
- * Schwab broker positions, added together. There is deliberately no reconciliation yet
- * (see the Tracker's "Possible match"/"Unlinked" hint) - an OSO campaign and a Schwab
- * position with no explicit link between them are two separate records, so this is a
- * simple additive count, not a deduplicated one. If the same real-world trade is tracked
- * as both an OSO campaign and a synced Schwab position, it is intentionally counted twice
- * today; this is the safest available interim behavior (never silently merging or
- * guessing a link) until reconciliation ships. See PROJECT_HANDOFF.md.
- */
-export function computeOpenPositionsCount(openCampaignCount: number, brokerPositions: BrokerPosition[]): number {
-  return openCampaignCount + brokerPositions.length;
-}
-
 export type BrokerPositionDisplay = {
   title: string;
   detailLine: string | null;
