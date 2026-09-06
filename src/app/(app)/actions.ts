@@ -61,6 +61,12 @@ import {
   getSanitizedCampaignEventSequenceForUser,
   type CampaignEventSequenceReport,
 } from "@/lib/campaign-event-sequence-diagnostic";
+import {
+  previewCampaignHistoryRepairForUser,
+  repairCampaignHistoryForUser,
+  type CampaignHistoryRepairPreview,
+  type CampaignHistoryRepairResult,
+} from "@/lib/campaign-history-repair";
 import { confirmBrokerImportForUser, discardBrokerImportForUser, previewBrokerImportForUser } from "@/lib/broker-import";
 import {
   confirmBrokerPositionAsCampaignForUser,
@@ -434,6 +440,16 @@ export async function repairSchwabRecordsAction(matchToken: string): Promise<Sch
 export async function runCampaignEventSequenceDiagnosticAction(): Promise<CampaignEventSequenceReport> {
   const user = await requireCurrentUser();
   return getSanitizedCampaignEventSequenceForUser(user.id);
+}
+
+export async function previewCampaignHistoryRepairAction(): Promise<CampaignHistoryRepairPreview> {
+  const user = await requireCurrentUser();
+  return previewCampaignHistoryRepairForUser(user.id);
+}
+
+export async function repairCampaignHistoryAction(matchToken: string): Promise<CampaignHistoryRepairResult> {
+  const user = await requireCurrentUser();
+  return repairCampaignHistoryForUser(user.id, matchToken);
 }
 
 export async function createTradingAccountAction(formData: FormData) {

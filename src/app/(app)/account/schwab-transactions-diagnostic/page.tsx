@@ -5,6 +5,7 @@ import { DiagnosticPanel } from "./diagnostic-panel";
 import { BrokerRecordClassificationPanel } from "./broker-record-classification-panel";
 import { RepairPanel } from "./repair-panel";
 import { CampaignEventSequencePanel } from "./campaign-event-sequence-panel";
+import { CampaignHistoryRepairPanel } from "./campaign-history-repair-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +60,10 @@ export default async function SchwabTransactionsDiagnosticPage() {
 
       <div className="space-y-3 border-t border-zinc-800 pt-6">
         <RepairPanel />
+      </div>
+
+      <div className="space-y-3 border-t border-zinc-800 pt-6">
+        <CampaignHistoryRepairPanel />
       </div>
     </div>
   );
