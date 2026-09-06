@@ -228,6 +228,31 @@ maybeDescribe("Schwab broker import (preview/confirm/dedupe/conflict/privacy)", 
     await discardBrokerImportForUser(userA.id, preview.batchId);
   });
 
+  it("works with no Schwab OAuth connection at all - CSV import never requires an API/OAuth link", async () => {
+    const connectionCount = await prisma.brokerConnection.count({ where: { userId: userB.id, provider: "SCHWAB" } });
+    expect(connectionCount).toBe(0); // Eric-equivalent: never configured/connected Schwab OAuth
+
+    const preview = await previewBrokerImportForUser(userB.id, csvFile("no-oauth.csv", fixture("transactions.csv")), null);
+    expect(preview.counts.newCount).toBeGreaterThan(0);
+    await confirmBrokerImportForUser(userB.id, preview.batchId);
+
+    const stored = await prisma.brokerRecord.count({ where: { userId: userB.id, kind: "TRANSACTION" } });
+    expect(stored).toBeGreaterThan(0);
+
+    // Clean up so later tests in this file can still assert userB starts with zero records.
+    await prisma.brokerRecord.deleteMany({ where: { userId: userB.id, kind: "TRANSACTION" } });
+  });
+
+  it("a recognized-format file with zero data rows reports a useful zero-row result, never a false success", async () => {
+    const headerOnly = fixture("transactions.csv").split(/\r\n|\r|\n/)[0];
+
+    const preview = await previewBrokerImportForUser(userA.id, csvFile("header-only.csv", headerOnly), null);
+    expect(preview.exportType).toBe("TRANSACTIONS");
+    expect(preview.counts.rowCount).toBe(0);
+    expect(preview.counts.newCount).toBe(0);
+    expect(preview.rows).toHaveLength(0);
+  });
+
   it("User B cannot see User A's persisted broker records", async () => {
     const preview = await previewBrokerImportForUser(
       userA.id,

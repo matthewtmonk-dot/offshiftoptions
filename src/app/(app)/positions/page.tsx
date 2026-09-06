@@ -460,6 +460,9 @@ export default async function PositionsPage({
           />
           <ImportStatusMessage
             imported={firstParam(query.imported)}
+            newCount={firstParam(query.newCount)}
+            duplicateCount={firstParam(query.duplicateCount)}
+            reviewCount={firstParam(query.reviewCount)}
             discarded={firstParam(query.discarded)}
             linked={firstParam(query.linked)}
             skipped={firstParam(query.skipped)}
@@ -1025,20 +1028,36 @@ function SchwabPositionsPanel({
 
 function ImportStatusMessage({
   imported,
+  newCount,
+  duplicateCount,
+  reviewCount,
   discarded,
   linked,
   skipped,
 }: {
   imported?: string;
+  newCount?: string;
+  duplicateCount?: string;
+  reviewCount?: string;
   discarded?: string;
   linked?: string;
   skipped?: string;
 }) {
   if (imported) {
+    const newN = Number(newCount ?? 0);
+    const duplicateN = Number(duplicateCount ?? 0);
+    const reviewN = Number(reviewCount ?? 0);
+    // Honest, count-specific feedback - never a generic "records were added" claim when the
+    // actual new count is zero, so a re-uploaded or empty-of-new-data file is never confused
+    // with a real import.
+    const message =
+      newN === 0
+        ? `Nothing new was imported${duplicateN > 0 ? ` - all ${duplicateN} recognized row${duplicateN === 1 ? "" : "s"} were already on file` : ""}.`
+        : `Imported ${newN} new record${newN === 1 ? "" : "s"}${reviewN > 0 ? ` (${reviewN} need review)` : ""}${
+            duplicateN > 0 ? ` - ${duplicateN} duplicate${duplicateN === 1 ? "" : "s"} skipped` : ""
+          }.`;
     return (
-      <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">
-        Import confirmed. New records were added to your account; duplicates and unchanged snapshots were skipped.
-      </div>
+      <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">{message}</div>
     );
   }
   if (discarded) {
@@ -1149,12 +1168,14 @@ function SchwabImportPreviewPanel({
           Preview: {batch.safeOriginalFilename} ({batch.exportType})
         </h2>
         <div className="flex gap-2">
-          <form action={confirmSchwabImportAction}>
-            <input type="hidden" name="batchId" value={batchId} />
-            <button type="submit" className={primaryButtonClass}>
-              Confirm Import
-            </button>
-          </form>
+          {batch.rowCount > 0 ? (
+            <form action={confirmSchwabImportAction}>
+              <input type="hidden" name="batchId" value={batchId} />
+              <button type="submit" className={primaryButtonClass}>
+                Confirm Import
+              </button>
+            </form>
+          ) : null}
           <form action={discardSchwabImportAction}>
             <input type="hidden" name="batchId" value={batchId} />
             <button type="submit" className={tinyButtonClass}>
@@ -1163,6 +1184,18 @@ function SchwabImportPreviewPanel({
           </form>
         </div>
       </div>
+      {batch.rowCount === 0 ? (
+        <div className="mb-3 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+          0 recognized rows. OSO detected a Schwab {batch.exportType.replace(/_/g, " ").toLowerCase()} export but could not
+          read any entries from it - the file may be empty, or in a variation of the format OSO does not yet
+          recognize. Discard this preview and try re-exporting the file from Schwab.
+        </div>
+      ) : batch.newCount === 0 && batch.conflictCount === 0 && batch.reviewCount === 0 ? (
+        <div className="mb-3 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300">
+          All {batch.duplicateCount} recognized row{batch.duplicateCount === 1 ? "" : "s"} in this file were already
+          imported previously - nothing new to add.
+        </div>
+      ) : null}
       <dl className="mb-3 grid grid-cols-3 gap-3 text-sm sm:grid-cols-5">
         <ResultItem label="New" value={batch.newCount} tone={batch.newCount > 0 ? 1 : null} />
         <ResultItem label="Duplicate" value={batch.duplicateCount} />

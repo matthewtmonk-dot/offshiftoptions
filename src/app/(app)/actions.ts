@@ -752,8 +752,9 @@ export async function confirmSchwabImportAction(formData: FormData) {
   const user = await requireCurrentUser();
   const batchId = String(formData.get("batchId") ?? "");
 
+  let summary: Awaited<ReturnType<typeof confirmBrokerImportForUser>>;
   try {
-    await confirmBrokerImportForUser(user.id, batchId);
+    summary = await confirmBrokerImportForUser(user.id, batchId);
   } catch (error) {
     if (error instanceof ValidationError) {
       redirectWithError("/positions?view=accounts", error.message);
@@ -763,7 +764,9 @@ export async function confirmSchwabImportAction(formData: FormData) {
 
   revalidatePath("/positions");
   revalidatePath("/dashboard");
-  redirect("/positions?view=accounts&imported=1");
+  redirect(
+    `/positions?view=accounts&imported=1&newCount=${summary.newCount}&duplicateCount=${summary.duplicateCount}&reviewCount=${summary.reviewCount}`,
+  );
 }
 
 export async function discardSchwabImportAction(formData: FormData) {
