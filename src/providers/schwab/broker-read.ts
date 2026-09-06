@@ -181,6 +181,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         description: stringValue(transaction?.description) ?? stringValue(transaction?.type) ?? "Schwab transaction",
         action:
           instructionToActionLabel(stringValue(item?.instruction)) ??
+          positionEffectActionLabel(item) ??
           assignmentOrExerciseActionLabel(transaction) ??
           nonTradeActivityActionLabel(transaction),
         quantity: numberValue(item?.amount),
@@ -301,6 +302,41 @@ function instructionToActionLabel(instruction: string | null): string | null {
     return INSTRUCTION_LABELS[instruction.toUpperCase()];
   }
 
+  return null;
+}
+
+/**
+ * Confirmed live against production: a real option transaction leg has no `instruction` field
+ * at all - only `positionEffect` ("OPENING"/"CLOSING") and a signed `amount` (negative = sell,
+ * positive = buy). Derives the same "Sell to Open"/"Buy to Close"/etc. labels
+ * instructionToActionLabel already recognizes, so nothing downstream needs to know which path
+ * produced the label. Any missing/zero/unrecognized combination returns null rather than
+ * guessing - the caller then leaves the record unclassified.
+ */
+function positionEffectActionLabel(item: Record<string, unknown> | null): string | null {
+  if (!item) {
+    return null;
+  }
+
+  const positionEffect = stringValue(item.positionEffect)?.toUpperCase() ?? null;
+  const amount = numberValue(item.amount);
+  if (!positionEffect || amount === null || amount === 0) {
+    return null;
+  }
+
+  const side = amount < 0 ? "SELL" : "BUY";
+  if (side === "SELL" && positionEffect === "OPENING") {
+    return "Sell to Open";
+  }
+  if (side === "BUY" && positionEffect === "CLOSING") {
+    return "Buy to Close";
+  }
+  if (side === "BUY" && positionEffect === "OPENING") {
+    return "Buy to Open";
+  }
+  if (side === "SELL" && positionEffect === "CLOSING") {
+    return "Sell to Close";
+  }
   return null;
 }
 

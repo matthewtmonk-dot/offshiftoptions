@@ -345,3 +345,202 @@ describe("SchwabBrokerReadProvider.getTransactions", () => {
     expect(result.transactions[0].id).toBe("trade-1");
   });
 });
+
+/**
+ * Diagnostic D's real production shape for an option TRADE: four CURRENCY_USD transfer items
+ * (cash settlement + fee legs) followed by the OPTION item at index 4 - never at index 0. The
+ * option item has NO `instruction` field, only `positionEffect` and a signed `amount`.
+ */
+function realShapeOptionTransaction(overrides: {
+  activityId: string;
+  netAmount: number;
+  time: string;
+  symbol: string;
+  positionEffect: string;
+  amount: number;
+  price: number;
+  strikePrice: number;
+  underlyingSymbol: string;
+  optionExpirationDate: string;
+}) {
+  const cashLeg = (cost: number) => ({ instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, cost, feeType: "COMMISSION" });
+  return {
+    activityId: overrides.activityId,
+    netAmount: overrides.netAmount,
+    time: overrides.time,
+    type: "TRADE",
+    transferItems: [
+      cashLeg(0.65),
+      { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, amount: overrides.netAmount },
+      cashLeg(0.01),
+      { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, amount: 0 },
+      {
+        positionEffect: overrides.positionEffect,
+        amount: overrides.amount,
+        price: overrides.price,
+        instrument: {
+          symbol: overrides.symbol,
+          assetType: "OPTION",
+          type: "VANILLA",
+          putCall: "PUT",
+          strikePrice: overrides.strikePrice,
+          underlyingSymbol: overrides.underlyingSymbol,
+          optionExpirationDate: overrides.optionExpirationDate,
+        },
+      },
+    ],
+  };
+}
+
+describe("SchwabBrokerReadProvider.getTransactions - real production transfer-item shape (Diagnostic D)", () => {
+  it("derives Sell to Open from positionEffect=OPENING + negative amount on the real 5-item shape", async () => {
+    const provider = transactionsProvider([
+      realShapeOptionTransaction({
+        activityId: "riot-sto",
+        netAmount: 28,
+        time: "2026-08-31T14:02:00Z",
+        symbol: "RIOT 260904P00017500",
+        positionEffect: "OPENING",
+        amount: -1,
+        price: 0.28,
+        strikePrice: 17.5,
+        underlyingSymbol: "RIOT",
+        optionExpirationDate: "2026-09-04",
+      }),
+    ]);
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0]).toMatchObject({
+      symbol: "RIOT 260904P00017500",
+      action: "Sell to Open",
+      underlyingSymbol: "RIOT",
+      optionType: "PUT",
+      strike: 17.5,
+      expiration: new Date("2026-09-04"),
+      price: 0.28,
+    });
+    // Fees are summed from the separate cash/fee legs, never discarded because they aren't the security leg.
+    expect(transactions[0].fees).toBe(0.66);
+  });
+
+  it("derives Buy to Close from positionEffect=CLOSING + positive amount", async () => {
+    const provider = transactionsProvider([
+      realShapeOptionTransaction({
+        activityId: "corz-btc",
+        netAmount: -23,
+        time: "2026-08-28T13:32:00Z",
+        symbol: "CORZ 260828P00016500",
+        positionEffect: "CLOSING",
+        amount: 1,
+        price: 0.23,
+        strikePrice: 16.5,
+        underlyingSymbol: "CORZ",
+        optionExpirationDate: "2026-08-28",
+      }),
+    ]);
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0]).toMatchObject({ action: "Buy to Close", price: 0.23, strike: 16.5, underlyingSymbol: "CORZ" });
+  });
+
+  it("derives Buy to Open and Sell to Close for the other two mathematically-consistent combinations", async () => {
+    const provider = transactionsProvider([
+      realShapeOptionTransaction({
+        activityId: "bto-1",
+        netAmount: -50,
+        time: "2026-08-31T14:00:00Z",
+        symbol: "XYZ 260904C00010000",
+        positionEffect: "OPENING",
+        amount: 1,
+        price: 0.5,
+        strikePrice: 10,
+        underlyingSymbol: "XYZ",
+        optionExpirationDate: "2026-09-04",
+      }),
+    ]);
+    const { transactions: btoTx } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(btoTx[0].action).toBe("Buy to Open");
+
+    const provider2 = transactionsProvider([
+      realShapeOptionTransaction({
+        activityId: "stc-1",
+        netAmount: 50,
+        time: "2026-08-31T14:00:00Z",
+        symbol: "XYZ 260904C00010000",
+        positionEffect: "CLOSING",
+        amount: -1,
+        price: 0.5,
+        strikePrice: 10,
+        underlyingSymbol: "XYZ",
+        optionExpirationDate: "2026-09-04",
+      }),
+    ]);
+    const { transactions: stcTx } = await provider2.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(stcTx[0].action).toBe("Sell to Close");
+  });
+
+  it("never guesses when amount is zero or positionEffect is missing - leaves action null", async () => {
+    const zeroAmount = transactionsProvider([
+      realShapeOptionTransaction({
+        activityId: "zero-1",
+        netAmount: 0,
+        time: "2026-08-31T14:00:00Z",
+        symbol: "RIOT 260904P00017500",
+        positionEffect: "OPENING",
+        amount: 0,
+        price: 0.28,
+        strikePrice: 17.5,
+        underlyingSymbol: "RIOT",
+        optionExpirationDate: "2026-09-04",
+      }),
+    ]);
+    const { transactions: zeroTx } = await zeroAmount.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(zeroTx[0].action).toBeNull();
+
+    const missingEffect = transactionsProvider([
+      {
+        activityId: "missing-effect-1",
+        netAmount: 28,
+        time: "2026-08-31T14:00:00Z",
+        type: "TRADE",
+        transferItems: [
+          {
+            amount: -1,
+            price: 0.28,
+            instrument: { symbol: "RIOT 260904P00017500", assetType: "OPTION", putCall: "PUT", strikePrice: 17.5, underlyingSymbol: "RIOT" },
+          },
+        ],
+      },
+    ]);
+    const { transactions: missingTx } = await missingEffect.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(missingTx[0].action).toBeNull();
+  });
+
+  it("locks in the real symbols Matt provided: underlying/expiration/strike/put-call all parse correctly", async () => {
+    const fixtures: [string, string, number, string][] = [
+      ["RIOT 260904P00017500", "RIOT", 17.5, "2026-09-04"],
+      ["APLD 260904P00023500", "APLD", 23.5, "2026-09-04"],
+      ["CORZ 260828P00016500", "CORZ", 16.5, "2026-08-28"],
+      ["CORZ 260904P00016500", "CORZ", 16.5, "2026-09-04"],
+    ];
+
+    for (const [symbol, underlying, strike, expiration] of fixtures) {
+      const provider = transactionsProvider([
+        realShapeOptionTransaction({
+          activityId: `sym-${symbol}`,
+          netAmount: 1,
+          time: "2026-08-31T14:00:00Z",
+          symbol,
+          positionEffect: "OPENING",
+          amount: -1,
+          price: 0.01,
+          strikePrice: strike,
+          underlyingSymbol: underlying,
+          optionExpirationDate: expiration,
+        }),
+      ]);
+      const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+      expect(transactions[0]).toMatchObject({ underlyingSymbol: underlying, strike, expiration: new Date(expiration) });
+    }
+  });
+});

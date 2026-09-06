@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { requireCurrentUser } from "@/lib/auth";
 import { DiagnosticPanel } from "./diagnostic-panel";
 import { BrokerRecordClassificationPanel } from "./broker-record-classification-panel";
+import { RepairPanel } from "./repair-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,10 @@ export default async function SchwabTransactionsDiagnosticPage() {
           </p>
         </div>
         <BrokerRecordClassificationPanel />
+      </div>
+
+      <div className="space-y-3 border-t border-zinc-800 pt-6">
+        <RepairPanel />
       </div>
     </div>
   );

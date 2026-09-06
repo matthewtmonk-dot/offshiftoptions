@@ -553,6 +553,66 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     expect(campaignsAfterSecondRun.find((c) => c.ticker === "CORZ")!.events).toHaveLength(3);
   });
 
+  it("fee-math plausibility check: IF each real trade's fee turns out to be $0.66 (Matt's screenshots suggest ~$0.65 commission + $0.01 reg fee), net trading P/L across all three campaigns is $123.70 - not asserted as confirmed production fact, only as a check against the real domain math once real fee fields are confirmed", async () => {
+    const account = await createTradingAccountForUser(userA.id, "Recon Account FEEMATH", "Manual", "10000", "10000", "PRIVATE");
+    const plausibleFee = 0.66;
+
+    await createTransaction(userA.id, account.id, {
+      symbol: "APLD 260904P00023500",
+      underlyingSymbol: "APLD",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-31T14:02:00Z"),
+      price: 0.28,
+      fees: plausibleFee,
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "RIOT 260904P00017500",
+      underlyingSymbol: "RIOT",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-31T14:13:00Z"),
+      price: 0.28,
+      fees: plausibleFee,
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "CORZ 260904P00016500",
+      underlyingSymbol: "CORZ",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-24T13:30:00Z"),
+      price: 0.26,
+      fees: plausibleFee,
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "CORZ 260904P00016500",
+      underlyingSymbol: "CORZ",
+      action: "Buy to Close",
+      occurredAt: new Date("2026-08-28T13:32:00Z"),
+      price: 0.23,
+      fees: plausibleFee,
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "CORZ 260918P00018000",
+      underlyingSymbol: "CORZ",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-28T13:32:00Z"),
+      price: 0.68,
+      fees: plausibleFee,
+    });
+
+    await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+
+    const campaigns = await prisma.campaign.findMany({
+      where: { ownerId: userA.id, accountId: account.id, ticker: { in: ["APLD", "RIOT", "CORZ"] } },
+      include: { events: true },
+    });
+    expect(campaigns).toHaveLength(3);
+
+    const { summarizeCampaign } = await import("@/domain/finance/campaigns");
+    const totalNetPL = campaigns.reduce((sum, campaign) => sum + (summarizeCampaign({ events: campaign.events, status: campaign.status }).realizedPL ?? 0), 0);
+    // $127 gross - (5 trades x $0.66) = $123.70 net, computed entirely by the real domain
+    // function - never hardcoded here or in production code.
+    expect(Math.round(totalNetPL * 100) / 100).toBe(123.7);
+  });
+
   it("a second user's identical-looking Schwab activity never affects the first user's campaigns", async () => {
     const accountA = await createTradingAccountForUser(userA.id, "Recon Account ISOREAL A", "Manual", "10000", "10000", "PRIVATE");
     await createTransaction(userA.id, accountA.id, {
@@ -585,5 +645,76 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     const brokerRecordB = await prisma.brokerRecord.findFirst({ where: { userId: userB.id, symbol: "ISOR 260904P00020000" } });
     expect(brokerRecordA?.linkedCampaignId).toBe(campaignsA[0].id);
     expect(brokerRecordB?.linkedCampaignId).toBe(campaignsB[0].id);
+  });
+
+  it("full pipeline (real raw Schwab shape -> semantic OPTION selection -> positionEffect normalization -> persist -> reconcile) works identically for a second user with entirely different tickers - proves nothing is Matt/ticker/account-specific", async () => {
+    const { SchwabBrokerReadProvider } = await import("@/providers/schwab/broker-read");
+    const { normalizeSchwabApiTransaction } = await import("@/providers/schwab/csv");
+    const { persistNormalizedBrokerRecordsForUser } = await import("./broker-import");
+
+    const account = await createTradingAccountForUser(userB.id, "Recon Account ERIC", "Manual", "10000", "10000", "PRIVATE");
+
+    // Same real production shape Diagnostic D found for Matt (4 CURRENCY legs then the OPTION
+    // leg at index 4, no `instruction` field) - but a different user, different ticker, different
+    // account hash entirely, to prove the pipeline hardcodes nothing.
+    const rawTransactions = [
+      {
+        activityId: "eric-nvda-sto",
+        netAmount: 45,
+        time: "2026-08-31T14:00:00Z",
+        type: "TRADE",
+        transferItems: [
+          { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, cost: 0.65, feeType: "COMMISSION" },
+          { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, amount: 45 },
+          { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, cost: 0.01, feeType: "REG_FEE" },
+          { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, amount: 0 },
+          {
+            positionEffect: "OPENING",
+            amount: -1,
+            price: 0.45,
+            instrument: {
+              symbol: "NVDA 260904P00090000",
+              assetType: "OPTION",
+              type: "VANILLA",
+              putCall: "PUT",
+              strikePrice: 90,
+              underlyingSymbol: "NVDA",
+              optionExpirationDate: "2026-09-04",
+            },
+          },
+        ],
+      },
+    ];
+
+    const provider = new SchwabBrokerReadProvider({
+      accessToken: "eric-test-token",
+      accountNumbers: [{ accountNumberLast4: "4242", hashValue: "eric-account-hash" }],
+      fetchFn: (async () => new Response(JSON.stringify(rawTransactions), { status: 200 })) as unknown as typeof fetch,
+    });
+
+    const { transactions } = await provider.getTransactions("eric-account-hash", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0]).toMatchObject({ symbol: "NVDA 260904P00090000", action: "Sell to Open", price: 0.45, fees: 0.66 });
+
+    const records = transactions.map((transaction) => normalizeSchwabApiTransaction(transaction));
+    await persistNormalizedBrokerRecordsForUser(userB.id, account.id, records);
+
+    const summary = await reconcileSchwabActivityForUser(userB.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+    expect(summary.campaignsOpened).toBe(1);
+
+    const campaign = await prisma.campaign.findFirst({
+      where: { ownerId: userB.id, accountId: account.id, ticker: "NVDA" },
+      include: { events: true },
+    });
+    expect(campaign?.status).toBe("OPEN");
+
+    const { summarizeCampaign } = await import("@/domain/finance/campaigns");
+    // Gross premium is $45 (0.45 x 1 contract x 100); netOptionPremium is lower because the
+    // $0.66 fee summed from the separate cash/fee transfer items is correctly attributed too.
+    expect(summarizeCampaign({ events: campaign!.events, status: campaign!.status }).totalPremiumReceived).toBe(45);
+
+    // Matt's own campaigns from the earlier tests in this file must remain completely
+    // unaffected by anything computed for this second, entirely independent user/ticker.
+    const mattNvdaCampaigns = await prisma.campaign.count({ where: { ownerId: userA.id, ticker: "NVDA" } });
+    expect(mattNvdaCampaigns).toBe(0);
   });
 });
