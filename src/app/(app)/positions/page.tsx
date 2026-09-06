@@ -1409,7 +1409,7 @@ function PerformanceSection({
               icon={<CircleDollarSign className="size-4" aria-hidden />}
               label="Realized P/L"
               value={signedMoney(winLoss.realizedTradingPL)}
-              detail="Closed campaigns only"
+              detail={winLoss.realizedTradingPLExact ? "Closed campaigns only" : "Closed campaigns only - pending an unresolved fee"}
               tone={winLoss.realizedTradingPL}
               help={HELP.realizedPL}
               helpTestId="help-realized-pl"

@@ -446,6 +446,40 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     expect(campaigns).toHaveLength(1);
     expect(campaigns[0].status).toBe("OPEN");
     expect(campaigns[0].events.map((event) => event.type).sort()).toEqual(["ROLL_PUT_CLOSE", "ROLL_PUT_OPEN", "SELL_PUT"].sort());
+
+    // REGRESSION: the rolled-to leg (expiring Sep 4) later reaches its own real expiration-
+    // removal evidence. This must stay "expiration processing" through the weekend/Labor Day
+    // and only ever transition via PUT_EXPIRED - never a second, spurious CLOSE_PUT.
+    await createTransaction(userA.id, account.id, {
+      symbol: "ROLL 260904P00017500",
+      underlyingSymbol: "ROLL",
+      action: "Removed - Expiration",
+      occurredAt: new Date("2026-09-04T21:00:00Z"),
+      price: 0,
+      fees: null,
+    });
+
+    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    expect(saturday.campaignsClosed).toBe(0);
+    expect(saturday.campaignsExpired).toBe(0);
+    const stillOpen = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "ROLL" } });
+    expect(stillOpen?.status).toBe("OPEN");
+
+    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-07T18:00:00Z"));
+    expect(laborDay.campaignsClosed).toBe(0);
+    expect(laborDay.campaignsExpired).toBe(0);
+
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    expect(tuesday.campaignsClosed).toBe(0);
+    expect(tuesday.campaignsExpired).toBe(1);
+
+    const finalCampaign = await prisma.campaign.findFirst({
+      where: { ownerId: userA.id, accountId: account.id, ticker: "ROLL" },
+      include: { events: true },
+    });
+    expect(finalCampaign?.status).toBe("CLOSED");
+    expect(finalCampaign?.events.map((event) => event.type).sort()).toEqual(["PUT_EXPIRED", "ROLL_PUT_CLOSE", "ROLL_PUT_OPEN", "SELL_PUT"].sort());
+    expect(finalCampaign?.events.filter((event) => event.type === "CLOSE_PUT")).toHaveLength(0);
   });
 
   it("User B's sync never reconciles or creates campaigns from User A's broker records", async () => {
@@ -716,5 +750,129 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     // unaffected by anything computed for this second, entirely independent user/ticker.
     const mattNvdaCampaigns = await prisma.campaign.count({ where: { ownerId: userA.id, ticker: "NVDA" } });
     expect(mattNvdaCampaigns).toBe(0);
+  });
+
+  it("REGRESSION - a real expiration-removal transaction (positionEffect=CLOSING on its option leg, exactly like Schwab's real records) must NOT close or win the campaign early - full real-shape pipeline stays OPEN through Labor Day weekend, then correctly expires on the first qualifying NYSE sync", async () => {
+    const { SchwabBrokerReadProvider } = await import("@/providers/schwab/broker-read");
+    const { normalizeSchwabApiTransaction } = await import("@/providers/schwab/csv");
+    const { persistNormalizedBrokerRecordsForUser } = await import("./broker-import");
+
+    const account = await createTradingAccountForUser(userA.id, "Recon Account EXPFIX", "Manual", "10000", "10000", "PRIVATE");
+
+    const stoTransaction = {
+      activityId: "expfix-sto",
+      netAmount: 28,
+      time: "2026-08-31T14:02:00Z",
+      type: "TRADE",
+      transferItems: [
+        { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, cost: 0.65, feeType: "COMMISSION" },
+        { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, amount: 28 },
+        { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, cost: 0.01, feeType: "REG_FEE" },
+        { instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" }, amount: 0 },
+        {
+          positionEffect: "OPENING",
+          amount: -1,
+          price: 0.28,
+          instrument: {
+            symbol: "EXPX 260904P00023500",
+            assetType: "OPTION",
+            type: "VANILLA",
+            putCall: "PUT",
+            strikePrice: 23.5,
+            underlyingSymbol: "EXPX",
+            optionExpirationDate: "2026-09-04",
+          },
+        },
+      ],
+    };
+    // The exact real shape that caused the bug: the option leg ALSO administratively closes on
+    // Schwab's books (positionEffect=CLOSING, a real nonzero amount), even though this is only
+    // expiration/removal evidence, not a genuine buy-back.
+    const removalTransaction = {
+      activityId: "expfix-removed",
+      netAmount: 0,
+      time: "2026-09-04T21:00:00Z",
+      type: "RECEIVE_AND_DELIVER",
+      description: "Removed due to Expiration PUT EXPX CORP $23.5 EXP 09/04/26",
+      transferItems: [
+        {
+          positionEffect: "CLOSING",
+          amount: 1,
+          price: 0,
+          instrument: {
+            symbol: "EXPX 260904P00023500",
+            assetType: "OPTION",
+            type: "VANILLA",
+            putCall: "PUT",
+            strikePrice: 23.5,
+            underlyingSymbol: "EXPX",
+            optionExpirationDate: "2026-09-04",
+          },
+        },
+      ],
+    };
+
+    const provider = new SchwabBrokerReadProvider({
+      accessToken: "expfix-token",
+      accountNumbers: [{ accountNumberLast4: "1111", hashValue: "expfix-hash" }],
+      fetchFn: (async (input: URL | string) => {
+        const url = new URL(input.toString());
+        const types = url.searchParams.get("types");
+        if (types === "TRADE") {
+          return new Response(JSON.stringify([stoTransaction]), { status: 200 });
+        }
+        if (types === "RECEIVE_AND_DELIVER") {
+          return new Response(JSON.stringify([removalTransaction]), { status: 200 });
+        }
+        return new Response("[]", { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+
+    const { transactions } = await provider.getTransactions("expfix-hash", new Date("2026-08-01"), new Date("2026-09-30"));
+    const removalRecord = transactions.find((t) => t.id === "expfix-removed");
+    expect(removalRecord?.action).toBe("Removed - Expiration");
+    expect(removalRecord?.action).not.toBe("Buy to Close");
+
+    const records = transactions.map((transaction) => normalizeSchwabApiTransaction(transaction));
+    await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
+
+    // Saturday sync (before the Sep 8 NYSE confirmation window) - must NOT close or expire.
+    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    expect(saturday.campaignsOpened).toBe(1);
+    expect(saturday.campaignsClosed).toBe(0);
+    expect(saturday.campaignsExpired).toBe(0);
+
+    const campaignBefore = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "EXPX" } });
+    expect(campaignBefore?.status).toBe("OPEN");
+
+    // Monday Sep 7 is Labor Day - still must not confirm.
+    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-07T18:00:00Z"));
+    expect(laborDay.campaignsClosed).toBe(0);
+    expect(laborDay.campaignsExpired).toBe(0);
+
+    // Tuesday Sep 8 (the first NYSE market day after the Labor Day weekend) - now safe to
+    // confirm expired worthless, via PUT_EXPIRED, never via the CLOSE path.
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    expect(tuesday.campaignsClosed).toBe(0);
+    expect(tuesday.campaignsExpired).toBe(1);
+
+    const campaignAfter = await prisma.campaign.findFirst({
+      where: { ownerId: userA.id, accountId: account.id, ticker: "EXPX" },
+      include: { events: true },
+    });
+    expect(campaignAfter?.status).toBe("CLOSED");
+    expect(campaignAfter?.events.map((event) => event.type).sort()).toEqual(["PUT_EXPIRED", "SELL_PUT"].sort());
+    expect(campaignAfter?.events.some((event) => event.type === "CLOSE_PUT")).toBe(false);
+
+    // The genuine removal record has fees: null (Schwab reported none) - it must never poison
+    // this campaign's fee-known status, because it's non-economic evidence and (correctly)
+    // never gets linked to the campaign at all - only the real STO's known $0.66 fee is linked.
+    const unknownFeeCampaigns = await getCampaignIdsWithUnknownFees([campaignAfter!.id]);
+    expect(unknownFeeCampaigns.has(campaignAfter!.id)).toBe(false);
+    const removalRow = await prisma.brokerRecord.findFirst({ where: { userId: userA.id, accountId: account.id, action: "Removed - Expiration" } });
+    expect(removalRow?.linkedCampaignId).toBeNull();
+    expect(removalRow?.fees).toBeNull();
+
+    await prisma.brokerRecord.deleteMany({ where: { accountId: account.id } });
   });
 });

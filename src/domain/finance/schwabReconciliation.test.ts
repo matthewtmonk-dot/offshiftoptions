@@ -119,6 +119,13 @@ describe("findClosingEvidence", () => {
     ]);
     expect(evidence).toMatchObject({ kind: "ASSIGNMENT", transactionId: "txn-assign" });
   });
+
+  it("never treats a 'Removed - Expiration' record as a CLOSE, even with a matching symbol and a real price - expiration evidence alone cannot close or win a campaign", () => {
+    const evidence = findClosingEvidence(leg, [
+      transaction({ id: "txn-removed", action: "Removed - Expiration", price: 0, occurredAt: new Date("2026-09-04T21:00:00Z") }),
+    ]);
+    expect(evidence).toEqual({ kind: "NONE" });
+  });
 });
 
 describe("findRollPairedOpeningTransactionIds", () => {

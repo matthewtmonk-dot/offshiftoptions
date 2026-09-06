@@ -181,9 +181,10 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         description: stringValue(transaction?.description) ?? stringValue(transaction?.type) ?? "Schwab transaction",
         action:
           instructionToActionLabel(stringValue(item?.instruction)) ??
-          positionEffectActionLabel(item) ??
           assignmentOrExerciseActionLabel(transaction) ??
-          nonTradeActivityActionLabel(transaction),
+          expirationRemovalActionLabel(transaction) ??
+          positionEffectActionLabel(item) ??
+          bankInterestActionLabel(transaction),
         quantity: numberValue(item?.amount),
         price: numberValue(item?.price),
         fees: totalFees(transaction),
@@ -306,12 +307,19 @@ function instructionToActionLabel(instruction: string | null): string | null {
 }
 
 /**
- * Confirmed live against production: a real option transaction leg has no `instruction` field
- * at all - only `positionEffect` ("OPENING"/"CLOSING") and a signed `amount` (negative = sell,
- * positive = buy). Derives the same "Sell to Open"/"Buy to Close"/etc. labels
- * instructionToActionLabel already recognizes, so nothing downstream needs to know which path
- * produced the label. Any missing/zero/unrecognized combination returns null rather than
- * guessing - the caller then leaves the record unclassified.
+ * Confirmed live against production: a real option TRADE leg has no `instruction` field at all
+ * - only `positionEffect` ("OPENING"/"CLOSING") and a signed `amount` (negative = sell, positive
+ * = buy). Derives the same "Sell to Open"/"Buy to Close"/etc. labels instructionToActionLabel
+ * already recognizes, so nothing downstream needs to know which path produced the label. Any
+ * missing/zero/unrecognized combination returns null rather than guessing.
+ *
+ * MUST be checked only after assignmentOrExerciseActionLabel/expirationRemovalActionLabel in the
+ * fallback chain: a real "Removed due to Expiration" RECEIVE_AND_DELIVER transaction's option
+ * leg also administratively closes out on Schwab's books (its transferItem can carry
+ * positionEffect=CLOSING and a nonzero amount too), which would otherwise be misread as a
+ * genuine Buy to Close trade and let it flow into findClosingEvidence's CLOSE branch - silently
+ * closing a campaign that only actually reached expiration, not a real buy-back. Text-based
+ * evidence of a special, non-trade economic event always wins over this numeric heuristic.
  */
 function positionEffectActionLabel(item: Record<string, unknown> | null): string | null {
   if (!item) {
@@ -352,17 +360,31 @@ function assignmentOrExerciseActionLabel(transaction: Record<string, unknown>): 
 }
 
 /**
- * Recognizes non-trade cash/removal activity from Schwab's free-text type/description when
- * there's no buy/sell instruction to label at all - confirmed live against production: a real
- * "BANK INT ... SCHWAB BANK" transaction and real "Removed due to Expiration PUT ..." removal
- * transactions both report no instruction. Anything not confidently matched returns null, same
- * fail-safe pattern as assignmentOrExerciseActionLabel - this never guesses a trade action.
+ * Recognizes a real Schwab expiration-removal transaction from its free-text type/description -
+ * confirmed live against production: "Removed due to Expiration PUT ..." transactions report no
+ * `instruction` at all. This is evidence that an option reached expiration/removal - it is
+ * deliberately checked BEFORE positionEffectActionLabel so a removal's administrative
+ * "closing" bookkeeping on the option leg can never be misread as a genuine Buy to Close trade
+ * (see the warning on positionEffectActionLabel). Never used to infer a win/loss on its own -
+ * that stays gated on the existing NYSE-market-day confirmation rule.
  */
-function nonTradeActivityActionLabel(transaction: Record<string, unknown>): string | null {
+function expirationRemovalActionLabel(transaction: Record<string, unknown>): string | null {
   const text = `${stringValue(transaction.type) ?? ""} ${stringValue(transaction.description) ?? ""}`.toLowerCase();
   if (text.includes("removed due to expiration") || text.includes("removed - expiration")) {
     return "Removed - Expiration";
   }
+  return null;
+}
+
+/**
+ * Recognizes non-trade cash activity (bank/cash interest, dividends) from Schwab's free-text
+ * type/description when there's no buy/sell instruction or positionEffect to derive one from -
+ * confirmed live against production: a real "BANK INT ... SCHWAB BANK" transaction reports
+ * neither. Anything not confidently matched returns null, same fail-safe pattern as
+ * assignmentOrExerciseActionLabel - this never guesses a trade action.
+ */
+function bankInterestActionLabel(transaction: Record<string, unknown>): string | null {
+  const text = `${stringValue(transaction.type) ?? ""} ${stringValue(transaction.description) ?? ""}`.toLowerCase();
   if (text.includes("bank int")) {
     return "Bank Interest";
   }

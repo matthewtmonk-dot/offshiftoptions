@@ -32,6 +32,14 @@ export type WinLossSummary = {
   averageLoss: number | null;
   averageDurationDays: number | null;
   realizedTradingPL: number;
+  /** False when at least one campaign counted into `realizedTradingPL` has an unresolved
+   * Schwab fee (see `CompletedCampaignResult.feesFullyKnown`) - callers must present
+   * `realizedTradingPL` as "pending"/not-yet-exact rather than a final confirmed number in that
+   * case, the same honesty rule `summarizeThisWeek`'s `netPLExact` already enforces. Win/loss
+   * classification and counts are unaffected - a few cents of unresolved fee essentially never
+   * flips a real premium-collection gain into a loss, and getCampaignIdsWithUnknownFees'
+   * documented rule is "never change the number, only flag it," not "hide the result." */
+  realizedTradingPLExact: boolean;
 };
 
 /**
@@ -64,6 +72,7 @@ export function summarizeWinLoss(completed: CompletedCampaignResult[]): WinLossS
     averageLoss: losses.length ? round(losses.reduce((sum, c) => sum + (c.pl ?? 0), 0) / losses.length, 2) : null,
     averageDurationDays: durations.length ? round(durations.reduce((a, b) => a + b, 0) / durations.length, 1) : null,
     realizedTradingPL,
+    realizedTradingPLExact: known.every((c) => c.feesFullyKnown !== false),
   };
 }
 

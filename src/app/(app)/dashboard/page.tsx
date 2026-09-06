@@ -10,6 +10,7 @@ import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { splitBrokerPositionsByCampaignLink } from "@/lib/broker-reconciliation";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
+import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { computeOpenPositionsCount, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
@@ -35,6 +36,10 @@ export default async function DashboardPage() {
   const data = await getDashboardData(user.id);
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
 
+  // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
+  // confirmed $0 in a "Realized trading P/L" figure - see getCampaignIdsWithUnknownFees.
+  const unknownFeeCampaignIds = await getCampaignIdsWithUnknownFees(data.completedCampaigns.map((campaign) => campaign.id));
+
   const completedPLByAccount = new Map<string, number>();
   const completedForPerformance = data.completedCampaigns.map((campaign) => {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
@@ -45,6 +50,7 @@ export default async function DashboardPage() {
       closedAt: campaign.closedAt ?? campaign.updatedAt,
       finalResult: summary.finalResult,
       pl,
+      feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
       daysActive: summary.daysActive,
     };
   });
@@ -128,7 +134,12 @@ export default async function DashboardPage() {
             campaignSecuredCapital={campaignSecuredCapital}
           />
         </Suspense>
-        <Stat label="Realized trading P/L" value={money(winLoss.realizedTradingPL)} tone={winLoss.realizedTradingPL} />
+        <Stat
+          label="Realized trading P/L"
+          value={money(winLoss.realizedTradingPL)}
+          tone={winLoss.realizedTradingPL}
+          detail={winLoss.realizedTradingPLExact ? undefined : "Pending - a closed campaign has an unresolved fee"}
+        />
       </section>
 
       <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">

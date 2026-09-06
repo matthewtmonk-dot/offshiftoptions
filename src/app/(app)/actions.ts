@@ -57,6 +57,10 @@ import {
   type SchwabRecordRepairPreview,
   type SchwabRecordRepairResult,
 } from "@/lib/schwab-record-repair";
+import {
+  getSanitizedCampaignEventSequenceForUser,
+  type CampaignEventSequenceReport,
+} from "@/lib/campaign-event-sequence-diagnostic";
 import { confirmBrokerImportForUser, discardBrokerImportForUser, previewBrokerImportForUser } from "@/lib/broker-import";
 import {
   confirmBrokerPositionAsCampaignForUser,
@@ -425,6 +429,11 @@ export async function previewSchwabRecordRepairAction(): Promise<SchwabRecordRep
 export async function repairSchwabRecordsAction(matchToken: string): Promise<SchwabRecordRepairResult> {
   const user = await requireCurrentUser();
   return repairMalformedSchwabTransactionRecordsForUser(user.id, matchToken);
+}
+
+export async function runCampaignEventSequenceDiagnosticAction(): Promise<CampaignEventSequenceReport> {
+  const user = await requireCurrentUser();
+  return getSanitizedCampaignEventSequenceForUser(user.id);
 }
 
 export async function createTradingAccountAction(formData: FormData) {

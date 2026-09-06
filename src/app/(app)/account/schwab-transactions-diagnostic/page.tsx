@@ -4,6 +4,7 @@ import { requireCurrentUser } from "@/lib/auth";
 import { DiagnosticPanel } from "./diagnostic-panel";
 import { BrokerRecordClassificationPanel } from "./broker-record-classification-panel";
 import { RepairPanel } from "./repair-panel";
+import { CampaignEventSequencePanel } from "./campaign-event-sequence-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +44,17 @@ export default async function SchwabTransactionsDiagnosticPage() {
           </p>
         </div>
         <BrokerRecordClassificationPanel />
+      </div>
+
+      <div className="space-y-3 border-t border-zinc-800 pt-6">
+        <div>
+          <h2 className="text-xl font-semibold text-zinc-50">Campaign Event Sequences</h2>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            Shows the exact stored event sequence for each of your campaigns, straight from the database - use this
+            to see exactly which event (and which source record) changed a campaign&apos;s status.
+          </p>
+        </div>
+        <CampaignEventSequencePanel />
       </div>
 
       <div className="space-y-3 border-t border-zinc-800 pt-6">

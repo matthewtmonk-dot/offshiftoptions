@@ -543,4 +543,44 @@ describe("SchwabBrokerReadProvider.getTransactions - real production transfer-it
       expect(transactions[0]).toMatchObject({ underlyingSymbol: underlying, strike, expiration: new Date(expiration) });
     }
   });
+
+  it("classifies a real expiration-removal transaction as 'Removed - Expiration' even when its option leg ALSO carries positionEffect=CLOSING and a nonzero amount - never mistaken for a genuine Buy to Close", async () => {
+    // This is the exact regression: Schwab's expiration-removal transaction administratively
+    // closes the option leg out on its own books too (positionEffect=CLOSING, a real amount),
+    // which - before this fix - was read by positionEffectActionLabel BEFORE the expiration-
+    // removal text check ever ran, misclassifying it as "Buy to Close" and letting a genuinely-
+    // expired campaign get silently closed via findClosingEvidence's CLOSE branch instead of
+    // staying in Expiration Processing until the NYSE confirmation rule is satisfied.
+    const provider = transactionsProvider(
+      [
+        {
+          activityId: "apld-removed",
+          netAmount: 0,
+          time: "2026-09-04T21:00:00Z",
+          type: "RECEIVE_AND_DELIVER",
+          description: "Removed due to Expiration PUT APPLIED DIGITAL CORP $23.5 EXP 09/04/26",
+          transferItems: [
+            {
+              positionEffect: "CLOSING",
+              amount: 1,
+              price: 0,
+              instrument: {
+                symbol: "APLD 260904P00023500",
+                assetType: "OPTION",
+                putCall: "PUT",
+                strikePrice: 23.5,
+                underlyingSymbol: "APLD",
+                optionExpirationDate: "2026-09-04",
+              },
+            },
+          ],
+        },
+      ],
+      { category: "RECEIVE_AND_DELIVER" },
+    );
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].action).toBe("Removed - Expiration");
+    expect(transactions[0].action).not.toBe("Buy to Close");
+  });
 });

@@ -58,6 +58,29 @@ describe("win/loss accounting", () => {
     expect(summary.winRate).toBeNull();
     expect(summary.realizedTradingPL).toBe(0);
   });
+
+  it("realizedTradingPLExact is true when every completed campaign's fee is known, and false if even one is not - the number itself is never hidden or changed, only its exactness is flagged", () => {
+    const allKnown = summarizeWinLoss([
+      { campaignId: "c1", closedAt: new Date("2026-02-01"), finalResult: "GAIN", pl: 27.34, daysActive: 4, feesFullyKnown: true },
+    ]);
+    expect(allKnown.realizedTradingPLExact).toBe(true);
+    expect(allKnown.realizedTradingPL).toBe(27.34);
+
+    const oneUnknown = summarizeWinLoss([
+      { campaignId: "c1", closedAt: new Date("2026-02-01"), finalResult: "GAIN", pl: 27.34, daysActive: 4, feesFullyKnown: true },
+      { campaignId: "c2", closedAt: new Date("2026-02-02"), finalResult: "GAIN", pl: 27.34, daysActive: 4, feesFullyKnown: false },
+    ]);
+    // The dollar figure is still computed (established rule: never hide/change the number) -
+    // only the exactness flag tells the caller to present it as pending, not confirmed.
+    expect(oneUnknown.realizedTradingPLExact).toBe(false);
+    expect(oneUnknown.realizedTradingPL).toBe(54.68);
+    expect(oneUnknown.wins).toBe(2);
+  });
+
+  it("defaults realizedTradingPLExact to true when feesFullyKnown is omitted, matching existing manual-entry behavior", () => {
+    const summary = summarizeWinLoss([{ campaignId: "c1", closedAt: new Date("2026-02-01"), finalResult: "GAIN", pl: 46, daysActive: 14 }]);
+    expect(summary.realizedTradingPLExact).toBe(true);
+  });
 });
 
 describe("this week's summary", () => {
