@@ -100,6 +100,66 @@ describe("live market-data scanner", () => {
     expect(tooHigh?.values.optionBid).toBeNull();
   });
 
+  it("explains a blank options row when the chain returns data but nothing qualifies (case A: not a fetch failure, not a stock-stage short-circuit)", async () => {
+    const provider: MarketDataProvider = {
+      async getQuote(symbol) {
+        return { symbol, price: 12, volume: 1_000_000, asOf: new Date("2026-08-31T14:30:00Z") };
+      },
+      async getPriceHistory(symbol, days) {
+        return Array.from({ length: days }, (_, index) => ({
+          symbol,
+          date: new Date(Date.UTC(2026, 7, index + 1)),
+          open: 12,
+          high: 12.5,
+          low: 11.5,
+          close: 12 - index * 0.01,
+          volume: 1000 + index,
+        }));
+      },
+      async getOptionChain(symbol) {
+        // Chain fetch succeeds and returns a real put, but it falls outside the DTE window
+        // the scan requires - so it's filtered out, not missing due to a provider error.
+        return [
+          {
+            symbol: `${symbol} 270101P00011000`,
+            underlyingSymbol: symbol,
+            optionType: "PUT",
+            strike: 11,
+            expiration: new Date("2027-01-01T20:00:00Z"), // far beyond the 14-45 DTE window
+            bid: 0.2,
+            ask: 0.26,
+            mark: 0.23,
+            delta: -0.22,
+            openInterest: 250,
+            volume: 41,
+          },
+        ];
+      },
+      async getInstrument(symbol) {
+        return { symbol, description: `${symbol} common stock`, assetType: "EQUITY" };
+      },
+      async getMarketHours() {
+        return { isOpen: true };
+      },
+    };
+
+    const results = await evaluateLiveMarketScan({
+      provider,
+      rules,
+      universe: ["RIOT"],
+      asOf: new Date("2026-08-31T12:00:00Z"),
+      maxOptionChainLookups: 1,
+    });
+
+    const riot = results.find((result) => result.ticker === "RIOT");
+    expect(riot?.values.scanNote).toBe("No qualifying option contract found within your Scanner Rules.");
+    expect(riot?.values.strike).toBeNull();
+    expect(riot?.values.optionBid).toBeNull();
+    // Stock-level values ARE known here (unlike a whole-ticker fetch failure) - only the
+    // option side is blank, which is exactly what distinguishes case A from case D.
+    expect(riot?.values.price).toBe(12);
+  });
+
   it("does not substitute demo data when the live provider fails", async () => {
     const provider: MarketDataProvider = {
       async getQuote() {

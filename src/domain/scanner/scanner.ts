@@ -404,7 +404,7 @@ function criterionGap(result: CriterionResult): CriterionGap | null {
   };
 }
 
-function numericValue(value: ScannerRule["desired"] | CriterionResult["actualValue"]): number | null {
+export function numericValue(value: ScannerRule["desired"] | CriterionResult["actualValue"]): number | null {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : null;
   }

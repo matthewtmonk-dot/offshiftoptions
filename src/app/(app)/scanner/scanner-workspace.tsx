@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
+import { InfoTip } from "@/components/info-tip";
 import {
   ArrowDownUp,
   ChevronDown,
@@ -16,7 +17,8 @@ import {
 } from "lucide-react";
 import { EmptyState, FieldLabel } from "@/components/ui";
 import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
-import { formatCriterionValue, type ExclusionDiagnostic } from "@/domain/scanner/scanner";
+import { formatCriterionValue, type CriterionResult, type ExclusionDiagnostic } from "@/domain/scanner/scanner";
+import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
 import { money, percent, shortDate, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
 import type { ScannerBuddy, ScannerViewResult } from "./page";
@@ -112,7 +114,39 @@ export function ScannerWorkspace({
     spreadPercent: false,
     distanceOtm: false,
   });
+  const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
+  const columnsMenuRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // Same outside-click/Escape shell as Research's ColumnsMenu (research-workspace.tsx) - a
+  // click on a checkbox inside the menu stays open (it's inside columnsMenuRef), an outside
+  // click or Escape closes it, and repeated open/close cycles stay stable since the listeners
+  // are only registered while open.
+  useEffect(() => {
+    if (!columnsMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (columnsMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setColumnsMenuOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setColumnsMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [columnsMenuOpen]);
 
   const optimisticResults = useMemo(
     () =>
@@ -133,7 +167,7 @@ export function ScannerWorkspace({
   const counts = useMemo(
     () => ({
       pass: actionable.filter((result) => result.summary.status === "PASS").length,
-      near: actionable.filter((result) => result.nearMisses.length === 1).length,
+      near: actionable.filter(isNearMatch).length,
       watchlist: actionable.filter((result) => result.researchStatus !== null).length,
     }),
     [actionable],
@@ -280,26 +314,37 @@ export function ScannerWorkspace({
           </select>
         </label>
 
-        <details className="group relative">
-          <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50">
+        <div ref={columnsMenuRef} className="relative">
+          <button
+            type="button"
+            aria-haspopup="true"
+            aria-expanded={columnsMenuOpen}
+            onClick={() => setColumnsMenuOpen((value) => !value)}
+            className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50"
+          >
             <Table2 className="size-3.5" aria-hidden />
             Columns
             <ChevronDown className="size-3.5" aria-hidden />
-          </summary>
-          <div className="absolute left-0 top-full z-10 mt-1 w-48 space-y-1 rounded-md border border-zinc-800 bg-zinc-900 p-2 shadow-lg shadow-black/30">
-            {optionalColumns.map((column) => (
-              <label key={column.key} className="flex min-h-8 items-center gap-2 rounded px-2 text-xs text-zinc-300 hover:bg-zinc-800">
-                <input
-                  type="checkbox"
-                  checked={columns[column.key]}
-                  onChange={(event) => setColumns((prev) => ({ ...prev, [column.key]: event.target.checked }))}
-                  className="size-3.5 accent-emerald-400"
-                />
-                {column.label}
-              </label>
-            ))}
-          </div>
-        </details>
+          </button>
+          {columnsMenuOpen ? (
+            <div
+              data-testid="scanner-columns-menu"
+              className="absolute left-0 top-full z-10 mt-1 w-48 space-y-1 rounded-md border border-zinc-800 bg-zinc-900 p-2 shadow-lg shadow-black/30"
+            >
+              {optionalColumns.map((column) => (
+                <label key={column.key} className="flex min-h-8 items-center gap-2 rounded px-2 text-xs text-zinc-300 hover:bg-zinc-800">
+                  <input
+                    type="checkbox"
+                    checked={columns[column.key]}
+                    onChange={(event) => setColumns((prev) => ({ ...prev, [column.key]: event.target.checked }))}
+                    className="size-3.5 accent-emerald-400"
+                  />
+                  {column.label}
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
 
         {excludedCount > 0 ? (
           <button
@@ -363,6 +408,14 @@ export function ScannerWorkspace({
         <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{statusError}</div>
       ) : null}
 
+      <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+        <span>Cell colors compare each metric with your active Scanner Rules.</span>
+        <InfoTip label="Cell colors" testId="help-scanner-cell-colors">
+          Green meets the rule, amber is near the threshold, red misses it, and gray/neutral means unavailable or
+          informational (the rule is disabled, or OSO doesn&apos;t have this value yet).
+        </InfoTip>
+      </div>
+
       <div data-testid="scanner-desktop-table" className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/60 lg:block">
         <table className="w-full min-w-[960px] border-separate border-spacing-0 text-left text-xs">
           <thead>
@@ -424,19 +477,32 @@ export function ScannerWorkspace({
                       {result.researchStatus === "NEVER_TRADE" ? (
                         <span className="ml-1.5 inline-flex items-center text-[10px] font-semibold text-red-300/70">EXCLUDED BY YOU</span>
                       ) : null}
+                      {status.word === "VERIFY" ? <VerifyReasons result={result} /> : null}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.price, money)}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">
-                      {cell(result.values.rsi, (value) => toNumber(value).toFixed(1))} / {cell(result.values.bbPercent, percent)}
+                      {coloredCell(result.values.price, money, ruleSeverityTone(criterionFor(result, "price")))}
+                    </td>
+                    <td className="border-b border-zinc-900 px-3 py-2">
+                      {coloredCell(result.values.rsi, (value) => toNumber(value).toFixed(1), ruleSeverityTone(criterionFor(result, "rsi")))} /{" "}
+                      {coloredCell(result.values.bbPercent, percent, ruleSeverityTone(criterionFor(result, "bbPercent")))}
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.strike, money)}</td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.premium, money)}</td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.ror, percent)}</td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.dte, (value) => `${value}d`)}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">
-                      {cell(result.values.openInterest, formatCount)} / {cell(result.values.optionVolume, formatCount)}
+                      {coloredCell(result.values.premium, money, ruleSeverityTone(criterionFor(result, "optionBid")))}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.earningsDistance, (value) => `${value}d`)}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">
+                      {coloredCell(result.values.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))}
+                    </td>
+                    <td className="border-b border-zinc-900 px-3 py-2">
+                      {coloredCell(result.values.dte, (value) => `${value}d`, ruleSeverityTone(criterionFor(result, "dte")))}
+                    </td>
+                    <td className="border-b border-zinc-900 px-3 py-2">
+                      {coloredCell(result.values.openInterest, formatCount, ruleSeverityTone(criterionFor(result, "openInterest")))} /{" "}
+                      {coloredCell(result.values.optionVolume, formatCount, ruleSeverityTone(criterionFor(result, "optionVolume")))}
+                    </td>
+                    <td className="border-b border-zinc-900 px-3 py-2">
+                      {coloredCell(result.values.earningsDistance, (value) => `${value}d`, ruleSeverityTone(criterionFor(result, "earningsDistance")))}
+                    </td>
                     {activeOptionalColumns.map((column) => (
                       <td key={column.key} className="border-b border-zinc-900 px-3 py-2">
                         {column.key === "delta" ? cell(result.values.delta, (value) => toNumber(value).toFixed(2)) : null}
@@ -516,13 +582,22 @@ function CandidateCard({
             </span>
           </div>
         </div>
+        {status.word === "VERIFY" ? <VerifyReasons result={result} /> : null}
         <dl className="grid grid-cols-3 gap-x-2 gap-y-1 text-xs">
-          <MobileDatum label="Price" value={cell(result.values.price, money)} />
-          <MobileDatum label="RSI / BB" value={<>{cell(result.values.rsi, (v) => toNumber(v).toFixed(1))} / {cell(result.values.bbPercent, percent)}</>} />
+          <MobileDatum label="Price" value={coloredCell(result.values.price, money, ruleSeverityTone(criterionFor(result, "price")))} />
+          <MobileDatum
+            label="RSI / BB"
+            value={
+              <>
+                {coloredCell(result.values.rsi, (v) => toNumber(v).toFixed(1), ruleSeverityTone(criterionFor(result, "rsi")))} /{" "}
+                {coloredCell(result.values.bbPercent, percent, ruleSeverityTone(criterionFor(result, "bbPercent")))}
+              </>
+            }
+          />
           <MobileDatum label="Strike" value={cell(result.values.strike, money)} />
-          <MobileDatum label="Premium" value={cell(result.values.premium, money)} />
-          <MobileDatum label="ROR" value={cell(result.values.ror, percent)} />
-          <MobileDatum label="DTE" value={cell(result.values.dte, (v) => `${v}d`)} />
+          <MobileDatum label="Premium" value={coloredCell(result.values.premium, money, ruleSeverityTone(criterionFor(result, "optionBid")))} />
+          <MobileDatum label="ROR" value={coloredCell(result.values.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))} />
+          <MobileDatum label="DTE" value={coloredCell(result.values.dte, (v) => `${v}d`, ruleSeverityTone(criterionFor(result, "dte")))} />
         </dl>
       </summary>
       <div className="border-t border-zinc-800 p-3">
@@ -600,30 +675,46 @@ function CandidateInspector({
         <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Stock</h3>
         <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <Datum label="Ticker" value={result.record.ticker} />
-          <Datum label="Current price" value={cell(result.values.price, money)} />
+          <Datum label="Current price" value={coloredCell(result.values.price, money, ruleSeverityTone(criterionFor(result, "price")))} />
           <Datum label="Change" value={signedPercent(result.values.priceChangePercent)} />
-          <Datum label="RSI" value={cell(result.values.rsi, (v) => toNumber(v).toFixed(1))} />
-          <Datum label="BB position" value={cell(result.values.bbPercent, percent)} />
+          <Datum label="RSI" value={coloredCell(result.values.rsi, (v) => toNumber(v).toFixed(1), ruleSeverityTone(criterionFor(result, "rsi")))} />
+          <Datum label="BB position" value={coloredCell(result.values.bbPercent, percent, ruleSeverityTone(criterionFor(result, "bbPercent")))} />
           <Datum label="Volume" value={cell(result.values.stockVolume, formatCount)} />
           <Datum label="Earnings" value={result.values.earningsDate ? shortDate(result.values.earningsDate) : dash()} />
-          <Datum label="Days to earnings" value={cell(result.values.earningsDistance, formatCount)} />
+          <Datum
+            label="Days to earnings"
+            value={coloredCell(result.values.earningsDistance, formatCount, ruleSeverityTone(criterionFor(result, "earningsDistance")))}
+          />
         </dl>
       </section>
       <section>
-        <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Option</h3>
+        <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-400">
+          Option
+          <InfoTip label="DTE filtering" testId="help-scanner-dte">
+            DTE is colored against your Scanner Rules only when the DTE rule is enabled. It&apos;s shown for reference even when
+            disabled, so a wide-ranging value isn&apos;t a bug.
+          </InfoTip>
+        </h3>
+        {result.values.scanNote ? <p className="mt-2 text-xs text-zinc-500">{result.values.scanNote}</p> : null}
         <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <Datum label="Expiration" value={result.values.expiration ? shortDate(result.values.expiration) : dash()} />
-          <Datum label="DTE" value={cell(result.values.dte, formatCount)} />
+          <Datum label="DTE" value={coloredCell(result.values.dte, formatCount, ruleSeverityTone(criterionFor(result, "dte")))} />
           <Datum label="Strike" value={cell(result.values.strike, money)} />
           <Datum label="Distance OTM" value={cell(result.values.distanceOtmPercent, percent)} />
-          <Datum label="Bid" value={cell(result.values.optionBid, money)} />
+          <Datum label="Bid" value={coloredCell(result.values.optionBid, money, ruleSeverityTone(criterionFor(result, "optionBid")))} />
           <Datum label="Ask" value={cell(result.values.optionAsk, money)} />
           <Datum label="Midpoint" value={cell(result.values.midpoint, money)} />
           <Datum label="Delta" value={cell(result.values.delta, (v) => toNumber(v).toFixed(2))} />
-          <Datum label="Open interest" value={cell(result.values.openInterest, formatCount)} />
-          <Datum label="Option volume" value={cell(result.values.optionVolume, formatCount)} />
+          <Datum
+            label="Open interest"
+            value={coloredCell(result.values.openInterest, formatCount, ruleSeverityTone(criterionFor(result, "openInterest")))}
+          />
+          <Datum
+            label="Option volume"
+            value={coloredCell(result.values.optionVolume, formatCount, ruleSeverityTone(criterionFor(result, "optionVolume")))}
+          />
           <Datum label="Spread" value={cell(result.values.spreadPercent, percent)} />
-          <Datum label="ROR" value={cell(result.values.ror, percent)} />
+          <Datum label="ROR" value={coloredCell(result.values.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))} />
           <Datum label="Annualized ROR" value={cell(result.values.annualizedRor, percent)} />
         </dl>
       </section>
@@ -731,6 +822,37 @@ function cell(value: number | null, format: (value: number) => string) {
   return value === null ? dash() : format(value);
 }
 
+/** Looks up this row's evaluated criterion for a Scanner Rule key, straight off the already-
+ * computed `summary.results` - a miss means the rule is disabled (or doesn't apply to this
+ * metric, e.g. "strike"), which `ruleSeverityTone` renders as neutral, never a hard pass/fail. */
+function criterionFor(result: ScannerViewResult, key: string): CriterionResult | undefined {
+  return result.summary.results.find((criterion) => criterion.key === key);
+}
+
+/** Reuses the same color families as the shared `Badge` tones (src/components/ui.tsx) -
+ * green/amber/red/neutral - so cell coloring never introduces a new palette. */
+function severityTextClass(tone: SeverityTone): string {
+  switch (tone) {
+    case "good":
+      return "text-emerald-300";
+    case "warn":
+      return "text-amber-300";
+    case "bad":
+      return "text-red-300";
+    default:
+      return "text-zinc-200";
+  }
+}
+
+/** Same contract as `cell()`, but colors the rendered value by severity tone when present.
+ * Never colors a dash - an unavailable value stays neutral, not a false red/green. */
+function coloredCell(value: number | null, format: (value: number) => string, tone: SeverityTone) {
+  if (value === null) {
+    return dash();
+  }
+  return <span className={severityTextClass(tone)}>{format(value)}</span>;
+}
+
 function formatCount(value: number) {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
 }
@@ -775,18 +897,70 @@ function ResearchBadge({ status }: { status: ScannerViewResult["researchStatus"]
   );
 }
 
+/** Friendlier phrasing for the rules most likely to be VERIFY's cause in practice - falls back
+ * to the criterion's own (already correct, just more verbose) `explanation` for anything else,
+ * so a row is never left with no reason shown at all. */
+const UNKNOWN_REASON_PHRASES: Record<string, string> = {
+  earningsDistance: "Earnings date unavailable",
+  optionVolume: "Option volume unavailable",
+  stockVolume: "Underlying volume unavailable",
+  openInterest: "Open interest unavailable",
+  optionBid: "Option bid unavailable",
+  debtToEquity: "Debt/equity unavailable",
+};
+
+function unknownReasons(result: ScannerViewResult): string[] {
+  return result.summary.results
+    .filter((criterion) => criterion.status === "UNKNOWN")
+    .map((criterion) => UNKNOWN_REASON_PHRASES[criterion.key] ?? criterion.explanation);
+}
+
+/** Never make the user guess why a row says VERIFY - shown right under the badge, not just
+ * buried in the row's full expansion. */
+function VerifyReasons({ result }: { result: ScannerViewResult }) {
+  const reasons = unknownReasons(result);
+  if (reasons.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-1 text-[10px] leading-snug text-zinc-500" title={reasons.join("; ")}>
+      {reasons.length === 1 ? reasons[0] : `${reasons.length} inputs need verification: ${reasons.join(", ")}`}
+    </div>
+  );
+}
+
+/**
+ * The domain's own classification (honestSetupLabel: a gating FAIL always reads "Fails," any
+ * UNKNOWN criterion always reads "Verify") must win before the "NEAR" heuristic ever gets a
+ * say - otherwise a candidate that fails a gating rule by a small margin can render the amber
+ * "NEAR" badge instead of "FAIL"/"VERIFY," directly contradicting the domain's own answer.
+ * getNearMisses doesn't distinguish gating from preference criteria, so it cannot be trusted
+ * to override either of those on its own. Shared by the status badge, the row border, the
+ * "Near" one-click filter, and its count chip, so all four always agree on what "near" means.
+ */
+function isNearMatch(result: ScannerViewResult): boolean {
+  if (result.summary.status === "PASS") {
+    return false;
+  }
+  if (result.scoreLabel === "Verify" || result.scoreLabel === "Fails" || result.score < 45) {
+    return false;
+  }
+  return result.nearMisses.length === 1;
+}
+
 function statusInfo(result: ScannerViewResult): { word: string; tone: string } {
   if (result.summary.status === "PASS") {
     return { word: "PASS", tone: "border-emerald-400/40 bg-emerald-400/15 text-emerald-100" };
-  }
-  if (result.nearMisses.length === 1) {
-    return { word: "NEAR", tone: "border-amber-400/40 bg-amber-400/15 text-amber-100" };
   }
   if (result.scoreLabel === "Verify") {
     return { word: "VERIFY", tone: "border-zinc-600 bg-zinc-800 text-zinc-300" };
   }
   if (result.scoreLabel === "Fails" || result.score < 45) {
     return { word: "FAIL", tone: "border-red-400/40 bg-red-400/15 text-red-100" };
+  }
+  if (isNearMatch(result)) {
+    return { word: "NEAR", tone: "border-amber-400/40 bg-amber-400/15 text-amber-100" };
   }
   if (result.score >= 78) {
     return { word: result.scoreLabel.toUpperCase(), tone: "border-sky-400/40 bg-sky-400/15 text-sky-100" };
@@ -814,11 +988,12 @@ function resultBorder(result: ScannerViewResult) {
   if (result.summary.status === "PASS") {
     return "border-emerald-400/35";
   }
-  if (result.nearMisses.length === 1) {
-    return "border-amber-400/35";
-  }
+  // A real FAIL (see isNearMatch's comment on precedence) must win over the "near" heuristic.
   if (result.summary.status === "FAIL") {
     return "border-red-400/25";
+  }
+  if (isNearMatch(result)) {
+    return "border-amber-400/35";
   }
   return "border-zinc-800";
 }
@@ -828,7 +1003,7 @@ function applyQuickFilter(results: ScannerViewResult[], quick: QuickKey) {
     case "pass":
       return results.filter((result) => result.summary.status === "PASS");
     case "near":
-      return results.filter((result) => result.nearMisses.length === 1);
+      return results.filter(isNearMatch);
     case "watchlist":
       return results.filter((result) => result.researchStatus !== null);
     case "strongest":

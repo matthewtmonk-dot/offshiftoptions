@@ -210,6 +210,7 @@ function bestPutValues(
     return {
       ...candidate.values,
       ...unknownOptionValues(),
+      scanNote: "No qualifying option contract found within your Scanner Rules.",
     };
   }
 

@@ -36,15 +36,25 @@ test.describe("scanner redesign", () => {
     await expect(desktop.getByText("NEAR", { exact: true })).toHaveCount(0);
   });
 
-  test("one-click Near filter isolates near-miss candidates and shows why they missed", async ({ page }) => {
+  test("a gating-rule FAIL (CORZ's option bid below the minimum) never displays as NEAR, and the Near filter excludes it", async ({ page }) => {
+    // Regression test for a real precedence bug: the status badge/border/Near filter used to
+    // check "is this a near miss" before checking the domain's own Fails/Verify classification,
+    // so a gating-rule FAIL with a small numeric gap (CORZ's $0.06 option bid vs. the $0.10
+    // minimum) could render the amber "NEAR" badge instead of "FAIL." CORZ is real seeded data
+    // that reproduced this exact bug before the fix.
     await loginAsMatt(page);
     await page.goto("/scanner");
 
-    await page.getByRole("button", { name: /^Near/ }).click();
     const desktop = page.getByTestId("scanner-desktop-table");
-    await expect(desktop.getByRole("row", { name: /CORZ/ })).toBeVisible();
-    await expect(desktop.getByRole("row", { name: /RIVN/ })).toHaveCount(0);
+    const corzRow = desktop.getByRole("row", { name: /CORZ/ });
+    await expect(corzRow.getByText("FAIL", { exact: true })).toBeVisible();
+    await expect(corzRow.getByText("NEAR", { exact: true })).toHaveCount(0);
 
+    await page.getByRole("button", { name: /^Near/ }).click();
+    await expect(desktop.getByRole("row", { name: /CORZ/ })).toHaveCount(0);
+
+    // Switch back client-side (no full reload) to avoid racing hydration mid-test.
+    await page.getByRole("button", { name: /^All/ }).click();
     await desktop.getByRole("button", { name: /CORZ details/ }).click();
     await expect(desktop.getByText("Criteria")).toBeVisible();
     await expect(desktop.getByText("FAIL", { exact: true }).first()).toBeVisible();
@@ -105,6 +115,39 @@ test.describe("scanner redesign", () => {
     await page.getByText("Columns", { exact: true }).click();
     await page.locator("label").filter({ hasText: /^Delta$/ }).click();
     await expect(page.locator("thead th", { hasText: "Delta" })).toBeVisible();
+  });
+
+  test("Columns dropdown closes on outside click, closes on Escape, and stays open for inside interaction", async ({ page }) => {
+    await loginAsMatt(page);
+    await page.goto("/scanner");
+    const menu = page.getByTestId("scanner-columns-menu");
+
+    await page.getByText("Columns", { exact: true }).click();
+    await expect(menu).toBeVisible();
+
+    // Clicking an interactive control inside the menu (a checkbox label) must not close it.
+    await menu.getByText("Delta", { exact: true }).click();
+    await expect(menu).toBeVisible();
+    await menu.getByText("Delta", { exact: true }).click();
+    await expect(menu).toBeVisible();
+
+    // Clicking anywhere outside the menu closes it.
+    await page.getByRole("heading", { name: "My LST Scanner", exact: true }).click();
+    await expect(menu).toBeHidden();
+
+    // Reopen, then Escape closes it too.
+    await page.getByText("Columns", { exact: true }).click();
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+
+    // Stable after repeated open/close cycles.
+    for (let i = 0; i < 3; i++) {
+      await page.getByText("Columns", { exact: true }).click();
+      await expect(menu).toBeVisible();
+      await page.getByText("Columns", { exact: true }).click();
+      await expect(menu).toBeHidden();
+    }
   });
 
   test("sort control changes candidate order client-side", async ({ page }) => {
