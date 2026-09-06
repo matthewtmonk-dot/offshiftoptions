@@ -640,7 +640,24 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     });
     expect(campaigns).toHaveLength(3);
 
+    // REGRESSION: each real transaction's own fee must attribute to its own event - the Aug 28
+    // BTC's $0.66 fee to ROLL_PUT_CLOSE, and the Aug 28 STO's own $0.66 fee to ROLL_PUT_OPEN -
+    // never the whole $1.32 combined onto one event and $0 on the other.
+    const corz = campaigns.find((c) => c.ticker === "CORZ")!;
+    const rollClose = corz.events.find((e) => e.type === "ROLL_PUT_CLOSE")!;
+    const rollOpen = corz.events.find((e) => e.type === "ROLL_PUT_OPEN")!;
+    const sellPut = corz.events.find((e) => e.type === "SELL_PUT")!;
+    expect(Number(rollClose.fees)).toBe(0.66);
+    expect(Number(rollOpen.fees)).toBe(0.66);
+    expect(Number(sellPut.fees)).toBe(0.66);
+    const corzTotalFees = Number(sellPut.fees) + Number(rollClose.fees) + Number(rollOpen.fees);
+    expect(Math.round(corzTotalFees * 100) / 100).toBe(1.98); // total unaffected by the per-event split
+
     const { summarizeCampaign } = await import("@/domain/finance/campaigns");
+    // $26 - $23 + $68 - $1.98 fees = $69.02, computed entirely by the real domain function.
+    const corzRealizedPL = summarizeCampaign({ events: corz.events, status: corz.status }).realizedPL ?? 0;
+    expect(Math.round(corzRealizedPL * 100) / 100).toBe(69.02);
+
     const totalNetPL = campaigns.reduce((sum, campaign) => sum + (summarizeCampaign({ events: campaign.events, status: campaign.status }).realizedPL ?? 0), 0);
     // $127 gross - (5 trades x $0.66) = $123.70 net, computed entirely by the real domain
     // function - never hardcoded here or in production code.

@@ -38,7 +38,7 @@ import {
 import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, type RollStatus } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { getTrackerPageData, normalizeTrackerScope, optionContractKey, type TrackerScope } from "@/lib/app-data";
-import { money, percent, shortDate, toNumber } from "@/lib/format";
+import { money, percent, shortCalendarDate, shortDate, toNumber } from "@/lib/format";
 import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { resolveInheritedVisibility } from "@/lib/privacy";
 import type { BrokerPosition } from "@/providers/broker-read/types";
@@ -712,8 +712,8 @@ function CampaignCard({
                 Result So Far
               </div>
               <dl className="grid gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
-                <ResultItem label="Opened" value={summary.openedAt ? shortDate(summary.openedAt) : "UNKNOWN"} />
-                <ResultItem label="Closed" value={summary.closedAt ? shortDate(summary.closedAt) : "Not closed"} />
+                <ResultItem label="Opened" value={summary.openedAt ? shortCalendarDate(summary.openedAt) : "UNKNOWN"} />
+                <ResultItem label="Closed" value={summary.closedAt ? shortCalendarDate(summary.closedAt) : "Not closed"} />
                 <ResultItem
                   label="Total credits"
                   value={money(summary.totalPremiumReceived)}
@@ -843,7 +843,7 @@ function TimelineGroupView({ group }: { group: { key: string; label: string; eve
 
   return (
     <div className="grid grid-cols-[88px_1fr] gap-3 text-sm">
-      <div className="text-xs text-zinc-500">{shortDate(group.events[0].occurredAt)}</div>
+      <div className="text-xs text-zinc-500">{shortCalendarDate(group.events[0].occurredAt)}</div>
       <div className="border-l border-zinc-800 pl-3">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
           <div className="inline-flex items-center gap-1.5 font-semibold text-zinc-100">
@@ -1170,7 +1170,7 @@ function SchwabImportPreviewPanel({
         {rows.map((row, index) => (
           <div key={index} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-zinc-900/60 px-3 py-2 text-xs">
             <span className="text-zinc-300">
-              {row.symbol ?? row.action ?? "Cash activity"} {row.occurredAt ? `· ${shortDate(row.occurredAt)}` : ""}
+              {row.symbol ?? row.action ?? "Cash activity"} {row.occurredAt ? `· ${shortCalendarDate(row.occurredAt)}` : ""}
               {row.amount !== null ? ` · ${money(row.amount)}` : ""}
             </span>
             <span className="flex items-center gap-2">
@@ -1217,7 +1217,7 @@ function BrokerActivityAwaitingReviewPanel({
                   {item.likelyCsp ? <Badge tone="info">Likely CSP campaign</Badge> : null}
                 </div>
                 <div className="text-xs text-zinc-500">
-                  {item.expiration ? shortDate(item.expiration) : "Unknown expiration"}
+                  {item.expiration ? shortCalendarDate(item.expiration) : "Unknown expiration"}
                   {item.strike !== null ? ` · $${item.strike.toFixed(2)} ${item.optionType === "PUT" ? "Put" : "Call"}` : ""} · Current
                   position: {item.quantity} · Transactions found: {item.transactionEvidenceCount}
                 </div>
@@ -1683,7 +1683,7 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
       <summary className="grid cursor-pointer list-none grid-cols-[1.05fr_0.75fr_0.85fr_0.9fr_0.9fr_0.9fr_0.85fr_0.7fr_0.7fr] gap-3 px-3 py-3 text-sm transition hover:bg-zinc-900/70 [&::-webkit-details-marker]:hidden">
         <span className="min-w-0">
           <span className="font-semibold text-zinc-50">{campaign.ticker}</span>
-          <span className="mt-0.5 block truncate text-xs text-zinc-500">{campaign.accountId ? shortDate(campaign.openedAt) : "Campaign"}</span>
+          <span className="mt-0.5 block truncate text-xs text-zinc-500">{campaign.accountId ? shortCalendarDate(campaign.openedAt) : "Campaign"}</span>
         </span>
         <span>
           <Badge tone={statusTone(campaign.status, progress.realizedPL ?? progress.currentPL)}>{campaign.status}</Badge>
@@ -1949,7 +1949,7 @@ function eventDescription(event: CampaignEventRow) {
 
   const optionType = event.optionType === "CALL" ? "Call" : "Put";
   const contractText = `${event.contracts ?? "?"} ${event.contracts === 1 ? "contract" : "contracts"}`;
-  const expiration = event.expiration ? shortDate(event.expiration) : "unknown expiration";
+  const expiration = event.expiration ? shortCalendarDate(event.expiration) : "unknown expiration";
   return `${expiration} ${money(event.strike)} ${optionType} / ${contractText}`;
 }
 

@@ -160,8 +160,9 @@ export async function reconcileSchwabActivityForUser(
         evidence.newExpiration.toISOString().slice(0, 10),
         evidence.newStrike,
         evidence.newPremium,
-        evidence.fees,
+        evidence.closeFees,
         null,
+        evidence.openFees,
       );
       await prisma.brokerRecord.updateMany({
         where: { id: { in: [evidence.closeTransactionId, evidence.openTransactionId] } },

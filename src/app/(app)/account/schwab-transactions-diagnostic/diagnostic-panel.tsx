@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Badge, Panel } from "@/components/ui";
-import { shortDateTime } from "@/lib/format";
+import { shortCalendarDate, shortDateTime } from "@/lib/format";
 import { runSchwabTransactionsDiagnosticAction } from "../../actions";
 import type {
   OrdersDiagnosticResult,
@@ -210,7 +210,7 @@ function OrdersSummary({ orders }: { orders: OrdersDiagnosticResult }) {
                   <td className="border-b border-zinc-900 px-3 py-2">{row.underlyingSymbol ?? "—"}</td>
                   <td className="border-b border-zinc-900 px-3 py-2">{row.putCall ?? "—"}</td>
                   <td className="border-b border-zinc-900 px-3 py-2">{row.strike ?? "—"}</td>
-                  <td className="border-b border-zinc-900 px-3 py-2">{row.expiration ? shortDateTime(row.expiration) : "—"}</td>
+                  <td className="border-b border-zinc-900 px-3 py-2">{row.expiration ? shortCalendarDate(row.expiration) : "—"}</td>
                   <td className="border-b border-zinc-900 px-3 py-2">{row.instruction ?? "—"}</td>
                   <td className="border-b border-zinc-900 px-3 py-2">{row.quantity ?? "—"}</td>
                   <td className="border-b border-zinc-900 px-3 py-2">{row.fillPrice ?? "—"}</td>
@@ -278,7 +278,7 @@ function TransferItemShapesSection({ transferItemShapes }: { transferItemShapes:
                     <td className="border-b border-zinc-900 px-3 py-2">{item.symbolDescriptor ?? "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{item.putCall ?? "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{item.strike ?? "—"}</td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{item.expiration ? shortDateTime(item.expiration) : "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.expiration ? shortCalendarDate(item.expiration) : "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{item.instruction ?? "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{item.positionEffect ?? "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{item.amount ?? "—"}</td>

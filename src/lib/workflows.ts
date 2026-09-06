@@ -661,6 +661,11 @@ export async function rollCampaignPutForUser(
   newPremiumInput: unknown,
   feesInput: unknown,
   notesInput: unknown,
+  /** Optional - the new leg's own fee, kept separate from `feesInput` (the close leg's fee) so
+   * an automatic Schwab reconciliation can attribute each real transaction's own fee to its own
+   * event. Omitted (manual roll entry, where only one combined fee is ever collected) defaults
+   * to $0 on the new leg, exactly matching this function's original behavior. */
+  newLegFeesInput: unknown = undefined,
 ) {
   const campaign = await getOwnMutableCampaign(userId, campaignId);
   if (!campaign) {
@@ -681,6 +686,7 @@ export async function rollCampaignPutForUser(
   const newStrike = parsePositiveNumber(newStrikeInput, "new strike");
   const newPremium = parseNonNegativeNumber(newPremiumInput, "new premium");
   const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const newLegFees = parseOptionalMoney(newLegFeesInput, "new leg fees") ?? 0;
   const notes = trimText(notesInput, 700);
   const groupKey = `roll-${randomUUID()}`;
   const baseSortOrder = nextSortOrder(campaign.events);
@@ -712,7 +718,7 @@ export async function rollCampaignPutForUser(
         strike: newStrike,
         expiration: newExpiration,
         premium: newPremium,
-        fees: 0,
+        fees: newLegFees,
         notes: notes || null,
       },
     ],

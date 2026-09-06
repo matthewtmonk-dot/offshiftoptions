@@ -120,7 +120,11 @@ export type ClosingEvidence =
       newStrike: number;
       newExpiration: Date;
       newPremium: number;
-      fees: number;
+      /** Kept separate (not pre-summed) so the caller can attribute each real transaction's own
+       * fee to its own event (ROLL_PUT_CLOSE / ROLL_PUT_OPEN) instead of dumping the combined
+       * total onto one event - the campaign's total fees are unaffected either way. */
+      closeFees: number;
+      openFees: number;
     }
   | { kind: "ASSIGNMENT"; transactionId: string; occurredAt: Date; fees: number }
   | { kind: "NONE" };
@@ -175,7 +179,8 @@ export function findClosingEvidence(
         newStrike: otherLeg.strike,
         newExpiration: otherLeg.expiration,
         newPremium: Math.abs(rollOpen.price!),
-        fees: absOrZero(closeTxn.fees) + absOrZero(rollOpen.fees),
+        closeFees: absOrZero(closeTxn.fees),
+        openFees: absOrZero(rollOpen.fees),
       };
     }
 

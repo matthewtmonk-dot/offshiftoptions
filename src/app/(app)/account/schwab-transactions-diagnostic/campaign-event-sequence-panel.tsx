@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Badge, Panel } from "@/components/ui";
-import { shortDateTime } from "@/lib/format";
+import { shortCalendarDate, shortDateTime } from "@/lib/format";
 import { runCampaignEventSequenceDiagnosticAction } from "../../actions";
 import type { CampaignEventSequenceReport } from "@/lib/campaign-event-sequence-diagnostic";
 
@@ -108,9 +108,9 @@ function SequenceReport({ report }: { report: CampaignEventSequenceReport }) {
                 {campaign.events.map((event, eventIndex) => (
                   <tr key={eventIndex}>
                     <td className="border-b border-zinc-900 px-3 py-2 font-medium text-zinc-100">{event.type}</td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{shortDateTime(event.occurredAt)}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{shortCalendarDate(event.occurredAt)}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{event.strike ?? "—"}</td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{event.expiration ? shortDateTime(event.expiration) : "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{event.expiration ? shortCalendarDate(event.expiration) : "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{event.premium ?? "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">{event.cashAmount ?? "—"}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">${event.fees}</td>
