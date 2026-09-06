@@ -590,6 +590,91 @@ describe("live market-data scanner", () => {
     expect(badco?.values.scanNote).toContain("unavailable");
   });
 
+  it("never fetches price history or option chains for a ticker that fails the quote-only price filter (Stage 1 before Stage 2)", async () => {
+    const historyCalls: string[] = [];
+    const optionChainCalls: string[] = [];
+    const provider: MarketDataProvider = {
+      async getQuote(symbol) {
+        return { symbol, price: symbol === "CHEAP" ? 12 : 999, volume: 1_000_000, asOf: new Date("2026-08-31T14:30:00Z") };
+      },
+      async getPriceHistory(symbol, days) {
+        historyCalls.push(symbol);
+        return Array.from({ length: days }, (_, index) => ({
+          symbol,
+          date: new Date(Date.UTC(2026, 7, index + 1)),
+          open: 12,
+          high: 12.5,
+          low: 11.5,
+          close: 12 - index * 0.01,
+          volume: 1000 + index,
+        }));
+      },
+      async getOptionChain(symbol) {
+        optionChainCalls.push(symbol);
+        return [];
+      },
+      async getInstrument(symbol) {
+        return { symbol, description: `${symbol} common stock`, assetType: "EQUITY" };
+      },
+      async getMarketHours() {
+        return { isOpen: true };
+      },
+    };
+
+    const results = await evaluateLiveMarketScan({
+      provider,
+      rules,
+      universe: ["CHEAP", "TOOEXPENSIVE"],
+      asOf: new Date("2026-08-31T12:00:00Z"),
+    });
+
+    // The out-of-range ticker's quote is real (never fabricated), but history/option-chain
+    // requests were never spent on it.
+    expect(historyCalls).toEqual(["CHEAP"]);
+    expect(optionChainCalls).not.toContain("TOOEXPENSIVE");
+
+    const tooExpensive = results.find((result) => result.ticker === "TOOEXPENSIVE");
+    expect(tooExpensive?.values.price).toBe(999);
+    expect(tooExpensive?.values.rsi).toBeNull();
+    expect(tooExpensive?.values.bbPercent).toBeNull();
+    expect(tooExpensive?.values.scanNote).toBe("Outside your configured stock price range; history and option-chain lookups were skipped.");
+    expect(tooExpensive?.summary.status).toBe("FAIL");
+  });
+
+  it("reports a real quote with a genuine history-fetch failure distinctly from a price exclusion or a full quote failure", async () => {
+    const provider: MarketDataProvider = {
+      async getQuote(symbol) {
+        return { symbol, price: 12, volume: 1_000_000, asOf: new Date("2026-08-31T14:30:00Z") };
+      },
+      async getPriceHistory() {
+        throw new Error("Schwab price history timeout");
+      },
+      async getOptionChain() {
+        return [];
+      },
+      async getInstrument(symbol) {
+        return { symbol, description: `${symbol} common stock`, assetType: "EQUITY" };
+      },
+      async getMarketHours() {
+        return { isOpen: true };
+      },
+    };
+
+    const results = await evaluateLiveMarketScan({
+      provider,
+      rules,
+      universe: ["RIOT"],
+      asOf: new Date("2026-08-31T12:00:00Z"),
+    });
+
+    const riot = results.find((result) => result.ticker === "RIOT");
+    expect(riot?.values.price).toBe(12); // the real quote is preserved
+    expect(riot?.values.rsi).toBeNull();
+    expect(riot?.values.scanNote).toBe("Price history was unavailable for this ticker; RSI/BB and option-chain lookups were skipped.");
+    // Distinct from a total quote failure, which reports price as null too - never conflated.
+    expect(riot?.summary.status).not.toBe("PASS");
+  });
+
   it("option volume never hard-excludes a contract even when the optionVolume rule is enabled - it is a preference, not a gate", async () => {
     // optionVolume is intentionally absent from profile.ts's GATING_RULE_KEYS - a FAIL should
     // only lower the score/label, never remove the contract from consideration the way an

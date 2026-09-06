@@ -965,12 +965,22 @@ export async function updateRollBufferPercentForUser(userId: string, rollBufferP
  * fixed discovery starter list. See PROJECT_HANDOFF.md Research section: this is additive
  * union, not a replacement for the discovery universe.
  */
+/**
+ * Tier 1 of the scanner's universe (see docs/SCANNER_RULES.md "Broad scanner universe"):
+ * private, user-scoped tickers ALWAYS included in this user's own live scan regardless of the
+ * broader public universe - their own Research (excluding AVOID/NEVER_TRADE, which a user has
+ * explicitly ruled out) plus every ticker they have ever traded (any of their own Campaigns,
+ * any status). Never another user's Research/Watchlist/campaigns - always scoped to `userId`.
+ */
 export async function getResearchUniverseTickersForUser(userId: string): Promise<string[]> {
-  const items = await prisma.watchlistItem.findMany({
-    where: { ownerId: userId, researchStatus: { in: ["LIKE", "WATCH", "NEUTRAL"] } },
-    select: { ticker: true },
-  });
-  return items.map((item) => item.ticker);
+  const [items, campaigns] = await Promise.all([
+    prisma.watchlistItem.findMany({
+      where: { ownerId: userId, researchStatus: { in: ["LIKE", "WATCH", "NEUTRAL"] } },
+      select: { ticker: true },
+    }),
+    prisma.campaign.findMany({ where: { ownerId: userId }, select: { ticker: true }, distinct: ["ticker"] }),
+  ]);
+  return [...new Set([...items.map((item) => item.ticker), ...campaigns.map((campaign) => campaign.ticker)])];
 }
 
 export async function getReadableWatchlistItemForUser(userId: string, itemId: string) {

@@ -158,6 +158,32 @@ maybeDescribe("Research (Watchlist->Research) privacy, isolation, and personal-r
     expect(universe).not.toContain("ZZZNEVER");
   });
 
+  it("also includes every ticker the user has ever traded (any Campaign), and never another user's - Tier 1 scanner universe", async () => {
+    const account = await prisma.tradingAccount.create({
+      data: { userId: userA.id, name: "Universe Test Account", brokerName: "Manual", accountType: "Brokerage", source: "MANUAL", visibility: "PRIVATE" },
+    });
+    const otherAccount = await prisma.tradingAccount.create({
+      data: { userId: userB.id, name: "User B Account", brokerName: "Manual", accountType: "Brokerage", source: "MANUAL", visibility: "PRIVATE" },
+    });
+
+    try {
+      await workflows.createCampaignForUser(userA.id, account.id, "ZZZTRADED", "2026-08-01", "2026-09-04", "20", "1", "0.3", "0.66", "", "PRIVATE");
+      await workflows.createCampaignForUser(userB.id, otherAccount.id, "ZZZOTHERB", "2026-08-01", "2026-09-04", "20", "1", "0.3", "0.66", "", "PRIVATE");
+
+      const universeA = await workflows.getResearchUniverseTickersForUser(userA.id);
+      expect(universeA).toContain("ZZZTRADED");
+      expect(universeA).not.toContain("ZZZOTHERB");
+
+      const universeB = await workflows.getResearchUniverseTickersForUser(userB.id);
+      expect(universeB).toContain("ZZZOTHERB");
+      expect(universeB).not.toContain("ZZZTRADED");
+    } finally {
+      await prisma.campaignEvent.deleteMany({ where: { campaign: { ownerId: { in: [userA.id, userB.id] } } } });
+      await prisma.campaign.deleteMany({ where: { ownerId: { in: [userA.id, userB.id] } } });
+      await prisma.tradingAccount.deleteMany({ where: { id: { in: [account.id, otherAccount.id] } } });
+    }
+  });
+
   it("rejects an invalid research status rather than silently accepting it", async () => {
     await expect(workflows.setResearchStatusForUser(userA.id, "ZZZJ", "BOGUS")).rejects.toThrow("Invalid research status");
   });

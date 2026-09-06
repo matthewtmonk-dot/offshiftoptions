@@ -47,6 +47,10 @@ type StockStageCandidate = {
 export const STARTER_LIVE_SCAN_UNIVERSE = [...new Set(DEMO_SCAN_CANDIDATES.map((candidate) => candidate.ticker))];
 const SCANNER_RULE_DEFAULTS_BY_KEY = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.key, definition]));
 const STOCK_STAGE_RULE_KEYS = new Set(["price", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
+/** Stage 1 of the stock-level funnel: rules answerable from a quote alone, with no history
+ * fetch. Kept as a subset of STOCK_STAGE_RULE_KEYS, never a separate rule vocabulary - see
+ * evaluateLiveMarketScan's two-stage stock funnel below. */
+const QUOTE_ONLY_STOCK_RULE_KEYS = new Set(["price"]);
 
 /**
  * Caps how many quote/history or option-chain requests run in flight at once for a
@@ -59,10 +63,33 @@ const STOCK_STAGE_RULE_KEYS = new Set(["price", "rsi", "bbPercent", "doNotTrade"
  */
 export const SCAN_FETCH_CONCURRENCY = 4;
 
+type QuoteStageOutcome =
+  | { ticker: string; ok: true; quote: MarketQuote; values: Record<string, number | string | boolean | null | undefined>; verifiedFundamentals: QuoteFundamentals | null }
+  | { ticker: string; ok: false; error: unknown };
+
 type StockStageOutcome =
   | { ticker: string; ok: true; candidate: StockStageCandidate }
   | { ticker: string; ok: false; error: unknown };
 
+/**
+ * Two-stage stock-level funnel, cheapest filter first (see docs/SCANNER_RULES.md "Broad scanner
+ * universe" / PROJECT_HANDOFF.md Stabilization Slice 3 design):
+ *
+ *  Stage 1 (quote only): one Schwab quote request per universe ticker - no price-history fetch
+ *  yet. Eliminates on QUOTE_ONLY_STOCK_RULE_KEYS (currently just `price`) before ever spending a
+ *  history request. A large universe with many price-out-of-range tickers never fetches their
+ *  history at all.
+ *
+ *  Stage 2 (technical): only quote-stage survivors get a price-history fetch, RSI/Bollinger
+ *  computed, and the FULL stock-stage rule set (STOCK_STAGE_RULE_KEYS) applied to rank/shortlist
+ *  for Stage 3 (option-chain enrichment, capped at maxOptionChainLookups) - unchanged from
+ *  before this split, just fed a smaller, already-price-filtered set.
+ *
+ * A ticker eliminated at Stage 1 still appears in the final results (with real quote values,
+ * never fabricated) - it simply never incurs a history or option-chain request, and its
+ * rsi/bbPercent stay null with an honest scanNote explaining why, rather than "unavailable" (a
+ * fetch failure) or silently absent.
+ */
 export async function evaluateLiveMarketScan({
   provider,
   rules,
@@ -71,27 +98,53 @@ export async function evaluateLiveMarketScan({
   maxOptionChainLookups = 8,
 }: LiveScanOptions): Promise<LiveScanCandidate[]> {
   const tickers = universe.map((item) => item.toUpperCase());
-  const stockOutcomes = await mapWithConcurrency<string, StockStageOutcome>(tickers, SCAN_FETCH_CONCURRENCY, async (ticker) => {
+  const quoteOutcomes = await mapWithConcurrency<string, QuoteStageOutcome>(tickers, SCAN_FETCH_CONCURRENCY, async (ticker) => {
     try {
-      const [quote, candles] = await Promise.all([provider.getQuote(ticker), provider.getPriceHistory(ticker, 80)]);
-      return { ticker, ok: true, candidate: buildStockStageCandidate(ticker, quote, candles) };
+      const quote = await provider.getQuote(ticker);
+      return { ticker, ok: true, quote, values: buildQuoteOnlyValues(quote), verifiedFundamentals: quote.fundamentals ?? null };
     } catch (error) {
       return { ticker, ok: false, error };
     }
   });
 
-  const stockStage = stockOutcomes
-    .filter((outcome): outcome is StockStageOutcome & { ok: true } => outcome.ok)
-    .map((outcome) => outcome.candidate);
-  const unavailableTickers = stockOutcomes.filter((outcome): outcome is StockStageOutcome & { ok: false } => !outcome.ok);
+  const quoteStage = quoteOutcomes.filter((outcome): outcome is QuoteStageOutcome & { ok: true } => outcome.ok);
+  const unavailableTickers = quoteOutcomes.filter((outcome): outcome is QuoteStageOutcome & { ok: false } => !outcome.ok);
 
   // A single bad ticker should not sink the whole scan (partial results are useful and
   // are surfaced as UNKNOWN below). But if every ticker failed, this is a systemic
   // problem (auth, outage, etc.), not a per-ticker one - surface it as a real failure
   // instead of returning an all-UNKNOWN scan that looks like it ran successfully.
-  if (stockStage.length === 0 && unavailableTickers.length > 0) {
+  if (quoteStage.length === 0 && unavailableTickers.length > 0) {
     throw unavailableTickers[0].error;
   }
+
+  const quoteOnlyRules = rules.filter((rule) => QUOTE_ONLY_STOCK_RULE_KEYS.has(rule.key));
+  const quoteEligible = quoteStage.filter((candidate) => !evaluateCandidate(quoteOnlyRules, candidate.values).results.some((r) => r.status === "FAIL"));
+  const quoteExcluded = quoteStage.filter((candidate) => !quoteEligible.includes(candidate));
+
+  const historyOutcomes = await mapWithConcurrency<QuoteStageOutcome & { ok: true }, StockStageOutcome>(
+    quoteEligible,
+    SCAN_FETCH_CONCURRENCY,
+    async (candidate) => {
+      try {
+        const candles = await provider.getPriceHistory(candidate.ticker, 80);
+        return {
+          ticker: candidate.ticker,
+          ok: true,
+          candidate: mergeHistoryValues(candidate.ticker, candidate.quote, candidate.values, candles, candidate.verifiedFundamentals),
+        };
+      } catch (error) {
+        return { ticker: candidate.ticker, ok: false, error };
+      }
+    },
+  );
+
+  const stockStage = historyOutcomes
+    .filter((outcome): outcome is StockStageOutcome & { ok: true } => outcome.ok)
+    .map((outcome) => outcome.candidate);
+  const historyFailedTickers = new Set(
+    historyOutcomes.filter((outcome): outcome is StockStageOutcome & { ok: false } => !outcome.ok).map((outcome) => outcome.ticker),
+  );
 
   const shortlist = stockStage
     .filter((candidate) => stockStageIsEligible(candidate, rules))
@@ -148,10 +201,66 @@ export async function evaluateLiveMarketScan({
     return { ticker: outcome.ticker, values, summary: evaluateCandidate(rules, values), verifiedFundamentals: null };
   });
 
-  return [...evaluated, ...unavailable];
+  // Stage 1 excluded these on price alone - a real quote was fetched (never fabricated), but
+  // history/RSI/BB/option-chain requests were never spent on a ticker already known to be
+  // outside the configured price range.
+  const priceExcluded = quoteExcluded.map((candidate) => {
+    const values = {
+      ...candidate.values,
+      ...unknownOptionValues(),
+      scanNote: "Outside your configured stock price range; history and option-chain lookups were skipped.",
+    };
+    return { ticker: candidate.ticker, values, summary: evaluateCandidate(rules, values), verifiedFundamentals: candidate.verifiedFundamentals };
+  });
+
+  // A real quote succeeded but the price-history request itself failed - distinct from
+  // priceExcluded (a deliberate filter) and from unavailableTickers (the quote itself failed).
+  const historyUnavailable = quoteEligible
+    .filter((candidate) => historyFailedTickers.has(candidate.ticker))
+    .map((candidate) => {
+      const values = {
+        ...candidate.values,
+        rsi: null,
+        bbPercent: null,
+        ...unknownOptionValues(),
+        scanNote: "Price history was unavailable for this ticker; RSI/BB and option-chain lookups were skipped.",
+      };
+      return { ticker: candidate.ticker, values, summary: evaluateCandidate(rules, values), verifiedFundamentals: candidate.verifiedFundamentals };
+    });
+
+  return [...evaluated, ...priceExcluded, ...historyUnavailable, ...unavailable];
 }
 
-function buildStockStageCandidate(ticker: string, quote: MarketQuote, candles: PriceCandle[]): StockStageCandidate {
+/** Stage 1: everything knowable from a quote alone - RSI/BB stay null until (if) Stage 2 runs. */
+function buildQuoteOnlyValues(quote: MarketQuote): Record<string, number | string | boolean | null | undefined> {
+  return {
+    price: quote.price,
+    priceChange: quote.change ?? null,
+    priceChangePercent: quote.changePercent ?? null,
+    stockVolume: quote.volume ?? null,
+    rsi: null,
+    bbPercent: null,
+    doNotTrade: false,
+    debtToEquity: null,
+    earningsDate: null,
+    earningsDistance: null,
+    // Ephemeral, scan-snapshot-only fields (no reserved WatchlistItem column exists for
+    // either) - Research reads these the same way it already reads Current Price, from
+    // the persisted ScanResult snapshot, never written back onto WatchlistItem itself.
+    companyDescription: quote.companyDescription ?? null,
+    dividendFrequency: quote.fundamentals?.dividendFrequency ?? null,
+  };
+}
+
+/** Stage 2: merges price-history-derived RSI/BB (and the candle-fallback volume, only relevant
+ * once history has actually been fetched) into the Stage 1 quote-only values. */
+function mergeHistoryValues(
+  ticker: string,
+  quote: MarketQuote,
+  quoteValues: Record<string, number | string | boolean | null | undefined>,
+  candles: PriceCandle[],
+  verifiedFundamentals: QuoteFundamentals | null,
+): StockStageCandidate {
   const closes = candles.map((candle) => candle.close);
   const rsi = wilderRsi(closes);
   const bands = bollingerBands(closes);
@@ -161,23 +270,12 @@ function buildStockStageCandidate(ticker: string, quote: MarketQuote, candles: P
     quote,
     candles,
     values: {
-      price: quote.price,
-      priceChange: quote.change ?? null,
-      priceChangePercent: quote.changePercent ?? null,
-      stockVolume: quote.volume ?? candles.at(-1)?.volume ?? null,
+      ...quoteValues,
+      stockVolume: quoteValues.stockVolume ?? candles.at(-1)?.volume ?? null,
       rsi,
       bbPercent: bands ? bollingerPositionPercent(quote.price, bands) : null,
-      doNotTrade: false,
-      debtToEquity: null,
-      earningsDate: null,
-      earningsDistance: null,
-      // Ephemeral, scan-snapshot-only fields (no reserved WatchlistItem column exists for
-      // either) - Research reads these the same way it already reads Current Price, from
-      // the persisted ScanResult snapshot, never written back onto WatchlistItem itself.
-      companyDescription: quote.companyDescription ?? null,
-      dividendFrequency: quote.fundamentals?.dividendFrequency ?? null,
     },
-    verifiedFundamentals: quote.fundamentals ?? null,
+    verifiedFundamentals,
   };
 }
 

@@ -47,3 +47,40 @@ export async function fetchAlphaVantageJson({
 
   return { payload, status: response.status, headers: response.headers };
 }
+
+export type AlphaVantageTextFetchResult = {
+  text: string;
+  status: number;
+};
+
+/**
+ * A handful of Alpha Vantage endpoints (EARNINGS_CALENDAR) respond with CSV rather than JSON -
+ * this fetches the raw response text without attempting to parse it as JSON. Alpha Vantage can
+ * still signal throttling/errors on these endpoints via an HTTP 200 with a JSON body instead of
+ * CSV, so callers must sniff the text (does it start with "{"?) before treating it as CSV - see
+ * fetchAlphaVantageEarningsCalendar in earnings-calendar.ts.
+ */
+export async function fetchAlphaVantageText({
+  apiKey,
+  searchParams,
+  fetchFn = fetch,
+  baseUrl = ALPHA_VANTAGE_BASE_URL,
+}: {
+  apiKey: string;
+  searchParams: URLSearchParams;
+  fetchFn?: AlphaVantageFetch;
+  baseUrl?: string;
+}): Promise<AlphaVantageTextFetchResult> {
+  const url = new URL(baseUrl);
+  for (const [key, value] of searchParams.entries()) {
+    url.searchParams.set(key, value);
+  }
+  url.searchParams.set("apikey", apiKey);
+
+  const response = await fetchFn(url, {
+    headers: { Accept: "text/csv" },
+  });
+
+  const text = await response.text();
+  return { text, status: response.status };
+}
