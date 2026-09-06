@@ -4,7 +4,13 @@ import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
 import { getAccountPageData } from "@/lib/app-data";
-import { getSchwabConnectionSummaryForUser, getSchwabDeveloperCredentialSummaryForUser, type SchwabSyncDiagnostics } from "@/lib/broker-connections";
+import {
+  getSchwabConnectionHealthForUser,
+  getSchwabConnectionSummaryForUser,
+  getSchwabDeveloperCredentialSummaryForUser,
+  type SchwabConnectionHealth,
+  type SchwabSyncDiagnostics,
+} from "@/lib/broker-connections";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { money, shortDateTime } from "@/lib/format";
@@ -32,14 +38,16 @@ export default async function AccountPage({
 }) {
   const user = await requireCurrentUser();
   const params = await searchParams;
-  const [schwabConnection, schwabDeveloperCredential, schwabConfig, accountData, alphaVantageUsage, alphaVantageCache] = await Promise.all([
-    getSchwabConnectionSummaryForUser(user.id),
-    getSchwabDeveloperCredentialSummaryForUser(user.id),
-    Promise.resolve(getSchwabConfigStatus()),
-    getAccountPageData(user.id),
-    getAlphaVantageUsageToday(),
-    getAlphaVantageCacheSummary(),
-  ]);
+  const [schwabConnection, schwabHealth, schwabDeveloperCredential, schwabConfig, accountData, alphaVantageUsage, alphaVantageCache] =
+    await Promise.all([
+      getSchwabConnectionSummaryForUser(user.id),
+      getSchwabConnectionHealthForUser(user.id),
+      getSchwabDeveloperCredentialSummaryForUser(user.id),
+      Promise.resolve(getSchwabConfigStatus()),
+      getAccountPageData(user.id),
+      getAlphaVantageUsageToday(),
+      getAlphaVantageCacheSummary(),
+    ]);
   const schwabOauthReady = Boolean(schwabDeveloperCredential?.configured) || schwabConfig.configured;
   const alphaVantageConfig = getAlphaVantageConfigStatus();
 
@@ -335,6 +343,8 @@ export default async function AccountPage({
                   ) : null}
                 </div>
               </details>
+
+              <ConnectionHealthDetails health={schwabHealth} />
             </div>
           </div>
 
@@ -492,12 +502,12 @@ function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagno
     { label: "TRADE received", value: diagnostics.tradeTransactionsReceived, status: diagnostics.tradeSourceStatus },
     { label: "Receive & deliver received", value: diagnostics.receiveAndDeliverReceived, status: diagnostics.receiveAndDeliverSourceStatus },
     { label: "Dividend/interest received", value: diagnostics.dividendOrInterestReceived, status: diagnostics.dividendOrInterestSourceStatus },
-    { label: "Broker records inserted", value: diagnostics.brokerRecordsInserted },
+    { label: "Broker records inserted", value: diagnostics.brokerRecordsInserted, status: diagnostics.persistenceStatus },
     { label: "Duplicates skipped", value: diagnostics.duplicatesSkipped },
     { label: "Records needing manual review", value: diagnostics.recordsUnresolved },
     { label: "Fees known", value: diagnostics.feeKnownCount },
     { label: "Fees unknown", value: diagnostics.feeUnknownCount },
-    { label: "Campaigns created", value: diagnostics.campaignsCreated },
+    { label: "Campaigns created", value: diagnostics.campaignsCreated, status: diagnostics.reconciliationStatus },
     { label: "Campaigns closed", value: diagnostics.campaignsClosed },
     { label: "Campaigns rolled", value: diagnostics.campaignsRolled },
     { label: "Campaigns assigned", value: diagnostics.campaignsAssigned },
@@ -525,6 +535,130 @@ function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagno
         </p>
       ) : null}
     </details>
+  );
+}
+
+const CREDENTIAL_SOURCE_LABEL: Record<SchwabConnectionHealth["credentialSource"], string> = {
+  USER_CONFIGURED: "Your own developer app",
+  SERVER_ENV: "Shared server app",
+  NONE: "Not configured",
+};
+
+const OAUTH_STATUS_LABEL: Record<SchwabConnectionHealth["oauthStatus"], string> = {
+  CONNECTED: "Connected",
+  NOT_CONNECTED: "Not connected",
+  TOKEN_EXPIRED: "Token expired (refreshes automatically on next use)",
+  REFRESH_FAILED: "Refresh failed - reconnect required",
+};
+
+const OAUTH_STATUS_TONE: Record<SchwabConnectionHealth["oauthStatus"], "good" | "warn" | "bad" | "neutral"> = {
+  CONNECTED: "good",
+  NOT_CONNECTED: "neutral",
+  TOKEN_EXPIRED: "warn",
+  REFRESH_FAILED: "bad",
+};
+
+/**
+ * Answers, for the authenticated user only: which credential source am I using, did OAuth
+ * succeed, did Schwab return an account, and if data stopped, at which stage - with a real
+ * failure always distinguishable from an honest zero. Composed entirely from
+ * getSchwabConnectionHealthForUser (see broker-connections.ts), itself read from data already
+ * persisted for other purposes - never a new diagnostic subsystem. Collapsed by default.
+ */
+function ConnectionHealthDetails({ health }: { health: SchwabConnectionHealth }) {
+  const accountDiscoveryValue =
+    health.accountDiscovery.status === "NOT_ATTEMPTED"
+      ? "Not yet attempted"
+      : health.accountDiscovery.status === "ERROR"
+        ? "Failed"
+        : `Succeeded - ${health.accountDiscovery.accountsLinked} account${health.accountDiscovery.accountsLinked === 1 ? "" : "s"}`;
+
+  return (
+    <details className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
+      <summary className="cursor-pointer font-medium text-zinc-300">Schwab connection health</summary>
+      <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+        <ConnectionDatum label="Developer credential source" value={CREDENTIAL_SOURCE_LABEL[health.credentialSource]} />
+        <div>
+          <dt className="text-xs uppercase tracking-normal text-zinc-500">OAuth status</dt>
+          <dd className="mt-1">
+            <Badge tone={OAUTH_STATUS_TONE[health.oauthStatus]}>{OAUTH_STATUS_LABEL[health.oauthStatus]}</Badge>
+          </dd>
+        </div>
+        <ConnectionDatum label="Account discovery" value={accountDiscoveryValue} />
+        <ConnectionDatum
+          label="Last successful token refresh"
+          value={health.lastSuccessfulRefreshAt ? shortDateTime(health.lastSuccessfulRefreshAt) : "Not yet"}
+        />
+        {health.lastRefreshFailureAt ? (
+          <ConnectionDatum
+            label="Last refresh failure"
+            value={`${health.lastRefreshFailureReason ?? "unknown reason"} at ${shortDateTime(health.lastRefreshFailureAt)}`}
+          />
+        ) : null}
+        <ConnectionDatum label="Last sync" value={health.lastSyncAt ? shortDateTime(health.lastSyncAt) : "Not yet"} />
+        {health.lastSyncFailureAt ? (
+          <ConnectionDatum
+            label="Last sync failure"
+            value={`${health.lastSyncFailureReason ?? "unknown reason"} at ${shortDateTime(health.lastSyncFailureAt)}`}
+          />
+        ) : null}
+      </dl>
+      {health.sync ? (
+        <div className="mt-4 border-t border-zinc-800 pt-3">
+          <p className="mb-2 text-xs font-medium uppercase tracking-normal text-zinc-500">Most recent sync, by stage</p>
+          <SyncStageList sync={health.sync} />
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
+function SyncStageList({ sync }: { sync: SchwabSyncDiagnostics }) {
+  const stages: { label: string; status: "OK" | "ERROR"; detail: string; errorCode: string | null }[] = [
+    { label: "Positions", status: sync.positionsSourceStatus, detail: `${sync.positionsReceived} received`, errorCode: sync.positionsErrorCode },
+    {
+      label: "Transactions - TRADE",
+      status: sync.tradeSourceStatus,
+      detail: `${sync.tradeTransactionsReceived} received`,
+      errorCode: sync.transactionsErrorCode,
+    },
+    {
+      label: "Transactions - RECEIVE_AND_DELIVER",
+      status: sync.receiveAndDeliverSourceStatus,
+      detail: `${sync.receiveAndDeliverReceived} received`,
+      errorCode: sync.transactionsErrorCode,
+    },
+    {
+      label: "Transactions - DIVIDEND_OR_INTEREST",
+      status: sync.dividendOrInterestSourceStatus,
+      detail: `${sync.dividendOrInterestReceived} received`,
+      errorCode: sync.transactionsErrorCode,
+    },
+    {
+      label: "Record persistence",
+      status: sync.persistenceStatus,
+      detail: `${sync.brokerRecordsInserted} inserted, ${sync.recordsUnresolved} need review`,
+      errorCode: sync.persistenceErrorCode,
+    },
+    {
+      label: "Campaign reconciliation",
+      status: sync.reconciliationStatus,
+      detail: `${sync.campaignsCreated} created, ${sync.campaignsClosed} closed, ${sync.campaignsRolled} rolled, ${sync.campaignsAssigned} assigned, ${sync.campaignsExpired} expired`,
+      errorCode: sync.reconciliationErrorCode,
+    },
+  ];
+
+  return (
+    <ul className="space-y-1.5 text-xs">
+      {stages.map((stage) => (
+        <li key={stage.label} className="flex flex-wrap items-center gap-2">
+          <Badge tone={stage.status === "ERROR" ? "bad" : "good"}>{stage.status === "ERROR" ? "ERROR" : "OK"}</Badge>
+          <span className="font-medium text-zinc-200">{stage.label}:</span>
+          <span className="text-zinc-400">{stage.detail}</span>
+          {stage.status === "ERROR" && stage.errorCode ? <span className="text-red-300">({stage.errorCode})</span> : null}
+        </li>
+      ))}
+    </ul>
   );
 }
 

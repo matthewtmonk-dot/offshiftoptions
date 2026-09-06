@@ -6,6 +6,8 @@ import type { MarketDataProvider } from "@/providers/market-data/types";
 import { withMarketDataCache } from "@/providers/market-data/cache";
 import { SchwabBrokerReadProvider } from "@/providers/schwab/broker-read";
 import { SchwabMarketDataProvider } from "@/providers/schwab/market-data";
+import { SchwabApiError } from "@/providers/schwab/client";
+import { getSchwabConfigStatus } from "@/providers/schwab/config";
 import {
   accountNumbersFromMetadata,
   findSchwabMarketDataConnectionForUser,
@@ -44,6 +46,9 @@ export type SchwabSyncDiagnostics = {
   accountsSynced: number;
   positionsReceived: number;
   positionsSourceStatus: "OK" | "ERROR";
+  /** Safe error category (see categorizeSchwabSyncError) for the most recent positions failure -
+   * never a raw provider message. Null when the last attempt succeeded. */
+  positionsErrorCode: string | null;
   transactionsReceived: number;
   tradeTransactionsReceived: number;
   tradeSourceStatus: "OK" | "ERROR";
@@ -51,16 +56,27 @@ export type SchwabSyncDiagnostics = {
   receiveAndDeliverSourceStatus: "OK" | "ERROR";
   dividendOrInterestReceived: number;
   dividendOrInterestSourceStatus: "OK" | "ERROR";
+  /** Set only when every transaction category failed outright (see fetchSchwabAccountActivity) -
+   * a single failed category is already visible via that category's own *SourceStatus above. */
+  transactionsErrorCode: string | null;
   brokerRecordsInserted: number;
   duplicatesSkipped: number;
   recordsUnresolved: number;
   feeKnownCount: number;
   feeUnknownCount: number;
+  /** Whether normalized records fetched this sync were successfully persisted - distinct from
+   * brokerRecordsInserted being 0, which can also mean an honest "nothing new to persist." */
+  persistenceStatus: "OK" | "ERROR";
+  persistenceErrorCode: string | null;
   campaignsCreated: number;
   campaignsClosed: number;
   campaignsRolled: number;
   campaignsAssigned: number;
   campaignsExpired: number;
+  /** Whether campaign reconciliation ran to completion for every synced account - distinct from
+   * the campaign counts above legitimately all being 0. */
+  reconciliationStatus: "OK" | "ERROR";
+  reconciliationErrorCode: string | null;
 };
 
 export type ResolvedMarketDataProvider =
@@ -100,6 +116,116 @@ export async function getSchwabConnectionSummaryForUser(userId: string): Promise
   });
 
   return connection ? summarizeSchwabConnection(connection) : null;
+}
+
+export type SchwabCredentialSourceStatus = "USER_CONFIGURED" | "SERVER_ENV" | "NONE";
+export type SchwabOAuthHealthStatus = "CONNECTED" | "NOT_CONNECTED" | "TOKEN_EXPIRED" | "REFRESH_FAILED";
+export type SchwabProviderCallStatus = "OK" | "ERROR" | "NOT_ATTEMPTED";
+
+/**
+ * A sanitized, current-user-scoped answer to "where did my Schwab connection stop working, and
+ * was a zero honest or an error?" - composed entirely from data already persisted for other
+ * purposes (BrokerConnection.metadata, SchwabDeveloperCredential, SCHWAB_* env config), never a
+ * new storage mechanism, and never a live Schwab call of its own. Safe to render directly:
+ * no client id/secret, no access/refresh tokens, no OAuth codes, no account hash, no full
+ * account number, no raw Schwab response/error body, no provider record ids.
+ */
+export type SchwabConnectionHealth = {
+  credentialSource: SchwabCredentialSourceStatus;
+  oauthStatus: SchwabOAuthHealthStatus;
+  lastSuccessfulRefreshAt: string | null;
+  lastRefreshFailureAt: string | null;
+  lastRefreshFailureReason: string | null;
+  accountDiscovery: {
+    status: SchwabProviderCallStatus;
+    accountsLinked: number;
+  };
+  sync: SchwabSyncDiagnostics | null;
+  lastSyncAt: string | null;
+  lastSyncFailureAt: string | null;
+  lastSyncFailureReason: string | null;
+};
+
+export async function getSchwabConnectionHealthForUser(userId: string): Promise<SchwabConnectionHealth> {
+  const connection = await prisma.brokerConnection.findFirst({
+    where: { userId, provider: "SCHWAB" },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  const credentialSource = await resolveCredentialSourceForHealth(userId, connection);
+
+  if (!connection) {
+    return {
+      credentialSource,
+      oauthStatus: "NOT_CONNECTED",
+      lastSuccessfulRefreshAt: null,
+      lastRefreshFailureAt: null,
+      lastRefreshFailureReason: null,
+      accountDiscovery: { status: "NOT_ATTEMPTED", accountsLinked: 0 },
+      sync: null,
+      lastSyncAt: null,
+      lastSyncFailureAt: null,
+      lastSyncFailureReason: null,
+    };
+  }
+
+  const metadata = objectValue(connection.metadata);
+
+  return {
+    credentialSource,
+    oauthStatus: oauthHealthStatus(connection.status, connection.expiresAt),
+    lastSuccessfulRefreshAt: stringValue(metadata?.lastSuccessfulRefreshAt),
+    lastRefreshFailureAt: stringValue(metadata?.lastRefreshFailureAt),
+    lastRefreshFailureReason: stringValue(metadata?.lastRefreshFailureReason),
+    accountDiscovery: {
+      status:
+        metadata?.accountDiscoveryStatus === "OK"
+          ? "OK"
+          : metadata?.accountDiscoveryStatus === "UNAVAILABLE"
+            ? "ERROR"
+            : "NOT_ATTEMPTED",
+      accountsLinked: numberValue(metadata?.accountCount) ?? 0,
+    },
+    sync: syncDiagnosticsValue(metadata?.lastSyncDiagnostics),
+    lastSyncAt: stringValue(metadata?.lastAccountSyncAt),
+    lastSyncFailureAt: stringValue(metadata?.lastAccountSyncFailureAt),
+    lastSyncFailureReason: stringValue(metadata?.lastAccountSyncFailureReason),
+  };
+}
+
+function oauthHealthStatus(status: string, expiresAt: Date | null): SchwabOAuthHealthStatus {
+  if (status === "EXPIRED") {
+    return "REFRESH_FAILED";
+  }
+  if (status !== "CONNECTED") {
+    return "NOT_CONNECTED";
+  }
+  if (!expiresAt || expiresAt.getTime() <= Date.now()) {
+    return "TOKEN_EXPIRED";
+  }
+  return "CONNECTED";
+}
+
+/**
+ * Reports what actually happened for an existing connection (its own stored
+ * developerCredentialId - ground truth from the last successful token save), or what would be
+ * used if this user connected right now when there is no connection yet. Mirrors
+ * resolveSchwabOAuthConfigForUser's own resolution order (user credential, else server env, else
+ * unavailable) without re-deriving or guessing at it independently.
+ */
+async function resolveCredentialSourceForHealth(
+  userId: string,
+  connection: { developerCredentialId: string | null } | null,
+): Promise<SchwabCredentialSourceStatus> {
+  if (connection) {
+    return connection.developerCredentialId ? "USER_CONFIGURED" : "SERVER_ENV";
+  }
+
+  const userCredential = await getUserSchwabDeveloperCredentialSummary(userId);
+  if (userCredential?.configured) {
+    return "USER_CONFIGURED";
+  }
+  return getSchwabConfigStatus().configured ? "SERVER_ENV" : "NONE";
 }
 
 export async function getSchwabDeveloperCredentialSummaryForUser(userId: string) {
@@ -300,12 +426,63 @@ function syncDiagnosticsValue(value: unknown): SchwabSyncDiagnostics | null {
     "tradeSourceStatus",
     "receiveAndDeliverSourceStatus",
     "dividendOrInterestSourceStatus",
+    "persistenceStatus",
+    "reconciliationStatus",
   ];
   for (const field of statusFields) {
     result[field] = record[field] === "ERROR" ? "ERROR" : "OK";
   }
 
+  // Safe error-code fields default to null when absent (success, or a blob persisted before
+  // this fix existed) - never fabricated, never a raw provider message.
+  const errorCodeFields: (keyof SchwabSyncDiagnostics)[] = [
+    "positionsErrorCode",
+    "transactionsErrorCode",
+    "persistenceErrorCode",
+    "reconciliationErrorCode",
+  ];
+  for (const field of errorCodeFields) {
+    result[field] = stringValue(record[field]);
+  }
+
   return result as SchwabSyncDiagnostics;
+}
+
+/**
+ * Sanitized, safe-to-display error category for a Schwab sync-stage failure - never the raw
+ * provider error message/body, which could echo request details. Used both to persist a code
+ * into SchwabSyncDiagnostics and to log a structured, non-sensitive server-side failure record.
+ */
+export type SchwabSyncErrorCode =
+  | "unauthorized"
+  | "rate_limited"
+  | "provider_unavailable"
+  | "provider_rejected"
+  | "network_or_unexpected";
+
+export function categorizeSchwabSyncError(error: unknown): SchwabSyncErrorCode {
+  if (error instanceof SchwabApiError) {
+    if (error.status === 401) return "unauthorized";
+    if (error.status === 429) return "rate_limited";
+    if (error.status && error.status >= 500) return "provider_unavailable";
+    if (error.status) return "provider_rejected";
+  }
+  return "network_or_unexpected";
+}
+
+/**
+ * Structured, non-sensitive server-side log for a swallowed Schwab sync-stage exception - only
+ * the stage, a safe error category, a timestamp, and the affected user's id. Never the raw
+ * error message, which could carry request/response details that aren't safe to persist in
+ * ordinary server logs.
+ */
+export function logSchwabSyncFailure(stage: string, userId: string, error: unknown) {
+  console.error("[schwab-sync-failure]", {
+    stage,
+    userId,
+    errorCode: categorizeSchwabSyncError(error),
+    at: new Date().toISOString(),
+  });
 }
 
 /**

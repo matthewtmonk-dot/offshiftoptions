@@ -31,9 +31,11 @@ import {
   saveSchwabDeveloperCredentialForUser,
 } from "@/providers/schwab/developer-credentials";
 import {
+  categorizeSchwabSyncError,
   clearSchwabBrokerReadCacheForUser,
   getSchwabBrokerReadProviderForUser,
   getSchwabMarketDataProviderForUser,
+  logSchwabSyncFailure,
   recordSchwabAccountSyncResult,
 } from "./broker-connections";
 import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
@@ -170,6 +172,7 @@ export type SchwabAccountSyncResult = {
   diagnostics: {
     positionsReceived: number;
     positionsSourceStatus: "OK" | "ERROR";
+    positionsErrorCode: string | null;
     transactionsReceived: number;
     tradeTransactionsReceived: number;
     tradeSourceStatus: "OK" | "ERROR";
@@ -177,11 +180,14 @@ export type SchwabAccountSyncResult = {
     receiveAndDeliverSourceStatus: "OK" | "ERROR";
     dividendOrInterestReceived: number;
     dividendOrInterestSourceStatus: "OK" | "ERROR";
+    transactionsErrorCode: string | null;
     brokerRecordsInserted: number;
     duplicatesSkipped: number;
     recordsUnresolved: number;
     feeKnownCount: number;
     feeUnknownCount: number;
+    persistenceStatus: "OK" | "ERROR";
+    persistenceErrorCode: string | null;
   };
 };
 
@@ -192,28 +198,34 @@ export type SchwabAccountSyncResult = {
  * otherwise-successful request. Positions and transactions are fetched in their own try/catch
  * blocks (not Promise.all), and getTransactions() itself already isolates each transaction
  * category internally (see SchwabBrokerReadProvider.getTransactions) - so a rejected category
- * still leaves the other categories' transactions intact here.
+ * still leaves the other categories' transactions intact here. Each catch records a sanitized
+ * error category (never the raw provider message) so the caller can distinguish an honest empty
+ * result from a failed request - see categorizeSchwabSyncError in broker-connections.ts.
  */
 export async function fetchSchwabAccountActivity(provider: BrokerReadProvider, accountId: string, from: Date, to: Date) {
   let positions: BrokerPosition[] = [];
   let positionsStatus: "OK" | "ERROR" = "OK";
+  let positionsErrorCode: string | null = null;
   try {
     positions = await provider.getPositions(accountId);
-  } catch {
+  } catch (error) {
     positionsStatus = "ERROR";
+    positionsErrorCode = categorizeSchwabSyncError(error);
   }
 
   let transactions: BrokerTransaction[] = [];
   let transactionCategories: Record<BrokerTransactionCategory, BrokerTransactionCategoryOutcome> | null = null;
+  let transactionsErrorCode: string | null = null;
   try {
     const result = await provider.getTransactions(accountId, from, to);
     transactions = result.transactions;
     transactionCategories = result.categories;
-  } catch {
+  } catch (error) {
     // Every category rejected (or some other total failure) - positions above is unaffected.
+    transactionsErrorCode = categorizeSchwabSyncError(error);
   }
 
-  return { positions, positionsStatus, transactions, transactionCategories };
+  return { positions, positionsStatus, positionsErrorCode, transactions, transactionCategories, transactionsErrorCode };
 }
 
 /**
@@ -257,7 +269,8 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
   let brokerAccounts;
   try {
     brokerAccounts = await provider.getAccounts();
-  } catch {
+  } catch (error) {
+    logSchwabSyncFailure("schwab_sync_accounts", userId, error);
     await recordSchwabAccountSyncResult(userId, { failureReason: "fetch_failed" });
     throw new ValidationError("Schwab did not return account data. Try again in a moment.");
   }
@@ -273,6 +286,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
   const diagnostics: SchwabAccountSyncResult["diagnostics"] = {
     positionsReceived: 0,
     positionsSourceStatus: "OK",
+    positionsErrorCode: null,
     transactionsReceived: 0,
     tradeTransactionsReceived: 0,
     tradeSourceStatus: "OK",
@@ -280,11 +294,14 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
     receiveAndDeliverSourceStatus: "OK",
     dividendOrInterestReceived: 0,
     dividendOrInterestSourceStatus: "OK",
+    transactionsErrorCode: null,
     brokerRecordsInserted: 0,
     duplicatesSkipped: 0,
     recordsUnresolved: 0,
     feeKnownCount: 0,
     feeUnknownCount: 0,
+    persistenceStatus: "OK",
+    persistenceErrorCode: null,
   };
 
   for (const brokerAccount of brokerAccounts) {
@@ -321,6 +338,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
     diagnostics.positionsReceived += activity.positions.length;
     if (activity.positionsStatus === "ERROR") {
       diagnostics.positionsSourceStatus = "ERROR";
+      diagnostics.positionsErrorCode = activity.positionsErrorCode;
     }
     diagnostics.transactionsReceived += activity.transactions.length;
     if (activity.transactionCategories) {
@@ -341,6 +359,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       diagnostics.tradeSourceStatus = "ERROR";
       diagnostics.receiveAndDeliverSourceStatus = "ERROR";
       diagnostics.dividendOrInterestSourceStatus = "ERROR";
+      diagnostics.transactionsErrorCode = activity.transactionsErrorCode;
     }
 
     const records = buildSchwabRecordsToPersist(activity.positions, activity.transactions, syncedAt);
@@ -352,9 +371,13 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         diagnostics.recordsUnresolved += persisted.unresolved;
         diagnostics.feeKnownCount += persisted.feeKnownTransactions;
         diagnostics.feeUnknownCount += persisted.feeUnknownTransactions;
-      } catch {
+      } catch (error) {
         // Balance sync above already succeeded and is durable - a persistence hiccup just means
-        // reconciliation catches up on the next successful sync, not a failed sync.
+        // reconciliation catches up on the next successful sync, not a failed sync. Recorded (not
+        // silent) so a real persistence failure is distinguishable from an honest 0 inserted.
+        diagnostics.persistenceStatus = "ERROR";
+        diagnostics.persistenceErrorCode = categorizeSchwabSyncError(error);
+        logSchwabSyncFailure("schwab_sync_persistence", userId, error);
       }
     }
 

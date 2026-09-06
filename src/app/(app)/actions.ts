@@ -42,7 +42,7 @@ import {
 } from "@/lib/workflows";
 import type { AppearanceMode } from "@/generated/prisma/enums";
 import { updateAppearanceForUser } from "@/lib/appearance";
-import { disconnectSchwabForUser, recordSchwabSyncDiagnostics } from "@/lib/broker-connections";
+import { categorizeSchwabSyncError, disconnectSchwabForUser, logSchwabSyncFailure, recordSchwabSyncDiagnostics } from "@/lib/broker-connections";
 import {
   runSchwabTransactionsDiagnosticForUser,
   type SchwabTransactionsDiagnosticResult,
@@ -675,6 +675,8 @@ export async function syncSchwabAccountAction() {
   }
 
   const campaignTotals = { campaignsCreated: 0, campaignsClosed: 0, campaignsRolled: 0, campaignsAssigned: 0, campaignsExpired: 0 };
+  let reconciliationStatus: "OK" | "ERROR" = "OK";
+  let reconciliationErrorCode: string | null = null;
   for (const account of result.accounts) {
     try {
       const summary = await reconcileSchwabActivityForUser(user.id, account.id, account.freshPositions);
@@ -683,9 +685,14 @@ export async function syncSchwabAccountAction() {
       campaignTotals.campaignsRolled += summary.campaignsRolled;
       campaignTotals.campaignsAssigned += summary.campaignsAssigned;
       campaignTotals.campaignsExpired += summary.campaignsExpired;
-    } catch {
+    } catch (error) {
       // Balance sync above already succeeded and is durable - a reconciliation hiccup for one
       // account just means it catches up on the next successful sync, not a failed sync.
+      // Recorded (not silent) so a real reconciliation failure is distinguishable from an
+      // honest "no campaign activity this sync."
+      reconciliationStatus = "ERROR";
+      reconciliationErrorCode = categorizeSchwabSyncError(error);
+      logSchwabSyncFailure("schwab_sync_reconciliation", user.id, error);
     }
   }
 
@@ -695,6 +702,8 @@ export async function syncSchwabAccountAction() {
     accountsSynced: result.syncedAccounts,
     ...result.diagnostics,
     ...campaignTotals,
+    reconciliationStatus,
+    reconciliationErrorCode,
   });
 
   const campaignsUpdated =
