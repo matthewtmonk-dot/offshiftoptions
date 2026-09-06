@@ -10,8 +10,8 @@ import {
 } from "@/domain/finance/calculations";
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
-import { DEMO_SCAN_CANDIDATES } from "./profile";
-import { evaluateCandidate, setupScore, type ScannerRule } from "./scanner";
+import { DEMO_SCAN_CANDIDATES, SCANNER_RULE_DEFINITIONS } from "./profile";
+import { evaluateCandidate, evaluateCriterion, setupScore, type ScannerRule } from "./scanner";
 
 export type LiveScanCandidate = {
   ticker: string;
@@ -45,6 +45,7 @@ type StockStageCandidate = {
 };
 
 export const STARTER_LIVE_SCAN_UNIVERSE = [...new Set(DEMO_SCAN_CANDIDATES.map((candidate) => candidate.ticker))];
+const SCANNER_RULE_DEFAULTS_BY_KEY = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.key, definition]));
 const STOCK_STAGE_RULE_KEYS = new Set(["price", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
 
 /**
@@ -120,7 +121,8 @@ export async function evaluateLiveMarketScan({
         ? {
             ...candidate.values,
             ...unknownOptionValues(),
-            scanNote: "Option-chain data was unavailable for this ticker; result marked UNKNOWN.",
+            contractReasonCode: "CHAIN_UNAVAILABLE" as const,
+            scanNote: OPTION_REASON_MESSAGES.CHAIN_UNAVAILABLE,
           }
         : bestPutValues(candidate, optionsByTicker.get(candidate.ticker) ?? [], rules, asOf)
       : {
@@ -189,40 +191,175 @@ function stockStageRank(candidate: StockStageCandidate) {
   return (numericValue(candidate.values.rsi) ?? 100) + (numericValue(candidate.values.bbPercent) ?? 100) / 10;
 }
 
+/**
+ * Honest reason a scanner row has no selected option contract - see docs/SCANNER_RULES.md.
+ * Each code names the exact funnel stage that eliminated every candidate contract, so the UI
+ * never has to show a meaningless row of dashes when OSO actually knows why. Never conflated
+ * with CHAIN_UNAVAILABLE, which is a provider fetch failure, not an empty/filtered result.
+ */
+export type OptionScanReasonCode =
+  | "CHAIN_UNAVAILABLE"
+  | "NO_PUT_CONTRACTS"
+  | "NO_ACCEPTABLE_STRIKE"
+  | "NO_CONTRACT_WITH_POSITIVE_BID"
+  | "NO_EXPIRATIONS_IN_CONFIGURED_RANGE"
+  | "OPTION_LIQUIDITY_FAILED"
+  | "OPTION_RULES_FAILED";
+
+const OPTION_REASON_MESSAGES: Record<OptionScanReasonCode, string> = {
+  CHAIN_UNAVAILABLE: "Option-chain data was unavailable for this ticker; result marked UNKNOWN.",
+  NO_PUT_CONTRACTS: "Schwab's option chain for this ticker contained no put contracts.",
+  NO_ACCEPTABLE_STRIKE: "Contracts were found, but none had a strike below the current stock price.",
+  NO_CONTRACT_WITH_POSITIVE_BID: "Option chain returned, but no contract had a positive bid.",
+  NO_EXPIRATIONS_IN_CONFIGURED_RANGE: "No put matched your configured DTE range.",
+  OPTION_LIQUIDITY_FAILED: "Contracts found, but open interest, volume, or spread was below your rule.",
+  OPTION_RULES_FAILED: "Contracts found, but none matched your other configured option rules (e.g. delta).",
+};
+
+/**
+ * Option-level rules that gate contract DISCOVERY (never merely score it) when the user has
+ * them enabled - matches profile.ts's own GATING_RULE_KEYS classification for these keys.
+ * DTE is handled separately: it is NOT a gating rule (see profile.ts's GATING_RULE_KEYS
+ * comment), so it must never hard-filter contracts unless the user has explicitly enabled it -
+ * see selectDteEligible below.
+ */
+const LIQUIDITY_GATE_KEYS = ["optionBid", "openInterest", "spreadPercent"] as const;
+const OTHER_OPTION_GATE_KEYS = ["delta"] as const;
+
+/** The LST-documented "typical" DTE window (docs/SCANNER_RULES.md's seeded default range for
+ * the dte rule itself) - reused ONLY as a tiebreak preference when the user has left the dte
+ * rule disabled, never as a hidden exclusion. */
+function dtePreferenceRange(): [number, number] {
+  const definition = SCANNER_RULE_DEFAULTS_BY_KEY.get("dte");
+  return (definition?.defaultDesired as [number, number] | undefined) ?? [14, 45];
+}
+
+/**
+ * Deterministically selects the single put contract a scanner row represents, for the given
+ * ticker's stock-stage candidate and its full raw option chain. Never "grabs the first
+ * contract" - runs a staged funnel, each stage eliminating on one specific, honestly-named
+ * reason (see OptionScanReasonCode) so a blank row always has a knowable cause:
+ *
+ *  1. PUT contracts only (NO_PUT_CONTRACTS if none).
+ *  2. Strike below the current stock price - what "cash-secured put" means, not a configurable
+ *     rule (NO_ACCEPTABLE_STRIKE if none).
+ *  3. A positive bid and a real ask - a $0-bid contract cannot be sold; this is a structural
+ *     floor distinct from the user's own configurable `optionBid` minimum, applied even when
+ *     that rule is disabled (NO_CONTRACT_WITH_POSITIVE_BID if none).
+ *  4. DTE, ONLY when the user has enabled the `dte` rule - using their own configured range,
+ *     never a hardcoded window (NO_EXPIRATIONS_IN_CONFIGURED_RANGE if none). Left untouched
+ *     entirely when the rule is disabled, matching its documented non-gating classification
+ *     (see profile.ts's GATING_RULE_KEYS comment) - DTE must never silently exclude a contract.
+ *  5. Liquidity gates - optionBid/openInterest/spreadPercent - each applied only when the user
+ *     has that specific rule enabled, using its own configured threshold
+ *     (OPTION_LIQUIDITY_FAILED if every surviving contract fails).
+ *  6. Other option-level gates - delta - same enabled-only treatment (OPTION_RULES_FAILED if
+ *     every surviving contract fails).
+ *
+ * Whatever survives every enabled gate is ranked by setupScore() (which already reflects every
+ * enabled preference rule - RSI, BB%, ROR, annualizedRor, etc.), then by the DTE preference
+ * tiebreak (only when DTE isn't an active gate), then by annualized ROR - and the top contract
+ * is the row's selected put. optionVolume is intentionally never a hard gate here (it is not in
+ * profile.ts's GATING_RULE_KEYS) - a FAIL there only affects score/label, never eliminates a
+ * contract from being selectable.
+ */
 function bestPutValues(
   candidate: StockStageCandidate,
   options: OptionContractSnapshot[],
   rules: ScannerRule[],
   asOf: Date,
 ) {
-  const usablePuts = options
-    .filter((option) => option.optionType === "PUT")
-    .map((option) => candidateValues(candidate, option, asOf))
-    .filter((values) => {
-      const dte = numericValue(values.dte);
-      const bid = numericValue(values.optionBid);
-      const ask = numericValue(values.optionAsk);
-      const strike = numericValue(values.strike);
-      return dte !== null && dte >= 14 && dte <= 45 && bid !== null && bid > 0 && ask !== null && strike !== null && strike < candidate.quote.price;
-    });
+  const blank = (reasonCode: OptionScanReasonCode) => ({
+    ...candidate.values,
+    ...unknownOptionValues(),
+    contractReasonCode: reasonCode,
+    scanNote: OPTION_REASON_MESSAGES[reasonCode],
+  });
 
-  if (!usablePuts.length) {
-    return {
-      ...candidate.values,
-      ...unknownOptionValues(),
-      scanNote: "No qualifying option contract found within your Scanner Rules.",
-    };
+  const puts = options.filter((option) => option.optionType === "PUT").map((option) => candidateValues(candidate, option, asOf));
+  if (!puts.length) {
+    return blank("NO_PUT_CONTRACTS");
   }
 
-  return usablePuts
+  const otm = puts.filter((values) => {
+    const strike = numericValue(values.strike);
+    return strike !== null && strike < candidate.quote.price;
+  });
+  if (!otm.length) {
+    return blank("NO_ACCEPTABLE_STRIKE");
+  }
+
+  const withBid = otm.filter((values) => {
+    const bid = numericValue(values.optionBid);
+    return bid !== null && bid > 0 && numericValue(values.optionAsk) !== null;
+  });
+  if (!withBid.length) {
+    return blank("NO_CONTRACT_WITH_POSITIVE_BID");
+  }
+
+  // DTE only ever hard-filters when the user has actually enabled the rule - using their
+  // configured range, never a hardcoded window. When disabled, every DTE stays eligible; see
+  // the tiebreak preference applied at selection time below instead.
+  const dteRule = rules.find((rule) => rule.key === "dte");
+  let dteEligible = withBid;
+  if (dteRule) {
+    const [low, high] = dteRule.desired as [number, number];
+    dteEligible = withBid.filter((values) => {
+      const dte = numericValue(values.dte);
+      return dte !== null && dte >= low && dte <= high;
+    });
+    if (!dteEligible.length) {
+      return blank("NO_EXPIRATIONS_IN_CONFIGURED_RANGE");
+    }
+  }
+
+  const afterLiquidity = dteEligible.filter((values) => LIQUIDITY_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)));
+  if (!afterLiquidity.length) {
+    return blank("OPTION_LIQUIDITY_FAILED");
+  }
+
+  const afterOtherGates = afterLiquidity.filter((values) => OTHER_OPTION_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)));
+  if (!afterOtherGates.length) {
+    return blank("OPTION_RULES_FAILED");
+  }
+
+  const dteHardFiltered = Boolean(dteRule);
+  const [preferLow, preferHigh] = dtePreferenceRange();
+
+  return afterOtherGates
     .map((values) => ({
       values,
       summary: evaluateCandidate(rules, values),
     }))
     .sort((left, right) => {
       const scoreDiff = setupScore(right.summary) - setupScore(left.summary);
-      return scoreDiff || (numericValue(right.values.annualizedRor) ?? 0) - (numericValue(left.values.annualizedRor) ?? 0);
+      if (scoreDiff) {
+        return scoreDiff;
+      }
+      if (!dteHardFiltered) {
+        // Selection preference only (see dtePreferenceRange) - never an exclusion, and never
+        // affects PASS/FAIL/score, only which equally-scored contract is chosen.
+        const leftPreferred = isWithinRange(numericValue(left.values.dte), preferLow, preferHigh) ? 1 : 0;
+        const rightPreferred = isWithinRange(numericValue(right.values.dte), preferLow, preferHigh) ? 1 : 0;
+        if (leftPreferred !== rightPreferred) {
+          return rightPreferred - leftPreferred;
+        }
+      }
+      return (numericValue(right.values.annualizedRor) ?? 0) - (numericValue(left.values.annualizedRor) ?? 0);
     })[0].values;
+}
+
+function passesEnabledGate(values: Record<string, number | string | boolean | null | undefined>, rules: ScannerRule[], key: string): boolean {
+  const rule = rules.find((candidate) => candidate.key === key);
+  if (!rule) {
+    return true; // rule disabled - never a hidden exclusion
+  }
+  // UNKNOWN must never eliminate a contract - only a definite FAIL means "we know this is bad."
+  return evaluateCriterion(rule, values[key]).status !== "FAIL";
+}
+
+function isWithinRange(value: number | null, low: number, high: number): boolean {
+  return value !== null && value >= low && value <= high;
 }
 
 function candidateValues(candidate: StockStageCandidate, option: OptionContractSnapshot, asOf: Date) {
@@ -282,6 +419,7 @@ function unknownOptionValues() {
     spreadPercent: null,
     openInterest: null,
     optionVolume: null,
+    contractReasonCode: null as OptionScanReasonCode | null,
   };
 }
 
