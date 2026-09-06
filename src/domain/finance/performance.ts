@@ -5,8 +5,18 @@ export type CompletedCampaignResult = {
   campaignId: string;
   closedAt: Date;
   finalResult: "GAIN" | "LOSS" | "BREAKEVEN" | "OPEN" | "UNKNOWN";
+  /** Fee-inclusive realized P/L - unchanged meaning from before fee-knownness tracking existed. */
   pl: number | null;
   daysActive: number | null;
+  collateralCommitted?: number | null;
+  /** Fee-EXCLUSIVE P/L (gross premium/debits/stock only) - always exact whenever `pl` is known,
+   * regardless of whether every fee was resolved, since it simply never subtracts fees at all. */
+  grossPL?: number | null;
+  /** False only when at least one Schwab-sourced transaction behind this campaign has an
+   * unresolved fee (see getCampaignIdsWithUnknownFees) - defaults to true (matching all
+   * existing manual-entry behavior, where a blank fee has always meant an assumed $0) when the
+   * caller doesn't know/pass this. */
+  feesFullyKnown?: boolean;
 };
 
 const KNOWN_FINAL_RESULTS = new Set(["GAIN", "LOSS", "BREAKEVEN"]);
@@ -54,6 +64,58 @@ export function summarizeWinLoss(completed: CompletedCampaignResult[]): WinLossS
     averageLoss: losses.length ? round(losses.reduce((sum, c) => sum + (c.pl ?? 0), 0) / losses.length, 2) : null,
     averageDurationDays: durations.length ? round(durations.reduce((a, b) => a + b, 0) / durations.length, 1) : null,
     realizedTradingPL,
+  };
+}
+
+export type ThisWeekSummary = {
+  completedCount: number;
+  wins: number;
+  losses: number;
+  breakevens: number;
+  /** Fee-exclusive gross P/L - always exact whenever any campaign closed this week is known. */
+  grossPL: number | null;
+  /** Fee-inclusive net P/L - only meaningful to present as a final number when `netPLExact`. */
+  netPL: number | null;
+  /** False when at least one campaign closed this week has an unresolved Schwab fee - callers
+   * must show `netPL` as "pending"/not-yet-exact rather than a confirmed number in that case,
+   * per the product rule that an unknown fee must never silently become a fake $0. */
+  netPLExact: boolean;
+  /** Gross-basis return - always exact whenever gross P/L and secured capital are both known. */
+  grossReturnOnSecuredCapitalPercent: number | null;
+  /** Net-basis return - only non-null when `netPLExact` is true; never a rounded-off guess. */
+  returnOnSecuredCapitalPercent: number | null;
+};
+
+/**
+ * "How did I do this week?" - the compact Tracker/Performance answer, distinct from
+ * summarizeWeeklyReturns' fixed-account-baseline trend line below: this buckets only
+ * campaigns that CLOSED in the current ISO week and returns their P/L against the actual
+ * capital those specific campaigns secured, not the whole account. Never invents a value, and
+ * never lets an unresolved fee masquerade as a confirmed net figure - see `netPLExact`.
+ */
+export function summarizeThisWeek(completed: CompletedCampaignResult[], asOf: Date = new Date()): ThisWeekSummary {
+  const currentWeekKey = isoWeekKey(asOf);
+  const thisWeek = completed.filter((c) => isoWeekKey(c.closedAt) === currentWeekKey);
+  const known = thisWeek.filter((c) => KNOWN_FINAL_RESULTS.has(c.finalResult) && c.pl !== null);
+  const wins = known.filter((c) => c.finalResult === "GAIN").length;
+  const losses = known.filter((c) => c.finalResult === "LOSS").length;
+  const breakevens = known.filter((c) => c.finalResult === "BREAKEVEN").length;
+  const netPLExact = known.every((c) => c.feesFullyKnown !== false);
+  const grossPL = known.length ? round(known.reduce((sum, c) => sum + (c.grossPL ?? c.pl ?? 0), 0), 2) : null;
+  const netPL = known.length ? round(known.reduce((sum, c) => sum + (c.pl ?? 0), 0), 2) : null;
+  const securedCapitalTotal = known.reduce((sum, c) => sum + (c.collateralCommitted ?? 0), 0);
+
+  return {
+    completedCount: thisWeek.length,
+    wins,
+    losses,
+    breakevens,
+    grossPL,
+    netPL,
+    netPLExact,
+    grossReturnOnSecuredCapitalPercent: grossPL !== null && securedCapitalTotal > 0 ? round((grossPL / securedCapitalTotal) * 100, 2) : null,
+    returnOnSecuredCapitalPercent:
+      netPLExact && netPL !== null && securedCapitalTotal > 0 ? round((netPL / securedCapitalTotal) * 100, 2) : null,
   };
 }
 

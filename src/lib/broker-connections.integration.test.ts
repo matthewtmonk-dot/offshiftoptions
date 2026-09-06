@@ -12,6 +12,8 @@ maybeDescribe("broker connection ownership and provider routing", () => {
   let resolvePersonalBrokerProviderForUser: typeof import("./broker-connections").resolvePersonalBrokerProviderForUser;
   let getSchwabBrokerReadProviderForUser: typeof import("./broker-connections").getSchwabBrokerReadProviderForUser;
   let getSchwabOpenPositionsForUser: typeof import("./workflows").getSchwabOpenPositionsForUser;
+  let getSchwabConnectionSummaryForUser: typeof import("./broker-connections").getSchwabConnectionSummaryForUser;
+  let recordSchwabSyncDiagnostics: typeof import("./broker-connections").recordSchwabSyncDiagnostics;
   let userA: { id: string };
   let userB: { id: string };
   const userIds: string[] = [];
@@ -25,6 +27,7 @@ maybeDescribe("broker connection ownership and provider routing", () => {
     resolvePersonalBrokerProviderForUser = (await import("./broker-connections")).resolvePersonalBrokerProviderForUser;
     getSchwabBrokerReadProviderForUser = (await import("./broker-connections")).getSchwabBrokerReadProviderForUser;
     getSchwabOpenPositionsForUser = (await import("./workflows")).getSchwabOpenPositionsForUser;
+    ({ getSchwabConnectionSummaryForUser, recordSchwabSyncDiagnostics } = await import("./broker-connections"));
 
     const passwordHash = await hash("not-used", 4);
     const timestamp = Date.now();
@@ -104,6 +107,76 @@ maybeDescribe("broker connection ownership and provider routing", () => {
       source: "USER_SCHWAB",
       connectionId: userBConnection.id,
     });
+  });
+
+  it("persists and reads back sync diagnostics as aggregate counts only - no account/position/transaction content", async () => {
+    const connection = await createConnection(userA.id, "Diagnostics round trip");
+
+    await recordSchwabSyncDiagnostics(userA.id, {
+      accountsSynced: 1,
+      positionsReceived: 3,
+      transactionsReceived: 3,
+      brokerRecordsInserted: 6,
+      duplicatesSkipped: 0,
+      recordsUnresolved: 0,
+      feeKnownCount: 2,
+      feeUnknownCount: 1,
+      campaignsCreated: 3,
+      campaignsClosed: 0,
+      campaignsRolled: 0,
+      campaignsAssigned: 0,
+      campaignsExpired: 3,
+    });
+
+    const summary = await getSchwabConnectionSummaryForUser(userA.id);
+    expect(summary?.lastSyncDiagnostics).toEqual({
+      accountsSynced: 1,
+      positionsReceived: 3,
+      transactionsReceived: 3,
+      brokerRecordsInserted: 6,
+      duplicatesSkipped: 0,
+      recordsUnresolved: 0,
+      feeKnownCount: 2,
+      feeUnknownCount: 1,
+      campaignsCreated: 3,
+      campaignsClosed: 0,
+      campaignsRolled: 0,
+      campaignsAssigned: 0,
+      campaignsExpired: 3,
+    });
+
+    // Nothing sensitive is present in the persisted metadata blob itself.
+    const raw = await prisma.brokerConnection.findUnique({ where: { id: connection.id } });
+    const serialized = JSON.stringify(raw?.metadata);
+    expect(serialized).not.toContain("access-token");
+    expect(serialized).not.toContain("refresh-token");
+  });
+
+  it("never mixes User B's sync diagnostics into User A's connection", async () => {
+    const connectionA = await createConnection(userA.id, "Isolation diagnostics A");
+    await createConnection(userB.id, "Isolation diagnostics B");
+
+    await recordSchwabSyncDiagnostics(userA.id, {
+      accountsSynced: 1,
+      positionsReceived: 1,
+      transactionsReceived: 1,
+      brokerRecordsInserted: 1,
+      duplicatesSkipped: 0,
+      recordsUnresolved: 0,
+      feeKnownCount: 1,
+      feeUnknownCount: 0,
+      campaignsCreated: 1,
+      campaignsClosed: 0,
+      campaignsRolled: 0,
+      campaignsAssigned: 0,
+      campaignsExpired: 0,
+    });
+
+    const userBSummary = await getSchwabConnectionSummaryForUser(userB.id);
+    expect(userBSummary?.lastSyncDiagnostics).toBeNull();
+
+    const stillRawA = await prisma.brokerConnection.findUnique({ where: { id: connectionA.id } });
+    expect((stillRawA?.metadata as Record<string, unknown> | null)?.lastSyncDiagnostics).toBeTruthy();
   });
 
   async function createDeveloperCredential(userId: string, label: string) {

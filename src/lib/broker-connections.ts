@@ -30,6 +30,30 @@ export type SchwabConnectionSummary = {
   lastAccountSyncAt: string | null;
   lastAccountSyncFailureAt: string | null;
   lastAccountSyncFailureReason: string | null;
+  lastSyncDiagnostics: SchwabSyncDiagnostics | null;
+};
+
+/**
+ * Aggregate counts ONLY from the most recent sync + auto-reconciliation run - never raw
+ * transaction/position payloads, account numbers, tokens, or secrets - so the first real
+ * production sync can be inspected safely (see PROJECT_HANDOFF.md "First real sync
+ * auditability"). Safe to show directly to the authenticated user; never logged server-side
+ * with anything more sensitive attached.
+ */
+export type SchwabSyncDiagnostics = {
+  accountsSynced: number;
+  positionsReceived: number;
+  transactionsReceived: number;
+  brokerRecordsInserted: number;
+  duplicatesSkipped: number;
+  recordsUnresolved: number;
+  feeKnownCount: number;
+  feeUnknownCount: number;
+  campaignsCreated: number;
+  campaignsClosed: number;
+  campaignsRolled: number;
+  campaignsAssigned: number;
+  campaignsExpired: number;
 };
 
 export type ResolvedMarketDataProvider =
@@ -229,7 +253,36 @@ function summarizeSchwabConnection(connection: {
     lastAccountSyncAt: stringValue(metadata?.lastAccountSyncAt),
     lastAccountSyncFailureAt: stringValue(metadata?.lastAccountSyncFailureAt),
     lastAccountSyncFailureReason: stringValue(metadata?.lastAccountSyncFailureReason),
+    lastSyncDiagnostics: syncDiagnosticsValue(metadata?.lastSyncDiagnostics),
   };
+}
+
+function syncDiagnosticsValue(value: unknown): SchwabSyncDiagnostics | null {
+  const record = objectValue(value);
+  if (!record) {
+    return null;
+  }
+
+  const fields: (keyof SchwabSyncDiagnostics)[] = [
+    "accountsSynced",
+    "positionsReceived",
+    "transactionsReceived",
+    "brokerRecordsInserted",
+    "duplicatesSkipped",
+    "recordsUnresolved",
+    "feeKnownCount",
+    "feeUnknownCount",
+    "campaignsCreated",
+    "campaignsClosed",
+    "campaignsRolled",
+    "campaignsAssigned",
+    "campaignsExpired",
+  ];
+  const result = {} as SchwabSyncDiagnostics;
+  for (const field of fields) {
+    result[field] = numberValue(record[field]) ?? 0;
+  }
+  return result;
 }
 
 /**
@@ -265,6 +318,28 @@ export async function recordSchwabAccountSyncResult(
   return prisma.brokerConnection.update({
     where: { id: connection.id },
     data: { metadata: { ...existing, ...patch } },
+  });
+}
+
+/**
+ * Persists the aggregate, non-sensitive counts from the most recent sync + reconciliation run
+ * (see SchwabSyncDiagnostics) so the first real production sync can be inspected via /account
+ * without exposing raw account/position/transaction data or requiring a database console.
+ */
+export async function recordSchwabSyncDiagnostics(userId: string, diagnostics: SchwabSyncDiagnostics) {
+  const connection = await prisma.brokerConnection.findFirst({
+    where: { userId, provider: "SCHWAB" },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  if (!connection) {
+    return null;
+  }
+
+  const existing = objectValue(connection.metadata) ?? {};
+  return prisma.brokerConnection.update({
+    where: { id: connection.id },
+    data: { metadata: { ...existing, lastSyncDiagnostics: diagnostics } },
   });
 }
 

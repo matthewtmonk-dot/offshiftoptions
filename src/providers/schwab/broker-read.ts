@@ -129,6 +129,11 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
       }
 
       const symbol = transactionSymbol(transaction);
+      const item = objectValue(arrayValue(transaction.transferItems)[0]);
+      const instrument = objectValue(item?.instrument);
+      const isOption = stringValue(instrument?.assetType) === "OPTION";
+      const putCallRaw = stringValue(instrument?.putCall);
+
       return {
         id,
         accountId,
@@ -136,6 +141,14 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         amount: numberValue(transaction?.netAmount) ?? 0,
         occurredAt: dateValue(transaction?.time) ?? dateValue(transaction?.settlementDate) ?? new Date(),
         description: stringValue(transaction?.description) ?? stringValue(transaction?.type) ?? "Schwab transaction",
+        action: instructionToActionLabel(stringValue(item?.instruction)) ?? assignmentOrExerciseActionLabel(transaction),
+        quantity: numberValue(item?.amount),
+        price: numberValue(item?.price),
+        fees: totalFees(transaction),
+        underlyingSymbol: isOption ? stringValue(instrument?.underlyingSymbol) : null,
+        optionType: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
+        strike: isOption ? numberValue(instrument?.strikePrice) : null,
+        expiration: isOption ? dateValue(instrument?.optionExpirationDate) : null,
       };
     });
   }
@@ -211,6 +224,74 @@ function transactionSymbol(transaction: Record<string, unknown>) {
   const item = arrayValue(transaction.transferItems)[0];
   const instrument = objectValue(objectValue(item)?.instrument);
   return stringValue(instrument?.symbol);
+}
+
+const INSTRUCTION_LABELS: Record<string, string> = {
+  SELL_TO_OPEN: "Sell to Open",
+  BUY_TO_CLOSE: "Buy to Close",
+  BUY_TO_OPEN: "Buy to Open",
+  SELL_TO_CLOSE: "Sell to Close",
+  BUY: "Buy",
+  SELL: "Sell",
+};
+
+/**
+ * Schwab's Transaction History API reports an opening/closing option instruction on the
+ * transfer item itself, but assignment/exercise instead shows up as a RECEIVE_AND_DELIVER
+ * transaction type with no "instruction" at all - only free-text type/description. This is
+ * a best-effort mapping (not verified against a live sandbox); anything it can't confidently
+ * label comes back null so the caller treats it as unclassified rather than guessing.
+ */
+function instructionToActionLabel(instruction: string | null): string | null {
+  if (instruction && INSTRUCTION_LABELS[instruction.toUpperCase()]) {
+    return INSTRUCTION_LABELS[instruction.toUpperCase()];
+  }
+
+  return null;
+}
+
+function assignmentOrExerciseActionLabel(transaction: Record<string, unknown>): string | null {
+  const text = `${stringValue(transaction.type) ?? ""} ${stringValue(transaction.description) ?? ""}`.toLowerCase();
+  if (text.includes("exercise")) {
+    return "Exercise";
+  }
+  if (text.includes("assignment")) {
+    return "Assignment";
+  }
+  return null;
+}
+
+/**
+ * Sums whatever fee/commission fields Schwab actually reports for this transaction. Schwab's
+ * documented schema varies by transaction type - some report a top-level `fees` object
+ * (commission, secFee, optRegFee, ...), others report fee-only transferItems (feeType set,
+ * no instruction). Returns null (not 0) when nothing is found, so callers never assert a
+ * confirmed-zero fee they didn't actually observe.
+ */
+function totalFees(transaction: Record<string, unknown>): number | null {
+  const amounts: number[] = [];
+
+  const feesObject = objectValue(transaction.fees);
+  if (feesObject) {
+    for (const value of Object.values(feesObject)) {
+      const parsed = numberValue(value);
+      if (parsed !== null) {
+        amounts.push(parsed);
+      }
+    }
+  }
+
+  for (const itemValue of arrayValue(transaction.transferItems)) {
+    const item = objectValue(itemValue);
+    if (item && stringValue(item.feeType)) {
+      const parsed = numberValue(item.cost) ?? numberValue(item.amount);
+      if (parsed !== null) {
+        amounts.push(Math.abs(parsed));
+      }
+    }
+  }
+
+  return amounts.length > 0 ? amounts.reduce((sum, value) => sum + value, 0) : null;
 }
 
 function orderSymbol(order: Record<string, unknown>) {

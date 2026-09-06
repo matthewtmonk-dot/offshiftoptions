@@ -141,6 +141,42 @@ describe("Schwab CSV normalization", () => {
     expect(records[0].sourceIds).toContain("schwab-api-transaction:schwab-stable-activity-id");
   });
 
+  it("carries the option leg, action, and fees from a widened API transaction through to the normalized record", () => {
+    const apiTransaction = normalizeSchwabApiTransaction({
+      id: "txn-sto-live",
+      accountId: accountHint,
+      symbol: "APLD 260904P00023500",
+      amount: 27.35,
+      occurredAt: new Date("2026-08-28T14:00:00.000Z"),
+      description: "Sell to Open",
+      action: "Sell to Open",
+      quantity: 1,
+      price: 0.28,
+      fees: 0.65,
+      underlyingSymbol: "APLD",
+      optionType: "PUT",
+      strike: 23.5,
+      expiration: new Date("2026-09-04T00:00:00.000Z"),
+    });
+
+    expect(apiTransaction).toMatchObject({
+      kind: "TRANSACTION",
+      action: "Sell to Open",
+      quantity: 1,
+      price: 0.28,
+      fees: 0.65,
+      underlyingSymbol: "APLD",
+      reconciliationKey: "option:APLD 260904P00023500",
+      sources: ["SCHWAB_API"],
+    });
+    expect(apiTransaction.metadata).toMatchObject({
+      optionType: "PUT",
+      strikePrice: 23.5,
+      expiration: "2026-09-04T00:00:00.000Z",
+      activityKind: "SELL_TO_OPEN",
+    });
+  });
+
   it("uses Gain/Loss data to validate a completed campaign without adding realized P/L twice", () => {
     const closeTransactions = parseSchwabTransactionsCsv(fixture("transactions.csv"), { accountHint }).filter(
       (record) => record.symbol === "TOOL 260828P00016500",

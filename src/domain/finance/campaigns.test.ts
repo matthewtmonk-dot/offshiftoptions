@@ -133,6 +133,59 @@ describe("campaign financial summaries", () => {
     expect(summary.finalResult).toBe("LOSS");
   });
 
+  it("realizes a simple expired-worthless put as premium minus fees, with no fake closing debit", () => {
+    const summary = summarizeCampaign({
+      status: "CLOSED",
+      asOf: new Date("2026-09-05T20:00:00Z"),
+      events: [
+        { type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 23.5, contracts: 1, premium: 0.28, expiration: "2026-09-04" },
+        { type: "PUT_EXPIRED", occurredAt: "2026-09-04T21:00:00Z", strike: 23.5, contracts: 1, expiration: "2026-09-04", premium: 0, fees: 0 },
+      ],
+    });
+
+    expect(summary.totalPremiumReceived).toBe(28);
+    expect(summary.optionDebitsPaid).toBe(0);
+    expect(summary.realizedPL).toBe(28);
+    expect(summary.totalCampaignPL).toBe(28);
+    expect(summary.finalResult).toBe("GAIN");
+    expect(summary.currentStage).toBe("Closed");
+  });
+
+  it("reduces expired-worthless realized P/L by actual broker fees, never counting secured cash", () => {
+    const summary = summarizeCampaign({
+      status: "CLOSED",
+      events: [
+        { type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 16.5, contracts: 1, premium: 0.68, expiration: "2026-09-04" },
+        { type: "PUT_EXPIRED", occurredAt: "2026-09-04T21:00:00Z", strike: 16.5, contracts: 1, expiration: "2026-09-04", premium: 0, fees: 0.65 },
+      ],
+    });
+
+    // Secured capital (strike * contracts * 100) must never appear as profit.
+    expect(summary.collateralCommitted).toBe(1650);
+    expect(summary.realizedPL).toBe(67.35);
+    expect(summary.totalCampaignPL).toBe(67.35);
+  });
+
+  it("shows 'Expiration processing' for a still-open put once its expiration date has passed", () => {
+    const summary = summarizeCampaign({
+      status: "OPEN",
+      asOf: new Date("2026-09-05T13:00:00Z"),
+      events: [{ type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 17.5, contracts: 1, premium: 0.28, expiration: "2026-09-04" }],
+    });
+
+    expect(summary.currentStage).toBe("Expiration processing");
+  });
+
+  it("does not show 'Expiration processing' while expiration day itself is still trading", () => {
+    const summary = summarizeCampaign({
+      status: "OPEN",
+      asOf: new Date("2026-09-04T14:00:00Z"),
+      events: [{ type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 17.5, contracts: 1, premium: 0.28, expiration: "2026-09-04" }],
+    });
+
+    expect(summary.currentStage).toBe("Cash-secured put");
+  });
+
   it("can estimate open assigned total P/L when a current stock price exists", () => {
     const summary = summarizeCampaign({
       status: "ASSIGNED",

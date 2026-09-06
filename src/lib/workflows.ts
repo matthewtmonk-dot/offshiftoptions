@@ -36,6 +36,9 @@ import {
   getSchwabMarketDataProviderForUser,
   recordSchwabAccountSyncResult,
 } from "./broker-connections";
+import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
+import { normalizeSchwabApiPosition, normalizeSchwabApiTransaction } from "@/providers/schwab/csv";
+import type { BrokerPosition } from "@/providers/broker-read/types";
 
 const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
 const RESEARCH_STATUSES = new Set<ResearchStatus>(["LIKE", "WATCH", "NEUTRAL", "AVOID", "NEVER_TRADE"]);
@@ -145,15 +148,38 @@ export async function createTradingAccountForUser(
   });
 }
 
+const SCHWAB_TRANSACTION_LOOKBACK_DAYS = 90;
+
 export type SchwabAccountSyncResult = {
   syncedAccounts: number;
-  accounts: { id: string; name: string; accountValue: number; cash: number }[];
+  accounts: { id: string; name: string; accountValue: number; cash: number; freshPositions: BrokerPosition[] }[];
+  /** The sync-only portion of SchwabSyncDiagnostics (see broker-connections.ts) - the caller
+   * (syncSchwabAccountAction) merges in the campaign-related counts from
+   * reconcileSchwabActivityForUser, which runs after this returns, before persisting the full
+   * diagnostics record. */
+  diagnostics: {
+    positionsReceived: number;
+    transactionsReceived: number;
+    brokerRecordsInserted: number;
+    duplicatesSkipped: number;
+    recordsUnresolved: number;
+    feeKnownCount: number;
+    feeUnknownCount: number;
+  };
 };
 
 /**
- * Pulls real account value/cash from Schwab for the authenticated user only and
- * records it as a BROKER_SNAPSHOT ledger entry per linked account. Never fabricates a
- * value Schwab did not return, and never touches another user's accounts or tokens.
+ * Pulls real account value/cash from Schwab for the authenticated user only and records it as
+ * a BROKER_SNAPSHOT ledger entry per linked account. Also pulls that account's current
+ * positions and recent transactions and persists them as BrokerRecords (reusing the exact CSV
+ * import dedupe scheme via persistNormalizedBrokerRecordsForUser - see broker-import.ts - so a
+ * repeated sync can never write a duplicate row), which is what lets campaign reconciliation
+ * (reconcileSchwabActivityForUser, called by the syncSchwabAccountAction caller with the fresh
+ * positions returned here) turn real Schwab activity into Tracker history automatically.
+ * Never fabricates a value Schwab did not return, and never touches another user's accounts or
+ * tokens. A positions/transactions fetch failure never fails the whole sync - the account
+ * balance sync (this function's original promise) still succeeds; that account's campaign
+ * reconciliation is simply skipped until the next successful sync.
  */
 export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAccountSyncResult> {
   clearSchwabBrokerReadCacheForUser(userId);
@@ -176,7 +202,17 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
   }
 
   const syncedAt = new Date();
+  const transactionsFrom = new Date(syncedAt.getTime() - SCHWAB_TRANSACTION_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const accounts = [];
+  const diagnostics = {
+    positionsReceived: 0,
+    transactionsReceived: 0,
+    brokerRecordsInserted: 0,
+    duplicatesSkipped: 0,
+    recordsUnresolved: 0,
+    feeKnownCount: 0,
+    feeUnknownCount: 0,
+  };
 
   for (const brokerAccount of brokerAccounts) {
     const tradingAccount = await prisma.tradingAccount.upsert({
@@ -206,12 +242,36 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       },
     });
 
-    accounts.push({ id: tradingAccount.id, name: tradingAccount.name, accountValue: brokerAccount.accountValue, cash: brokerAccount.cash });
+    let freshPositions: BrokerPosition[] = [];
+    try {
+      const [positions, transactions] = await Promise.all([
+        provider.getPositions(brokerAccount.id),
+        provider.getTransactions(brokerAccount.id, transactionsFrom, syncedAt),
+      ]);
+      freshPositions = positions;
+      diagnostics.positionsReceived += positions.length;
+      diagnostics.transactionsReceived += transactions.length;
+      const records = [
+        ...positions.map((position) => normalizeSchwabApiPosition(position, syncedAt)),
+        ...transactions.map((transaction) => normalizeSchwabApiTransaction(transaction)),
+      ];
+      const persisted = await persistNormalizedBrokerRecordsForUser(userId, tradingAccount.id, records);
+      diagnostics.brokerRecordsInserted += persisted.inserted;
+      diagnostics.duplicatesSkipped += persisted.duplicatesSkipped;
+      diagnostics.recordsUnresolved += persisted.unresolved;
+      diagnostics.feeKnownCount += persisted.feeKnownTransactions;
+      diagnostics.feeUnknownCount += persisted.feeUnknownTransactions;
+    } catch {
+      // Balance sync above already succeeded and is durable - a positions/transactions hiccup
+      // just means reconciliation catches up on the next successful sync, not a failed sync.
+    }
+
+    accounts.push({ id: tradingAccount.id, name: tradingAccount.name, accountValue: brokerAccount.accountValue, cash: brokerAccount.cash, freshPositions });
   }
 
   await recordSchwabAccountSyncResult(userId, { succeededAt: syncedAt });
   clearSchwabBrokerReadCacheForUser(userId);
-  return { syncedAccounts: accounts.length, accounts };
+  return { syncedAccounts: accounts.length, accounts, diagnostics };
 }
 
 export async function getSchwabOpenPositionsForUser(userId: string, options: { bypassCache?: boolean } = {}) {
@@ -434,6 +494,59 @@ export async function closeCampaignPutForUser(
       strike: activePut.strike,
       expiration: activePut.expiration,
       premium,
+      fees,
+      notes: notes || null,
+    },
+  });
+
+  return prisma.campaign.update({
+    where: { id: campaign.id },
+    data: { status: "CLOSED", closedAt: occurredAt },
+    include: campaignDetailInclude,
+  });
+}
+
+/**
+ * Closes a campaign whose short put expired worthless - no BTC fill exists, and none should be
+ * invented. The option's closing value is $0 by definition, so there is no premium input here;
+ * realized P/L falls out of summarizeCampaign as opening premium minus fees, exactly the same
+ * engine closeCampaignPutForUser feeds (see src/domain/finance/campaigns.ts).
+ */
+export async function expireCampaignPutForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "OPEN") {
+    throw new ValidationError("Only an open put campaign can be marked expired.");
+  }
+
+  const activePut = latestPutLeg(campaign.events);
+  if (!activePut) {
+    throw new ValidationError("No open put leg was found for this campaign.");
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "expiration date");
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId: campaign.id,
+      type: "PUT_EXPIRED",
+      occurredAt,
+      sortOrder: nextSortOrder(campaign.events),
+      optionType: "PUT",
+      contracts: activePut.contracts,
+      strike: activePut.strike,
+      expiration: activePut.expiration,
+      premium: 0,
       fees,
       notes: notes || null,
     },

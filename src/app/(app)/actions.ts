@@ -42,12 +42,13 @@ import {
 } from "@/lib/workflows";
 import type { AppearanceMode } from "@/generated/prisma/enums";
 import { updateAppearanceForUser } from "@/lib/appearance";
-import { disconnectSchwabForUser } from "@/lib/broker-connections";
+import { disconnectSchwabForUser, recordSchwabSyncDiagnostics } from "@/lib/broker-connections";
 import { confirmBrokerImportForUser, discardBrokerImportForUser, previewBrokerImportForUser } from "@/lib/broker-import";
 import {
   confirmBrokerPositionAsCampaignForUser,
   skipBrokerReconciliationForUser,
 } from "@/lib/broker-reconciliation";
+import { reconcileSchwabActivityForUser } from "@/lib/campaign-reconciliation";
 import { ValidationError, requireTicker } from "@/lib/tickers";
 import {
   runAlphaVantageOverviewDiagnostic,
@@ -604,8 +605,9 @@ export async function removeSchwabDeveloperCredentialsAction() {
 export async function syncSchwabAccountAction() {
   const user = await requireCurrentUser();
 
+  let result: Awaited<ReturnType<typeof syncSchwabAccountForUser>>;
   try {
-    await syncSchwabAccountForUser(user.id);
+    result = await syncSchwabAccountForUser(user.id);
   } catch (error) {
     if (error instanceof ValidationError) {
       redirectWithError("/account", error.message);
@@ -613,10 +615,40 @@ export async function syncSchwabAccountAction() {
     throw error;
   }
 
+  const campaignTotals = { campaignsCreated: 0, campaignsClosed: 0, campaignsRolled: 0, campaignsAssigned: 0, campaignsExpired: 0 };
+  for (const account of result.accounts) {
+    try {
+      const summary = await reconcileSchwabActivityForUser(user.id, account.id, account.freshPositions);
+      campaignTotals.campaignsCreated += summary.campaignsOpened;
+      campaignTotals.campaignsClosed += summary.campaignsClosed;
+      campaignTotals.campaignsRolled += summary.campaignsRolled;
+      campaignTotals.campaignsAssigned += summary.campaignsAssigned;
+      campaignTotals.campaignsExpired += summary.campaignsExpired;
+    } catch {
+      // Balance sync above already succeeded and is durable - a reconciliation hiccup for one
+      // account just means it catches up on the next successful sync, not a failed sync.
+    }
+  }
+
+  // Aggregate counts only (see SchwabSyncDiagnostics) - never raw account/position/transaction
+  // data - persisted so the first real production sync can be inspected from /account.
+  await recordSchwabSyncDiagnostics(user.id, {
+    accountsSynced: result.syncedAccounts,
+    ...result.diagnostics,
+    ...campaignTotals,
+  });
+
+  const campaignsUpdated =
+    campaignTotals.campaignsCreated +
+    campaignTotals.campaignsClosed +
+    campaignTotals.campaignsRolled +
+    campaignTotals.campaignsAssigned +
+    campaignTotals.campaignsExpired;
+
   revalidatePath("/account");
   revalidatePath("/dashboard");
   revalidatePath("/positions");
-  redirect("/account?schwab=synced");
+  redirect(`/account?schwab=synced&campaignsUpdated=${campaignsUpdated}`);
 }
 
 export async function previewSchwabImportAction(formData: FormData) {

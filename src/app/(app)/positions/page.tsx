@@ -30,6 +30,7 @@ import { getCurrentOpenPut, optionLegValue, summarizeCampaign } from "@/domain/f
 import {
   summarizeCampaignProgress,
   summarizeContributionAdjustedGoal,
+  summarizeThisWeek,
   summarizeWinLoss,
   type CampaignProgressSummary,
   type ContributionAdjustedGoalSummary,
@@ -43,6 +44,7 @@ import { resolveInheritedVisibility } from "@/lib/privacy";
 import type { BrokerPosition } from "@/providers/broker-read/types";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { getPendingBrokerImportBatchForUser, getBrokerImportBatchesForUser, type BrokerImportPreviewRow } from "@/lib/broker-import";
+import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { NewAccountNameAndTypeFields } from "./new-account-name-field";
 import {
   getBrokerActivityAwaitingReviewForUser,
@@ -176,9 +178,20 @@ export default async function PositionsPage({
     : { linked: [] };
   const linkedSchwabSymbols = new Set(linkedSchwabPositions.map((position) => position.symbol));
   const buddyName = data.users[0]?.name ?? "Buddy";
+  // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
+  // confirmed $0 in a "Net P/L" figure - see getCampaignIdsWithUnknownFees. Checked across
+  // every campaign this page might render a realized/net number for.
+  const unknownFeeCampaignIds = await getCampaignIdsWithUnknownFees([
+    ...new Set([
+      ...data.campaigns.map((campaign) => campaign.id),
+      ...data.ownCompletedCampaigns.map((campaign) => campaign.id),
+      ...data.ownPerformanceCampaigns.map((campaign) => campaign.id),
+    ]),
+  ]);
   const rows = data.campaigns.map((campaign) => ({
     campaign,
     summary: summarizeCampaign({ status: campaign.status, events: campaign.events }),
+    feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
   }));
   const openRows = rows.filter((row) => row.campaign.status !== "CLOSED");
   const closedRows = rows.filter((row) => row.campaign.status === "CLOSED");
@@ -222,14 +235,19 @@ export default async function PositionsPage({
   });
   const ownCompletedForPerformance = data.ownCompletedCampaigns.map((campaign) => {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+    const pl = summary.totalCampaignPL ?? summary.realizedPL;
     return {
       campaignId: campaign.id,
       closedAt: campaign.closedAt ?? campaign.updatedAt,
       finalResult: summary.finalResult,
-      pl: summary.totalCampaignPL ?? summary.realizedPL,
+      pl,
+      grossPL: pl !== null ? pl + summary.fees : null,
+      feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
       daysActive: summary.daysActive,
+      collateralCommitted: summary.collateralCommitted,
     };
   });
+  const ownThisWeek = summarizeThisWeek(ownCompletedForPerformance);
   const ownRealizedByAccount = new Map<string, number>();
   for (const campaign of data.ownCompletedCampaigns) {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
@@ -418,6 +436,7 @@ export default async function PositionsPage({
 
       {view === "performance" ? (
         <PerformanceSection
+          thisWeek={ownThisWeek}
           winLoss={ownWinLoss}
           goal={ownGoal}
           campaignRows={ownPerformanceRows}
@@ -595,7 +614,7 @@ function CampaignCard({
   currentUserId,
   rollStatus = null,
 }: {
-  row: { campaign: CampaignRow; summary: ReturnType<typeof summarizeCampaign> };
+  row: { campaign: CampaignRow; summary: ReturnType<typeof summarizeCampaign>; feesFullyKnown?: boolean };
   currentUserId: string;
   rollStatus?: RollStatus | "UNAVAILABLE" | null;
 }) {
@@ -605,6 +624,14 @@ function CampaignCard({
   const effectiveVisibility = resolveInheritedVisibility(campaign.visibility, campaign.account.visibility);
   const timeline = timelineGroups(campaign.events);
   const plValue = campaign.status === "CLOSED" ? (summary.totalCampaignPL ?? summary.realizedPL) : null;
+  const expiredWorthless = campaign.status === "CLOSED" && campaign.events.some((event) => event.type === "PUT_EXPIRED");
+  // A fee Schwab didn't report (or this code couldn't parse) must never silently present as a
+  // confirmed $0 in a "Net P/L"-style figure - see getCampaignIdsWithUnknownFees.
+  const netPLExact = row.feesFullyKnown ?? true;
+  const returnOnSecuredCapital =
+    campaign.status === "CLOSED" && netPLExact && plValue !== null && summary.collateralCommitted
+      ? (plValue / summary.collateralCommitted) * 100
+      : null;
 
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
@@ -613,6 +640,12 @@ function CampaignCard({
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-2xl font-semibold text-zinc-50">{campaign.ticker}</span>
             <Badge tone={statusTone(campaign.status, plValue)}>{campaign.status}</Badge>
+            {campaign.status === "CLOSED" ? (
+              <Badge tone={plValue === null ? "neutral" : plValue < 0 ? "bad" : "good"}>
+                {expiredWorthless ? "EXPIRED OTM · " : ""}
+                {outcomeLabel(summary.finalResult)}
+              </Badge>
+            ) : null}
             <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} />
             {rollStatus === "UNAVAILABLE" ? (
               <RollStatusUnavailableBadge />
@@ -626,12 +659,18 @@ function CampaignCard({
             <span>{summary.currentStage}</span>
           </div>
         </div>
-        <div className="grid grid-cols-[1fr_auto] items-center gap-3 md:min-w-[520px] md:grid-cols-[1fr_1fr_1fr_auto]">
+        <div className="grid grid-cols-[1fr_auto] items-center gap-3 md:min-w-[600px] md:grid-cols-[1fr_1fr_1fr_1fr_auto]">
           <SummaryCell
             label="Realized"
-            value={campaign.status === "CLOSED" ? signedMoney(plValue) : "Not closed"}
-            tone={campaign.status === "CLOSED" ? plValue : null}
-            help={HELP.realizedPL}
+            value={
+              campaign.status !== "CLOSED"
+                ? "Not closed"
+                : !netPLExact
+                  ? "Pending"
+                  : signedMoney(plValue)
+            }
+            tone={campaign.status === "CLOSED" && netPLExact ? plValue : null}
+            help={netPLExact ? HELP.realizedPL : "Gross P/L is known, but an actual Schwab fee/commission on this campaign hasn't been resolved yet - net P/L isn't final until it is, rather than assuming it was $0."}
             helpTestId={`help-summary-realized-${campaign.ticker}`}
           />
           <SummaryCell
@@ -640,6 +679,12 @@ function CampaignCard({
             tone={summary.netOptionPremium}
             help={HELP.netPremium}
             helpTestId={`help-summary-premium-${campaign.ticker}`}
+          />
+          <SummaryCell
+            label="Return"
+            value={campaign.status === "CLOSED" && !netPLExact ? "Pending" : returnOnSecuredCapital === null ? "—" : percent(returnOnSecuredCapital)}
+            tone={returnOnSecuredCapital}
+            help="Realized P/L divided by capital committed to secure the put."
           />
           <SummaryCell label="Days" value={summary.daysActive ?? "UNKNOWN"} />
           <ChevronDown className="size-5 justify-self-end text-zinc-500 transition group-open:rotate-180" aria-hidden />
@@ -1267,6 +1312,7 @@ function BrokerActivityAwaitingReviewPanel({
 }
 
 function PerformanceSection({
+  thisWeek,
   winLoss,
   goal,
   campaignRows,
@@ -1274,6 +1320,7 @@ function PerformanceSection({
   currentCampaignPartial,
   projectedOtmPartial,
 }: {
+  thisWeek: ReturnType<typeof summarizeThisWeek>;
   winLoss: ReturnType<typeof summarizeWinLoss>;
   goal: ContributionAdjustedGoalSummary;
   campaignRows: PerformanceCampaignViewRow[];
@@ -1293,6 +1340,44 @@ function PerformanceSection({
 
   return (
     <section className="space-y-4" data-testid="performance-cockpit">
+      <div
+        className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20"
+        data-testid="this-week-summary"
+      >
+        <p className="text-xs font-semibold uppercase tracking-normal text-emerald-300">This Week</p>
+        {thisWeek.completedCount === 0 ? (
+          <p className="text-sm text-zinc-400">No campaigns closed yet this week.</p>
+        ) : (
+          <>
+            <span className="text-sm text-zinc-300">
+              <span className="font-semibold text-zinc-50">{thisWeek.completedCount}</span> completed
+            </span>
+            <span className="text-sm text-zinc-300">
+              <span className="font-semibold text-emerald-300">{thisWeek.wins}</span> wins ·{" "}
+              <span className="font-semibold text-red-300">{thisWeek.losses}</span> losses
+            </span>
+            {thisWeek.netPLExact ? (
+              <>
+                <span className={`text-sm font-semibold ${toneClass(thisWeek.netPL)}`}>{signedMoney(thisWeek.netPL)} net</span>
+                <span className="text-sm text-zinc-300">
+                  {thisWeek.returnOnSecuredCapitalPercent === null ? "Return unavailable" : `${percent(thisWeek.returnOnSecuredCapitalPercent)} on secured capital`}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className={`text-sm font-semibold ${toneClass(thisWeek.grossPL)}`}>{signedMoney(thisWeek.grossPL)} gross</span>
+                <span className="text-sm text-zinc-300">
+                  {thisWeek.grossReturnOnSecuredCapitalPercent === null ? "Return unavailable" : `${percent(thisWeek.grossReturnOnSecuredCapitalPercent)} gross return`}
+                </span>
+                <span className="inline-flex items-center gap-1 text-sm text-amber-300">
+                  Net P/L: pending (a fee on one of this week&apos;s campaigns hasn&apos;t been confirmed yet)
+                </span>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
       <div className="grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -2080,6 +2165,13 @@ function segmentClass(active: boolean) {
       ? "border-emerald-400/70 bg-emerald-400/15 text-emerald-100"
       : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-600 hover:text-zinc-50"
   }`;
+}
+
+function outcomeLabel(finalResult: ReturnType<typeof summarizeCampaign>["finalResult"]) {
+  if (finalResult === "GAIN") return "WIN";
+  if (finalResult === "LOSS") return "LOSS";
+  if (finalResult === "BREAKEVEN") return "BREAKEVEN";
+  return "UNKNOWN";
 }
 
 function statusTone(status: string, pl: number | null) {

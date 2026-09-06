@@ -12,6 +12,7 @@ export type CampaignEventKind =
   | "SELL_COVERED_CALL"
   | "CLOSE_COVERED_CALL"
   | "COVERED_CALL_EXPIRED"
+  | "PUT_EXPIRED"
   | "STOCK_SALE"
   | "NOTE";
 
@@ -38,6 +39,7 @@ export type CampaignEventInput = {
 export type CampaignCurrentStage =
   | "Cash-secured put"
   | "Rolled put"
+  | "Expiration processing"
   | "Assigned shares"
   | "Covered call"
   | "Closed"
@@ -225,7 +227,7 @@ export function summarizeCampaign({
     adjustedBasis,
     sharesHeld,
     finalResult: finalResult(status, totalCampaignPL),
-    currentStage: currentStage(status, lastTradeEvent?.type ?? null),
+    currentStage: currentStage(status, lastTradeEvent?.type ?? null, getCurrentOpenPut(orderedEvents)?.expiration ?? null, asOf),
     unknowns: unique(unknowns),
   };
 }
@@ -278,6 +280,10 @@ function daysBetween(start: Date, end: Date) {
   return Math.max(1, Math.ceil((endUtc - startUtc) / MS_PER_DAY));
 }
 
+function utcDateOnly(value: Date) {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+}
+
 function numeric(value: unknown): number | null {
   if (value === null || value === undefined || value === "") {
     return null;
@@ -309,7 +315,8 @@ function isOptionEvent(type: CampaignEventKind) {
     type === "ROLL_PUT_OPEN" ||
     type === "SELL_COVERED_CALL" ||
     type === "CLOSE_COVERED_CALL" ||
-    type === "COVERED_CALL_EXPIRED"
+    type === "COVERED_CALL_EXPIRED" ||
+    type === "PUT_EXPIRED"
   );
 }
 
@@ -357,13 +364,26 @@ function finalResult(status: CampaignStatusInput, totalCampaignPL: number | null
   return "BREAKEVEN";
 }
 
-function currentStage(status: CampaignStatusInput, lastEventType: CampaignEventKind | null): CampaignCurrentStage {
+function currentStage(
+  status: CampaignStatusInput,
+  lastEventType: CampaignEventKind | null,
+  openPutExpiration: Date | null,
+  asOf: Date,
+): CampaignCurrentStage {
   if (status === "CLOSED") {
     return "Closed";
   }
 
   if (status === "ASSIGNED") {
     return lastEventType === "SELL_COVERED_CALL" ? "Covered call" : "Assigned shares";
+  }
+
+  // Expiration/exercise processing happens after market close, and expiration is stored as a
+  // bare UTC calendar date - so only flag this once the calendar day AFTER expiration has
+  // started. Comparing raw instants would flag "processing" while expiration day is still
+  // trading (UTC midnight lands in the previous ET afternoon/evening).
+  if (openPutExpiration && utcDateOnly(asOf).getTime() > utcDateOnly(openPutExpiration).getTime()) {
+    return "Expiration processing";
   }
 
   if (lastEventType === "ROLL_PUT_CLOSE" || lastEventType === "ROLL_PUT_OPEN") {

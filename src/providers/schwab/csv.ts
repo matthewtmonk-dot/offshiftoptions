@@ -341,6 +341,10 @@ export function normalizeSchwabApiPosition(position: BrokerPosition, observedAt 
 export function normalizeSchwabApiTransaction(transaction: BrokerTransaction): NormalizedBrokerRecord {
   const parsed = transaction.symbol ? parseSchwabSymbol(transaction.symbol) : null;
   const accountKey = accountKeyFor(transaction.accountId);
+  // Fingerprint intentionally ignores the action label (kept as `action: null` here, same as
+  // before this function knew about actions) so an API-sourced transaction still dedupes
+  // against the same real-world event imported later from a Transactions CSV - both agree on
+  // date/symbol/amount/description regardless of exactly how each source phrases the action.
   const fingerprint = transactionFingerprint({
     accountKey,
     occurredAt: transaction.occurredAt,
@@ -361,12 +365,12 @@ export function normalizeSchwabApiTransaction(transaction: BrokerTransaction): N
     occurredAt: transaction.occurredAt,
     observedAt: null,
     symbol: parsed?.symbol ?? null,
-    underlyingSymbol: parsed?.underlyingSymbol ?? null,
-    action: null,
+    underlyingSymbol: transaction.underlyingSymbol ?? parsed?.underlyingSymbol ?? null,
+    action: transaction.action ?? null,
     description: transaction.description,
-    quantity: null,
-    price: null,
-    fees: null,
+    quantity: transaction.quantity ?? null,
+    price: transaction.price ?? null,
+    fees: transaction.fees ?? null,
     amount: transaction.amount,
     sources: ["SCHWAB_API"],
     sourceIds: [`schwab-api-transaction:${transaction.id}`],
@@ -374,6 +378,10 @@ export function normalizeSchwabApiTransaction(transaction: BrokerTransaction): N
       accountId: transaction.accountId,
       brokerTransactionId: transaction.id,
       economicEffect: "ACTIVITY",
+      optionType: transaction.optionType ?? parsed?.optionType ?? null,
+      strikePrice: transaction.strike ?? parsed?.strike ?? null,
+      expiration: (transaction.expiration ?? parsed?.expiration)?.toISOString() ?? null,
+      activityKind: classifyBrokerTransactionAction(transaction.action ?? null),
     },
   };
 }

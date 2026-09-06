@@ -4,7 +4,7 @@ import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
 import { getAccountPageData } from "@/lib/app-data";
-import { getSchwabConnectionSummaryForUser, getSchwabDeveloperCredentialSummaryForUser } from "@/lib/broker-connections";
+import { getSchwabConnectionSummaryForUser, getSchwabDeveloperCredentialSummaryForUser, type SchwabSyncDiagnostics } from "@/lib/broker-connections";
 import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { money, shortDateTime } from "@/lib/format";
@@ -185,6 +185,7 @@ export default async function AccountPage({
                       Sync now
                     </button>
                   </form>
+                  {schwabConnection.lastSyncDiagnostics ? <SyncDiagnosticsDetails diagnostics={schwabConnection.lastSyncDiagnostics} /> : null}
                 </div>
               ) : (
                 <p className="text-sm text-zinc-400">
@@ -458,6 +459,50 @@ function ConnectionDatum({ label, value }: { label: string; value: string }) {
       <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
       <dd className="mt-1 break-words font-medium text-zinc-100">{value}</dd>
     </div>
+  );
+}
+
+/**
+ * Aggregate counts only from the last sync + auto-reconciliation run - no account numbers,
+ * balances, positions, or transaction content - safe to show directly on this page so the
+ * first real production sync can be verified without a database console. Collapsed by default
+ * to keep the primary "Sync now" action uncluttered.
+ */
+function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagnostics }) {
+  const rows: [string, number][] = [
+    ["Accounts synced", diagnostics.accountsSynced],
+    ["Positions received", diagnostics.positionsReceived],
+    ["Transactions received", diagnostics.transactionsReceived],
+    ["Broker records inserted", diagnostics.brokerRecordsInserted],
+    ["Duplicates skipped", diagnostics.duplicatesSkipped],
+    ["Records needing manual review", diagnostics.recordsUnresolved],
+    ["Fees known", diagnostics.feeKnownCount],
+    ["Fees unknown", diagnostics.feeUnknownCount],
+    ["Campaigns created", diagnostics.campaignsCreated],
+    ["Campaigns closed", diagnostics.campaignsClosed],
+    ["Campaigns rolled", diagnostics.campaignsRolled],
+    ["Campaigns assigned", diagnostics.campaignsAssigned],
+    ["Campaigns expired", diagnostics.campaignsExpired],
+  ];
+
+  return (
+    <details className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-sm">
+      <summary className="cursor-pointer text-xs font-medium uppercase tracking-normal text-zinc-400">Last sync details</summary>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</dt>
+            <dd className="mt-0.5 font-medium text-zinc-100">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {diagnostics.feeUnknownCount > 0 ? (
+        <p className="mt-3 text-xs text-amber-200">
+          {diagnostics.feeUnknownCount} imported transaction{diagnostics.feeUnknownCount === 1 ? "" : "s"} had no resolvable fee - affected
+          campaigns show &quot;Pending&quot; for Net P/L rather than assuming a $0 fee.
+        </p>
+      ) : null}
+    </details>
   );
 }
 

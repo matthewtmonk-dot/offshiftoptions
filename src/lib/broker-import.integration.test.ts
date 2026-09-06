@@ -20,14 +20,24 @@ maybeDescribe("Schwab broker import (preview/confirm/dedupe/conflict/privacy)", 
   let confirmBrokerImportForUser: typeof import("./broker-import").confirmBrokerImportForUser;
   let discardBrokerImportForUser: typeof import("./broker-import").discardBrokerImportForUser;
   let getPendingBrokerImportBatchForUser: typeof import("./broker-import").getPendingBrokerImportBatchForUser;
+  let persistNormalizedBrokerRecordsForUser: typeof import("./broker-import").persistNormalizedBrokerRecordsForUser;
+  let normalizeSchwabApiTransaction: typeof import("@/providers/schwab/csv").normalizeSchwabApiTransaction;
+  let createTradingAccountForUser: typeof import("./workflows").createTradingAccountForUser;
   let userA: { id: string };
   let userB: { id: string };
   const userIds: string[] = [];
 
   beforeAll(async () => {
     prisma = (await import("./prisma")).prisma;
-    ({ previewBrokerImportForUser, confirmBrokerImportForUser, discardBrokerImportForUser, getPendingBrokerImportBatchForUser } =
-      await import("./broker-import"));
+    ({
+      previewBrokerImportForUser,
+      confirmBrokerImportForUser,
+      discardBrokerImportForUser,
+      getPendingBrokerImportBatchForUser,
+      persistNormalizedBrokerRecordsForUser,
+    } = await import("./broker-import"));
+    ({ normalizeSchwabApiTransaction } = await import("@/providers/schwab/csv"));
+    ({ createTradingAccountForUser } = await import("./workflows"));
 
     const passwordHash = await hash("not-used", 4);
     const timestamp = Date.now();
@@ -74,6 +84,52 @@ maybeDescribe("Schwab broker import (preview/confirm/dedupe/conflict/privacy)", 
   it("is idempotent even under a different filename with the same content", async () => {
     const renamed = await previewBrokerImportForUser(userA.id, csvFile("totally-different-name.csv", fixture("transactions.csv")), null);
     expect(renamed.counts.newCount).toBe(0);
+  });
+
+  it("persistNormalizedBrokerRecordsForUser reports insert/duplicate/fee-known/fee-unknown counts, and stays idempotent on a repeat call", async () => {
+    const account = await createTradingAccountForUser(userA.id, "Diagnostics Count Account", "Manual", "10000", "10000", "PRIVATE");
+    const records = [
+      normalizeSchwabApiTransaction({
+        id: "diag-known-fee",
+        accountId: account.id,
+        symbol: "DIAG 260904P00023500",
+        amount: 27.35,
+        occurredAt: new Date("2026-08-28T14:00:00Z"),
+        description: "Sell to Open",
+        action: "Sell to Open",
+        quantity: 1,
+        price: 0.28,
+        fees: 0.65,
+      }),
+      normalizeSchwabApiTransaction({
+        id: "diag-unknown-fee",
+        accountId: account.id,
+        symbol: "DIAG 260904P00023500",
+        amount: 27.35,
+        occurredAt: new Date("2026-08-29T14:00:00Z"),
+        description: "Sell to Open",
+        action: "Sell to Open",
+        quantity: 1,
+        price: 0.31,
+        // fees intentionally omitted - simulates a fee Schwab didn't report / couldn't be parsed
+      }),
+    ];
+
+    const first = await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
+    expect(first.inserted).toBe(2);
+    expect(first.duplicatesSkipped).toBe(0);
+    expect(first.feeKnownTransactions).toBe(1);
+    expect(first.feeUnknownTransactions).toBe(1);
+
+    const second = await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
+    expect(second.inserted).toBe(0);
+    expect(second.duplicatesSkipped).toBe(2);
+
+    const stored = await prisma.brokerRecord.findMany({ where: { userId: userA.id, accountId: account.id, kind: "TRANSACTION" } });
+    expect(stored).toHaveLength(2);
+    const feesStored = stored.map((row) => row.fees);
+    expect(feesStored.some((fee) => fee === null)).toBe(true);
+    expect(feesStored.some((fee) => fee !== null && Number(fee) === 0.65)).toBe(true);
   });
 
   it("discarding a preview batch never creates BrokerRecords", async () => {

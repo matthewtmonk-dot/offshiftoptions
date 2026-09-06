@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   summarizeCampaignProgress,
   summarizeContributionAdjustedGoal,
+  summarizeThisWeek,
   summarizeWeeklyReturns,
   summarizeWinLoss,
   tradingProfitFromAccountValue,
@@ -56,6 +57,85 @@ describe("win/loss accounting", () => {
     expect(summary.unknownResults).toBe(1);
     expect(summary.winRate).toBeNull();
     expect(summary.realizedTradingPL).toBe(0);
+  });
+});
+
+describe("this week's summary", () => {
+  const asOf = new Date("2026-09-05T13:00:00Z"); // Saturday, in the week of 2026-08-31 (Mon) - 2026-09-06 (Sun)
+
+  it("matches the three-CSP Sep 4 expiration week example - 3 completed, 3 wins, net premium, return on secured capital", () => {
+    const summary = summarizeThisWeek(
+      [
+        { campaignId: "APLD", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 28, daysActive: 7, collateralCommitted: 2350 },
+        { campaignId: "CORZ", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 68, daysActive: 7, collateralCommitted: 1650 },
+        { campaignId: "RIOT", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 28, daysActive: 7, collateralCommitted: 1750 },
+      ],
+      asOf,
+    );
+
+    expect(summary.completedCount).toBe(3);
+    expect(summary.wins).toBe(3);
+    expect(summary.losses).toBe(0);
+    expect(summary.netPL).toBe(124);
+    expect(summary.netPLExact).toBe(true); // zero-fee fixture - fees are known ($0), not merely assumed
+    expect(summary.grossPL).toBe(124); // gross equals net here since there are no fees at all
+    expect(summary.returnOnSecuredCapitalPercent).toBeCloseTo(2.16, 1); // 124 / 5750
+    expect(summary.grossReturnOnSecuredCapitalPercent).toBeCloseTo(2.16, 1);
+  });
+
+  it("shows gross P/L as exact but withholds a confirmed net figure when a completed campaign has an unresolved fee", () => {
+    const summary = summarizeThisWeek(
+      [
+        { campaignId: "APLD", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 28, grossPL: 28, daysActive: 7, collateralCommitted: 2350, feesFullyKnown: true },
+        {
+          campaignId: "CORZ",
+          closedAt: new Date("2026-09-04T21:00:00Z"),
+          finalResult: "GAIN",
+          pl: 68, // computed treating the unresolved fee as $0 - not presented as a confirmed net number
+          grossPL: 68,
+          daysActive: 7,
+          collateralCommitted: 1650,
+          feesFullyKnown: false,
+        },
+      ],
+      asOf,
+    );
+
+    expect(summary.completedCount).toBe(2);
+    expect(summary.netPLExact).toBe(false);
+    expect(summary.grossPL).toBe(96); // 28 + 68 - always exact, doesn't depend on fee resolution
+    expect(summary.grossReturnOnSecuredCapitalPercent).not.toBeNull();
+    // The net figures are still computed (so a caller COULD inspect them) but netPLExact tells
+    // the UI not to present them as a confirmed "Net P/L."
+    expect(summary.returnOnSecuredCapitalPercent).toBeNull();
+  });
+
+  it("excludes a campaign closed in a prior week", () => {
+    const summary = summarizeThisWeek(
+      [{ campaignId: "old", closedAt: new Date("2026-08-20T14:00:00Z"), finalResult: "GAIN", pl: 50, daysActive: 7, collateralCommitted: 1000 }],
+      asOf,
+    );
+    expect(summary.completedCount).toBe(0);
+    expect(summary.netPL).toBeNull();
+  });
+
+  it("returns null return-on-secured-capital when no closed campaign this week reports a known secured amount", () => {
+    const summary = summarizeThisWeek(
+      [{ campaignId: "unknown-collateral", closedAt: new Date("2026-09-01T14:00:00Z"), finalResult: "GAIN", pl: 20, daysActive: 5 }],
+      asOf,
+    );
+    expect(summary.netPL).toBe(20);
+    expect(summary.returnOnSecuredCapitalPercent).toBeNull();
+  });
+
+  it("counts a loss this week without dressing it up", () => {
+    const summary = summarizeThisWeek(
+      [{ campaignId: "loser", closedAt: new Date("2026-09-02T14:00:00Z"), finalResult: "LOSS", pl: -40, daysActive: 3, collateralCommitted: 2000 }],
+      asOf,
+    );
+    expect(summary.wins).toBe(0);
+    expect(summary.losses).toBe(1);
+    expect(summary.netPL).toBe(-40);
   });
 });
 
