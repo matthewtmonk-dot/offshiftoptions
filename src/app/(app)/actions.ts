@@ -43,6 +43,10 @@ import {
 import type { AppearanceMode } from "@/generated/prisma/enums";
 import { updateAppearanceForUser } from "@/lib/appearance";
 import { disconnectSchwabForUser, recordSchwabSyncDiagnostics } from "@/lib/broker-connections";
+import {
+  runSchwabTransactionsDiagnosticForUser,
+  type SchwabTransactionsDiagnosticResult,
+} from "@/lib/schwab-transactions-diagnostic";
 import { confirmBrokerImportForUser, discardBrokerImportForUser, previewBrokerImportForUser } from "@/lib/broker-import";
 import {
   confirmBrokerPositionAsCampaignForUser,
@@ -391,6 +395,11 @@ export async function runLiveSchwabScannerAction(): Promise<RunLiveScanResult> {
     }
     throw error;
   }
+}
+
+export async function runSchwabTransactionsDiagnosticAction(): Promise<SchwabTransactionsDiagnosticResult> {
+  const user = await requireCurrentUser();
+  return runSchwabTransactionsDiagnosticForUser(user.id);
 }
 
 export async function createTradingAccountAction(formData: FormData) {

@@ -317,6 +317,16 @@ export default async function AccountPage({
                       Verify Schwab Fundamental Fields
                     </Link>
                   ) : null}
+                  {schwabConnection?.connected ? (
+                    <Link
+                      href="/account/schwab-transactions-diagnostic"
+                      prefetch={false}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
+                    >
+                      <SearchCheck className="size-3" aria-hidden />
+                      Diagnose Schwab Transactions &amp; Orders
+                    </Link>
+                  ) : null}
                 </div>
               </details>
             </div>
