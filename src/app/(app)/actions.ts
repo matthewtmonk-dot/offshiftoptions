@@ -47,6 +47,10 @@ import {
   runSchwabTransactionsDiagnosticForUser,
   type SchwabTransactionsDiagnosticResult,
 } from "@/lib/schwab-transactions-diagnostic";
+import {
+  getSanitizedBrokerRecordClassificationForUser,
+  type BrokerRecordClassificationReport,
+} from "@/lib/broker-record-classification-diagnostic";
 import { confirmBrokerImportForUser, discardBrokerImportForUser, previewBrokerImportForUser } from "@/lib/broker-import";
 import {
   confirmBrokerPositionAsCampaignForUser,
@@ -400,6 +404,11 @@ export async function runLiveSchwabScannerAction(): Promise<RunLiveScanResult> {
 export async function runSchwabTransactionsDiagnosticAction(): Promise<SchwabTransactionsDiagnosticResult> {
   const user = await requireCurrentUser();
   return runSchwabTransactionsDiagnosticForUser(user.id);
+}
+
+export async function runBrokerRecordClassificationDiagnosticAction(): Promise<BrokerRecordClassificationReport> {
+  const user = await requireCurrentUser();
+  return getSanitizedBrokerRecordClassificationForUser(user.id);
 }
 
 export async function createTradingAccountAction(formData: FormData) {

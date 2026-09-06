@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { requireCurrentUser } from "@/lib/auth";
 import { DiagnosticPanel } from "./diagnostic-panel";
+import { BrokerRecordClassificationPanel } from "./broker-record-classification-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +32,17 @@ export default async function SchwabTransactionsDiagnosticPage() {
       </div>
 
       <DiagnosticPanel />
+
+      <div className="space-y-3 border-t border-zinc-800 pt-6">
+        <div>
+          <h2 className="text-xl font-semibold text-zinc-50">Broker Record Classifications</h2>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            Shows how your already-synced Schwab transactions are classified right now, straight from the database -
+            no live Schwab call needed. Use this to see exactly why a real trade isn&apos;t becoming a campaign.
+          </p>
+        </div>
+        <BrokerRecordClassificationPanel />
+      </div>
     </div>
   );
 }

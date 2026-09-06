@@ -37,7 +37,7 @@ import {
   recordSchwabAccountSyncResult,
 } from "./broker-connections";
 import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
-import { normalizeSchwabApiPosition, normalizeSchwabApiTransaction } from "@/providers/schwab/csv";
+import { mergeBrokerRecords, normalizeSchwabApiPosition, normalizeSchwabApiTransaction } from "@/providers/schwab/csv";
 import type {
   BrokerPosition,
   BrokerReadProvider,
@@ -217,6 +217,24 @@ export async function fetchSchwabAccountActivity(provider: BrokerReadProvider, a
 }
 
 /**
+ * Normalizes fresh positions/transactions into candidate BrokerRecords, then coalesces via the
+ * existing mergeBrokerRecords() (see providers/schwab/csv.ts, already used by the CSV-import
+ * path) - required because transactions are now fetched via three independent per-category
+ * requests (see fetchSchwabAccountActivity/getTransactions), and a single real-world Schwab
+ * activity can legitimately surface under more than one category. Without merging first, two
+ * identically-fingerprinted candidates reach classification/persistence separately: the first
+ * inserts, the second collides on the (userId, provider, kind, fingerprint) unique constraint
+ * and is counted as a duplicate - but only after already being counted as needing review too,
+ * inflating that count past the number of rows actually inserted.
+ */
+export function buildSchwabRecordsToPersist(positions: BrokerPosition[], transactions: BrokerTransaction[], syncedAt: Date) {
+  return mergeBrokerRecords([
+    ...positions.map((position) => normalizeSchwabApiPosition(position, syncedAt)),
+    ...transactions.map((transaction) => normalizeSchwabApiTransaction(transaction)),
+  ]);
+}
+
+/**
  * Pulls real account value/cash from Schwab for the authenticated user only and records it as
  * a BROKER_SNAPSHOT ledger entry per linked account. Also pulls that account's current
  * positions and recent transactions and persists them as BrokerRecords (reusing the exact CSV
@@ -325,10 +343,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       diagnostics.dividendOrInterestSourceStatus = "ERROR";
     }
 
-    const records = [
-      ...activity.positions.map((position) => normalizeSchwabApiPosition(position, syncedAt)),
-      ...activity.transactions.map((transaction) => normalizeSchwabApiTransaction(transaction)),
-    ];
+    const records = buildSchwabRecordsToPersist(activity.positions, activity.transactions, syncedAt);
     if (records.length > 0) {
       try {
         const persisted = await persistNormalizedBrokerRecordsForUser(userId, tradingAccount.id, records);
