@@ -479,30 +479,36 @@ function ConnectionDatum({ label, value }: { label: string; value: string }) {
  * to keep the primary "Sync now" action uncluttered.
  */
 function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagnostics }) {
-  const rows: [string, number][] = [
-    ["Accounts synced", diagnostics.accountsSynced],
-    ["Positions received", diagnostics.positionsReceived],
-    ["Transactions received", diagnostics.transactionsReceived],
-    ["Broker records inserted", diagnostics.brokerRecordsInserted],
-    ["Duplicates skipped", diagnostics.duplicatesSkipped],
-    ["Records needing manual review", diagnostics.recordsUnresolved],
-    ["Fees known", diagnostics.feeKnownCount],
-    ["Fees unknown", diagnostics.feeUnknownCount],
-    ["Campaigns created", diagnostics.campaignsCreated],
-    ["Campaigns closed", diagnostics.campaignsClosed],
-    ["Campaigns rolled", diagnostics.campaignsRolled],
-    ["Campaigns assigned", diagnostics.campaignsAssigned],
-    ["Campaigns expired", diagnostics.campaignsExpired],
+  const rows: { label: string; value: number; status?: "OK" | "ERROR" }[] = [
+    { label: "Accounts synced", value: diagnostics.accountsSynced },
+    { label: "Positions received", value: diagnostics.positionsReceived, status: diagnostics.positionsSourceStatus },
+    { label: "Transactions received", value: diagnostics.transactionsReceived },
+    { label: "TRADE received", value: diagnostics.tradeTransactionsReceived, status: diagnostics.tradeSourceStatus },
+    { label: "Receive & deliver received", value: diagnostics.receiveAndDeliverReceived, status: diagnostics.receiveAndDeliverSourceStatus },
+    { label: "Dividend/interest received", value: diagnostics.dividendOrInterestReceived, status: diagnostics.dividendOrInterestSourceStatus },
+    { label: "Broker records inserted", value: diagnostics.brokerRecordsInserted },
+    { label: "Duplicates skipped", value: diagnostics.duplicatesSkipped },
+    { label: "Records needing manual review", value: diagnostics.recordsUnresolved },
+    { label: "Fees known", value: diagnostics.feeKnownCount },
+    { label: "Fees unknown", value: diagnostics.feeUnknownCount },
+    { label: "Campaigns created", value: diagnostics.campaignsCreated },
+    { label: "Campaigns closed", value: diagnostics.campaignsClosed },
+    { label: "Campaigns rolled", value: diagnostics.campaignsRolled },
+    { label: "Campaigns assigned", value: diagnostics.campaignsAssigned },
+    { label: "Campaigns expired", value: diagnostics.campaignsExpired },
   ];
 
   return (
     <details className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-sm">
       <summary className="cursor-pointer text-xs font-medium uppercase tracking-normal text-zinc-400">Last sync details</summary>
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
-        {rows.map(([label, value]) => (
-          <div key={label}>
-            <dt className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</dt>
-            <dd className="mt-0.5 font-medium text-zinc-100">{value}</dd>
+        {rows.map((row) => (
+          <div key={row.label}>
+            <dt className="text-[11px] uppercase tracking-normal text-zinc-500">{row.label}</dt>
+            <dd className="mt-0.5 font-medium text-zinc-100">
+              {row.value}
+              {row.status === "ERROR" ? <span className="ml-1.5 text-xs font-semibold text-red-300">ERROR</span> : null}
+            </dd>
           </div>
         ))}
       </dl>

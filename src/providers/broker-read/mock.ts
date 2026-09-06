@@ -4,6 +4,7 @@ import type {
   BrokerPosition,
   BrokerReadProvider,
   BrokerTransaction,
+  BrokerTransactionsResult,
 } from "./types";
 
 const accounts: BrokerAccount[] = [
@@ -35,8 +36,8 @@ export class DemoBrokerReadProvider implements BrokerReadProvider {
     ];
   }
 
-  async getTransactions(accountId: string): Promise<BrokerTransaction[]> {
-    return [
+  async getTransactions(accountId: string): Promise<BrokerTransactionsResult> {
+    const transactions: BrokerTransaction[] = [
       {
         id: "mock-premium-corZ",
         accountId,
@@ -46,6 +47,15 @@ export class DemoBrokerReadProvider implements BrokerReadProvider {
         description: "Demo premium received for CORZ cash-secured put.",
       },
     ];
+
+    return {
+      transactions,
+      categories: {
+        TRADE: { status: "OK", count: transactions.length },
+        RECEIVE_AND_DELIVER: { status: "OK", count: 0 },
+        DIVIDEND_OR_INTEREST: { status: "OK", count: 0 },
+      },
+    };
   }
 
   async getOrders(accountId: string): Promise<BrokerObservedOrder[]> {

@@ -87,8 +87,16 @@ describe("SchwabBrokerReadProvider.getPositions", () => {
   });
 });
 
-function transactionsProvider(transactions: Record<string, unknown>[]) {
-  const fetchFn = async () => new Response(JSON.stringify(transactions), { status: 200, headers: { "content-type": "application/json" } });
+/** Returns `transactions` only for the one category the fixture represents (default TRADE) and
+ * `[]` for the other two - mirrors how Schwab's three independent per-category endpoints behave
+ * in production, where only one category ever actually contains a given real transaction. */
+function transactionsProvider(transactions: Record<string, unknown>[], options: { category?: string } = {}) {
+  const category = options.category ?? "TRADE";
+  const fetchFn = async (input: URL | string) => {
+    const url = new URL(input.toString());
+    const body = url.searchParams.get("types") === category ? transactions : [];
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  };
 
   return new SchwabBrokerReadProvider({
     accessToken: "test-token",
@@ -116,7 +124,7 @@ describe("SchwabBrokerReadProvider.getTransactions", () => {
       },
     ]);
 
-    const transactions = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
     expect(transactions).toEqual([
       expect.objectContaining({
         id: "txn-sto-1",
@@ -146,37 +154,88 @@ describe("SchwabBrokerReadProvider.getTransactions", () => {
       },
     ]);
 
-    const [transaction] = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
-    expect(transaction.action).toBe("Buy to Close");
-    expect(transaction.fees).toBe(0.65);
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].action).toBe("Buy to Close");
+    expect(transactions[0].fees).toBe(0.65);
   });
 
   it("labels an assignment transaction from free-text type/description when there is no instruction field", async () => {
-    const provider = transactionsProvider([
-      {
-        activityId: "txn-assign-1",
-        netAmount: 0,
-        time: "2026-09-04T21:00:00Z",
-        type: "RECEIVE_AND_DELIVER",
-        description: "Option Assignment",
-        transferItems: [{ instrument: { symbol: "APLD 260904P00023500", assetType: "OPTION" } }],
-      },
-    ]);
+    const provider = transactionsProvider(
+      [
+        {
+          activityId: "txn-assign-1",
+          netAmount: 0,
+          time: "2026-09-04T21:00:00Z",
+          type: "RECEIVE_AND_DELIVER",
+          description: "Option Assignment",
+          transferItems: [{ instrument: { symbol: "APLD 260904P00023500", assetType: "OPTION" } }],
+        },
+      ],
+      { category: "RECEIVE_AND_DELIVER" },
+    );
 
-    const [transaction] = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
-    expect(transaction.action).toBe("Assignment");
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].action).toBe("Assignment");
   });
 
   it("returns null (not zero) fees and null option fields when Schwab reports none, rather than guessing", async () => {
-    const provider = transactionsProvider([
-      { activityId: "txn-cash-1", netAmount: 4.12, time: "2026-08-15T14:00:00Z", type: "CASH_IN_OR_CASH_OUT", description: "Bank Interest" },
-    ]);
+    const provider = transactionsProvider(
+      [{ activityId: "txn-cash-1", netAmount: 4.12, time: "2026-08-15T14:00:00Z", type: "INTEREST", description: "Bank Interest" }],
+      { category: "DIVIDEND_OR_INTEREST" },
+    );
 
-    const [transaction] = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
-    expect(transaction.action).toBeNull();
-    expect(transaction.fees).toBeNull();
-    expect(transaction.optionType).toBeNull();
-    expect(transaction.strike).toBeNull();
-    expect(transaction.expiration).toBeNull();
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].action).toBeNull();
+    expect(transactions[0].fees).toBeNull();
+    expect(transactions[0].optionType).toBeNull();
+    expect(transactions[0].strike).toBeNull();
+    expect(transactions[0].expiration).toBeNull();
+  });
+
+  it("never sends the invalid CASH_IN_OR_CASH_OUT value; fetches TRADE, RECEIVE_AND_DELIVER, and DIVIDEND_OR_INTEREST as three independent requests", async () => {
+    const requestedTypes: string[] = [];
+    const fetchFn = async (input: URL | string) => {
+      const url = new URL(input.toString());
+      requestedTypes.push(url.searchParams.get("types") ?? "");
+      return new Response("[]", { status: 200 });
+    };
+    const provider = new SchwabBrokerReadProvider({
+      accessToken: "test-token",
+      accountNumbers: [{ accountNumberLast4: "1234", hashValue: "acct-hash-1" }],
+      fetchFn: fetchFn as typeof fetch,
+    });
+
+    await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-08-31"));
+
+    expect(requestedTypes).toHaveLength(3);
+    expect(requestedTypes).not.toContain("CASH_IN_OR_CASH_OUT");
+    expect(new Set(requestedTypes)).toEqual(new Set(["TRADE", "RECEIVE_AND_DELIVER", "DIVIDEND_OR_INTEREST"]));
+  });
+
+  it("does not let one rejected category erase the others' results", async () => {
+    const fetchFn = async (input: URL | string) => {
+      const url = new URL(input.toString());
+      const types = url.searchParams.get("types");
+      if (types === "DIVIDEND_OR_INTEREST") {
+        return new Response("Bad Request", { status: 400 });
+      }
+      if (types === "TRADE") {
+        return new Response(JSON.stringify([{ activityId: "trade-1", netAmount: 28, time: "2026-08-28T14:00:00Z" }]), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    };
+    const provider = new SchwabBrokerReadProvider({
+      accessToken: "test-token",
+      accountNumbers: [{ accountNumberLast4: "1234", hashValue: "acct-hash-1" }],
+      fetchFn: fetchFn as typeof fetch,
+    });
+
+    const result = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-08-31"));
+
+    expect(result.categories.DIVIDEND_OR_INTEREST).toEqual({ status: "ERROR" });
+    expect(result.categories.TRADE).toEqual({ status: "OK", count: 1 });
+    expect(result.categories.RECEIVE_AND_DELIVER).toEqual({ status: "OK", count: 0 });
+    expect(result.transactions).toHaveLength(1);
+    expect(result.transactions[0].id).toBe("trade-1");
   });
 });

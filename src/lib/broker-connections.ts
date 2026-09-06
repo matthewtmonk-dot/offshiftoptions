@@ -43,7 +43,14 @@ export type SchwabConnectionSummary = {
 export type SchwabSyncDiagnostics = {
   accountsSynced: number;
   positionsReceived: number;
+  positionsSourceStatus: "OK" | "ERROR";
   transactionsReceived: number;
+  tradeTransactionsReceived: number;
+  tradeSourceStatus: "OK" | "ERROR";
+  receiveAndDeliverReceived: number;
+  receiveAndDeliverSourceStatus: "OK" | "ERROR";
+  dividendOrInterestReceived: number;
+  dividendOrInterestSourceStatus: "OK" | "ERROR";
   brokerRecordsInserted: number;
   duplicatesSkipped: number;
   recordsUnresolved: number;
@@ -263,10 +270,13 @@ function syncDiagnosticsValue(value: unknown): SchwabSyncDiagnostics | null {
     return null;
   }
 
-  const fields: (keyof SchwabSyncDiagnostics)[] = [
+  const numericFields: (keyof SchwabSyncDiagnostics)[] = [
     "accountsSynced",
     "positionsReceived",
     "transactionsReceived",
+    "tradeTransactionsReceived",
+    "receiveAndDeliverReceived",
+    "dividendOrInterestReceived",
     "brokerRecordsInserted",
     "duplicatesSkipped",
     "recordsUnresolved",
@@ -278,11 +288,24 @@ function syncDiagnosticsValue(value: unknown): SchwabSyncDiagnostics | null {
     "campaignsAssigned",
     "campaignsExpired",
   ];
-  const result = {} as SchwabSyncDiagnostics;
-  for (const field of fields) {
+  const result: Record<string, unknown> = {};
+  for (const field of numericFields) {
     result[field] = numberValue(record[field]) ?? 0;
   }
-  return result;
+
+  // Status fields default to "OK" when absent so diagnostics blobs persisted before this fix
+  // existed don't retroactively render as errored.
+  const statusFields: (keyof SchwabSyncDiagnostics)[] = [
+    "positionsSourceStatus",
+    "tradeSourceStatus",
+    "receiveAndDeliverSourceStatus",
+    "dividendOrInterestSourceStatus",
+  ];
+  for (const field of statusFields) {
+    result[field] = record[field] === "ERROR" ? "ERROR" : "OK";
+  }
+
+  return result as SchwabSyncDiagnostics;
 }
 
 /**

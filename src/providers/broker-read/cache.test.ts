@@ -209,7 +209,14 @@ function fakeBrokerReadProvider(label: string, shouldFail: () => boolean = () =>
     },
     getTransactions: async () => {
       calls.transactions += 1;
-      return maybeFail([transaction]);
+      return maybeFail({
+        transactions: [transaction],
+        categories: {
+          TRADE: { status: "OK" as const, count: 1 },
+          RECEIVE_AND_DELIVER: { status: "OK" as const, count: 0 },
+          DIVIDEND_OR_INTEREST: { status: "OK" as const, count: 0 },
+        },
+      });
     },
     getOrders: async () => {
       calls.orders += 1;

@@ -49,10 +49,24 @@ export type BrokerObservedOrder = {
   enteredAt: Date;
 };
 
+/** Schwab's Transaction History `types` values this app actually requests - each fetched as
+ * its own independent request so one unsupported/rejected category can never erase another's
+ * results (see SchwabBrokerReadProvider.getTransactions). */
+export type BrokerTransactionCategory = "TRADE" | "RECEIVE_AND_DELIVER" | "DIVIDEND_OR_INTEREST";
+
+/** No error detail is carried on failure - only the enum - so a raw provider error can never
+ * reach diagnostics or the UI through this type. */
+export type BrokerTransactionCategoryOutcome = { status: "OK"; count: number } | { status: "ERROR" };
+
+export type BrokerTransactionsResult = {
+  transactions: BrokerTransaction[];
+  categories: Record<BrokerTransactionCategory, BrokerTransactionCategoryOutcome>;
+};
+
 export interface BrokerReadProvider {
   getAccounts(): Promise<BrokerAccount[]>;
   getAccount(accountId: string): Promise<BrokerAccount | null>;
   getPositions(accountId: string): Promise<BrokerPosition[]>;
-  getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransaction[]>;
+  getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransactionsResult>;
   getOrders(accountId: string, from: Date, to: Date): Promise<BrokerObservedOrder[]>;
 }

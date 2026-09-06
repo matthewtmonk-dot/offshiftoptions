@@ -472,4 +472,118 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     const stillUnlinked = await prisma.brokerRecord.findFirst({ where: { userId: userA.id, symbol: "PRIV 260904P00012000" } });
     expect(stillUnlinked?.linkedCampaignId).toBeNull();
   });
+
+  it("real diagnostic-derived fixture: APLD/RIOT open independently, CORZ's same-day BTC+STO reconciles as one roll, and gross premium matches the real domain calculation", async () => {
+    const account = await createTradingAccountForUser(userA.id, "Recon Account REALSYNC", "Manual", "10000", "10000", "PRIVATE");
+
+    await createTransaction(userA.id, account.id, {
+      symbol: "APLD 260904P00023500",
+      underlyingSymbol: "APLD",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-31T14:02:00Z"),
+      price: 0.28,
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "RIOT 260904P00017500",
+      underlyingSymbol: "RIOT",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-31T14:13:00Z"),
+      price: 0.28,
+      fees: null, // Schwab didn't report a fee for this one - must stay flagged unknown, never $0
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "CORZ 260904P00016500",
+      underlyingSymbol: "CORZ",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-24T13:30:00Z"),
+      price: 0.26,
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "CORZ 260904P00016500",
+      underlyingSymbol: "CORZ",
+      action: "Buy to Close",
+      occurredAt: new Date("2026-08-28T13:32:00Z"),
+      price: 0.23,
+    });
+    await createTransaction(userA.id, account.id, {
+      symbol: "CORZ 260918P00018000",
+      underlyingSymbol: "CORZ",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-28T13:32:00Z"),
+      price: 0.68,
+    });
+
+    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+    expect(summary.campaignsOpened).toBe(3); // APLD, RIOT, and CORZ's original opening leg
+    expect(summary.campaignsRolled).toBe(1); // CORZ's BTC+STO pair rolls that same campaign, not a fresh one
+
+    const campaigns = await prisma.campaign.findMany({
+      where: { ownerId: userA.id, accountId: account.id, ticker: { in: ["APLD", "RIOT", "CORZ"] } },
+      include: { events: true },
+    });
+    expect(campaigns).toHaveLength(3); // one CORZ campaign, never two
+
+    const { summarizeCampaign } = await import("@/domain/finance/campaigns");
+    const corz = campaigns.find((c) => c.ticker === "CORZ")!;
+    const apld = campaigns.find((c) => c.ticker === "APLD")!;
+    const riot = campaigns.find((c) => c.ticker === "RIOT")!;
+
+    expect(corz.events.map((e) => e.type).sort()).toEqual(["ROLL_PUT_CLOSE", "ROLL_PUT_OPEN", "SELL_PUT"].sort());
+    // +0.26 STO, -0.23 BTC, +0.68 STO -> $71 gross before fees - computed by the real
+    // summarizeCampaign(), never hand-computed or hardcoded into production code.
+    expect(summarizeCampaign({ events: corz.events, status: corz.status }).netOptionPremium).toBe(71);
+    expect(summarizeCampaign({ events: apld.events, status: apld.status }).netOptionPremium).toBe(28);
+    expect(summarizeCampaign({ events: riot.events, status: riot.status }).netOptionPremium).toBe(28);
+
+    // RIOT's unresolved fee stays flagged unknown - never silently treated as a confirmed $0.
+    const unknownFeeCampaigns = await getCampaignIdsWithUnknownFees([apld.id, riot.id, corz.id]);
+    expect(unknownFeeCampaigns.has(riot.id)).toBe(true);
+    expect(unknownFeeCampaigns.has(apld.id)).toBe(false);
+    expect(unknownFeeCampaigns.has(corz.id)).toBe(false);
+
+    // Idempotent: re-running reconciliation against the same synced data creates nothing new.
+    const secondRun = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+    expect(secondRun.campaignsOpened).toBe(0);
+    expect(secondRun.campaignsRolled).toBe(0);
+    const campaignsAfterSecondRun = await prisma.campaign.findMany({
+      where: { ownerId: userA.id, accountId: account.id, ticker: { in: ["APLD", "RIOT", "CORZ"] } },
+      include: { events: true },
+    });
+    expect(campaignsAfterSecondRun).toHaveLength(3);
+    expect(campaignsAfterSecondRun.find((c) => c.ticker === "CORZ")!.events).toHaveLength(3);
+  });
+
+  it("a second user's identical-looking Schwab activity never affects the first user's campaigns", async () => {
+    const accountA = await createTradingAccountForUser(userA.id, "Recon Account ISOREAL A", "Manual", "10000", "10000", "PRIVATE");
+    await createTransaction(userA.id, accountA.id, {
+      symbol: "ISOR 260904P00020000",
+      underlyingSymbol: "ISOR",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-31T14:00:00Z"),
+      price: 0.3,
+    });
+
+    const accountB = await createTradingAccountForUser(userB.id, "Recon Account ISOREAL B", "Manual", "10000", "10000", "PRIVATE");
+    await createTransaction(userB.id, accountB.id, {
+      symbol: "ISOR 260904P00020000",
+      underlyingSymbol: "ISOR",
+      action: "Sell to Open",
+      occurredAt: new Date("2026-08-31T14:00:00Z"),
+      price: 0.3,
+    });
+
+    await reconcileSchwabActivityForUser(userA.id, accountA.id, [], new Date("2026-08-31T18:00:00Z"));
+    await reconcileSchwabActivityForUser(userB.id, accountB.id, [], new Date("2026-08-31T18:00:00Z"));
+
+    const campaignsA = await prisma.campaign.findMany({ where: { ownerId: userA.id, ticker: "ISOR" } });
+    const campaignsB = await prisma.campaign.findMany({ where: { ownerId: userB.id, ticker: "ISOR" } });
+    expect(campaignsA).toHaveLength(1);
+    expect(campaignsB).toHaveLength(1);
+    expect(campaignsA[0].id).not.toBe(campaignsB[0].id);
+
+    const brokerRecordA = await prisma.brokerRecord.findFirst({ where: { userId: userA.id, symbol: "ISOR 260904P00020000" } });
+    const brokerRecordB = await prisma.brokerRecord.findFirst({ where: { userId: userB.id, symbol: "ISOR 260904P00020000" } });
+    expect(brokerRecordA?.linkedCampaignId).toBe(campaignsA[0].id);
+    expect(brokerRecordB?.linkedCampaignId).toBe(campaignsB[0].id);
+  });
 });

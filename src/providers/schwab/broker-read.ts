@@ -6,6 +6,9 @@ import type {
   BrokerPosition,
   BrokerReadProvider,
   BrokerTransaction,
+  BrokerTransactionCategory,
+  BrokerTransactionCategoryOutcome,
+  BrokerTransactionsResult,
 } from "@/providers/broker-read/types";
 import { SCHWAB_TRADER_BASE_URL } from "./config";
 import { schwabGetJson, type SchwabFetch } from "./client";
@@ -14,6 +17,10 @@ export type SchwabAccountNumber = {
   accountNumberLast4: string | null;
   hashValue: string;
 };
+
+/** Only Schwab transaction-type values verified live against production (see
+ * PROJECT_HANDOFF.md) - never add a value here without live confirmation it's accepted. */
+const TRANSACTION_CATEGORIES: BrokerTransactionCategory[] = ["TRADE", "RECEIVE_AND_DELIVER", "DIVIDEND_OR_INTEREST"];
 
 export class SchwabBrokerReadProvider implements BrokerReadProvider {
   constructor(
@@ -110,12 +117,43 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
     });
   }
 
-  async getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransaction[]> {
-    const payload = await this.get(`/accounts/${encodeURIComponent(accountId)}/transactions`, {
-      startDate: from.toISOString(),
-      endDate: to.toISOString(),
-      types: "TRADE,DIVIDEND_OR_INTEREST,RECEIVE_AND_DELIVER,CASH_IN_OR_CASH_OUT",
+  /**
+   * Schwab rejects a transactions request outright (HTTP 400) if any value in a combined
+   * `types` list isn't one it recognizes - confirmed live against production (see
+   * PROJECT_HANDOFF.md) that the previously-used `CASH_IN_OR_CASH_OUT` value is exactly such a
+   * case, and that it silently poisoned the other three, otherwise-valid categories in the same
+   * request. Each category is now fetched independently via Promise.allSettled so one rejected
+   * or unsupported category can never prevent the others from being received.
+   */
+  async getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransactionsResult> {
+    const settled = await Promise.allSettled(
+      TRANSACTION_CATEGORIES.map((category) =>
+        this.get(`/accounts/${encodeURIComponent(accountId)}/transactions`, {
+          startDate: from.toISOString(),
+          endDate: to.toISOString(),
+          types: category,
+        }),
+      ),
+    );
+
+    const transactions: BrokerTransaction[] = [];
+    const categories = {} as Record<BrokerTransactionCategory, BrokerTransactionCategoryOutcome>;
+
+    settled.forEach((outcome, index) => {
+      const category = TRANSACTION_CATEGORIES[index];
+      if (outcome.status === "fulfilled") {
+        const parsed = this.mapTransactionsPayload(outcome.value, accountId);
+        transactions.push(...parsed);
+        categories[category] = { status: "OK", count: parsed.length };
+      } else {
+        categories[category] = { status: "ERROR" };
+      }
     });
+
+    return { transactions, categories };
+  }
+
+  private mapTransactionsPayload(payload: unknown, accountId: string): BrokerTransaction[] {
     const transactions = Array.isArray(payload) ? payload : [];
 
     return transactions.flatMap((transactionValue) => {

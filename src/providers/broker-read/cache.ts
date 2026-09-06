@@ -3,7 +3,7 @@ import type {
   BrokerObservedOrder,
   BrokerPosition,
   BrokerReadProvider,
-  BrokerTransaction,
+  BrokerTransactionsResult,
 } from "./types";
 
 type CacheEntry<T> = {
@@ -60,7 +60,7 @@ export function withBrokerReadCache(
     getPositions(accountId: string): Promise<BrokerPosition[]> {
       return cached(`${providerKey}:positions:${accountId}`, ttl.positions, now, () => provider.getPositions(accountId));
     },
-    getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransaction[]> {
+    getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransactionsResult> {
       return cached(`${providerKey}:transactions:${accountId}:${from.toISOString()}:${to.toISOString()}`, ttl.transactions, now, () =>
         provider.getTransactions(accountId, from, to),
       );

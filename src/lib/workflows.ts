@@ -38,7 +38,13 @@ import {
 } from "./broker-connections";
 import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
 import { normalizeSchwabApiPosition, normalizeSchwabApiTransaction } from "@/providers/schwab/csv";
-import type { BrokerPosition } from "@/providers/broker-read/types";
+import type {
+  BrokerPosition,
+  BrokerReadProvider,
+  BrokerTransaction,
+  BrokerTransactionCategory,
+  BrokerTransactionCategoryOutcome,
+} from "@/providers/broker-read/types";
 
 const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
 const RESEARCH_STATUSES = new Set<ResearchStatus>(["LIKE", "WATCH", "NEUTRAL", "AVOID", "NEVER_TRADE"]);
@@ -150,6 +156,10 @@ export async function createTradingAccountForUser(
 
 const SCHWAB_TRANSACTION_LOOKBACK_DAYS = 90;
 
+function categoryCount(outcome: BrokerTransactionCategoryOutcome): number {
+  return outcome.status === "OK" ? outcome.count : 0;
+}
+
 export type SchwabAccountSyncResult = {
   syncedAccounts: number;
   accounts: { id: string; name: string; accountValue: number; cash: number; freshPositions: BrokerPosition[] }[];
@@ -159,7 +169,14 @@ export type SchwabAccountSyncResult = {
    * diagnostics record. */
   diagnostics: {
     positionsReceived: number;
+    positionsSourceStatus: "OK" | "ERROR";
     transactionsReceived: number;
+    tradeTransactionsReceived: number;
+    tradeSourceStatus: "OK" | "ERROR";
+    receiveAndDeliverReceived: number;
+    receiveAndDeliverSourceStatus: "OK" | "ERROR";
+    dividendOrInterestReceived: number;
+    dividendOrInterestSourceStatus: "OK" | "ERROR";
     brokerRecordsInserted: number;
     duplicatesSkipped: number;
     recordsUnresolved: number;
@@ -167,6 +184,37 @@ export type SchwabAccountSyncResult = {
     feeUnknownCount: number;
   };
 };
+
+/**
+ * Fetches this account's live positions and recent transactions with fully independent failure
+ * handling - confirmed live against production that a single rejected Schwab request (e.g. an
+ * unsupported transaction-type value) must never be allowed to erase data from an unrelated,
+ * otherwise-successful request. Positions and transactions are fetched in their own try/catch
+ * blocks (not Promise.all), and getTransactions() itself already isolates each transaction
+ * category internally (see SchwabBrokerReadProvider.getTransactions) - so a rejected category
+ * still leaves the other categories' transactions intact here.
+ */
+export async function fetchSchwabAccountActivity(provider: BrokerReadProvider, accountId: string, from: Date, to: Date) {
+  let positions: BrokerPosition[] = [];
+  let positionsStatus: "OK" | "ERROR" = "OK";
+  try {
+    positions = await provider.getPositions(accountId);
+  } catch {
+    positionsStatus = "ERROR";
+  }
+
+  let transactions: BrokerTransaction[] = [];
+  let transactionCategories: Record<BrokerTransactionCategory, BrokerTransactionCategoryOutcome> | null = null;
+  try {
+    const result = await provider.getTransactions(accountId, from, to);
+    transactions = result.transactions;
+    transactionCategories = result.categories;
+  } catch {
+    // Every category rejected (or some other total failure) - positions above is unaffected.
+  }
+
+  return { positions, positionsStatus, transactions, transactionCategories };
+}
 
 /**
  * Pulls real account value/cash from Schwab for the authenticated user only and records it as
@@ -204,9 +252,16 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
   const syncedAt = new Date();
   const transactionsFrom = new Date(syncedAt.getTime() - SCHWAB_TRANSACTION_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const accounts = [];
-  const diagnostics = {
+  const diagnostics: SchwabAccountSyncResult["diagnostics"] = {
     positionsReceived: 0,
+    positionsSourceStatus: "OK",
     transactionsReceived: 0,
+    tradeTransactionsReceived: 0,
+    tradeSourceStatus: "OK",
+    receiveAndDeliverReceived: 0,
+    receiveAndDeliverSourceStatus: "OK",
+    dividendOrInterestReceived: 0,
+    dividendOrInterestSourceStatus: "OK",
     brokerRecordsInserted: 0,
     duplicatesSkipped: 0,
     recordsUnresolved: 0,
@@ -242,28 +297,50 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       },
     });
 
-    let freshPositions: BrokerPosition[] = [];
-    try {
-      const [positions, transactions] = await Promise.all([
-        provider.getPositions(brokerAccount.id),
-        provider.getTransactions(brokerAccount.id, transactionsFrom, syncedAt),
-      ]);
-      freshPositions = positions;
-      diagnostics.positionsReceived += positions.length;
-      diagnostics.transactionsReceived += transactions.length;
-      const records = [
-        ...positions.map((position) => normalizeSchwabApiPosition(position, syncedAt)),
-        ...transactions.map((transaction) => normalizeSchwabApiTransaction(transaction)),
-      ];
-      const persisted = await persistNormalizedBrokerRecordsForUser(userId, tradingAccount.id, records);
-      diagnostics.brokerRecordsInserted += persisted.inserted;
-      diagnostics.duplicatesSkipped += persisted.duplicatesSkipped;
-      diagnostics.recordsUnresolved += persisted.unresolved;
-      diagnostics.feeKnownCount += persisted.feeKnownTransactions;
-      diagnostics.feeUnknownCount += persisted.feeUnknownTransactions;
-    } catch {
-      // Balance sync above already succeeded and is durable - a positions/transactions hiccup
-      // just means reconciliation catches up on the next successful sync, not a failed sync.
+    const activity = await fetchSchwabAccountActivity(provider, brokerAccount.id, transactionsFrom, syncedAt);
+    const freshPositions = activity.positions;
+
+    diagnostics.positionsReceived += activity.positions.length;
+    if (activity.positionsStatus === "ERROR") {
+      diagnostics.positionsSourceStatus = "ERROR";
+    }
+    diagnostics.transactionsReceived += activity.transactions.length;
+    if (activity.transactionCategories) {
+      diagnostics.tradeTransactionsReceived += categoryCount(activity.transactionCategories.TRADE);
+      diagnostics.receiveAndDeliverReceived += categoryCount(activity.transactionCategories.RECEIVE_AND_DELIVER);
+      diagnostics.dividendOrInterestReceived += categoryCount(activity.transactionCategories.DIVIDEND_OR_INTEREST);
+      if (activity.transactionCategories.TRADE.status === "ERROR") {
+        diagnostics.tradeSourceStatus = "ERROR";
+      }
+      if (activity.transactionCategories.RECEIVE_AND_DELIVER.status === "ERROR") {
+        diagnostics.receiveAndDeliverSourceStatus = "ERROR";
+      }
+      if (activity.transactionCategories.DIVIDEND_OR_INTEREST.status === "ERROR") {
+        diagnostics.dividendOrInterestSourceStatus = "ERROR";
+      }
+    } else {
+      // Total transactions failure (every category rejected) - all three sources unavailable.
+      diagnostics.tradeSourceStatus = "ERROR";
+      diagnostics.receiveAndDeliverSourceStatus = "ERROR";
+      diagnostics.dividendOrInterestSourceStatus = "ERROR";
+    }
+
+    const records = [
+      ...activity.positions.map((position) => normalizeSchwabApiPosition(position, syncedAt)),
+      ...activity.transactions.map((transaction) => normalizeSchwabApiTransaction(transaction)),
+    ];
+    if (records.length > 0) {
+      try {
+        const persisted = await persistNormalizedBrokerRecordsForUser(userId, tradingAccount.id, records);
+        diagnostics.brokerRecordsInserted += persisted.inserted;
+        diagnostics.duplicatesSkipped += persisted.duplicatesSkipped;
+        diagnostics.recordsUnresolved += persisted.unresolved;
+        diagnostics.feeKnownCount += persisted.feeKnownTransactions;
+        diagnostics.feeUnknownCount += persisted.feeUnknownTransactions;
+      } catch {
+        // Balance sync above already succeeded and is durable - a persistence hiccup just means
+        // reconciliation catches up on the next successful sync, not a failed sync.
+      }
     }
 
     accounts.push({ id: tradingAccount.id, name: tradingAccount.name, accountValue: brokerAccount.accountValue, cash: brokerAccount.cash, freshPositions });
