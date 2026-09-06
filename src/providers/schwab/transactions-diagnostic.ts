@@ -51,6 +51,34 @@ export type OrdersSummary = {
   malformedResponse: boolean;
 };
 
+export type SanitizedTransferItem = {
+  transferItemIndex: number;
+  assetType: string | null;
+  instrumentType: string | null;
+  symbolDescriptor: string | null;
+  putCall: "PUT" | "CALL" | null;
+  strike: number | null;
+  expiration: string | null;
+  instruction: string | null;
+  positionEffect: string | null;
+  amount: number | null;
+  price: number | null;
+  hasFeeType: boolean;
+};
+
+export type SanitizedTransactionTransferItems = {
+  transactionOrdinal: number;
+  transactionType: string | null;
+  transferItems: SanitizedTransferItem[];
+};
+
+export type TransferItemShapesSummary = {
+  transactions: SanitizedTransactionTransferItems[];
+  malformedResponse: boolean;
+};
+
+const MAX_TRANSFER_ITEM_TRANSACTIONS = 50;
+
 export async function fetchSchwabTransactionsRaw({
   accessToken,
   accountHash,
@@ -190,6 +218,54 @@ export function summarizeOrders(payload: unknown): OrdersSummary {
   }
 
   return { ordersReceived: payload.length, filledOrders, optionOrders, fillLegs, instrumentSummaries, malformedResponse: false };
+}
+
+/**
+ * Sanitized, per-transferItem breakdown of raw TRADE transactions - built to answer exactly one
+ * question with real evidence instead of a guess: which transferItem is the traded OPTION
+ * security (never assumed to be index 0 - see broker-read.ts's selectTradedSecurityTransferItem,
+ * fixed once this proved wrong), and where do instruction/positionEffect/price actually live on
+ * it. Never includes activityId/transactionId/orderId/account identifiers/CUSIP/any raw payload
+ * - only this fixed allowlist per item.
+ */
+export function summarizeTransferItemShapes(payload: unknown): TransferItemShapesSummary {
+  if (!Array.isArray(payload)) {
+    return { transactions: [], malformedResponse: true };
+  }
+
+  const transactions = payload.slice(0, MAX_TRANSFER_ITEM_TRANSACTIONS).map((transactionValue, index) => {
+    const transaction = objectValue(transactionValue) ?? {};
+    const items = arrayValue(transaction.transferItems);
+
+    return {
+      transactionOrdinal: index + 1,
+      transactionType: stringValue(transaction.type),
+      transferItems: items.map(sanitizeTransferItem),
+    };
+  });
+
+  return { transactions, malformedResponse: false };
+}
+
+function sanitizeTransferItem(itemValue: unknown, itemIndex: number): SanitizedTransferItem {
+  const item = objectValue(itemValue) ?? {};
+  const instrument = objectValue(item.instrument) ?? {};
+  const putCallRaw = stringValue(instrument.putCall);
+
+  return {
+    transferItemIndex: itemIndex,
+    assetType: stringValue(instrument.assetType),
+    instrumentType: stringValue(instrument.type),
+    symbolDescriptor: stringValue(instrument.symbol),
+    putCall: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
+    strike: numberValue(instrument.strikePrice),
+    expiration: dateValue(instrument.optionExpirationDate),
+    instruction: stringValue(item.instruction),
+    positionEffect: stringValue(item.positionEffect),
+    amount: numberValue(item.amount),
+    price: numberValue(item.price),
+    hasFeeType: Boolean(stringValue(item.feeType)),
+  };
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {

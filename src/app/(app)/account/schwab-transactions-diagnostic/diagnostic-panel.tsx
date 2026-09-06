@@ -9,6 +9,7 @@ import type {
   OrdersDiagnosticResult,
   TransactionTypeTestResult,
   TransactionWindowResult,
+  TransferItemShapesDiagnosticResult,
 } from "@/lib/schwab-transactions-diagnostic";
 import type { SchwabTransactionsDiagnosticResult } from "@/lib/schwab-transactions-diagnostic";
 
@@ -144,6 +145,15 @@ function DiagnosticResult({ result, onRetry }: { result: SchwabTransactionsDiagn
       <Panel title="Diagnostic C - Orders (60-day window)">
         <OrdersSummary orders={report.orders} />
       </Panel>
+
+      <Panel title="Diagnostic D - Transfer Item Shapes (types=TRADE, 30-day window)">
+        <p className="mb-3 text-xs text-zinc-500">
+          Per-transaction, per-transfer-item breakdown of real TRADE transactions - shows exactly which item is the
+          traded security vs. a cash/currency leg, and where instruction/positionEffect/price actually live. Never
+          shows activity/transaction/order ids, account identifiers, CUSIP, or raw payload.
+        </p>
+        <TransferItemShapesSection transferItemShapes={report.transferItemShapes} />
+      </Panel>
     </>
   );
 }
@@ -213,6 +223,74 @@ function OrdersSummary({ orders }: { orders: OrdersDiagnosticResult }) {
       ) : (
         <p className="text-sm text-zinc-400">No option order legs found in this window.</p>
       )}
+    </div>
+  );
+}
+
+function TransferItemShapesSection({ transferItemShapes }: { transferItemShapes: TransferItemShapesDiagnosticResult }) {
+  if (transferItemShapes.status === "ERROR") {
+    return (
+      <div className="space-y-2">
+        <CallStatusBadge row={transferItemShapes} />
+      </div>
+    );
+  }
+
+  if (transferItemShapes.malformedResponse) {
+    return <Badge tone="warn">Response body was not an array</Badge>;
+  }
+
+  if (transferItemShapes.transactions.length === 0) {
+    return <p className="text-sm text-zinc-400">No TRADE transactions found in this window.</p>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {transferItemShapes.transactions.map((transaction) => (
+        <div key={transaction.transactionOrdinal} className="rounded-md border border-zinc-800 p-3">
+          <p className="mb-2 text-xs font-medium uppercase tracking-normal text-zinc-500">
+            Transaction #{transaction.transactionOrdinal} · type: {transaction.transactionType ?? "—"}
+          </p>
+          <div className="overflow-x-auto">
+            <table className="min-w-[900px] w-full border-separate border-spacing-0 text-left text-sm">
+              <thead>
+                <tr className="text-xs uppercase tracking-normal text-zinc-500">
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Item #</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Asset type</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Instrument type</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Symbol</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Put/Call</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Strike</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Expiration</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Instruction</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Position effect</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Amount</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Price</th>
+                  <th className="border-b border-zinc-800 px-3 py-2 font-medium">Fee item?</th>
+                </tr>
+              </thead>
+              <tbody>
+                {transaction.transferItems.map((item) => (
+                  <tr key={item.transferItemIndex}>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.transferItemIndex}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.assetType ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.instrumentType ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.symbolDescriptor ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.putCall ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.strike ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.expiration ? shortDateTime(item.expiration) : "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.instruction ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.positionEffect ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.amount ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.price ?? "—"}</td>
+                    <td className="border-b border-zinc-900 px-3 py-2">{item.hasFeeType ? "Yes" : "No"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

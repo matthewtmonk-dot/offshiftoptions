@@ -7,6 +7,7 @@ describe("classifyBrokerTransactionAction", () => {
     expect(classifyBrokerTransactionAction("Buy to Close")).toBe("BUY_TO_CLOSE");
     expect(classifyBrokerTransactionAction("Bank Interest")).toBe("INTEREST");
     expect(classifyBrokerTransactionAction("Security Transfer")).toBe("TRANSFER");
+    expect(classifyBrokerTransactionAction("Removed - Expiration")).toBe("OPTION_REMOVED_EXPIRATION");
   });
 
   it("is case-insensitive", () => {

@@ -12,8 +12,9 @@ maybeDescribe("Schwab transactions/orders diagnostic - authorization, scoping, a
   let userB: { id: string };
   const userIds: string[] = [];
 
-  // Every diagnostic run makes 9 calls (3 windows + 5 type tests + 1 orders call) against the
-  // same fetchFn, so a single stub covers a full run unless a test needs per-call variation.
+  // Every diagnostic run makes 10 calls (3 windows + 5 type tests + 1 orders call + 1
+  // transfer-item shape call) against the same fetchFn, so a single stub covers a full run
+  // unless a test needs per-call variation.
   const emptyOkFetchFn = (async () => new Response("[]", { status: 200 })) as unknown as typeof fetch;
 
   beforeAll(async () => {
@@ -91,6 +92,7 @@ maybeDescribe("Schwab transactions/orders diagnostic - authorization, scoping, a
     expect(result.report.windows.map((w) => w.days)).toEqual([7, 30, 60]);
     expect(result.report.typeTests).toHaveLength(5);
     expect(result.report.orders.status).toBe("OK");
+    expect(result.report.transferItemShapes.status).toBe("OK");
 
     const honestEmpty = result.report.windows[0];
     expect(honestEmpty).toMatchObject({ status: "OK", transactionCount: 0, malformedResponse: false });
@@ -128,6 +130,7 @@ maybeDescribe("Schwab transactions/orders diagnostic - authorization, scoping, a
       }
     }
     expect(result.report.orders.status).toBe("ERROR");
+    expect(result.report.transferItemShapes.status).toBe("ERROR");
     expect(JSON.stringify(result)).not.toMatch(/bearer|authorization:/i);
 
     await prisma.brokerConnection.delete({ where: { id: connection.id } });
@@ -177,8 +180,10 @@ maybeDescribe("Schwab transactions/orders diagnostic - authorization, scoping, a
     const result = await runSchwabTransactionsDiagnosticForUser(userA.id, { fetchFn: capturingFetchFn, now });
     expect(result.status).toBe("OK");
 
+    // 3 windows + 5 type tests + 1 transfer-item-shape call (types=TRADE), all hitting the same
+    // /transactions path - the orders call is separate and asserted below.
     const transactionUrls = capturedUrls.filter((url) => url.pathname.endsWith("/transactions"));
-    expect(transactionUrls).toHaveLength(8); // 3 windows + 5 type tests
+    expect(transactionUrls).toHaveLength(9);
     for (const url of transactionUrls) {
       expect(url.searchParams.get("startDate")).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
       expect(url.searchParams.get("endDate")).toBe("2026-09-05T12:00:00.000Z");
@@ -191,6 +196,7 @@ maybeDescribe("Schwab transactions/orders diagnostic - authorization, scoping, a
       "RECEIVE_AND_DELIVER",
       "CASH_IN_OR_CASH_OUT",
       "TRADE,DIVIDEND_OR_INTEREST,RECEIVE_AND_DELIVER,CASH_IN_OR_CASH_OUT",
+      "TRADE", // the transfer-item-shape call
     ]);
 
     const ordersUrl = capturedUrls.find((url) => url.pathname.endsWith("/orders"));

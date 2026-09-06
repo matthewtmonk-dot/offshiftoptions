@@ -17,6 +17,7 @@ export type BrokerTransactionActivityKind =
   | "INTEREST"
   | "FEE"
   | "TRANSFER"
+  | "OPTION_REMOVED_EXPIRATION"
   | "UNKNOWN";
 
 const EXACT_ACTION_MAP: Record<string, BrokerTransactionActivityKind> = {
@@ -49,6 +50,11 @@ const EXACT_ACTION_MAP: Record<string, BrokerTransactionActivityKind> = {
   "moneylink transfer": "TRANSFER",
   "funds received": "TRANSFER",
   "atm withdrawal": "TRANSFER",
+  // Confirmed live against production: a real RECEIVE_AND_DELIVER transaction reports no
+  // instruction at all, only free-text description ("Removed due to Expiration PUT ...") -
+  // recognized evidence that an option reached expiration/removal, never a guess about the
+  // final outcome (assignment vs. worthless still requires the existing confirmation rule).
+  "removed - expiration": "OPTION_REMOVED_EXPIRATION",
 };
 
 export function classifyBrokerTransactionAction(action: string | null | undefined): BrokerTransactionActivityKind {

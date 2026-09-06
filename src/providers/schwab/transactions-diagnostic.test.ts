@@ -4,6 +4,7 @@ import {
   fetchSchwabTransactionsRaw,
   summarizeOrders,
   summarizeTransactions,
+  summarizeTransferItemShapes,
 } from "./transactions-diagnostic";
 
 describe("summarizeTransactions", () => {
@@ -193,5 +194,70 @@ describe("fetchSchwabOrdersRaw", () => {
     expect(url.pathname).toBe("/trader/v1/accounts/hash-123/orders");
     expect(url.searchParams.get("fromEnteredTime")).toBe("2026-07-01T00:00:00.000Z");
     expect(url.searchParams.get("toEnteredTime")).toBe("2026-08-30T00:00:00.000Z");
+  });
+});
+
+describe("summarizeTransferItemShapes", () => {
+  it("flags a non-array body as malformed", () => {
+    expect(summarizeTransferItemShapes({ not: "an array" }).malformedResponse).toBe(true);
+  });
+
+  it("returns an empty transaction list for an honest empty array", () => {
+    expect(summarizeTransferItemShapes([])).toEqual({ transactions: [], malformedResponse: false });
+  });
+
+  it("sanitizes every transfer item on a transaction, including instruction/positionEffect/price wherever they live, and never leaks ids", () => {
+    const summary = summarizeTransferItemShapes([
+      {
+        activityId: "SECRET-ACTIVITY-1",
+        type: "TRADE",
+        transferItems: [
+          { amount: 0.65, price: 1, instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" } },
+          {
+            instruction: "SELL",
+            positionEffect: "OPENING",
+            amount: 1,
+            price: 0.28,
+            instrument: {
+              symbol: "APLD 260904P00023500",
+              assetType: "OPTION",
+              type: "VANILLA",
+              putCall: "PUT",
+              strikePrice: 23.5,
+              optionExpirationDate: "2026-09-04",
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(summary.malformedResponse).toBe(false);
+    expect(summary.transactions).toHaveLength(1);
+    expect(summary.transactions[0].transactionOrdinal).toBe(1);
+    expect(summary.transactions[0].transactionType).toBe("TRADE");
+    expect(summary.transactions[0].transferItems).toHaveLength(2);
+    expect(summary.transactions[0].transferItems[0]).toMatchObject({ transferItemIndex: 0, assetType: "CURRENCY", symbolDescriptor: "CURRENCY_USD" });
+    expect(summary.transactions[0].transferItems[1]).toMatchObject({
+      transferItemIndex: 1,
+      assetType: "OPTION",
+      instrumentType: "VANILLA",
+      symbolDescriptor: "APLD 260904P00023500",
+      putCall: "PUT",
+      strike: 23.5,
+      expiration: "2026-09-04T00:00:00.000Z",
+      instruction: "SELL",
+      positionEffect: "OPENING",
+      amount: 1,
+      price: 0.28,
+      hasFeeType: false,
+    });
+
+    const serialized = JSON.stringify(summary);
+    expect(serialized).not.toContain("SECRET-ACTIVITY-1");
+  });
+
+  it("caps at 50 transactions", () => {
+    const transactions = Array.from({ length: 60 }, () => ({ type: "TRADE", transferItems: [] }));
+    expect(summarizeTransferItemShapes(transactions).transactions).toHaveLength(50);
   });
 });

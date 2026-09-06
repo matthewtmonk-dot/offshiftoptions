@@ -166,9 +166,9 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         return [];
       }
 
-      const symbol = transactionSymbol(transaction);
-      const item = objectValue(arrayValue(transaction.transferItems)[0]);
+      const item = selectTradedSecurityTransferItem(transaction);
       const instrument = objectValue(item?.instrument);
+      const symbol = stringValue(instrument?.symbol);
       const isOption = stringValue(instrument?.assetType) === "OPTION";
       const putCallRaw = stringValue(instrument?.putCall);
 
@@ -179,7 +179,10 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         amount: numberValue(transaction?.netAmount) ?? 0,
         occurredAt: dateValue(transaction?.time) ?? dateValue(transaction?.settlementDate) ?? new Date(),
         description: stringValue(transaction?.description) ?? stringValue(transaction?.type) ?? "Schwab transaction",
-        action: instructionToActionLabel(stringValue(item?.instruction)) ?? assignmentOrExerciseActionLabel(transaction),
+        action:
+          instructionToActionLabel(stringValue(item?.instruction)) ??
+          assignmentOrExerciseActionLabel(transaction) ??
+          nonTradeActivityActionLabel(transaction),
         quantity: numberValue(item?.amount),
         price: numberValue(item?.price),
         fees: totalFees(transaction),
@@ -258,10 +261,23 @@ function accountLabel(account: Record<string, unknown>, hash: string) {
   return lastFour ? `${type} ...${lastFour}` : type;
 }
 
-function transactionSymbol(transaction: Record<string, unknown>) {
-  const item = arrayValue(transaction.transferItems)[0];
-  const instrument = objectValue(objectValue(item)?.instrument);
-  return stringValue(instrument?.symbol);
+/**
+ * A real multi-leg Schwab TRADE transaction (an option order's cash settlement alongside the
+ * option leg itself) does not put the traded security at a fixed index - confirmed live against
+ * production that index 0 is the CURRENCY_USD cash leg, not the option, for every real option
+ * trade in this account. Scans every transferItem for the one whose instrument is actually an
+ * OPTION; falls back to index 0 only when none is (equity trades, cash-only activity), which
+ * was never wrong for those cases.
+ */
+function selectTradedSecurityTransferItem(transaction: Record<string, unknown>): Record<string, unknown> | null {
+  const items = arrayValue(transaction.transferItems);
+  for (const itemValue of items) {
+    const item = objectValue(itemValue);
+    if (stringValue(objectValue(item?.instrument)?.assetType) === "OPTION") {
+      return item;
+    }
+  }
+  return objectValue(items[0]);
 }
 
 const INSTRUCTION_LABELS: Record<string, string> = {
@@ -295,6 +311,30 @@ function assignmentOrExerciseActionLabel(transaction: Record<string, unknown>): 
   }
   if (text.includes("assignment")) {
     return "Assignment";
+  }
+  return null;
+}
+
+/**
+ * Recognizes non-trade cash/removal activity from Schwab's free-text type/description when
+ * there's no buy/sell instruction to label at all - confirmed live against production: a real
+ * "BANK INT ... SCHWAB BANK" transaction and real "Removed due to Expiration PUT ..." removal
+ * transactions both report no instruction. Anything not confidently matched returns null, same
+ * fail-safe pattern as assignmentOrExerciseActionLabel - this never guesses a trade action.
+ */
+function nonTradeActivityActionLabel(transaction: Record<string, unknown>): string | null {
+  const text = `${stringValue(transaction.type) ?? ""} ${stringValue(transaction.description) ?? ""}`.toLowerCase();
+  if (text.includes("removed due to expiration") || text.includes("removed - expiration")) {
+    return "Removed - Expiration";
+  }
+  if (text.includes("bank int")) {
+    return "Bank Interest";
+  }
+  if (text.includes("dividend")) {
+    return "Dividend";
+  }
+  if (text.includes("interest")) {
+    return "Interest";
   }
   return null;
 }

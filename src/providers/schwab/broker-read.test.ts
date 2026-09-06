@@ -180,7 +180,7 @@ describe("SchwabBrokerReadProvider.getTransactions", () => {
 
   it("returns null (not zero) fees and null option fields when Schwab reports none, rather than guessing", async () => {
     const provider = transactionsProvider(
-      [{ activityId: "txn-cash-1", netAmount: 4.12, time: "2026-08-15T14:00:00Z", type: "INTEREST", description: "Bank Interest" }],
+      [{ activityId: "txn-cash-1", netAmount: 4.12, time: "2026-08-15T14:00:00Z", type: "SOME_UNRECOGNIZED_TYPE", description: "Something Schwab hasn't documented" }],
       { category: "DIVIDEND_OR_INTEREST" },
     );
 
@@ -190,6 +190,112 @@ describe("SchwabBrokerReadProvider.getTransactions", () => {
     expect(transactions[0].optionType).toBeNull();
     expect(transactions[0].strike).toBeNull();
     expect(transactions[0].expiration).toBeNull();
+  });
+
+  it("recognizes real bank-interest text with no instruction field, confirmed live against production", async () => {
+    const provider = transactionsProvider(
+      [{ activityId: "txn-int-1", netAmount: 0.07, time: "2026-08-15T14:00:00Z", type: "DIVIDEND_OR_INTEREST", description: "BANK INT 0000000000 SCHWAB BANK" }],
+      { category: "DIVIDEND_OR_INTEREST" },
+    );
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].action).toBe("Bank Interest");
+  });
+
+  it("recognizes a real expiration-removal transaction with no instruction field, confirmed live against production", async () => {
+    const provider = transactionsProvider(
+      [
+        {
+          activityId: "txn-exp-1",
+          netAmount: 0,
+          time: "2026-09-04T21:00:00Z",
+          type: "RECEIVE_AND_DELIVER",
+          description: "Removed due to Expiration PUT RIOT PLATFORMS INC $17.5 EXP 09/04/26",
+          transferItems: [
+            { instrument: { symbol: "RIOT 260904P00017500", assetType: "OPTION", putCall: "PUT", strikePrice: 17.5, underlyingSymbol: "RIOT" } },
+          ],
+        },
+      ],
+      { category: "RECEIVE_AND_DELIVER" },
+    );
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].action).toBe("Removed - Expiration");
+    expect(transactions[0].underlyingSymbol).toBe("RIOT");
+    expect(transactions[0].strike).toBe(17.5);
+  });
+
+  it("selects the OPTION transfer item as the traded security even when a CURRENCY_USD cash leg is listed first - confirmed live against production", async () => {
+    const provider = transactionsProvider([
+      {
+        activityId: "txn-sto-cash-first",
+        netAmount: 28,
+        time: "2026-08-31T14:02:00Z",
+        transferItems: [
+          { amount: 0.65, price: 1, instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" } },
+          {
+            instruction: "SELL_TO_OPEN",
+            amount: 1,
+            price: 0.28,
+            instrument: { symbol: "APLD 260904P00023500", assetType: "OPTION", putCall: "PUT", strikePrice: 23.5, underlyingSymbol: "APLD", optionExpirationDate: "2026-09-04" },
+          },
+        ],
+      },
+    ]);
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0]).toMatchObject({
+      symbol: "APLD 260904P00023500",
+      action: "Sell to Open",
+      quantity: 1,
+      price: 0.28,
+      underlyingSymbol: "APLD",
+      optionType: "PUT",
+      strike: 23.5,
+    });
+  });
+
+  it("selects the same OPTION transfer item regardless of transferItems order (order must not be assumed)", async () => {
+    const optionFirst = transactionsProvider([
+      {
+        activityId: "txn-order-a",
+        netAmount: 28,
+        time: "2026-08-31T14:02:00Z",
+        transferItems: [
+          {
+            instruction: "SELL_TO_OPEN",
+            amount: 1,
+            price: 0.28,
+            instrument: { symbol: "APLD 260904P00023500", assetType: "OPTION", putCall: "PUT", strikePrice: 23.5, underlyingSymbol: "APLD" },
+          },
+          { amount: 0.65, instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" } },
+        ],
+      },
+    ]);
+    const cashFirst = transactionsProvider([
+      {
+        activityId: "txn-order-b",
+        netAmount: 28,
+        time: "2026-08-31T14:02:00Z",
+        transferItems: [
+          { amount: 0.65, instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" } },
+          {
+            instruction: "SELL_TO_OPEN",
+            amount: 1,
+            price: 0.28,
+            instrument: { symbol: "APLD 260904P00023500", assetType: "OPTION", putCall: "PUT", strikePrice: 23.5, underlyingSymbol: "APLD" },
+          },
+        ],
+      },
+    ]);
+
+    const [{ transactions: a }, { transactions: b }] = await Promise.all([
+      optionFirst.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30")),
+      cashFirst.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30")),
+    ]);
+
+    expect(a[0]).toMatchObject({ symbol: "APLD 260904P00023500", action: "Sell to Open", price: 0.28 });
+    expect(b[0]).toMatchObject({ symbol: "APLD 260904P00023500", action: "Sell to Open", price: 0.28 });
   });
 
   it("never sends the invalid CASH_IN_OR_CASH_OUT value; fetches TRADE, RECEIVE_AND_DELIVER, and DIVIDEND_OR_INTEREST as three independent requests", async () => {

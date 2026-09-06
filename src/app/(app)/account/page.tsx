@@ -176,6 +176,12 @@ export default async function AccountPage({
                       {shortDateTime(schwabConnection.lastAccountSyncFailureAt)}.
                     </p>
                   ) : null}
+                  <p className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                    Do not click Sync again until Diagnostic D (Transfer Item Shapes, on the Schwab Transaction &amp;
+                    Order Diagnostic page) has been reviewed and the repair step for the 8 existing malformed,
+                    unlinked transaction records has been approved. Syncing again will not fix them and may add more
+                    unresolved rows in the meantime.
+                  </p>
                   <form action={syncSchwabAccountAction}>
                     <button
                       type="submit"

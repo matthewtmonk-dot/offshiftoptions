@@ -15,13 +15,15 @@ type PanelState =
 const CATEGORY_LABEL: Record<BrokerRecordCategory, string> = {
   ALREADY_LINKED: "Already linked",
   CAMPAIGN_READY: "Campaign-ready",
+  EXPIRATION_EVIDENCE: "Expiration/assignment evidence",
   NON_CAMPAIGN_ACTIVITY: "Non-campaign account activity",
   NEEDS_REVIEW: "Needs manual review",
 };
 
-const CATEGORY_TONE: Record<BrokerRecordCategory, "good" | "info" | "neutral" | "bad"> = {
+const CATEGORY_TONE: Record<BrokerRecordCategory, "good" | "info" | "neutral" | "bad" | "warn"> = {
   ALREADY_LINKED: "info",
   CAMPAIGN_READY: "good",
+  EXPIRATION_EVIDENCE: "warn",
   NON_CAMPAIGN_ACTIVITY: "neutral",
   NEEDS_REVIEW: "bad",
 };
@@ -84,10 +86,11 @@ function ClassificationReport({ report }: { report: BrokerRecordClassificationRe
           <Badge tone="good">Read only</Badge>
           <Badge tone="neutral">Nothing saved</Badge>
         </div>
-        <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-3 lg:grid-cols-5">
+        <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
           <SummaryDatum label="Total transactions" value={String(report.totalRecords)} />
           <SummaryDatum label="Already linked" value={String(report.countsByCategory.ALREADY_LINKED)} />
           <SummaryDatum label="Campaign-ready" value={String(report.countsByCategory.CAMPAIGN_READY)} />
+          <SummaryDatum label="Expiration/assignment evidence" value={String(report.countsByCategory.EXPIRATION_EVIDENCE)} />
           <SummaryDatum label="Non-campaign activity" value={String(report.countsByCategory.NON_CAMPAIGN_ACTIVITY)} />
           <SummaryDatum label="Needs manual review" value={String(report.countsByCategory.NEEDS_REVIEW)} />
         </dl>

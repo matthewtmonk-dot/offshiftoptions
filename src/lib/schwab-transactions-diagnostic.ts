@@ -12,9 +12,15 @@ import {
   SCHWAB_TRANSACTIONS_DIAGNOSTIC_WINDOW_DAYS,
   summarizeOrders,
   summarizeTransactions,
+  summarizeTransferItemShapes,
   type OrdersSummary,
   type TransactionsSummary,
+  type TransferItemShapesSummary,
 } from "@/providers/schwab/transactions-diagnostic";
+
+/** Window used for the transfer-item shape diagnostic - one call is enough to see every real
+ * TRADE transaction's transferItems shape; no need to repeat across multiple windows. */
+const TRANSFER_ITEM_SHAPE_WINDOW_DAYS = 30;
 
 type CallOutcome<TSummary> =
   | ({ status: "OK"; httpStatus: 200 } & TSummary)
@@ -23,6 +29,7 @@ type CallOutcome<TSummary> =
 export type TransactionWindowResult = { days: number } & CallOutcome<TransactionsSummary>;
 export type TransactionTypeTestResult = { types: string } & CallOutcome<TransactionsSummary>;
 export type OrdersDiagnosticResult = CallOutcome<OrdersSummary>;
+export type TransferItemShapesDiagnosticResult = CallOutcome<TransferItemShapesSummary>;
 
 export type SchwabTransactionsDiagnosticReport = {
   source: "Schwab Trader API";
@@ -32,6 +39,7 @@ export type SchwabTransactionsDiagnosticReport = {
   windows: TransactionWindowResult[];
   typeTests: TransactionTypeTestResult[];
   orders: OrdersDiagnosticResult;
+  transferItemShapes: TransferItemShapesDiagnosticResult;
 };
 
 export type SchwabTransactionsDiagnosticResult =
@@ -140,6 +148,14 @@ export async function runSchwabTransactionsDiagnosticForUser(
       fetchFn: options.fetchFn,
     });
 
+    const transferItemShapes = await callTransferItemShapes({
+      accessToken,
+      accountHash,
+      from: daysAgo(now, TRANSFER_ITEM_SHAPE_WINDOW_DAYS),
+      to: now,
+      fetchFn: options.fetchFn,
+    });
+
     return {
       status: "OK",
       label: "User Schwab brokerage authorization",
@@ -151,6 +167,7 @@ export async function runSchwabTransactionsDiagnosticForUser(
         windows,
         typeTests,
         orders,
+        transferItemShapes,
       },
     };
   } catch (error) {
@@ -194,6 +211,25 @@ async function callOrders(params: {
   try {
     const raw = await fetchSchwabOrdersRaw(params);
     return { status: "OK", httpStatus: 200, ...summarizeOrders(raw) };
+  } catch (error) {
+    return {
+      status: "ERROR",
+      httpStatus: error instanceof SchwabApiError ? error.status : undefined,
+      errorMessage: diagnosticErrorMessage(error),
+    };
+  }
+}
+
+async function callTransferItemShapes(params: {
+  accessToken: string;
+  accountHash: string;
+  from: Date;
+  to: Date;
+  fetchFn?: SchwabFetch;
+}): Promise<CallOutcome<TransferItemShapesSummary>> {
+  try {
+    const raw = await fetchSchwabTransactionsRaw({ ...params, types: "TRADE" });
+    return { status: "OK", httpStatus: 200, ...summarizeTransferItemShapes(raw) };
   } catch (error) {
     return {
       status: "ERROR",
