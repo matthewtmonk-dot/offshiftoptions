@@ -611,3 +611,39 @@ export async function getTechnicalCacheReadinessForUser(
     lastPreparedAt: lastReady?.processedAt ?? null,
   };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Orchestration support - cheap, DB-only status reads for technical-preparation-orchestrator.ts.
+// Deliberately never touches a provider or does a quote sweep itself - only
+// getOrCreateActiveTechnicalPreparationRun (already above) is allowed to do that.
+// ---------------------------------------------------------------------------------------------
+
+export type TechnicalPreparationStatusForUser = {
+  hasRunForToday: boolean;
+  isComplete: boolean;
+  /** The run's own `updatedAt` if one exists for today's (marketDate, rulesFingerprint) identity,
+   * else null - lets a caller order multiple users by "least recently touched" (null sorts first,
+   * i.e. a user who hasn't been started at all today takes priority) without needing any separate
+   * scheduler-state table. */
+  lastTouchedAt: Date | null;
+};
+
+/**
+ * Read-only, zero-provider-call check of whether THIS user's technical preparation for today
+ * (their current rules fingerprint) exists and is complete - used by the orchestrator to cheaply
+ * decide which of several connected users most needs a real (Schwab-calling) cycle, without
+ * spending any provider work on users who don't.
+ */
+export async function getTechnicalPreparationStatusForUser(userId: string, now: Date = new Date()): Promise<TechnicalPreparationStatusForUser> {
+  const rules = await loadUserQuoteStageRules(userId);
+  const fingerprint = computeQuoteStageRulesFingerprint(rules);
+  const marketDate = dateOnlyUtc(now);
+
+  const run = await prisma.technicalPreparationRun.findUnique({
+    where: { userId_marketDate_rulesFingerprint: { userId, marketDate, rulesFingerprint: fingerprint } },
+  });
+  if (!run) {
+    return { hasRunForToday: false, isComplete: false, lastTouchedAt: null };
+  }
+  return { hasRunForToday: true, isComplete: run.status === "COMPLETE", lastTouchedAt: run.updatedAt };
+}

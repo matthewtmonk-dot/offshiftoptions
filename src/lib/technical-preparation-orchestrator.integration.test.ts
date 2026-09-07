@@ -1,0 +1,394 @@
+import { hash } from "bcryptjs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MarketDataProvider, MarketQuote, PriceCandle } from "@/providers/market-data/types";
+
+const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
+const maybeDescribe = runDatabaseTests ? describe : describe.skip;
+
+const TEST_SOURCE = "TEST_FIXTURE_TECHNICAL_ORCHESTRATOR";
+
+const resolveMarketDataProviderForUserMock = vi.fn();
+vi.mock("@/lib/broker-connections", () => ({
+  resolveMarketDataProviderForUser: (...args: unknown[]) => resolveMarketDataProviderForUserMock(...args),
+}));
+
+function syntheticTickers(count: number): string[] {
+  return Array.from({ length: count }, (_, i) => `ORCH${String(i).padStart(3, "0")}`);
+}
+
+function syntheticCandles(ticker: string, count = 80, endDate: Date = new Date()): PriceCandle[] {
+  return Array.from({ length: count }, (_, i) => {
+    const close = 100 + i * 0.3 + (i % 5 === 0 ? -2 : 1);
+    const date = new Date(endDate.getTime() - (count - 1 - i) * 24 * 60 * 60 * 1000);
+    return { symbol: ticker, date, open: close - 0.5, high: close + 1, low: close - 1, close, volume: 1_000_000 };
+  });
+}
+
+function fakeProvider(options: {
+  quotes: Record<string, { price: number; volume: number }>;
+  onGetQuotes?: (symbols: string[]) => void;
+  onGetPriceHistory?: (ticker: string) => void;
+  onGetOptionChain?: (ticker: string) => void;
+}): MarketDataProvider {
+  const quotesByTicker = new Map<string, MarketQuote>(
+    Object.entries(options.quotes).map(([ticker, { price, volume }]) => [ticker, { symbol: ticker, price, volume, asOf: new Date() }]),
+  );
+  return {
+    async getQuote(symbol) {
+      const quote = quotesByTicker.get(symbol.toUpperCase());
+      if (!quote) throw new Error(`no quote for ${symbol}`);
+      return quote;
+    },
+    async getQuotes(symbols) {
+      options.onGetQuotes?.(symbols);
+      const result = new Map<string, MarketQuote>();
+      for (const symbol of symbols) {
+        const quote = quotesByTicker.get(symbol.toUpperCase());
+        if (quote) result.set(symbol.toUpperCase(), quote);
+      }
+      return result;
+    },
+    async getPriceHistory(symbol) {
+      options.onGetPriceHistory?.(symbol);
+      return syntheticCandles(symbol);
+    },
+    async getOptionChain(symbol) {
+      options.onGetOptionChain?.(symbol);
+      return [];
+    },
+    async getInstrument(symbol) {
+      return { symbol, description: symbol, assetType: "EQUITY" };
+    },
+    async getMarketHours() {
+      return { isOpen: true };
+    },
+  };
+}
+
+// A real trading day well after close (see technical-preparation-orchestrator.test.ts for the
+// pure window-function tests) - Tue Sep 8 2026, 8:00 PM ET.
+const WITHIN_WINDOW_NOW = new Date("2026-09-09T00:00:00Z");
+// Tue Sep 8 2026, 2:00 PM ET - inside the live regular session.
+const OUTSIDE_WINDOW_NOW = new Date("2026-09-08T18:00:00Z");
+
+maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isolated", () => {
+  let prisma: typeof import("./prisma").prisma;
+  let runTechnicalPreparationOrchestratorCycle: typeof import("./technical-preparation-orchestrator").runTechnicalPreparationOrchestratorCycle;
+  let encryptToken: typeof import("@/providers/schwab/crypto").encryptToken;
+  let matt: { id: string };
+  let eric: { id: string };
+
+  beforeAll(async () => {
+    process.env.SCHWAB_TOKEN_ENCRYPTION_KEY = `base64:${Buffer.alloc(32, 9).toString("base64")}`;
+    prisma = (await import("./prisma")).prisma;
+    ({ runTechnicalPreparationOrchestratorCycle } = await import("./technical-preparation-orchestrator"));
+    encryptToken = (await import("@/providers/schwab/crypto")).encryptToken;
+
+    const passwordHash = await hash("not-used", 4);
+    const timestamp = Date.now();
+    matt = await prisma.user.create({ data: { name: "Matt Orchestrator", email: `matt-orch-${timestamp}@lst.local`, passwordHash } });
+    eric = await prisma.user.create({ data: { name: "Eric Orchestrator", email: `eric-orch-${timestamp}@lst.local`, passwordHash } });
+  });
+
+  beforeEach(() => {
+    // A safe, unconditional default for ANY candidate userId - including a stray BrokerConnection
+    // row belonging to some OTHER concurrently-running test file's own fixture user, which the
+    // orchestrator's real (deliberately global, unscoped) "all connected users" query can pick up
+    // under Vitest's parallel-by-file execution against this one shared local dev database. Each
+    // test below overrides this only for the specific userId(s) it actually cares about.
+    resolveMarketDataProviderForUserMock.mockResolvedValue({
+      provider: null,
+      source: "UNAVAILABLE",
+      label: "no mock configured for this user in this test",
+      reason: "NO_USER_CONNECTION",
+      sharedFallback: "DISABLED_POLICY_NOT_VERIFIED",
+    });
+  });
+
+  afterEach(async () => {
+    resolveMarketDataProviderForUserMock.mockReset();
+    await prisma.technicalPreparationRun.deleteMany({ where: { userId: { in: [matt.id, eric.id] } } });
+    await prisma.technicalIndicatorSnapshot.deleteMany({ where: { userId: { in: [matt.id, eric.id] } } });
+    await prisma.optionableUniverseSymbol.deleteMany({ where: { source: TEST_SOURCE } });
+    await prisma.brokerConnection.deleteMany({ where: { userId: { in: [matt.id, eric.id] } } });
+  });
+
+  afterAll(async () => {
+    await prisma.user.deleteMany({ where: { id: { in: [matt.id, eric.id] } } });
+    await prisma.$disconnect();
+  });
+
+  async function seedUniverse(tickers: string[]) {
+    const now = new Date();
+    await prisma.optionableUniverseSymbol.createMany({
+      data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: now })),
+    });
+  }
+
+  /** Resolves ONLY `userId` to a real working provider - any other candidate (including a stray
+   * BrokerConnection row belonging to some other concurrently-running test file's own fixture
+   * user) safely resolves to UNAVAILABLE, so this test's assertions about "which user got
+   * selected" can never be thrown off by cross-file noise under Vitest's parallel execution. */
+  function mockProviderForOnly(userId: string, provider: MarketDataProvider) {
+    resolveMarketDataProviderForUserMock.mockImplementation(async (candidateId: string) => {
+      if (candidateId === userId) {
+        return { provider, source: "USER_SCHWAB", label: "test", connectionId: "c1", usesUserDeveloperApp: false };
+      }
+      return { provider: null, source: "UNAVAILABLE", label: "unrecognized", reason: "NO_USER_CONNECTION", sharedFallback: "DISABLED_POLICY_NOT_VERIFIED" };
+    });
+  }
+
+  async function createConnectedBrokerRow(userId: string, label: string) {
+    await prisma.brokerConnection.create({
+      data: {
+        userId,
+        provider: "SCHWAB",
+        label,
+        status: "CONNECTED",
+        accessTokenCiphertext: encryptToken(`access-token-${label}`),
+        refreshTokenCiphertext: encryptToken(`refresh-token-${label}`),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        metadata: {},
+      },
+    });
+  }
+
+  it("is a safe no-op outside the preparation window - no user selection, no provider work", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-outside-window");
+    await seedUniverse(syntheticTickers(5));
+
+    const result = await runTechnicalPreparationOrchestratorCycle(OUTSIDE_WINDOW_NOW);
+    expect(result.status).toBe("OUTSIDE_WINDOW");
+    expect(resolveMarketDataProviderForUserMock).not.toHaveBeenCalled();
+  });
+
+  it("is a safe no-op when no connected user needs preparation", async () => {
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(result.status).toBe("NO_ELIGIBLE_USER");
+  });
+
+  it("processes at most MAX_SUB_BATCHES_PER_INVOCATION existing 25-symbol batches, never more, using the current authenticated user's own provider only", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-bounded");
+    const tickers = syntheticTickers(200); // far more than one invocation's cap should ever touch
+    await seedUniverse(tickers);
+    let getQuotesCallCount = 0;
+    let historyCallCount = 0;
+    const provider = fakeProvider({
+      quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+      onGetQuotes: () => {
+        getQuotesCallCount += 1;
+      },
+      onGetPriceHistory: () => {
+        historyCallCount += 1;
+      },
+    });
+    mockProviderForOnly(matt.id, provider);
+
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(result.status).toBe("OK");
+    if (result.status !== "OK") throw new Error("expected OK");
+    expect(result.subBatchesProcessed).toBe(5); // MAX_SUB_BATCHES_PER_INVOCATION
+    expect(result.historySymbolsProcessed).toBe(125); // 5 * 25
+    expect(historyCallCount).toBe(125); // never more than the cap's worth of real history calls
+    expect(getQuotesCallCount).toBe(1); // Stage A swept exactly once for this whole invocation
+    expect(result.generationStatus).toBe("IN_PROGRESS"); // 200 eligible, only 125 done
+    expect(result.remainingEligibleCount).toBe(75);
+    expect(resolveMarketDataProviderForUserMock).toHaveBeenCalledWith(matt.id);
+  });
+
+  it("stops cleanly (no-op-like) once the generation is already fully COMPLETE, and never re-sweeps quotes", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-complete");
+    const tickers = syntheticTickers(10);
+    await seedUniverse(tickers);
+    let getQuotesCallCount = 0;
+    const provider = fakeProvider({
+      quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+      onGetQuotes: () => {
+        getQuotesCallCount += 1;
+      },
+    });
+    mockProviderForOnly(matt.id, provider);
+
+    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(first.status).toBe("OK");
+    if (first.status !== "OK") throw new Error("expected OK");
+    expect(first.generationStatus).toBe("COMPLETE"); // only 10 eligible - done in one sub-batch
+    expect(getQuotesCallCount).toBe(1);
+
+    // A second invocation should find nothing left to do for Matt (COMPLETE) - safe no-op.
+    const second = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(second.status).toBe("NO_ELIGIBLE_USER");
+    expect(getQuotesCallCount).toBe(1); // still exactly one sweep across both invocations
+  });
+
+  it("repeated invocations reuse the same generation and make cumulative forward progress (spanning more than one invocation's own 5-sub-batch cap)", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-resume");
+    const tickers = syntheticTickers(140); // > MAX_SUB_BATCHES_PER_INVOCATION (5) * TECHNICAL_REFRESH_BATCH_SIZE (25) = 125
+    await seedUniverse(tickers);
+    const provider = fakeProvider({ quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])) });
+    mockProviderForOnly(matt.id, provider);
+
+    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    if (first.status !== "OK") throw new Error("expected OK");
+    expect(first.subBatchesProcessed).toBe(5); // hit the per-invocation cap
+    expect(first.remainingEligibleCount).toBe(15); // 140 - 125
+    expect(first.generationStatus).toBe("IN_PROGRESS");
+
+    const second = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    if (second.status !== "OK") throw new Error("expected OK");
+    expect(second.remainingEligibleCount).toBe(0); // 15 - 15, done in the remaining single sub-batch
+    expect(second.generationStatus).toBe("COMPLETE");
+  });
+
+  it("a rule change starts a new generation for the affected user - reported via a fresh quote sweep", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-rule-change");
+    await seedUniverse(["ORCHRULE1"]);
+    let getQuotesCallCount = 0;
+    const provider = fakeProvider({ quotes: { ORCHRULE1: { price: 20, volume: 1_000_000 } }, onGetQuotes: () => (getQuotesCallCount += 1) });
+    mockProviderForOnly(matt.id, provider);
+
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(getQuotesCallCount).toBe(1);
+
+    const { ensureMyLstScannerProfileForUser } = await import("./workflows");
+    const profile = await ensureMyLstScannerProfileForUser(matt.id);
+    await prisma.scannerRule.update({ where: { profileId_key: { profileId: profile.id, key: "price" } }, data: { valueJson: { desired: [5, 15] } } });
+
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(getQuotesCallCount).toBe(2); // a genuinely new generation swept again
+
+    await prisma.scannerRule.update({ where: { profileId_key: { profileId: profile.id, key: "price" } }, data: { valueJson: { desired: [10, 50] } } });
+  });
+
+  it("one user's provider failure is skipped safely within the invocation, and the other user's data is completely unaffected", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-failing");
+    await createConnectedBrokerRow(eric.id, "eric-healthy");
+    await seedUniverse(["ORCHFAIL1"]);
+
+    resolveMarketDataProviderForUserMock.mockImplementation(async (userId: string) => {
+      if (userId === matt.id) {
+        return { provider: null, source: "UNAVAILABLE", label: "token dead", reason: "TOKEN_UNAVAILABLE", sharedFallback: "DISABLED_POLICY_NOT_VERIFIED" };
+      }
+      if (userId === eric.id) {
+        return {
+          provider: fakeProvider({ quotes: { ORCHFAIL1: { price: 20, volume: 1_000_000 } } }),
+          source: "USER_SCHWAB",
+          label: "test",
+          connectionId: "c1",
+          usesUserDeveloperApp: false,
+        };
+      }
+      return { provider: null, source: "UNAVAILABLE", label: "unrecognized", reason: "NO_USER_CONNECTION", sharedFallback: "DISABLED_POLICY_NOT_VERIFIED" };
+    });
+
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(result.status).toBe("OK");
+    if (result.status !== "OK") throw new Error("expected OK");
+    // Eric was selected instead - proven by his own run now existing while Matt has none.
+    const mattRuns = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+    const ericRuns = await prisma.technicalPreparationRun.count({ where: { userId: eric.id } });
+    expect(mattRuns).toBe(0);
+    expect(ericRuns).toBe(1);
+  });
+
+  it("an unexpected mid-cycle failure for the selected user is caught and reported as a clean status, never an unhandled crash - and never touches another user's data", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-mid-cycle-crash");
+    await seedUniverse(["ORCHCRASH1"]);
+    const crashingProvider: MarketDataProvider = {
+      async getQuote(symbol) {
+        return { symbol, price: 20, volume: 1_000_000, asOf: new Date() };
+      },
+      async getQuotes() {
+        throw new Error("simulated unexpected failure mid-sweep");
+      },
+      async getPriceHistory() {
+        return [];
+      },
+      async getOptionChain() {
+        return [];
+      },
+      async getInstrument(symbol) {
+        return { symbol, description: symbol, assetType: "EQUITY" };
+      },
+      async getMarketHours() {
+        return { isOpen: true };
+      },
+    };
+    mockProviderForOnly(matt.id, crashingProvider);
+
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(result.status).toBe("USER_CYCLE_FAILED"); // never an unhandled throw out of the orchestrator
+
+    const runCount = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+    expect(runCount).toBe(0); // the failed sweep's own placeholder cleanup already guarantees this
+  });
+
+  it("a user with no connected broker row is never even considered a candidate", async () => {
+    // Eric has no BrokerConnection row at all - not connected, not merely provider-unavailable.
+    await createConnectedBrokerRow(matt.id, "matt-only-connection");
+    await seedUniverse(["ORCHONLY1"]);
+    const provider = fakeProvider({ quotes: { ORCHONLY1: { price: 20, volume: 1_000_000 } } });
+    mockProviderForOnly(matt.id, provider);
+
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    expect(resolveMarketDataProviderForUserMock).toHaveBeenCalledTimes(1);
+    expect(resolveMarketDataProviderForUserMock).toHaveBeenCalledWith(matt.id); // never called for Eric
+  });
+
+  it("fairness: a never-started user is selected over one who already has recent IN_PROGRESS work, so one user's ongoing generation can never starve another", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-already-started");
+    const bigTickers = syntheticTickers(200); // large enough that one invocation cannot complete Matt
+    await seedUniverse(bigTickers);
+    mockProviderForOnly(matt.id, fakeProvider({ quotes: Object.fromEntries(bigTickers.map((t) => [t, { price: 20, volume: 1_000_000 }])) }));
+
+    // First invocation: only Matt is connected - he gets a real, recently-touched IN_PROGRESS run.
+    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    if (first.status !== "OK") throw new Error("expected OK");
+    expect(first.generationStatus).toBe("IN_PROGRESS"); // 200 eligible, only 125 done - still needs more work
+
+    // Now Eric connects too, but has never been touched at all (lastTouchedAt null - sorts first).
+    await createConnectedBrokerRow(eric.id, "eric-never-started");
+    resolveMarketDataProviderForUserMock.mockImplementation(async (candidateId: string) => {
+      if (candidateId === matt.id || candidateId === eric.id) {
+        return {
+          provider: fakeProvider({ quotes: { ORCHFAIR1: { price: 20, volume: 1_000_000 } } }),
+          source: "USER_SCHWAB",
+          label: "test",
+          connectionId: candidateId,
+          usesUserDeveloperApp: false,
+        };
+      }
+      return { provider: null, source: "UNAVAILABLE", label: "unrecognized", reason: "NO_USER_CONNECTION", sharedFallback: "DISABLED_POLICY_NOT_VERIFIED" };
+    });
+    await seedUniverse(["ORCHFAIR1"]);
+
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+
+    // Eric - never touched before - was picked this time, not Matt (who still has 75 remaining
+    // and would otherwise be the "obvious" continuation target).
+    const ericRuns = await prisma.technicalPreparationRun.count({ where: { userId: eric.id } });
+    expect(ericRuns).toBe(1);
+    const mattRun = await prisma.technicalPreparationRun.findFirstOrThrow({ where: { userId: matt.id } });
+    expect(mattRun.eligibleCount).toBe(200); // Matt's own generation untouched by this second invocation
+  });
+
+  it("never issues an option-chain request, and never touches the earnings/Alpha Vantage cache, during technical preparation", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-no-side-effects");
+    await seedUniverse(["ORCHSIDE1"]);
+    let optionChainCallCount = 0;
+    const provider = fakeProvider({
+      quotes: { ORCHSIDE1: { price: 20, volume: 1_000_000 } },
+      onGetOptionChain: () => {
+        optionChainCallCount += 1;
+      },
+    });
+    mockProviderForOnly(matt.id, provider);
+
+    const earningsCountBefore = await prisma.earningsCalendarEntry.count();
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const earningsCountAfter = await prisma.earningsCalendarEntry.count();
+
+    expect(optionChainCallCount).toBe(0);
+    expect(earningsCountAfter).toBe(earningsCountBefore); // completely untouched
+  });
+});
