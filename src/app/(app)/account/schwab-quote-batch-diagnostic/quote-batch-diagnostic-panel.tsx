@@ -83,14 +83,15 @@ function DiagnosticResult({ result, onRetry }: { result: SchwabQuoteBatchDiagnos
           <Badge tone="good">Read only</Badge>
           <Badge tone="neutral">Nothing saved</Badge>
           <Badge tone="info">Market data only - no account/position data touched</Badge>
-          <Badge tone={result.largestVerifiedBatchSize ? "good" : "bad"}>
-            Largest verified batch size: {result.largestVerifiedBatchSize ?? "none"}
+          <Badge tone="info">Test symbols from the public OCC universe cache - no private data</Badge>
+          <Badge tone={result.largestVerifiedRequestSize ? "good" : "bad"}>
+            Largest verified request size: {result.largestVerifiedRequestSize ?? "none"}
           </Badge>
         </div>
         <p className="text-xs text-zinc-500">Timestamp: {shortDateTime(result.timestamp)}</p>
         <div className="space-y-1">
           {result.results.map((outcome) => (
-            <BatchSizeRow key={outcome.requestedCount} outcome={outcome} />
+            <BatchSizeRow key={outcome.requestedDistinct} outcome={outcome} />
           ))}
         </div>
       </div>
@@ -99,19 +100,24 @@ function DiagnosticResult({ result, onRetry }: { result: SchwabQuoteBatchDiagnos
 }
 
 function BatchSizeRow({ outcome }: { outcome: SchwabQuoteBatchSizeOutcome }) {
-  const tone = outcome.outcome === "SUCCESS" ? "good" : "bad";
+  const tone = outcome.outcome === "SUCCESS" ? "good" : outcome.outcome === "NOT_TESTED" ? "neutral" : "bad";
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-xs">
-      <span className="font-medium text-zinc-200">{outcome.requestedCount} symbols requested</span>
+      <span className="font-medium text-zinc-200">{outcome.requestedDistinct} distinct symbols requested</span>
       <Badge tone={tone}>{outcome.outcome}</Badge>
       {outcome.outcome === "SUCCESS" ? (
         <span className="text-zinc-400">
-          {outcome.symbolsReturnedCount} of {outcome.distinctSymbolsRequested} distinct symbols returned
-          {outcome.missingCount ? ` (${outcome.missingCount} missing)` : ""} · {outcome.elapsedMs}ms
+          Request accepted · {outcome.returnedDistinct} of {outcome.requestedDistinct} returned
+          {outcome.missingCount ? ` (${outcome.missingCount} unavailable)` : ""} · {outcome.elapsedMs}ms
+        </span>
+      ) : outcome.outcome === "NOT_TESTED" ? (
+        <span className="text-zinc-400">
+          Only {outcome.availableDistinct} distinct symbols available in the public universe cache - not enough to
+          test this size
         </span>
       ) : (
         <span className="text-zinc-400">
-          {outcome.httpStatus ? `HTTP ${outcome.httpStatus}` : "request failed"} · {outcome.elapsedMs}ms
+          Request rejected · {outcome.httpStatus ? `HTTP ${outcome.httpStatus}` : "request failed"} · {outcome.elapsedMs}ms
         </span>
       )}
     </div>

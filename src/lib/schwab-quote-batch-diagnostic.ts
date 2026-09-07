@@ -12,46 +12,67 @@ import { getValidSchwabAccessTokenForConnection } from "@/providers/schwab/token
  * src/providers/schwab/market-data.ts). Each size is tested with exactly ONE real, uncached,
  * unchunked /quotes HTTP call (via schwabGetJson directly, never SchwabMarketDataProvider.
  * getQuotes, which would silently split anything over 100 into multiple calls) - only proceeding
- * to the next size if the current one succeeds. Never brute-forced beyond 100.
+ * to the next size if the current one was genuinely accepted with that many DISTINCT symbols.
+ * Never brute-forced beyond 100.
  */
 export const SCHWAB_QUOTE_BATCH_DIAGNOSTIC_SIZES = [5, 25, 50, 100] as const;
 
-/**
- * A real, ordinary, already-boring-to-this-codebase set of tickers (reused from
- * src/providers/schwab/fundamentals-diagnostic.ts, src/domain/scanner/profile.ts, and
- * prisma/seed.ts demo data) - never invented symbols. Sizes above this pool's length repeat
- * tickers to reach the exact requested count; the report is explicit about "distinct symbols"
- * vs "requested count" so a repeated-symbol artifact is never mistaken for a real duplicate-
- * quote failure.
- */
-const DIAGNOSTIC_TICKER_POOL = [
-  "AAP",
-  "AMD",
-  "APLD",
-  "BROS",
-  "CORZ",
-  "F",
-  "HOOD",
-  "IONQ",
-  "PLTR",
-  "RIOT",
-  "RIVN",
-  "ROKU",
-  "SNAP",
-  "SOFI",
-  "T",
-  "WBD",
-] as const;
+const LARGEST_DIAGNOSTIC_SIZE = Math.max(...SCHWAB_QUOTE_BATCH_DIAGNOSTIC_SIZES);
 
-export type SchwabQuoteBatchSizeOutcome = {
-  requestedCount: number;
-  distinctSymbolsRequested: number;
-  outcome: "SUCCESS" | "HTTP_ERROR";
-  httpStatus?: number;
-  symbolsReturnedCount?: number;
-  missingCount?: number;
-  elapsedMs: number;
-};
+/**
+ * Source of test symbols: the public, shared OCC optionable-universe cache
+ * (OptionableUniverseSymbol - safe public reference data, production has ~6,071 real
+ * underlyings). NEVER positions, transactions, campaigns, private Research/Watchlist, or account
+ * holdings. A deterministic ORDER BY ticker ASC LIMIT keeps repeated diagnostic runs comparable -
+ * the same first-N tickers every time, not a random sample. Normalized (trimmed/uppercased) and
+ * deduplicated via Set BEFORE slicing into test batches, so a duplicate or case-variant row in
+ * the source table can never silently shrink the actual distinct count below what a batch claims
+ * to test. Ticker is this table's own primary key, so duplicates should never occur in practice -
+ * the dedupe is defense in depth, not a workaround for a known data issue. No BRKB -> BRK.B (or
+ * any other) ticker transliteration is applied - OCC's own values are used as-is.
+ */
+async function loadDeterministicDistinctSymbols(limit: number): Promise<string[]> {
+  const rows = await prisma.optionableUniverseSymbol.findMany({
+    select: { ticker: true },
+    orderBy: { ticker: "asc" },
+    take: limit,
+  });
+
+  const seen = new Set<string>();
+  const distinct: string[] = [];
+  for (const row of rows) {
+    const ticker = row.ticker.trim().toUpperCase();
+    if (ticker && !seen.has(ticker)) {
+      seen.add(ticker);
+      distinct.push(ticker);
+    }
+  }
+  return distinct;
+}
+
+export type SchwabQuoteBatchSizeOutcome =
+  | {
+      requestedDistinct: number;
+      outcome: "SUCCESS";
+      requestAccepted: true;
+      returnedDistinct: number;
+      missingCount: number;
+      elapsedMs: number;
+    }
+  | {
+      requestedDistinct: number;
+      outcome: "HTTP_ERROR";
+      requestAccepted: false;
+      httpStatus?: number;
+      elapsedMs: number;
+    }
+  | {
+      requestedDistinct: number;
+      outcome: "NOT_TESTED";
+      requestAccepted: false;
+      reason: "INSUFFICIENT_SOURCE_SYMBOLS";
+      availableDistinct: number;
+    };
 
 export type SchwabQuoteBatchDiagnosticResult =
   | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string; timestamp: string }
@@ -62,15 +83,19 @@ export type SchwabQuoteBatchDiagnosticResult =
       accountDataTouched: false;
       timestamp: string;
       results: SchwabQuoteBatchSizeOutcome[];
-      largestVerifiedBatchSize: number | null;
+      /** The largest size for which the outbound request truly contained that many DISTINCT
+       * symbols AND Schwab accepted the request - never inflated by a source pool too small to
+       * actually contain that many distinct tickers (see loadDeterministicDistinctSymbols). */
+      largestVerifiedRequestSize: number | null;
     };
 
 /**
  * Runs the escalating Schwab quote batch-size diagnostic for one user's OWN existing Schwab
  * market-data connection. Market-data only - never resolves an accountHash, never reads
- * positions/transactions/orders/campaigns. Stops at the first failed size rather than continuing
- * to brute-force larger requests. Returns only sanitized counts/timing - never the raw Schwab
- * response body, never the access token.
+ * positions/transactions/orders/campaigns. Stops as soon as a size cannot be genuinely tested
+ * (either the source pool has too few distinct symbols, or Schwab rejected the request) rather
+ * than continuing to brute-force larger requests. Returns only sanitized counts/timing - never
+ * the raw Schwab response body, never the access token.
  */
 export async function runSchwabQuoteBatchDiagnosticForUser(
   userId: string,
@@ -101,11 +126,30 @@ export async function runSchwabQuoteBatchDiagnosticForUser(
     };
   }
 
+  // Loaded once, up front - the same deterministic, ordered, deduplicated pool backs every size;
+  // each size just takes a longer prefix of it, so a 25-symbol test's tickers are a strict subset
+  // of the 100-symbol test's tickers.
+  const distinctSymbols = await loadDeterministicDistinctSymbols(LARGEST_DIAGNOSTIC_SIZE);
+
   const results: SchwabQuoteBatchSizeOutcome[] = [];
-  let largestVerifiedBatchSize: number | null = null;
+  let largestVerifiedRequestSize: number | null = null;
 
   for (const size of SCHWAB_QUOTE_BATCH_DIAGNOSTIC_SIZES) {
-    const symbols = symbolsForBatchSize(size);
+    if (distinctSymbols.length < size) {
+      // The source pool itself cannot supply this many distinct symbols - no larger size can
+      // possibly have more available either, so this is a genuine stopping point, not merely a
+      // failed HTTP request. Never silently test fewer symbols and call it "size verified."
+      results.push({
+        requestedDistinct: size,
+        outcome: "NOT_TESTED",
+        requestAccepted: false,
+        reason: "INSUFFICIENT_SOURCE_SYMBOLS",
+        availableDistinct: distinctSymbols.length,
+      });
+      break;
+    }
+
+    const batch = distinctSymbols.slice(0, size);
     const started = Date.now();
 
     try {
@@ -113,31 +157,31 @@ export async function runSchwabQuoteBatchDiagnosticForUser(
         accessToken,
         baseUrl: SCHWAB_MARKET_DATA_BASE_URL,
         path: "/quotes",
-        searchParams: new URLSearchParams({ symbols: symbols.join(","), fields: "quote" }),
+        searchParams: new URLSearchParams({ symbols: batch.join(","), fields: "quote" }),
         fetchFn: options.fetchFn,
       });
       const elapsedMs = Date.now() - started;
-      const quotes = normalizeSchwabQuotesResponse([...new Set(symbols)], payload);
+      const quotes = normalizeSchwabQuotesResponse(batch, payload);
 
       results.push({
-        requestedCount: size,
-        distinctSymbolsRequested: new Set(symbols).size,
+        requestedDistinct: size,
         outcome: "SUCCESS",
-        symbolsReturnedCount: quotes.size,
-        missingCount: new Set(symbols).size - quotes.size,
+        requestAccepted: true,
+        returnedDistinct: quotes.size,
+        missingCount: batch.length - quotes.size,
         elapsedMs,
       });
-      largestVerifiedBatchSize = size;
+      largestVerifiedRequestSize = size;
     } catch (error) {
       const elapsedMs = Date.now() - started;
       results.push({
-        requestedCount: size,
-        distinctSymbolsRequested: new Set(symbols).size,
+        requestedDistinct: size,
         outcome: "HTTP_ERROR",
+        requestAccepted: false,
         httpStatus: error instanceof SchwabApiError ? error.status : undefined,
         elapsedMs,
       });
-      break; // never proceed to a larger size after a failure
+      break; // Schwab rejected this size - never proceed to a larger one.
     }
   }
 
@@ -148,10 +192,6 @@ export async function runSchwabQuoteBatchDiagnosticForUser(
     accountDataTouched: false,
     timestamp: now.toISOString(),
     results,
-    largestVerifiedBatchSize,
+    largestVerifiedRequestSize,
   };
-}
-
-function symbolsForBatchSize(size: number): string[] {
-  return Array.from({ length: size }, (_, i) => DIAGNOSTIC_TICKER_POOL[i % DIAGNOSTIC_TICKER_POOL.length]);
 }
