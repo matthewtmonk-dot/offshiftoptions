@@ -5,6 +5,37 @@ type UnknownRecord = Record<string, unknown>;
 export function normalizeSchwabQuoteResponse(symbol: string, payload: unknown): MarketQuote {
   const normalizedSymbol = symbol.toUpperCase();
   const record = objectValue(payload)?.[normalizedSymbol] ?? firstObjectValue(payload);
+  const quote = normalizeSchwabQuoteRecord(normalizedSymbol, record);
+  if (!quote) {
+    throw new Error(`Schwab quote response did not include a usable price for ${normalizedSymbol}.`);
+  }
+  return quote;
+}
+
+/**
+ * Batch counterpart of normalizeSchwabQuoteResponse - Schwab's `/quotes` response is ALWAYS
+ * shaped as one object keyed by uppercase symbol, whether one or many symbols were requested
+ * (normalizeSchwabQuoteResponse already relied on this for the single-symbol case). Each
+ * requested symbol is normalized independently: a symbol missing from the payload, or missing a
+ * usable price, is simply absent from the returned Map - never thrown, never fabricated, so one
+ * bad/delisted/invalid symbol in a batch can never prevent the other symbols in the same
+ * response from being read. See SchwabMarketDataProvider.getQuotes.
+ */
+export function normalizeSchwabQuotesResponse(symbols: string[], payload: unknown): Map<string, MarketQuote> {
+  const container = objectValue(payload);
+  const result = new Map<string, MarketQuote>();
+  for (const symbol of symbols) {
+    const normalizedSymbol = symbol.toUpperCase();
+    const record = container?.[normalizedSymbol];
+    const quote = normalizeSchwabQuoteRecord(normalizedSymbol, record);
+    if (quote) {
+      result.set(normalizedSymbol, quote);
+    }
+  }
+  return result;
+}
+
+function normalizeSchwabQuoteRecord(normalizedSymbol: string, record: unknown): MarketQuote | null {
   const quote = objectValue(objectValue(record)?.quote);
   const regular = objectValue(objectValue(record)?.regular);
   const reference = objectValue(objectValue(record)?.reference);
@@ -17,7 +48,7 @@ export function normalizeSchwabQuoteResponse(symbol: string, payload: unknown): 
     numberValue(quote?.closePrice);
 
   if (price === null) {
-    throw new Error(`Schwab quote response did not include a usable price for ${normalizedSymbol}.`);
+    return null;
   }
 
   const asOf = dateFromEpoch(

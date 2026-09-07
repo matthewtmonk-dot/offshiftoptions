@@ -1136,3 +1136,39 @@ model BrokerImportBatch {
   @@index([userId, status])
   @@index([userId, createdAt])
 }
+
+/// Public, shared, user-agnostic cache of underlyings with listed options (Tier 2 of the
+/// scanner's broad universe - see docs/SCANNER_RULES.md "Broad scanner universe" /
+/// PROJECT_HANDOFF.md Stabilization Slice 3). Never scoped to a user, never mixed with private
+/// brokerage/Research data - Matt and Eric share exactly one copy of this table. `source`
+/// records where a row came from (e.g. "OCC") so more than one public source can coexist
+/// without ambiguity. `lastSeenAt` is updated only by a fully successful refresh (see
+/// refreshOptionableUniverseCache) - a failed/partial refresh never touches existing rows, so a
+/// network or parser failure can never destroy yesterday's valid universe.
+model OptionableUniverseSymbol {
+  ticker     String   @id
+  name       String?
+  source     String
+  lastSeenAt DateTime
+  updatedAt  DateTime @updatedAt
+
+  @@index([source, lastSeenAt])
+}
+
+/// Public, shared cache of upcoming corporate earnings dates (Alpha Vantage EARNINGS_CALENDAR),
+/// refreshed via the SAME shared 25/day Alpha Vantage budget as OVERVIEW/BALANCE_SHEET (see
+/// alpha-vantage-budget.ts) - one shared calendar fetch populates every ticker, never one call
+/// per scanned symbol. `reportDate` is a financial CALENDAR DATE, not a moment in time - @db.Date
+/// stores it as a plain Postgres DATE column with no time-of-day/timezone component at all, so
+/// "2026-09-04" can never be shifted to the prior evening by a server/reader's local timezone
+/// the way a plain DateTime timestamp could (see the Campaign date-only bug this deliberately
+/// avoids repeating - PROJECT_HANDOFF.md "date-only bug"). Always render via shortCalendarDate
+/// (UTC-pinned), never shortDate/shortDateTime.
+model EarningsCalendarEntry {
+  ticker     String
+  reportDate DateTime @db.Date
+  fetchedAt  DateTime @default(now())
+
+  @@id([ticker, reportDate])
+  @@index([reportDate])
+}

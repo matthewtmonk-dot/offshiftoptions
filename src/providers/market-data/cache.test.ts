@@ -93,4 +93,67 @@ describe("withMarketDataCache", () => {
       providerKey: "schwab:user:user-a",
     } satisfies Partial<MarketDataProviderError>);
   });
+
+  describe("getQuotes (always exposed on the wrapper, even when the underlying provider lacks it)", () => {
+    it("uses the underlying provider's native getQuotes when available", async () => {
+      const nativeGetQuotes = vi.fn(async (symbols: string[]) => new Map(symbols.map((symbol) => [symbol, quote(symbol, 42)])));
+      const inner = provider({ getQuotes: nativeGetQuotes });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      const result = await cached.getQuotes(["AAA", "BBB"]);
+      expect(result.get("AAA")?.price).toBe(42);
+      expect(result.get("BBB")?.price).toBe(42);
+      expect(nativeGetQuotes).toHaveBeenCalledTimes(1);
+      expect(inner.getQuote).not.toHaveBeenCalled();
+    });
+
+    it("falls back to one getQuote call per symbol when the underlying provider has no getQuotes", async () => {
+      const inner = provider(); // no getQuotes override - default has none
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      const result = await cached.getQuotes(["AAA", "BBB"]);
+      expect(result.get("AAA")?.price).toBe(12.34);
+      expect(result.get("BBB")?.price).toBe(12.34);
+      expect(inner.getQuote).toHaveBeenCalledTimes(2);
+    });
+
+    it("in the fallback path, one bad symbol never drops the others", async () => {
+      const inner = provider({
+        getQuote: vi.fn(async (symbol: string) => {
+          if (symbol === "BAD") {
+            throw new Error("invalid symbol");
+          }
+          return quote(symbol, 10);
+        }),
+      });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      const result = await cached.getQuotes(["GOOD", "BAD"]);
+      expect(result.has("GOOD")).toBe(true);
+      expect(result.has("BAD")).toBe(false);
+    });
+
+    it("reuses an already-cached single quote instead of re-fetching it in a batch", async () => {
+      const nativeGetQuotes = vi.fn(async (symbols: string[]) => new Map(symbols.map((symbol) => [symbol, quote(symbol, 99)])));
+      const inner = provider({ getQuotes: nativeGetQuotes });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one", { quoteTtlMs: 30_000 });
+
+      await cached.getQuote("AAA"); // populates the per-symbol cache via getQuote
+      const result = await cached.getQuotes(["AAA", "BBB"]);
+
+      expect(result.get("AAA")?.price).toBe(12.34); // from the earlier getQuote call, not re-fetched
+      expect(result.get("BBB")?.price).toBe(99);
+      expect(nativeGetQuotes).toHaveBeenCalledWith(["BBB"]); // AAA already cached, never requested again
+    });
+
+    it("a batch-fetched quote populates the cache so a later single getQuote() call reuses it", async () => {
+      const nativeGetQuotes = vi.fn(async (symbols: string[]) => new Map(symbols.map((symbol) => [symbol, quote(symbol, 55)])));
+      const inner = provider({ getQuotes: nativeGetQuotes });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one", { quoteTtlMs: 30_000 });
+
+      await cached.getQuotes(["AAA"]);
+      await expect(cached.getQuote("AAA")).resolves.toMatchObject({ price: 55 });
+      expect(inner.getQuote).not.toHaveBeenCalled();
+    });
+  });
 });

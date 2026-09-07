@@ -4,6 +4,7 @@ import {
   normalizeSchwabOptionChainResponse,
   normalizeSchwabPriceHistoryResponse,
   normalizeSchwabQuoteResponse,
+  normalizeSchwabQuotesResponse,
 } from "./normalizers";
 
 describe("Schwab market-data normalizers", () => {
@@ -137,5 +138,49 @@ describe("Schwab market-data normalizers", () => {
 
     expect(quote.companyDescription).toBeNull();
     expect(quote.fundamentals).toBeNull();
+  });
+});
+
+describe("normalizeSchwabQuotesResponse (batch)", () => {
+  it("normalizes every requested symbol from one multi-key payload - no cross-symbol mixup", () => {
+    const result = normalizeSchwabQuotesResponse(["RIOT", "APLD", "CORZ"], {
+      RIOT: { quote: { lastPrice: 12.34 } },
+      APLD: { quote: { lastPrice: 23.5 } },
+      CORZ: { quote: { lastPrice: 16.5 } },
+    });
+
+    expect(result.size).toBe(3);
+    expect(result.get("RIOT")?.price).toBe(12.34);
+    expect(result.get("APLD")?.price).toBe(23.5);
+    expect(result.get("CORZ")?.price).toBe(16.5);
+  });
+
+  it("a symbol missing from the payload is simply absent from the result - never thrown, never fabricated", () => {
+    const result = normalizeSchwabQuotesResponse(["RIOT", "DELISTED"], {
+      RIOT: { quote: { lastPrice: 12.34 } },
+      // DELISTED intentionally not present in the response at all
+    });
+
+    expect(result.has("RIOT")).toBe(true);
+    expect(result.has("DELISTED")).toBe(false);
+  });
+
+  it("a symbol present but with no usable price is also simply absent, not a thrown error for the whole batch", () => {
+    const result = normalizeSchwabQuotesResponse(["RIOT", "NOPRICE"], {
+      RIOT: { quote: { lastPrice: 12.34 } },
+      NOPRICE: { reference: { description: "present but priceless" } },
+    });
+
+    expect(result.has("RIOT")).toBe(true);
+    expect(result.has("NOPRICE")).toBe(false);
+  });
+
+  it("uppercases requested symbols regardless of input casing", () => {
+    const result = normalizeSchwabQuotesResponse(["riot"], { RIOT: { quote: { lastPrice: 12.34 } } });
+    expect(result.get("RIOT")?.symbol).toBe("RIOT");
+  });
+
+  it("returns an empty map for an empty symbol list without touching the payload", () => {
+    expect(normalizeSchwabQuotesResponse([], { RIOT: { quote: { lastPrice: 12.34 } } }).size).toBe(0);
   });
 });

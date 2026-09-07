@@ -590,6 +590,45 @@ describe("live market-data scanner", () => {
     expect(badco?.values.scanNote).toContain("unavailable");
   });
 
+  it("uses the provider's native getQuotes in one batched call for Stage 1, never one getQuote call per ticker, when it's available", async () => {
+    const getQuotes = async (symbols: string[]) =>
+      new Map(symbols.map((symbol) => [symbol, { symbol, price: 12, volume: 1_000_000, asOf: new Date("2026-08-31T14:30:00Z") }]));
+    let getQuoteCallCount = 0;
+    const provider: MarketDataProvider = {
+      getQuote: async (symbol) => {
+        getQuoteCallCount += 1;
+        return { symbol, price: 12, asOf: new Date("2026-08-31T14:30:00Z") };
+      },
+      getQuotes,
+      async getPriceHistory(symbol, days) {
+        return Array.from({ length: days }, (_, index) => ({
+          symbol,
+          date: new Date(Date.UTC(2026, 7, index + 1)),
+          open: 12,
+          high: 12.5,
+          low: 11.5,
+          close: 12,
+          volume: 1000,
+        }));
+      },
+      async getOptionChain() {
+        return [];
+      },
+      async getInstrument(symbol) {
+        return { symbol, description: symbol, assetType: "EQUITY" };
+      },
+      async getMarketHours() {
+        return { isOpen: true };
+      },
+    };
+
+    const results = await evaluateLiveMarketScan({ provider, rules, universe: ["RIOT", "APLD", "CORZ"], asOf: new Date("2026-08-31T12:00:00Z") });
+
+    expect(getQuoteCallCount).toBe(0); // never fell back to one-at-a-time
+    expect(results).toHaveLength(3);
+    expect(results.every((result) => result.values.price === 12)).toBe(true);
+  });
+
   it("never fetches price history or option chains for a ticker that fails the quote-only price filter (Stage 1 before Stage 2)", async () => {
     const historyCalls: string[] = [];
     const optionChainCalls: string[] = [];

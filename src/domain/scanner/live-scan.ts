@@ -98,25 +98,36 @@ export async function evaluateLiveMarketScan({
   maxOptionChainLookups = 8,
 }: LiveScanOptions): Promise<LiveScanCandidate[]> {
   const tickers = universe.map((item) => item.toUpperCase());
-  const quoteOutcomes = await mapWithConcurrency<string, QuoteStageOutcome>(tickers, SCAN_FETCH_CONCURRENCY, async (ticker) => {
-    try {
-      const quote = await provider.getQuote(ticker);
-      return { ticker, ok: true, quote, values: buildQuoteOnlyValues(quote), verifiedFundamentals: quote.fundamentals ?? null };
-    } catch (error) {
-      return { ticker, ok: false, error };
+  // Prefer the provider's native batch quote support (see MarketDataProvider.getQuotes) so a
+  // broad universe costs a handful of requests instead of one per symbol - falls back to the
+  // existing one-per-symbol, concurrency-bounded loop for a provider that doesn't implement it
+  // (e.g. the demo provider, or a test fixture). Either path can throw for a total/systemic
+  // failure (every symbol unavailable) - see SchwabMarketDataProvider.getQuotes and
+  // fetchQuotesIndividually below - which is surfaced as a real failure rather than an
+  // all-UNKNOWN scan that looks like it ran successfully.
+  let quotesByTicker: Map<string, MarketQuote>;
+  let quoteFetchError: unknown = null;
+  try {
+    quotesByTicker = provider.getQuotes ? await provider.getQuotes(tickers) : await fetchQuotesIndividually(provider, tickers);
+  } catch (error) {
+    quotesByTicker = new Map();
+    quoteFetchError = error;
+  }
+
+  if (quotesByTicker.size === 0 && tickers.length > 0) {
+    throw quoteFetchError ?? new Error("Live market data was unavailable for every ticker in this scan.");
+  }
+
+  const quoteOutcomes: QuoteStageOutcome[] = tickers.map((ticker) => {
+    const quote = quotesByTicker.get(ticker);
+    if (!quote) {
+      return { ticker, ok: false, error: new Error(`Live market data was unavailable for ${ticker}.`) };
     }
+    return { ticker, ok: true, quote, values: buildQuoteOnlyValues(quote), verifiedFundamentals: quote.fundamentals ?? null };
   });
 
   const quoteStage = quoteOutcomes.filter((outcome): outcome is QuoteStageOutcome & { ok: true } => outcome.ok);
   const unavailableTickers = quoteOutcomes.filter((outcome): outcome is QuoteStageOutcome & { ok: false } => !outcome.ok);
-
-  // A single bad ticker should not sink the whole scan (partial results are useful and
-  // are surfaced as UNKNOWN below). But if every ticker failed, this is a systemic
-  // problem (auth, outage, etc.), not a per-ticker one - surface it as a real failure
-  // instead of returning an all-UNKNOWN scan that looks like it ran successfully.
-  if (quoteStage.length === 0 && unavailableTickers.length > 0) {
-    throw unavailableTickers[0].error;
-  }
 
   const quoteOnlyRules = rules.filter((rule) => QUOTE_ONLY_STOCK_RULE_KEYS.has(rule.key));
   const quoteEligible = quoteStage.filter((candidate) => !evaluateCandidate(quoteOnlyRules, candidate.values).results.some((r) => r.status === "FAIL"));
@@ -528,4 +539,29 @@ function midpoint(bid: number, ask: number) {
 function numericValue(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Fallback Stage 1 quote fetch for a provider without native getQuotes (e.g. the demo provider,
+ * or a test fixture that only implements getQuote) - one call per symbol, concurrency-bounded
+ * the same way every other per-symbol fetch in this module is, each isolated so a single bad
+ * symbol never drops the others. If EVERY symbol fails, that is a systemic problem, not a
+ * per-symbol one - rethrown rather than silently returning an empty map, mirroring
+ * SchwabMarketDataProvider.getQuotes' own all-chunks-failed behavior.
+ */
+async function fetchQuotesIndividually(provider: MarketDataProvider, tickers: string[]): Promise<Map<string, MarketQuote>> {
+  const outcomes = await mapWithConcurrency(tickers, SCAN_FETCH_CONCURRENCY, async (ticker) => {
+    try {
+      return { ticker, quote: await provider.getQuote(ticker), error: null as unknown };
+    } catch (error) {
+      return { ticker, quote: null, error };
+    }
+  });
+
+  const succeeded = outcomes.filter((outcome): outcome is { ticker: string; quote: MarketQuote; error: null } => outcome.quote !== null);
+  if (tickers.length > 0 && succeeded.length === 0) {
+    throw outcomes[0]?.error;
+  }
+
+  return new Map(succeeded.map((outcome) => [outcome.ticker, outcome.quote]));
 }
