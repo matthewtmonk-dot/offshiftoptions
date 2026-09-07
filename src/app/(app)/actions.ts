@@ -42,11 +42,19 @@ import {
 } from "@/lib/workflows";
 import type { AppearanceMode } from "@/generated/prisma/enums";
 import { updateAppearanceForUser } from "@/lib/appearance";
-import { categorizeSchwabSyncError, disconnectSchwabForUser, logSchwabSyncFailure, recordSchwabSyncDiagnostics } from "@/lib/broker-connections";
+import {
+  categorizeSchwabSyncError,
+  disconnectSchwabForUser,
+  logSchwabSyncFailure,
+  recordSchwabSyncDiagnostics,
+  resolveMarketDataProviderForUser,
+} from "@/lib/broker-connections";
+import { runScannerUniverseDryRun } from "@/lib/scanner-universe-dry-run";
 import {
   runSchwabTransactionsDiagnosticForUser,
   type SchwabTransactionsDiagnosticResult,
 } from "@/lib/schwab-transactions-diagnostic";
+import { runSchwabQuoteBatchDiagnosticForUser, type SchwabQuoteBatchDiagnosticResult } from "@/lib/schwab-quote-batch-diagnostic";
 import {
   getSanitizedBrokerRecordClassificationForUser,
   type BrokerRecordClassificationReport,
@@ -420,6 +428,62 @@ export async function runLiveSchwabScannerAction(): Promise<RunLiveScanResult> {
 export async function runSchwabTransactionsDiagnosticAction(): Promise<SchwabTransactionsDiagnosticResult> {
   const user = await requireCurrentUser();
   return runSchwabTransactionsDiagnosticForUser(user.id);
+}
+
+export async function runSchwabQuoteBatchDiagnosticAction(): Promise<SchwabQuoteBatchDiagnosticResult> {
+  const user = await requireCurrentUser();
+  return runSchwabQuoteBatchDiagnosticForUser(user.id);
+}
+
+export type ScannerUniverseDryRunActionResult =
+  | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string }
+  | {
+      status: "OK";
+      universeSymbols: number;
+      successfullyQuoted: number;
+      quoteFailures: number;
+      priceSurvivors: number;
+      priceAndVolumeSurvivors: number;
+      earningsKnown: number;
+      earningsUnknown: number;
+      estimatedHistoryCallsRequired: number;
+      estimatedOptionChainCallsRequired: number;
+    };
+
+/**
+ * Read-only Stage 1 measurement, using ONLY the current authenticated user's own resolved
+ * market-data provider (never a shared/cross-user backend - see resolveMarketDataProviderForUser
+ * and its `sharedFallback: "DISABLED_POLICY_NOT_VERIFIED"` contract). Matt's dry run uses Matt's
+ * connection; Eric's, once he has one, uses his own. Never fetches history/chains, never creates
+ * a ScanRun, never touches Research/campaign data - see runScannerUniverseDryRun.
+ */
+export async function runScannerUniverseDryRunAction(): Promise<ScannerUniverseDryRunActionResult> {
+  const user = await requireCurrentUser();
+  const resolved = await resolveMarketDataProviderForUser(user.id);
+  if (!resolved.provider) {
+    return {
+      status: "UNAVAILABLE",
+      reason: resolved.reason,
+      message:
+        resolved.reason === "NO_USER_CONNECTION"
+          ? "Connect Schwab from Account before running this read-only measurement."
+          : "Reconnect Schwab from Account before running this read-only measurement.",
+    };
+  }
+
+  const result = await runScannerUniverseDryRun(user.id, resolved.provider);
+  return {
+    status: "OK",
+    universeSymbols: result.universeSymbols,
+    successfullyQuoted: result.successfullyQuoted,
+    quoteFailures: result.universeSymbols - result.successfullyQuoted,
+    priceSurvivors: result.priceSurvivors,
+    priceAndVolumeSurvivors: result.priceAndVolumeSurvivors,
+    earningsKnown: result.earningsKnown,
+    earningsUnknown: result.earningsUnknown,
+    estimatedHistoryCallsRequired: result.estimatedHistoryCallsRequired,
+    estimatedOptionChainCallsRequired: result.estimatedOptionChainCallsRequired,
+  };
 }
 
 export async function runBrokerRecordClassificationDiagnosticAction(): Promise<BrokerRecordClassificationReport> {
