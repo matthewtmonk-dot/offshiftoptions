@@ -1,0 +1,35 @@
+name: Technical Preparation Worker
+
+on:
+  schedule:
+    # 21:10-23:55 UTC, Mon-Fri, every 5 minutes - runs after the reference-refresh workflow (21:05
+    # UTC) so shared OCC/earnings data is current first. All NYSE market-day/session/DST/holiday
+    # logic lives server-side in the endpoint itself (isTechnicalPreparationWindowOpen) - this
+    # window is deliberately just a broad container for it to be called in; a tick outside the
+    # real preparation window, or once every connected user is already complete, is a safe no-op.
+    - cron: "10-55/5 21 * * 1-5"
+    - cron: "*/5 22-23 * * 1-5"
+  workflow_dispatch:
+
+# One bounded cycle claims real TechnicalPreparationItem rows via the existing DB claim mechanism
+# before it finishes - cancelling an in-flight run rather than letting it complete would abandon
+# those claims until the existing stale-claim timeout recovers them. If GitHub delays a scheduled
+# run, queue the next one rather than killing the current one; the DB claim system is still the
+# final concurrency protection either way.
+concurrency:
+  group: technical-preparation-worker
+  cancel-in-progress: false
+
+jobs:
+  process-technical-preparation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run one bounded technical preparation cycle
+        env:
+          CRON_SECRET: ${{ secrets.OSO_CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 300 \
+            -X POST \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            https://offshiftoptions.com/api/internal/scanner-technical/process

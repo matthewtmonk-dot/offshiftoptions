@@ -1,0 +1,23 @@
+name: Scanner Reference Refresh
+
+on:
+  schedule:
+    # 21:05 UTC, Mon-Fri - after regular NYSE close year-round (17:05 ET in EDT, 16:05 ET in EST),
+    # without hardcoding either DST offset. Runs before the technical preparation workflow (21:10+)
+    # so shared OCC/earnings data is current before any user-scoped preparation cycle starts.
+    - cron: "5 21 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  refresh-reference:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Refresh shared scanner reference data (OCC + earnings calendar)
+        env:
+          CRON_SECRET: ${{ secrets.OSO_CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 300 \
+            -X POST \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            https://offshiftoptions.com/api/internal/scanner-reference/refresh
