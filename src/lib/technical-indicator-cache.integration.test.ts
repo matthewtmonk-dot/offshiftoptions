@@ -26,6 +26,10 @@ function syntheticCandles(ticker: string, count = 80, endDate: Date = new Date()
   });
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function fakeProvider(options: {
   quotes: Record<string, { price: number; volume: number }>;
   candlesByTicker?: Record<string, PriceCandle[]>;
@@ -34,6 +38,11 @@ function fakeProvider(options: {
   onGetPriceHistory?: (ticker: string) => void;
   onGetQuotes?: (symbols: string[]) => void;
   onGetOptionChain?: (ticker: string) => void;
+  /** Widens the async race window so two genuinely concurrent callers both reach their own
+   * database write attempt before either finishes - without this, fast in-memory fakes can
+   * resolve one call to completion before the second one even starts, hiding a real race. */
+  getQuotesDelayMs?: number;
+  getPriceHistoryDelayMs?: number;
 }): MarketDataProvider {
   const quotesByTicker = new Map<string, MarketQuote>(
     Object.entries(options.quotes).map(([ticker, { price, volume }]) => [ticker, { symbol: ticker, price, volume, asOf: new Date() }]),
@@ -47,6 +56,7 @@ function fakeProvider(options: {
     },
     async getQuotes(symbols) {
       options.onGetQuotes?.(symbols);
+      if (options.getQuotesDelayMs) await delay(options.getQuotesDelayMs);
       if (options.failQuotes) {
         throw new Error("simulated quote-sweep provider failure");
       }
@@ -59,6 +69,7 @@ function fakeProvider(options: {
     },
     async getPriceHistory(symbol) {
       options.onGetPriceHistory?.(symbol);
+      if (options.getPriceHistoryDelayMs) await delay(options.getPriceHistoryDelayMs);
       if (options.failTickers?.has(symbol)) {
         throw new Error("simulated provider failure");
       }
@@ -84,6 +95,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   let getTechnicalIndicatorSnapshotsForUser: typeof import("./technical-indicator-cache").getTechnicalIndicatorSnapshotsForUser;
   let getTechnicalCacheReadinessForUser: typeof import("./technical-indicator-cache").getTechnicalCacheReadinessForUser;
   let getOrCreateActiveTechnicalPreparationRun: typeof import("./technical-indicator-cache").getOrCreateActiveTechnicalPreparationRun;
+  let PROCESSING_CLAIM_TIMEOUT_MS: typeof import("./technical-indicator-cache").PROCESSING_CLAIM_TIMEOUT_MS;
   let ensureMyLstScannerProfileForUser: typeof import("./workflows").ensureMyLstScannerProfileForUser;
   let matt: { id: string };
   let eric: { id: string };
@@ -97,6 +109,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       getTechnicalIndicatorSnapshotsForUser,
       getTechnicalCacheReadinessForUser,
       getOrCreateActiveTechnicalPreparationRun,
+      PROCESSING_CLAIM_TIMEOUT_MS,
     } = await import("./technical-indicator-cache"));
     ({ ensureMyLstScannerProfileForUser } = await import("./workflows"));
 
@@ -550,5 +563,182 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 5 });
     await getTechnicalCacheReadinessForUser(matt.id, provider);
     expect(optionChainCallCount).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Concurrency hardening - genuinely overlapping calls (Promise.all against the real local
+  // Postgres DB), not merely sequential duplicate calls.
+  // ---------------------------------------------------------------------------------------------
+
+  it("two simultaneous get-or-create calls yield exactly ONE preparation run, and the quote sweep executes once, not twice", async () => {
+    await seedUniverse(syntheticTickers(20));
+    let getQuotesCallCount = 0;
+    const provider = fakeProvider({
+      quotes: Object.fromEntries(syntheticTickers(20).map((t) => [t, { price: 20, volume: 1_000_000 }])),
+      onGetQuotes: () => {
+        getQuotesCallCount += 1;
+      },
+      getQuotesDelayMs: 60, // widen the race window so both calls are genuinely in flight together
+    });
+
+    const [a, b] = await Promise.all([
+      getOrCreateActiveTechnicalPreparationRun(matt.id, provider),
+      getOrCreateActiveTechnicalPreparationRun(matt.id, provider),
+    ]);
+
+    expect(a.runId).toBe(b.runId); // one generation, not two
+    expect(getQuotesCallCount).toBe(1); // the loser polled for the winner's result instead of sweeping itself
+    const runCount = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+    expect(runCount).toBe(1); // the unique constraint allowed exactly one row to persist
+  });
+
+  it("two simultaneous <=25 workers never process the same ticker, and their combined claimed count never exceeds available PENDING rows", async () => {
+    const tickers = syntheticTickers(40); // deliberately more than one batch's worth
+    await seedUniverse(tickers);
+    const claimedByCall = { a: [] as string[], b: [] as string[] };
+    const historyCallsPerTicker = new Map<string, number>();
+
+    function makeProvider(bucket: "a" | "b") {
+      return fakeProvider({
+        quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+        getPriceHistoryDelayMs: 20,
+        onGetPriceHistory: (ticker) => {
+          claimedByCall[bucket].push(ticker);
+          historyCallsPerTicker.set(ticker, (historyCallsPerTicker.get(ticker) ?? 0) + 1);
+        },
+      });
+    }
+
+    // Pre-create the run once (outside the race) so this test isolates the CLAIM race specifically,
+    // not the run-creation race already covered above.
+    await getOrCreateActiveTechnicalPreparationRun(matt.id, makeProvider("a"));
+
+    const [resultA, resultB] = await Promise.all([
+      refreshTechnicalIndicatorCacheBatchForUser(matt.id, makeProvider("a"), { batchSize: 25 }),
+      refreshTechnicalIndicatorCacheBatchForUser(matt.id, makeProvider("b"), { batchSize: 25 }),
+    ]);
+
+    expect(resultA.processedCount).toBeLessThanOrEqual(25); // each worker respects the cap
+    expect(resultB.processedCount).toBeLessThanOrEqual(25);
+    expect(resultA.processedCount + resultB.processedCount).toBe(40); // combined claims == exactly what was available, no more
+
+    const overlap = claimedByCall.a.filter((ticker) => claimedByCall.b.includes(ticker));
+    expect(overlap).toEqual([]); // disjoint sets - worker B never claimed anything worker A already had
+
+    for (const [, count] of historyCallsPerTicker) {
+      expect(count).toBe(1); // every ticker's history was fetched exactly once total, never twice
+    }
+
+    const readyRows = await prisma.technicalPreparationItem.count({ where: { status: "READY" } });
+    expect(readyRows).toBe(40);
+  });
+
+  it("a stale (abandoned) PROCESSING claim can be reclaimed by a later invocation, but a non-stale active claim cannot", async () => {
+    await seedUniverse(["TECHSTALECLAIM", "TECHFRESHCLAIM", "TECHNORMAL"]);
+    const provider = fakeProvider({
+      quotes: {
+        TECHSTALECLAIM: { price: 20, volume: 1_000_000 },
+        TECHFRESHCLAIM: { price: 20, volume: 1_000_000 },
+        TECHNORMAL: { price: 20, volume: 1_000_000 },
+      },
+    });
+
+    const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider);
+
+    // Simulate one worker that claimed TECHSTALECLAIM a long time ago and then died.
+    const longAgo = new Date(Date.now() - (PROCESSING_CLAIM_TIMEOUT_MS + 60_000));
+    await prisma.technicalPreparationItem.updateMany({
+      where: { runId, ticker: "TECHSTALECLAIM" },
+      data: { status: "PROCESSING", claimToken: "dead-worker-token", claimedAt: longAgo },
+    });
+    // Simulate a DIFFERENT worker that claimed TECHFRESHCLAIM moments ago and is still legitimately running.
+    await prisma.technicalPreparationItem.updateMany({
+      where: { runId, ticker: "TECHFRESHCLAIM" },
+      data: { status: "PROCESSING", claimToken: "live-worker-token", claimedAt: new Date() },
+    });
+
+    const historyFetchedTickers: string[] = [];
+    const trackingProvider = fakeProvider({
+      quotes: { TECHNORMAL: { price: 20, volume: 1_000_000 } },
+      onGetPriceHistory: (ticker) => {
+        historyFetchedTickers.push(ticker);
+      },
+    });
+    const result = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, trackingProvider, { batchSize: 25 });
+
+    expect(historyFetchedTickers).toContain("TECHSTALECLAIM"); // reclaimed and processed
+    expect(historyFetchedTickers).toContain("TECHNORMAL"); // the genuinely-PENDING one
+    expect(historyFetchedTickers).not.toContain("TECHFRESHCLAIM"); // still actively claimed - never touched
+    expect(result.processedCount).toBe(2);
+
+    const freshClaim = await prisma.technicalPreparationItem.findFirstOrThrow({ where: { runId, ticker: "TECHFRESHCLAIM" } });
+    expect(freshClaim.status).toBe("PROCESSING"); // untouched by the reclaim pass
+    expect(freshClaim.claimToken).toBe("live-worker-token");
+  });
+
+  it("a run cannot become COMPLETE while any item is still PROCESSING - even after every other item is READY/FAILED", async () => {
+    await seedUniverse(["TECHDONE1", "TECHDONE2", "TECHSTUCK"]);
+    const provider = fakeProvider({
+      quotes: { TECHDONE1: { price: 20, volume: 1_000_000 }, TECHDONE2: { price: 20, volume: 1_000_000 }, TECHSTUCK: { price: 20, volume: 1_000_000 } },
+    });
+    const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider);
+
+    // Simulate a still-in-flight OTHER worker owning TECHSTUCK.
+    await prisma.technicalPreparationItem.updateMany({
+      where: { runId, ticker: "TECHSTUCK" },
+      data: { status: "PROCESSING", claimToken: "other-worker-token", claimedAt: new Date() },
+    });
+
+    // This invocation can only claim TECHDONE1/TECHDONE2 - TECHSTUCK is legitimately claimed elsewhere.
+    const result = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 25 });
+    expect(result.processedCount).toBe(2);
+    expect(result.remainingEligibleCount).toBe(1); // TECHSTUCK still outstanding
+
+    const run = await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: runId } });
+    expect(run.status).toBe("IN_PROGRESS"); // NOT complete - a PROCESSING row still exists
+  });
+
+  it("a failed worker's own claimed items never destroy other tickers' previous TechnicalIndicatorSnapshot data, and the claim mechanism is a single fast statement (no long-held transaction blocking other work)", async () => {
+    await seedUniverse(["TECHPREV", "TECHCONCURRENT"]);
+    // TECHPREV already has real prior data from an earlier successful run.
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, fakeProvider({ quotes: { TECHPREV: { price: 20, volume: 1_000_000 } } }), {
+      batchSize: 5,
+    });
+    const before = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({ where: { userId_ticker: { userId: matt.id, ticker: "TECHPREV" } } });
+
+    // A new run (rule change) where TECHCONCURRENT's history fetch fails outright.
+    await setPriceRuleRange(matt.id, 1, 999);
+    const failingProvider = fakeProvider({
+      quotes: { TECHPREV: { price: 20, volume: 1_000_000 }, TECHCONCURRENT: { price: 20, volume: 1_000_000 } },
+      failTickers: new Set(["TECHCONCURRENT"]),
+    });
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, failingProvider, { batchSize: 25 });
+
+    const after = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({ where: { userId_ticker: { userId: matt.id, ticker: "TECHPREV" } } });
+    expect(after).toEqual(before); // TECHPREV's data is completely unaffected by TECHCONCURRENT's failure
+    const concurrentSnapshot = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({
+      where: { userId_ticker: { userId: matt.id, ticker: "TECHCONCURRENT" } },
+    });
+    expect(concurrentSnapshot.status).toBe("FAILED");
+  });
+
+  it("Matt and Eric's claims/runs remain fully isolated even when both prepare at the same time", async () => {
+    await seedUniverse(["TECHISOCLAIM"]);
+    const [mattResult, ericResult] = await Promise.all([
+      refreshTechnicalIndicatorCacheBatchForUser(matt.id, fakeProvider({ quotes: { TECHISOCLAIM: { price: 20, volume: 1_000_000 } } }), {
+        batchSize: 25,
+      }),
+      refreshTechnicalIndicatorCacheBatchForUser(eric.id, fakeProvider({ quotes: { TECHISOCLAIM: { price: 20, volume: 1_000_000 } } }), {
+        batchSize: 25,
+      }),
+    ]);
+
+    expect(mattResult.succeededCount).toBe(1);
+    expect(ericResult.succeededCount).toBe(1);
+    const mattRuns = await prisma.technicalPreparationRun.findMany({ where: { userId: matt.id } });
+    const ericRuns = await prisma.technicalPreparationRun.findMany({ where: { userId: eric.id } });
+    expect(mattRuns).toHaveLength(1);
+    expect(ericRuns).toHaveLength(1);
+    expect(mattRuns[0].id).not.toBe(ericRuns[0].id); // structurally separate generations, never shared
   });
 });

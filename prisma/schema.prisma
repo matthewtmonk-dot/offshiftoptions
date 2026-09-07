@@ -272,6 +272,7 @@ enum TechnicalPreparationRunStatus {
 
 enum TechnicalPreparationItemStatus {
   PENDING
+  PROCESSING
   READY
   FAILED
 }
@@ -1261,19 +1262,35 @@ model TechnicalIndicatorSnapshot {
 /// `marketDate` is the calendar date (real Postgres DATE, no timezone shift) this sweep's live
 /// quotes were captured on - used to naturally start a fresh run each new day, alongside the
 /// fingerprint check above.
+///
+/// `@@unique([userId, marketDate, rulesFingerprint])` (deliberately WITHOUT status - a COMPLETE
+/// run is still the one true run for that identity, never superseded by a second one) is a real
+/// database invariant, not just an application-level "find then create" convention - two
+/// overlapping getOrCreateActiveTechnicalPreparationRun calls both attempting to create a run for
+/// the same identity will have the second INSERT rejected by Postgres itself (caught as a unique-
+/// constraint error, never a silent duplicate/second quote sweep - see the function's own doc
+/// comment for the create-then-poll-on-conflict protocol this enables).
+///
+/// `eligibleCount` is nullable and starts NULL the moment a run is created, before its quote
+/// sweep has actually finished - a concurrent caller that lost the unique-constraint race reads
+/// this to know whether to keep waiting (NULL = sweep still in flight) or return the finished
+/// result (a real number, possibly 0). If the winner's sweep or item-creation throws, the run row
+/// itself is deleted rather than left with a permanently-NULL eligibleCount, freeing the unique
+/// constraint for a clean future retry - the prior TechnicalIndicatorSnapshot cache is completely
+/// unaffected either way.
 model TechnicalPreparationRun {
   id               String                        @id @default(cuid())
   userId           String
   marketDate       DateTime                      @db.Date
   rulesFingerprint String
   status           TechnicalPreparationRunStatus @default(IN_PROGRESS)
-  eligibleCount    Int
+  eligibleCount    Int?
   createdAt        DateTime                      @default(now())
   updatedAt        DateTime                      @updatedAt
   user             User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
   items            TechnicalPreparationItem[]
 
-  @@index([userId, marketDate, rulesFingerprint, status])
+  @@unique([userId, marketDate, rulesFingerprint])
 }
 
 /// One ticker's membership/status within one TechnicalPreparationRun - deliberately a separate
@@ -1281,12 +1298,23 @@ model TechnicalPreparationRun {
 /// "eligible in today's sweep" is never confused with "has historical technical data": a ticker
 /// can have a perfectly valid (if aging) TechnicalIndicatorSnapshot row while not being part of
 /// today's run at all (e.g. price moved out of range), or vice versa.
+///
+/// PENDING -> PROCESSING -> READY|FAILED. PROCESSING exists specifically so two overlapping
+/// worker invocations can never claim the same row: a claim is one atomic
+/// `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT n)` statement (see
+/// claimNextPendingItems in technical-indicator-cache.ts) - Postgres itself guarantees a second
+/// concurrent claim skips whatever the first one already locked, never double-claims, and never
+/// blocks waiting for the first to finish. `claimToken`/`claimedAt` identify which invocation
+/// currently owns a PROCESSING row and when it claimed it, purely for abandoned-claim recovery
+/// (see PROCESSING_CLAIM_TIMEOUT_MS) - never a credential, never derived from one.
 model TechnicalPreparationItem {
   id          String                         @id @default(cuid())
   runId       String
   ticker      String
   priority    Int
   status      TechnicalPreparationItemStatus @default(PENDING)
+  claimToken  String?
+  claimedAt   DateTime?
   processedAt DateTime?
   run         TechnicalPreparationRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
 

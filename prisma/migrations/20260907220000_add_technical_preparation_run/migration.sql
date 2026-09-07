@@ -2,7 +2,7 @@
 CREATE TYPE "TechnicalPreparationRunStatus" AS ENUM ('IN_PROGRESS', 'COMPLETE');
 
 -- CreateEnum
-CREATE TYPE "TechnicalPreparationItemStatus" AS ENUM ('PENDING', 'READY', 'FAILED');
+CREATE TYPE "TechnicalPreparationItemStatus" AS ENUM ('PENDING', 'PROCESSING', 'READY', 'FAILED');
 
 -- CreateTable
 CREATE TABLE "TechnicalPreparationRun" (
@@ -11,7 +11,7 @@ CREATE TABLE "TechnicalPreparationRun" (
     "marketDate" DATE NOT NULL,
     "rulesFingerprint" TEXT NOT NULL,
     "status" "TechnicalPreparationRunStatus" NOT NULL DEFAULT 'IN_PROGRESS',
-    "eligibleCount" INTEGER NOT NULL,
+    "eligibleCount" INTEGER,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -25,13 +25,15 @@ CREATE TABLE "TechnicalPreparationItem" (
     "ticker" TEXT NOT NULL,
     "priority" INTEGER NOT NULL,
     "status" "TechnicalPreparationItemStatus" NOT NULL DEFAULT 'PENDING',
+    "claimToken" TEXT,
+    "claimedAt" TIMESTAMP(3),
     "processedAt" TIMESTAMP(3),
 
     CONSTRAINT "TechnicalPreparationItem_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
-CREATE INDEX "TechnicalPreparationRun_userId_marketDate_rulesFingerprint_idx" ON "TechnicalPreparationRun"("userId", "marketDate", "rulesFingerprint", "status");
+CREATE UNIQUE INDEX "TechnicalPreparationRun_userId_marketDate_rulesFingerprint_key" ON "TechnicalPreparationRun"("userId", "marketDate", "rulesFingerprint");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "TechnicalPreparationItem_runId_ticker_key" ON "TechnicalPreparationItem"("runId", "ticker");
