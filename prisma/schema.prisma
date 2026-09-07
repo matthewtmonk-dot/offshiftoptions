@@ -256,39 +256,49 @@ enum BrokerImportBatchStatus {
   DISCARDED
 }
 
+/// READY = a price-history fetch succeeded and RSI/BB were computed (either may still be null if
+/// there genuinely wasn't enough real trading history - never a failure). FAILED = the
+/// price-history fetch itself failed; see TechnicalIndicatorSnapshot.failureReason. PENDING is
+/// never persisted - a missing row IS the pending state (see technical-indicator-cache.ts).
+enum TechnicalSnapshotStatus {
+  READY
+  FAILED
+}
+
 model User {
-  id                         String                      @id @default(cuid())
-  name                       String
-  email                      String                      @unique
-  passwordHash               String
-  createdAt                  DateTime                    @default(now())
-  updatedAt                  DateTime                    @updatedAt
-  settings                   UserSettings?
-  sharingPreferences         SharingPreferences?
-  sessions                   Session[]
-  accounts                   TradingAccount[]
-  trades                     Trade[]
-  watchlists                 Watchlist[]
-  watchlistItems             WatchlistItem[]
-  notes                      StockNote[]
-  comments                   Comment[]
-  recommendationsSent        Recommendation[]            @relation("SentRecommendations")
-  recommendationsReceived    Recommendation[]            @relation("ReceivedRecommendations")
-  conversationMemberships    ConversationMember[]
-  chatMessages               ChatMessage[]
-  chatReads                  ChatMessageRead[]
-  reactions                  Reaction[]
-  activities                 Activity[]
-  notificationsSent          Notification[]              @relation("NotificationActor")
-  notificationsReceived      Notification[]              @relation("NotificationRecipient")
-  pushSubscriptions          PushSubscription[]
-  scannerProfiles            ScannerProfile[]
-  scannerRuns                ScanRun[]
-  brokerConnections          BrokerConnection[]
-  schwabDeveloperCredentials SchwabDeveloperCredential[]
-  brokerRecords              BrokerRecord[]
-  brokerImportBatches        BrokerImportBatch[]
-  campaigns                  Campaign[]
+  id                          String                       @id @default(cuid())
+  name                        String
+  email                       String                       @unique
+  passwordHash                String
+  createdAt                   DateTime                     @default(now())
+  updatedAt                   DateTime                     @updatedAt
+  settings                    UserSettings?
+  sharingPreferences          SharingPreferences?
+  sessions                    Session[]
+  accounts                    TradingAccount[]
+  trades                      Trade[]
+  watchlists                  Watchlist[]
+  watchlistItems              WatchlistItem[]
+  notes                       StockNote[]
+  comments                    Comment[]
+  recommendationsSent         Recommendation[]             @relation("SentRecommendations")
+  recommendationsReceived     Recommendation[]             @relation("ReceivedRecommendations")
+  conversationMemberships     ConversationMember[]
+  chatMessages                ChatMessage[]
+  chatReads                   ChatMessageRead[]
+  reactions                   Reaction[]
+  activities                  Activity[]
+  notificationsSent           Notification[]               @relation("NotificationActor")
+  notificationsReceived       Notification[]               @relation("NotificationRecipient")
+  pushSubscriptions           PushSubscription[]
+  scannerProfiles             ScannerProfile[]
+  scannerRuns                 ScanRun[]
+  brokerConnections           BrokerConnection[]
+  schwabDeveloperCredentials  SchwabDeveloperCredential[]
+  brokerRecords               BrokerRecord[]
+  brokerImportBatches         BrokerImportBatch[]
+  campaigns                   Campaign[]
+  technicalIndicatorSnapshots TechnicalIndicatorSnapshot[]
 }
 
 model Session {
@@ -320,17 +330,17 @@ model UserSettings {
   // built-in default column set, so a user who has never touched Columns sees the same
   // thing they always have. Order is preserved (it doubles as the user's column order).
   // Entirely per-user: one user changing this can never affect another user's settings row.
-  researchColumns String[] @default([])
-  researchSortKey String?
+  researchColumns     String[]       @default([])
+  researchSortKey     String?
   // OSO decision-support preference (2026-09 Roll Status slice) - NOT a confirmed proprietary
   // LST numeric rule, never hard-coded elsewhere. Controls the amber "near strike" zone width
   // for the Roll Status badge on open cash-secured puts (Dashboard/Tracker). Purely per-user -
   // Matt and Eric may choose different thresholds, and changing one's own value can never
   // affect the other's row. Defaults to 3.0% for every existing and new row.
-  rollBufferPercent Decimal  @default(3.0) @db.Decimal(5, 2)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rollBufferPercent   Decimal        @default(3.0) @db.Decimal(5, 2)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  user                User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model SharingPreferences {
@@ -350,28 +360,28 @@ model SharingPreferences {
 }
 
 model TradingAccount {
-  id                 String               @id @default(cuid())
-  userId             String
-  name               String
-  brokerName         String               @default("Manual")
-  accountType        String               @default("Demo")
-  currency           String               @default("USD")
-  startingBalance    Decimal?             @db.Decimal(14, 2)
-  manualBalance      Decimal?             @db.Decimal(14, 2)
-  visibility         Visibility           @default(PRIVATE)
-  source             AccountSource        @default(MANUAL)
-  brokerConnectionId String?
-  externalAccountId  String?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  user               User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  brokerConnection   BrokerConnection?    @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
-  snapshots          AccountSnapshot[]
-  ledgerEntries      AccountLedgerEntry[]
-  brokerRecords      BrokerRecord[]
+  id                  String               @id @default(cuid())
+  userId              String
+  name                String
+  brokerName          String               @default("Manual")
+  accountType         String               @default("Demo")
+  currency            String               @default("USD")
+  startingBalance     Decimal?             @db.Decimal(14, 2)
+  manualBalance       Decimal?             @db.Decimal(14, 2)
+  visibility          Visibility           @default(PRIVATE)
+  source              AccountSource        @default(MANUAL)
+  brokerConnectionId  String?
+  externalAccountId   String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerConnection    BrokerConnection?    @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
+  snapshots           AccountSnapshot[]
+  ledgerEntries       AccountLedgerEntry[]
+  brokerRecords       BrokerRecord[]
   brokerImportBatches BrokerImportBatch[]
-  trades             Trade[]
-  campaigns          Campaign[]
+  trades              Trade[]
+  campaigns           Campaign[]
 
   @@unique([userId, externalAccountId])
   @@index([userId, visibility])
@@ -484,22 +494,22 @@ model PositionSnapshot {
 }
 
 model Campaign {
-  id                String           @id @default(cuid())
-  ownerId           String
-  accountId         String
-  ticker            String
-  strategy          CampaignStrategy @default(CASH_SECURED_PUT)
-  status            CampaignStatus   @default(OPEN)
-  visibility        RecordVisibility @default(INHERIT)
-  openedAt          DateTime
-  closedAt          DateTime?
-  thesis            String?
-  entrySnapshotJson Json?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
-  owner             User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  account           TradingAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  events            CampaignEvent[]
+  id                  String           @id @default(cuid())
+  ownerId             String
+  accountId           String
+  ticker              String
+  strategy            CampaignStrategy @default(CASH_SECURED_PUT)
+  status              CampaignStatus   @default(OPEN)
+  visibility          RecordVisibility @default(INHERIT)
+  openedAt            DateTime
+  closedAt            DateTime?
+  thesis              String?
+  entrySnapshotJson   Json?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  owner               User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  account             TradingAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  events              CampaignEvent[]
   linkedBrokerRecords BrokerRecord[]
 
   @@index([ownerId, status])
@@ -560,34 +570,34 @@ model WatchlistItem {
   updatedAt   DateTime            @updatedAt
 
   // --- Research fields (2026-09 Scanner<->Research slice) ---
-  researchStatus       ResearchStatus     @default(NEUTRAL)
-  companyName          String?
-  whatItDoes           String?
-  wouldOwn             WouldOwnStatus?
-  wouldOwnMaxPrice     Decimal?           @db.Decimal(12, 2)
-  monthlyPutsOnly      Boolean            @default(false)
-  rollFriendliness     RollFriendliness   @default(UNKNOWN)
-  rollFriendlinessNote String?
-  exclusionReason      String?
-  manualSchwabGrade    String?
-  manualLsegRating     String?
-  manualLsegScore      String?
-  manualLsegTarget     String?
+  researchStatus            ResearchStatus          @default(NEUTRAL)
+  companyName               String?
+  whatItDoes                String?
+  wouldOwn                  WouldOwnStatus?
+  wouldOwnMaxPrice          Decimal?                @db.Decimal(12, 2)
+  monthlyPutsOnly           Boolean                 @default(false)
+  rollFriendliness          RollFriendliness        @default(UNKNOWN)
+  rollFriendlinessNote      String?
+  exclusionReason           String?
+  manualSchwabGrade         String?
+  manualLsegRating          String?
+  manualLsegScore           String?
+  manualLsegTarget          String?
   // LSEG's Buy/Hold/Sell consensus is a separate concept from the free-text "LSEG rating"
   // above (e.g. a letter/numeric grade) - both manual, both unverified against any actual
   // authorized LSEG feed (see PROJECT_HANDOFF.md Research section - OSO does not scrape LSEG).
-  manualLsegRecommendation LsegRecommendation @default(UNKNOWN)
+  manualLsegRecommendation  LsegRecommendation      @default(UNKNOWN)
   // Verified fundamentals (auto, from Schwab's quote "fundamental" field group) - left
   // unpopulated in this slice. No live Schwab connection was available locally to verify
   // field names/units against a real response; see PROJECT_HANDOFF.md Research section for
   // the exact next step before wiring these up. Never treat as a live quote.
-  fundamentalPeRatio        Decimal?  @db.Decimal(10, 2)
-  fundamentalPegRatio       Decimal?  @db.Decimal(10, 2)
-  fundamentalDebtToEquity   Decimal?  @db.Decimal(10, 4)
-  fundamentalCurrentRatio   Decimal?  @db.Decimal(10, 4)
-  fundamentalEps            Decimal?  @db.Decimal(10, 4)
-  fundamentalDividendYield  Decimal?  @db.Decimal(10, 4)
-  fundamentalDividendAmount Decimal?  @db.Decimal(10, 4)
+  fundamentalPeRatio        Decimal?                @db.Decimal(10, 2)
+  fundamentalPegRatio       Decimal?                @db.Decimal(10, 2)
+  fundamentalDebtToEquity   Decimal?                @db.Decimal(10, 4)
+  fundamentalCurrentRatio   Decimal?                @db.Decimal(10, 4)
+  fundamentalEps            Decimal?                @db.Decimal(10, 4)
+  fundamentalDividendYield  Decimal?                @db.Decimal(10, 4)
+  fundamentalDividendAmount Decimal?                @db.Decimal(10, 4)
   fundamentalSource         String?
   fundamentalAsOf           DateTime?
   // Manual fallback counterparts for the verified-auto columns above. Kept in SEPARATE
@@ -598,27 +608,27 @@ model WatchlistItem {
   // Debt/Equity, and Current Ratio have no verified auto source at all right now - see
   // PROJECT_HANDOFF.md Research section - so today these are the only populated slot for
   // those three, but they stay ready for that auto source to arrive without a schema change.
-  manualPeRatio        Decimal? @db.Decimal(10, 2)
-  manualPegRatio       Decimal? @db.Decimal(10, 2)
-  manualDebtToEquity   Decimal? @db.Decimal(10, 4)
-  manualCurrentRatio   Decimal? @db.Decimal(10, 4)
-  manualDividendYield  Decimal? @db.Decimal(10, 4)
-  manualDividendAmount Decimal? @db.Decimal(10, 4)
+  manualPeRatio             Decimal?                @db.Decimal(10, 2)
+  manualPegRatio            Decimal?                @db.Decimal(10, 2)
+  manualDebtToEquity        Decimal?                @db.Decimal(10, 4)
+  manualCurrentRatio        Decimal?                @db.Decimal(10, 4)
+  manualDividendYield       Decimal?                @db.Decimal(10, 4)
+  manualDividendAmount      Decimal?                @db.Decimal(10, 4)
   // Simple "does it pay a dividend?" tri-state - null means not entered/unknown, distinct
   // from false (confirmed no dividend). Prominent on its own since yield/amount can both be
   // blank even when the answer to this simpler question is known.
-  paysDividend Boolean?
+  paysDividend              Boolean?
   // "Are they profitable over the past several years?" - a deliberately simple, structured
   // manual judgment. Never computed from a single year's EPS; there is no verified
   // multi-year financial-statements provider wired up (see PROJECT_HANDOFF.md).
-  profitability     ProfitabilityAssessment @default(UNKNOWN)
-  profitabilityNote String?
+  profitability             ProfitabilityAssessment @default(UNKNOWN)
+  profitabilityNote         String?
 
-  watchlist   Watchlist           @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
-  owner       User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  notes       StockNote[]
-  comments    Comment[]
-  reactions   Reaction[]
+  watchlist Watchlist   @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  owner     User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  notes     StockNote[]
+  comments  Comment[]
+  reactions Reaction[]
 
   @@unique([watchlistId, ticker])
   @@index([ownerId, visibility])
@@ -886,35 +896,35 @@ model ScanCriterionResult {
 // userId, private research note, status, or campaign information (see Privacy section of the
 // slice this was built in).
 model TickerFundamentals {
-  ticker                     String    @id
-  name                       String?
-  description                String?
-  sector                     String?
-  industry                   String?
-  marketCapitalization       Decimal?  @db.Decimal(20, 2)
-  peRatio                    Decimal?  @db.Decimal(12, 4)
-  pegRatio                   Decimal?  @db.Decimal(12, 4)
-  eps                        Decimal?  @db.Decimal(12, 4)
-  dividendPerShare           Decimal?  @db.Decimal(12, 4)
-  dividendYield              Decimal?  @db.Decimal(10, 6)
-  profitMargin               Decimal?  @db.Decimal(10, 6)
-  operatingMarginTtm         Decimal?  @db.Decimal(10, 6)
-  returnOnAssetsTtm          Decimal?  @db.Decimal(10, 6)
-  returnOnEquityTtm          Decimal?  @db.Decimal(10, 6)
-  revenueTtm                 Decimal?  @db.Decimal(20, 2)
-  grossProfitTtm             Decimal?  @db.Decimal(20, 2)
-  quarterlyEarningsGrowthYoy Decimal?  @db.Decimal(10, 6)
-  quarterlyRevenueGrowthYoy  Decimal?  @db.Decimal(10, 6)
-  analystTargetPrice         Decimal?  @db.Decimal(12, 4)
-  analystStrongBuy           Int?
-  analystBuy                 Int?
-  analystHold                Int?
-  analystSell                Int?
-  analystStrongSell          Int?
-  bookValue                  Decimal?  @db.Decimal(12, 4)
-  priceToBookRatio           Decimal?  @db.Decimal(12, 4)
-  evToEbitda                 Decimal?  @db.Decimal(12, 4)
-  beta                       Decimal?  @db.Decimal(10, 4)
+  ticker                        String    @id
+  name                          String?
+  description                   String?
+  sector                        String?
+  industry                      String?
+  marketCapitalization          Decimal?  @db.Decimal(20, 2)
+  peRatio                       Decimal?  @db.Decimal(12, 4)
+  pegRatio                      Decimal?  @db.Decimal(12, 4)
+  eps                           Decimal?  @db.Decimal(12, 4)
+  dividendPerShare              Decimal?  @db.Decimal(12, 4)
+  dividendYield                 Decimal?  @db.Decimal(10, 6)
+  profitMargin                  Decimal?  @db.Decimal(10, 6)
+  operatingMarginTtm            Decimal?  @db.Decimal(10, 6)
+  returnOnAssetsTtm             Decimal?  @db.Decimal(10, 6)
+  returnOnEquityTtm             Decimal?  @db.Decimal(10, 6)
+  revenueTtm                    Decimal?  @db.Decimal(20, 2)
+  grossProfitTtm                Decimal?  @db.Decimal(20, 2)
+  quarterlyEarningsGrowthYoy    Decimal?  @db.Decimal(10, 6)
+  quarterlyRevenueGrowthYoy     Decimal?  @db.Decimal(10, 6)
+  analystTargetPrice            Decimal?  @db.Decimal(12, 4)
+  analystStrongBuy              Int?
+  analystBuy                    Int?
+  analystHold                   Int?
+  analystSell                   Int?
+  analystStrongSell             Int?
+  bookValue                     Decimal?  @db.Decimal(12, 4)
+  priceToBookRatio              Decimal?  @db.Decimal(12, 4)
+  evToEbitda                    Decimal?  @db.Decimal(12, 4)
+  beta                          Decimal?  @db.Decimal(10, 4)
   // BALANCE_SHEET-derived fields (2026-09 slice) - tracked independently from the OVERVIEW
   // fields above via their own fetchedAt/staleAfter/lastAttempt* set below, since balance
   // sheets are quarterly/slow-moving and must not be considered "fresh" merely because
@@ -925,28 +935,28 @@ model TickerFundamentals {
   // yet been verified against a real response (see the one-ticker APLD diagnostic), so writing
   // to it without that verification would risk an invented ratio; the column exists now so a
   // future slice can start populating it without another migration.
-  balanceSheetCurrentRatio   Decimal?  @db.Decimal(12, 4)
-  balanceSheetDebtToEquity   Decimal?  @db.Decimal(12, 4)
-  balanceSheetFiscalDateEnding DateTime?
-  balanceSheetFetchedAt      DateTime?
-  balanceSheetStaleAfter     DateTime?
-  balanceSheetLastAttemptAt  DateTime?
+  balanceSheetCurrentRatio      Decimal?  @db.Decimal(12, 4)
+  balanceSheetDebtToEquity      Decimal?  @db.Decimal(12, 4)
+  balanceSheetFiscalDateEnding  DateTime?
+  balanceSheetFetchedAt         DateTime?
+  balanceSheetStaleAfter        DateTime?
+  balanceSheetLastAttemptAt     DateTime?
   balanceSheetLastAttemptStatus String?
-  balanceSheetLastErrorMessage String?
-  source                     String    @default("Alpha Vantage")
+  balanceSheetLastErrorMessage  String?
+  source                        String    @default("Alpha Vantage")
   // Set only on a real SUCCESS classification - a failed/empty/rate-limited attempt never
   // touches fetchedAt/staleAfter or any value field above, so a transient failure can never
   // fabricate or blank out real fundamentals (see syncTickerFundamentalsFromAlphaVantage()).
-  fetchedAt                  DateTime?
+  fetchedAt                     DateTime?
   // Queue eligibility date - doubles as both the success-TTL expiry and a failure backoff
   // (a failed attempt still advances this a short distance so a permanently-invalid ticker
   // doesn't get retried on every single queue run and burn budget).
-  staleAfter                 DateTime?
-  lastAttemptAt              DateTime?
-  lastAttemptStatus          String?
-  lastErrorMessage           String?
-  createdAt                  DateTime  @default(now())
-  updatedAt                  DateTime  @updatedAt
+  staleAfter                    DateTime?
+  lastAttemptAt                 DateTime?
+  lastAttemptStatus             String?
+  lastErrorMessage              String?
+  createdAt                     DateTime  @default(now())
+  updatedAt                     DateTime  @updatedAt
 
   @@index([staleAfter])
   @@index([balanceSheetStaleAfter])
@@ -960,9 +970,9 @@ model TickerFundamentals {
 // via read-then-write from application code, so two concurrent requests can never overspend
 // the daily budget - see reserveAlphaVantageBudget() in src/lib/alpha-vantage-budget.ts.
 model AlphaVantageDailyUsage {
-  date        DateTime  @id @db.Date
-  autoCount   Int       @default(0)
-  manualCount Int       @default(0)
+  date         DateTime  @id @db.Date
+  autoCount    Int       @default(0)
+  manualCount  Int       @default(0)
   // Single-flight guard so a manual refresh and the automatic queue (or two overlapping
   // requests of either) can never both be mid-flight against the real Alpha Vantage API at
   // once - "do not parallelize Alpha Vantage OVERVIEW calls" applies across requests, not just
@@ -972,7 +982,7 @@ model AlphaVantageDailyUsage {
   // actual network calls. A stale lock (a crashed process never released it) self-heals after
   // 5 minutes rather than deadlocking the feature forever.
   runningSince DateTime?
-  updatedAt   DateTime  @updatedAt
+  updatedAt    DateTime  @updatedAt
 }
 
 model MarketQuoteCache {
@@ -1070,37 +1080,37 @@ model SchwabDeveloperCredential {
 }
 
 model BrokerRecord {
-  id                String               @id @default(cuid())
-  userId            String
-  accountId         String?
-  importBatchId     String?
-  linkedCampaignId  String?
-  provider          BrokerProvider       @default(SCHWAB)
-  kind              BrokerRecordKind
-  status            BrokerRecordStatus   @default(CONFIRMED)
-  fingerprint       String
-  identityKey       String
-  reconciliationKey String?
-  occurredAt        DateTime?
-  observedAt        DateTime?
-  symbol            String?
-  underlyingSymbol  String?
-  action            String?
-  description       String?
-  quantity          Decimal?             @db.Decimal(14, 4)
-  price             Decimal?             @db.Decimal(14, 4)
-  fees              Decimal?             @db.Decimal(14, 2)
-  amount            Decimal?             @db.Decimal(14, 2)
-  sources           BrokerRecordSource[] @default([])
-  sourceIds         String[]             @default([])
+  id                        String               @id @default(cuid())
+  userId                    String
+  accountId                 String?
+  importBatchId             String?
+  linkedCampaignId          String?
+  provider                  BrokerProvider       @default(SCHWAB)
+  kind                      BrokerRecordKind
+  status                    BrokerRecordStatus   @default(CONFIRMED)
+  fingerprint               String
+  identityKey               String
+  reconciliationKey         String?
+  occurredAt                DateTime?
+  observedAt                DateTime?
+  symbol                    String?
+  underlyingSymbol          String?
+  action                    String?
+  description               String?
+  quantity                  Decimal?             @db.Decimal(14, 4)
+  price                     Decimal?             @db.Decimal(14, 4)
+  fees                      Decimal?             @db.Decimal(14, 2)
+  amount                    Decimal?             @db.Decimal(14, 2)
+  sources                   BrokerRecordSource[] @default([])
+  sourceIds                 String[]             @default([])
   reconciliationDismissedAt DateTime?
-  metadata          Json?
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  account           TradingAccount?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  importBatch       BrokerImportBatch?   @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
-  linkedCampaign    Campaign?            @relation(fields: [linkedCampaignId], references: [id], onDelete: SetNull)
+  metadata                  Json?
+  createdAt                 DateTime             @default(now())
+  updatedAt                 DateTime             @updatedAt
+  user                      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account                   TradingAccount?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  importBatch               BrokerImportBatch?   @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  linkedCampaign            Campaign?            @relation(fields: [linkedCampaignId], references: [id], onDelete: SetNull)
 
   @@unique([userId, provider, kind, fingerprint])
   @@index([userId, provider, kind])
@@ -1171,4 +1181,52 @@ model EarningsCalendarEntry {
 
   @@id([ticker, reportDate])
   @@index([reportDate])
+}
+
+/// User-scoped cache of derived daily-candle technical values (RSI, Bollinger Bands) - see
+/// technical-indicator-cache.ts. Deliberately per-user, never shared: the underlying price
+/// history is fetched through one user's own resolved Schwab market-data connection
+/// (resolveMarketDataProviderForUser), and current provider policy explicitly disallows one
+/// user's personal OAuth/developer-credential access becoming another user's shared backend
+/// (`sharedFallback: "DISABLED_POLICY_NOT_VERIFIED"` in broker-connections.ts) - Matt's row for a
+/// ticker can never satisfy Eric's scan, and vice versa, even for the exact same ticker.
+///
+/// Deliberately does NOT store bbPercent (Bollinger "position") directly - the existing live
+/// scanner's bollingerPositionPercent(quote.price, bands) always uses the CURRENT live quote
+/// price at scan time, not a historical close, so any precomputed position would go stale the
+/// instant the price moves and could never be "the exact existing calculation." Instead this
+/// stores the bands themselves (bbLower/bbMiddle/bbUpper, purely history-derived and stable for
+/// the whole trading day) - the eventual scan-time join recomputes position against that scan's
+/// own fresh quote, reproducing today's live-scan math exactly rather than approximating it.
+///
+/// No providerConnectionId is stored: RSI/BB are objective market data (the same regardless of
+/// which of a user's own Schwab apps fetched the candles), so tracking connection identity would
+/// add complexity without preventing any real staleness risk - a broken/replaced connection
+/// simply means refreshes stop, which asOfDate/updatedAt-based freshness checks already surface
+/// honestly (see getTechnicalCacheReadinessForUser) rather than silently serving wrong data.
+///
+/// `asOfDate` is the financial CALENDAR DATE of the latest daily candle actually used (a real
+/// completed trading day) - @db.Date, never a shiftable timestamp, matching
+/// EarningsCalendarEntry's own reasoning. `status: FAILED` rows keep their previous good
+/// rsi/bb values in place if any existed (a failed refresh attempt only touches status/
+/// failureReason/updatedAt) - a transient provider error never destroys yesterday's valid
+/// snapshot the same way a failed OCC/earnings refresh never destroys their caches either.
+model TechnicalIndicatorSnapshot {
+  userId           String
+  ticker           String
+  asOfDate         DateTime?               @db.Date
+  status           TechnicalSnapshotStatus
+  rsi              Float?
+  bbLower          Float?
+  bbMiddle         Float?
+  bbUpper          Float?
+  /// A small, fixed, sanitized vocabulary only (e.g. "HISTORY_FETCH_FAILED") - never a raw
+  /// provider exception, response body, token, or credential. Null unless status = FAILED.
+  failureReason    String?
+  historyFetchedAt DateTime?
+  updatedAt        DateTime                @updatedAt
+  user             User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, ticker])
+  @@index([userId, status])
 }

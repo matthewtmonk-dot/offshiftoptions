@@ -28,6 +28,18 @@ export function nextNyseMarketDay(date: Date): Date {
   return candidate;
 }
 
+/** The last NYSE market day strictly BEFORE `date` (skips weekends and NYSE holidays) - the
+ * symmetric counterpart to nextNyseMarketDay, used to determine "the most recent trading day
+ * whose close has already happened" for daily-candle-based data freshness checks (see
+ * technical-indicator-cache.ts). */
+export function previousNyseMarketDay(date: Date): Date {
+  let candidate = addDaysUtc(date, -1);
+  while (!isNyseMarketDay(candidate)) {
+    candidate = addDaysUtc(candidate, -1);
+  }
+  return candidate;
+}
+
 const holidayCache = new Map<number, Set<string>>();
 
 function nyseHolidaysForYear(year: number): Set<string> {

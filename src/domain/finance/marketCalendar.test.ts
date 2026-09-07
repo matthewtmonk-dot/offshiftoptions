@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isNyseMarketDay, nextNyseMarketDay } from "./marketCalendar";
+import { isNyseMarketDay, nextNyseMarketDay, previousNyseMarketDay } from "./marketCalendar";
 
 function utc(year: number, month: number, day: number) {
   return new Date(Date.UTC(year, month - 1, day));
@@ -18,6 +18,21 @@ describe("nextNyseMarketDay", () => {
   it("skips a plain weekend with no holiday involved", () => {
     // Fri Jan 2 2026 -> next market day Mon Jan 5 2026.
     expect(key(nextNyseMarketDay(utc(2026, 1, 2)))).toBe("2026-01-05");
+  });
+});
+
+describe("previousNyseMarketDay", () => {
+  it("Mon Sep 7 2026 (Labor Day) -> previous market day is Fri Sep 4 2026, skipping the weekend and the holiday itself", () => {
+    expect(key(previousNyseMarketDay(utc(2026, 9, 7)))).toBe("2026-09-04");
+  });
+
+  it("Mon Jan 5 2026 -> previous market day is Fri Jan 2 2026, skipping a plain weekend", () => {
+    expect(key(previousNyseMarketDay(utc(2026, 1, 5)))).toBe("2026-01-02");
+  });
+
+  it("is the exact inverse of nextNyseMarketDay across a holiday weekend", () => {
+    const afterHoliday = nextNyseMarketDay(utc(2026, 9, 4));
+    expect(key(previousNyseMarketDay(afterHoliday))).toBe("2026-09-04");
   });
 });
 

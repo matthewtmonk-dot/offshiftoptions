@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { requireCurrentUser } from "@/lib/auth";
 import { QuoteBatchDiagnosticPanel } from "./quote-batch-diagnostic-panel";
 import { ScannerUniverseDryRunPanel } from "./scanner-universe-dry-run-panel";
+import { TechnicalCachePanel } from "./technical-cache-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,20 @@ export default async function SchwabQuoteBatchDiagnosticPage() {
           </p>
         </div>
         <ScannerUniverseDryRunPanel />
+      </div>
+
+      <div className="space-y-3 border-t border-zinc-800 pt-6">
+        <div>
+          <h2 className="text-xl font-semibold text-zinc-50">Technical Indicator Cache</h2>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            Your own user-scoped RSI/Bollinger Band cache, sourced only through your own Schwab connection - never
+            shared with another user. Unlike the two diagnostics above, &quot;Warm Cache&quot; is not purely
+            read-only: it fetches real price history for up to 25 symbols per click and persists the derived
+            technical values so a future broad scan doesn&apos;t need to fetch history interactively. Not scheduled
+            or wired into Run Live Scan yet.
+          </p>
+        </div>
+        <TechnicalCachePanel />
       </div>
     </div>
   );

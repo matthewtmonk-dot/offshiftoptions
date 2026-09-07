@@ -1,6 +1,7 @@
 import "server-only";
 
 import { prisma } from "./prisma";
+import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
 import { SchwabApiError, schwabGetJson, type SchwabFetch } from "@/providers/schwab/client";
 import { SCHWAB_MARKET_DATA_BASE_URL } from "@/providers/schwab/config";
 import { normalizeSchwabQuotesResponse } from "@/providers/schwab/normalizers";
@@ -29,10 +30,16 @@ const LARGEST_DIAGNOSTIC_SIZE = Math.max(...SCHWAB_QUOTE_BATCH_DIAGNOSTIC_SIZES)
  * the source table can never silently shrink the actual distinct count below what a batch claims
  * to test. Ticker is this table's own primary key, so duplicates should never occur in practice -
  * the dedupe is defense in depth, not a workaround for a known data issue. No BRKB -> BRK.B (or
- * any other) ticker transliteration is applied - OCC's own values are used as-is.
+ * any other) ticker transliteration is applied - OCC's own values are used as-is. Scoped to a
+ * specific `source` (real callers default to OCC_OPTIONABLE_UNIVERSE_SOURCE = "OCC") - the table
+ * is otherwise source-agnostic (see optionable-universe-cache.ts), and this diagnostic's job is
+ * to test against the real production OCC universe specifically, not merely "whatever happens to
+ * be in the table" (which could otherwise include unrelated future sources, or - in dev/test -
+ * other tests' own fixture rows sharing the same physical database).
  */
-async function loadDeterministicDistinctSymbols(limit: number): Promise<string[]> {
+async function loadDeterministicDistinctSymbols(limit: number, source: string): Promise<string[]> {
   const rows = await prisma.optionableUniverseSymbol.findMany({
+    where: { source },
     select: { ticker: true },
     orderBy: { ticker: "asc" },
     take: limit,
@@ -99,7 +106,7 @@ export type SchwabQuoteBatchDiagnosticResult =
  */
 export async function runSchwabQuoteBatchDiagnosticForUser(
   userId: string,
-  options: { fetchFn?: SchwabFetch; now?: Date } = {},
+  options: { fetchFn?: SchwabFetch; now?: Date; universeSource?: string } = {},
 ): Promise<SchwabQuoteBatchDiagnosticResult> {
   const now = options.now ?? new Date();
 
@@ -129,7 +136,7 @@ export async function runSchwabQuoteBatchDiagnosticForUser(
   // Loaded once, up front - the same deterministic, ordered, deduplicated pool backs every size;
   // each size just takes a longer prefix of it, so a 25-symbol test's tickers are a strict subset
   // of the 100-symbol test's tickers.
-  const distinctSymbols = await loadDeterministicDistinctSymbols(LARGEST_DIAGNOSTIC_SIZE);
+  const distinctSymbols = await loadDeterministicDistinctSymbols(LARGEST_DIAGNOSTIC_SIZE, options.universeSource ?? OCC_OPTIONABLE_UNIVERSE_SOURCE);
 
   const results: SchwabQuoteBatchSizeOutcome[] = [];
   let largestVerifiedRequestSize: number | null = null;

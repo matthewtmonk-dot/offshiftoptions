@@ -93,7 +93,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
     await seedUniverse(syntheticTickers(150));
     const { fetchFn, requestedSymbolsPerCall } = capturingFetchFn();
 
-    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
     expect(result.status).toBe("OK");
     if (result.status !== "OK") throw new Error("expected OK");
 
@@ -123,7 +123,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
     await seedUniverse(syntheticTickers(120));
     const { fetchFn, requestedSymbolsPerCall } = capturingFetchFn();
 
-    await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
     const [size5, size25, , size100] = requestedSymbolsPerCall;
     expect(size100.slice(0, 5)).toEqual(size5);
     expect(size100.slice(0, 25)).toEqual(size25);
@@ -138,7 +138,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
     await seedUniverse([...base, "sym000", " SYM001 "]);
     const { fetchFn, requestedSymbolsPerCall } = capturingFetchFn();
 
-    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
     expect(result.status).toBe("OK");
     if (result.status !== "OK") throw new Error("expected OK");
 
@@ -160,7 +160,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
     await seedUniverse(syntheticTickers(30)); // enough for 5 and 25, not enough for 50 or 100
     const { fetchFn, requestedSymbolsPerCall } = capturingFetchFn();
 
-    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
     expect(result.status).toBe("OK");
     if (result.status !== "OK") throw new Error("expected OK");
 
@@ -183,7 +183,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
       return new Response(JSON.stringify(fakeQuotesResponse(symbols.slice(0, 3))), { status: 200 });
     }) as unknown as typeof fetch;
 
-    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
     expect(result.status).toBe("OK");
     if (result.status !== "OK") throw new Error("expected OK");
     const size5 = result.results[0];
@@ -211,7 +211,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
       return { fetchFn, requestedSymbolsPerCall };
     })();
 
-    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
     expect(result.status).toBe("OK");
     if (result.status !== "OK") throw new Error("expected OK");
     expect(requestedSymbolsPerCall).toHaveLength(2); // size 5 (accepted), then size 25 (rejected) - never reaches 50 or 100
@@ -233,7 +233,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
     });
 
     const { fetchFn, requestedSymbolsPerCall } = capturingFetchFn();
-    await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
 
     const allRequestedSymbols = requestedSymbolsPerCall.flat();
     expect(allRequestedSymbols).not.toContain("PRIVATEW");
@@ -247,7 +247,7 @@ maybeDescribe("Schwab quote batch-size diagnostic - market data only, never touc
     await seedUniverse(syntheticTickers(10));
     const { fetchFn } = capturingFetchFn();
 
-    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn });
+    const result = await runSchwabQuoteBatchDiagnosticForUser(user.id, { fetchFn, universeSource: TEST_SOURCE });
     expect(JSON.stringify(result)).not.toContain("access-token-secret-check");
   });
 });

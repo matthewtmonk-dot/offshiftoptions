@@ -51,6 +51,12 @@ import {
 } from "@/lib/broker-connections";
 import { runScannerUniverseDryRun } from "@/lib/scanner-universe-dry-run";
 import {
+  getEligibleTechnicalRefreshTickersForUser,
+  getTechnicalCacheReadinessForUser,
+  refreshTechnicalIndicatorCacheBatchForUser,
+  TECHNICAL_REFRESH_BATCH_SIZE,
+} from "@/lib/technical-indicator-cache";
+import {
   runSchwabTransactionsDiagnosticForUser,
   type SchwabTransactionsDiagnosticResult,
 } from "@/lib/schwab-transactions-diagnostic";
@@ -483,6 +489,71 @@ export async function runScannerUniverseDryRunAction(): Promise<ScannerUniverseD
     earningsUnknown: result.earningsUnknown,
     estimatedHistoryCallsRequired: result.estimatedHistoryCallsRequired,
     estimatedOptionChainCallsRequired: result.estimatedOptionChainCallsRequired,
+  };
+}
+
+export type TechnicalCacheWarmActionResult =
+  | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string }
+  | { status: "OK"; processedCount: number; succeededCount: number; failedCount: number; remainingEligibleCount: number };
+
+/**
+ * Explicit-click warm-cache action - the ONLY way this user's technical cache is refreshed right
+ * now (no schedule, no cron secret exists for this yet - see PROJECT_HANDOFF.md "Background
+ * invocation design"). Resolves and uses ONLY the current authenticated user's own market-data
+ * provider (same resolveMarketDataProviderForUser isolation as the dry run / batch diagnostic) -
+ * this deliberately cannot be triggered for, or on behalf of, any other user. Processes at most
+ * TECHNICAL_REFRESH_BATCH_SIZE symbols per click - never a long-running single request.
+ */
+export async function warmTechnicalIndicatorCacheAction(): Promise<TechnicalCacheWarmActionResult> {
+  const user = await requireCurrentUser();
+  const resolved = await resolveMarketDataProviderForUser(user.id);
+  if (!resolved.provider) {
+    return {
+      status: "UNAVAILABLE",
+      reason: resolved.reason,
+      message:
+        resolved.reason === "NO_USER_CONNECTION"
+          ? "Connect Schwab from Account before warming the technical cache."
+          : "Reconnect Schwab from Account before warming the technical cache.",
+    };
+  }
+
+  const result = await refreshTechnicalIndicatorCacheBatchForUser(user.id, resolved.provider, { batchSize: TECHNICAL_REFRESH_BATCH_SIZE });
+  return { status: "OK", ...result };
+}
+
+export type TechnicalCacheReadinessActionResult =
+  | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string }
+  | { status: "OK"; eligibleCount: number; readyCount: number; pendingCount: number; lastPreparedAt: string | null };
+
+/** Read-only - never fetches a quote or history, just reports the current cache state (still
+ * needs the user's resolved provider to compute the CURRENT eligible set via Phase A's quote
+ * sweep, so this is not entirely free, but it never touches history/option-chain endpoints). */
+export async function getTechnicalCacheReadinessAction(): Promise<TechnicalCacheReadinessActionResult> {
+  const user = await requireCurrentUser();
+  const resolved = await resolveMarketDataProviderForUser(user.id);
+  if (!resolved.provider) {
+    return {
+      status: "UNAVAILABLE",
+      reason: resolved.reason,
+      message:
+        resolved.reason === "NO_USER_CONNECTION"
+          ? "Connect Schwab from Account to check technical cache readiness."
+          : "Reconnect Schwab from Account to check technical cache readiness.",
+    };
+  }
+
+  const eligible = await getEligibleTechnicalRefreshTickersForUser(user.id, resolved.provider);
+  const status = await getTechnicalCacheReadinessForUser(
+    user.id,
+    eligible.map((item) => item.ticker),
+  );
+  return {
+    status: "OK",
+    eligibleCount: status.eligibleCount,
+    readyCount: status.readyCount,
+    pendingCount: status.pendingCount,
+    lastPreparedAt: status.lastPreparedAt?.toISOString() ?? null,
   };
 }
 
