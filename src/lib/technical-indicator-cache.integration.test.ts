@@ -213,6 +213,15 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(lookup.get("TECHSTALE")?.state).toBe("TECHNICAL_DATA_STALE");
   });
 
+  it("reports a real, non-negative elapsedMs for the whole invocation - the aggregate cost a caller needs to estimate worker invocations, never a per-request breakdown", async () => {
+    await seedUniverse(["TECHTIME"]);
+    const provider = fakeProvider({ quotes: { TECHTIME: { price: 20, volume: 1_000_000 } } });
+
+    const result = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 5 });
+    expect(typeof result.elapsedMs).toBe("number");
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
   it("a price-history failure for one symbol is isolated - other symbols in the same batch still succeed, and the failed row is HISTORY_UNAVAILABLE not fabricated", async () => {
     await seedUniverse(["TECHGOOD", "TECHBAD"]);
     const provider = fakeProvider({

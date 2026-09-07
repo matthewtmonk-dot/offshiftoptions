@@ -106,9 +106,11 @@ function WarmResult({ result }: { result: TechnicalCacheWarmActionResult }) {
   return (
     <Panel title="Warm-Up Result">
       <div className="flex flex-wrap gap-2 text-xs">
+        <Badge tone="neutral">{result.processedCount} selected</Badge>
         <Badge tone="good">{result.succeededCount} refreshed</Badge>
         {result.failedCount > 0 ? <Badge tone="bad">{result.failedCount} failed</Badge> : null}
         <Badge tone="neutral">{result.remainingEligibleCount} remaining after this batch</Badge>
+        <Badge tone="info">{result.elapsedMs}ms elapsed</Badge>
       </div>
       {result.remainingEligibleCount > 0 ? (
         <p className="mt-2 text-xs text-zinc-500">Click &quot;Warm Cache&quot; again to process the next batch.</p>

@@ -494,7 +494,14 @@ export async function runScannerUniverseDryRunAction(): Promise<ScannerUniverseD
 
 export type TechnicalCacheWarmActionResult =
   | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string }
-  | { status: "OK"; processedCount: number; succeededCount: number; failedCount: number; remainingEligibleCount: number };
+  | {
+      status: "OK";
+      processedCount: number;
+      succeededCount: number;
+      failedCount: number;
+      remainingEligibleCount: number;
+      elapsedMs: number;
+    };
 
 /**
  * Explicit-click warm-cache action - the ONLY way this user's technical cache is refreshed right

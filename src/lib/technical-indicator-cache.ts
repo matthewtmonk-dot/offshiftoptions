@@ -133,6 +133,11 @@ export type TechnicalRefreshBatchResult = {
   /** How many eligible tickers still need a refresh (missing/stale/retryable-failed) after this
    * batch - 0 means fully caught up. Lets a caller decide whether to invoke again. */
   remainingEligibleCount: number;
+  /** Real wall-clock time for this ENTIRE invocation (Phase A's quote sweep + Phase B's bounded
+   * history processing), in milliseconds - the aggregate cost a caller needs to estimate how many
+   * worker invocations a full preparation cycle would take. Never a raw per-request timing
+   * breakdown, no raw provider response, no token - just one aggregate number. */
+  elapsedMs: number;
 };
 
 /**
@@ -149,6 +154,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   provider: MarketDataProvider,
   options: { batchSize?: number; now?: Date } = {},
 ): Promise<TechnicalRefreshBatchResult> {
+  const startedAt = Date.now();
   const now = options.now ?? new Date();
   const batchSize = options.batchSize ?? TECHNICAL_REFRESH_BATCH_SIZE;
 
@@ -202,6 +208,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
     succeededCount,
     failedCount,
     remainingEligibleCount: Math.max(needsWork.length - batch.length, 0),
+    elapsedMs: Date.now() - startedAt,
   };
 }
 
