@@ -45,7 +45,7 @@ export type EarningsCalendarRefreshResult =
   | { status: "LOCK_UNAVAILABLE" }
   | { status: "BUDGET_EXHAUSTED"; usage: AlphaVantageUsageSnapshot }
   | { status: "ALREADY_FRESH"; cache: EarningsCalendarCacheStatus }
-  | { status: "FETCH_FAILED"; outcome: "RATE_LIMITED" | "ERROR_MESSAGE" | "EMPTY" | "HTTP_ERROR"; message?: string }
+  | { status: "FETCH_FAILED"; outcome: "RATE_LIMITED" | "ERROR_MESSAGE" | "EMPTY" | "HTTP_ERROR"; message?: string; httpStatus?: number }
   | { status: "SUCCESS"; entryCount: number; prunedCount: number; usage: AlphaVantageUsageSnapshot };
 
 type RefreshOptions = {
@@ -96,7 +96,12 @@ export async function refreshEarningsCalendarCache(options: RefreshOptions = {})
 
     const result = await fetchAlphaVantageEarningsCalendar({ apiKey, fetchFn: options.fetchFn });
     if (result.outcome !== "SUCCESS") {
-      return { status: "FETCH_FAILED", outcome: result.outcome, message: "message" in result ? result.message : undefined };
+      return {
+        status: "FETCH_FAILED",
+        outcome: result.outcome,
+        message: "message" in result ? result.message : undefined,
+        httpStatus: result.outcome === "HTTP_ERROR" ? result.status : undefined,
+      };
     }
 
     const deduped = dedupeEntries(result.entries);

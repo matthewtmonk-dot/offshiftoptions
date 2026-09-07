@@ -36,7 +36,14 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
 
   afterEach(async () => {
     await prisma.earningsCalendarEntry.deleteMany({});
-    await prisma.alphaVantageDailyUsage.deleteMany({ where: { date: new Date("2099-11-20T00:00:00.000Z") } });
+    // Some tests here pass a `now` more than 24h past TEST_NOW (e.g. TEST_NOW + 25h/+26h, to
+    // exercise a later refresh), which rolls the AlphaVantageDailyUsage dateKey onto the next
+    // calendar day - clean up the whole file-unique synthetic date range, not just TEST_NOW's own
+    // day, so repeated local/CI runs never accumulate a stale AUTO reservation count against a
+    // fixed future date and spuriously start returning BUDGET_EXHAUSTED.
+    await prisma.alphaVantageDailyUsage.deleteMany({
+      where: { date: { gte: new Date("2099-11-20T00:00:00.000Z"), lte: new Date("2099-11-22T00:00:00.000Z") } },
+    });
   });
 
   afterAll(() => {

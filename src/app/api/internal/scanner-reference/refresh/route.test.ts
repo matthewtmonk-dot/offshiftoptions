@@ -152,6 +152,116 @@ describe("POST /api/internal/scanner-reference/refresh", () => {
     expect(body.earnings).toMatchObject({ status: "FETCH_FAILED", alphaVantageCallUsed: true, fresh: false });
   });
 
+  it("reports failureOutcome RATE_LIMITED with its already-sanitized message on a rate-limited fetch", async () => {
+    refreshOccMock.mockResolvedValue({ status: "EMPTY", message: "unused in this test" });
+    refreshEarningsMock.mockResolvedValue({
+      status: "FETCH_FAILED",
+      outcome: "RATE_LIMITED",
+      message: "Alpha Vantage's standard API rate limit is 25 requests per day.",
+    });
+
+    const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scanner-reference-secret" }));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.earnings).toMatchObject({
+      status: "FETCH_FAILED",
+      failureOutcome: "RATE_LIMITED",
+      message: "Alpha Vantage's standard API rate limit is 25 requests per day.",
+    });
+    expect(body.earnings.httpStatus).toBeUndefined();
+  });
+
+  it("reports failureOutcome HTTP_ERROR with its safe numeric httpStatus", async () => {
+    refreshOccMock.mockResolvedValue({ status: "EMPTY", message: "unused in this test" });
+    refreshEarningsMock.mockResolvedValue({
+      status: "FETCH_FAILED",
+      outcome: "HTTP_ERROR",
+      message: "Alpha Vantage returned HTTP 503.",
+      httpStatus: 503,
+    });
+
+    const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scanner-reference-secret" }));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.earnings).toMatchObject({
+      status: "FETCH_FAILED",
+      failureOutcome: "HTTP_ERROR",
+      message: "Alpha Vantage returned HTTP 503.",
+      httpStatus: 503,
+    });
+  });
+
+  it("reports failureOutcome EMPTY when Alpha Vantage returned no usable rows", async () => {
+    refreshOccMock.mockResolvedValue({ status: "EMPTY", message: "unused in this test" });
+    refreshEarningsMock.mockResolvedValue({
+      status: "FETCH_FAILED",
+      outcome: "EMPTY",
+      message: "Alpha Vantage earnings calendar contained no usable rows.",
+    });
+
+    const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scanner-reference-secret" }));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.earnings).toMatchObject({ status: "FETCH_FAILED", failureOutcome: "EMPTY" });
+    expect(body.earnings.httpStatus).toBeUndefined();
+  });
+
+  it("reports failureOutcome ERROR_MESSAGE when Alpha Vantage's response shape was unexpected", async () => {
+    refreshOccMock.mockResolvedValue({ status: "EMPTY", message: "unused in this test" });
+    refreshEarningsMock.mockResolvedValue({
+      status: "FETCH_FAILED",
+      outcome: "ERROR_MESSAGE",
+      message: "Alpha Vantage earnings calendar response did not include the expected columns.",
+    });
+
+    const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scanner-reference-secret" }));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.earnings).toMatchObject({ status: "FETCH_FAILED", failureOutcome: "ERROR_MESSAGE" });
+    expect(body.earnings.httpStatus).toBeUndefined();
+  });
+
+  it("never includes failureOutcome/httpStatus on a non-FETCH_FAILED earnings status - the current successful response shape is unchanged", async () => {
+    const lastSeenAt = new Date("2026-09-08T00:00:00Z");
+    refreshOccMock.mockResolvedValue({ status: "EMPTY", message: "unused in this test" });
+
+    refreshEarningsMock.mockResolvedValue({ status: "SUCCESS", entryCount: 1400, prunedCount: 2, usage: {} });
+    earningsCacheStatusMock.mockResolvedValue({ lastSuccessfulRefreshAt: lastSeenAt, entryCount: 1400, isStale: false });
+    let response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scanner-reference-secret" }));
+    let body = await response.json();
+    expect(body.earnings).toEqual({
+      status: "SUCCESS",
+      entryCount: 1400,
+      alphaVantageCallUsed: true,
+      fresh: true,
+      lastSuccessfulRefreshAt: lastSeenAt.toISOString(),
+    });
+    expect(body.earnings.failureOutcome).toBeUndefined();
+    expect(body.earnings.httpStatus).toBeUndefined();
+
+    refreshEarningsMock.mockResolvedValue({ status: "ALREADY_FRESH", cache: { lastSuccessfulRefreshAt: lastSeenAt, entryCount: 1400, isStale: false } });
+    earningsCacheStatusMock.mockResolvedValue({ lastSuccessfulRefreshAt: lastSeenAt, entryCount: 1400, isStale: false });
+    response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scanner-reference-secret" }));
+    body = await response.json();
+    expect(body.earnings.failureOutcome).toBeUndefined();
+    expect(body.earnings.httpStatus).toBeUndefined();
+  });
+
+  it("never leaks an API key, bearer token, or secret-looking value through the FETCH_FAILED diagnostic fields", async () => {
+    refreshOccMock.mockResolvedValue({ status: "EMPTY", message: "unused in this test" });
+    refreshEarningsMock.mockResolvedValue({
+      status: "FETCH_FAILED",
+      outcome: "HTTP_ERROR",
+      message: "Alpha Vantage returned a message that was withheld by the safety filter.",
+      httpStatus: 401,
+    });
+
+    const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scanner-reference-secret" }));
+    const text = await response.text();
+    expect(text).not.toContain("sentinel-scanner-reference-secret");
+    expect(text.toLowerCase()).not.toMatch(/apikey=|api[_-]?key["\s:=]|authorization|bearer /);
+  });
+
   it("never exposes the configured secret anywhere in the response", async () => {
     refreshOccMock.mockResolvedValue({ status: "EMPTY", message: "unused" });
     refreshEarningsMock.mockResolvedValue({ status: "NO_API_KEY" });

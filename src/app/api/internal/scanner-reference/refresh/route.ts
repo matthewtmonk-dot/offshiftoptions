@@ -24,6 +24,14 @@ export const runtime = "nodejs";
  * Response is aggregate-only: row/entry counts and refresh status, never a symbol list, never
  * Schwab data, never a secret. Both refreshes are independent - a failure in one never blocks or
  * is masked by the other.
+ *
+ * On earnings FETCH_FAILED specifically, the response also includes `failureOutcome`
+ * (RATE_LIMITED/ERROR_MESSAGE/EMPTY/HTTP_ERROR), an already-sanitized `message` where the
+ * provider layer supplied one, and `httpStatus` for HTTP_ERROR - this is the only way to
+ * diagnose a real production failure without a database console. Never the API key, an
+ * authorization header, a raw URL, a raw response body, a raw exception, or a stack trace -
+ * fetchAlphaVantageEarningsCalendar's own sanitizeMessage already redacts the API key and
+ * withholds any credential-looking text before this endpoint ever sees it.
  */
 export async function POST(request: Request) {
   const provided = extractProvidedCronSecret(request.headers);
@@ -76,6 +84,17 @@ async function refreshEarnings() {
       alphaVantageCallUsed,
       fresh: !status.isStale,
       lastSuccessfulRefreshAt: status.lastSuccessfulRefreshAt?.toISOString() ?? null,
+      // FETCH_FAILED only - already-sanitized (see fetchAlphaVantageEarningsCalendar's
+      // sanitizeMessage, which redacts the API key and blocks credential-looking text) failure
+      // detail so a real production failure is diagnosable without a database console. Never
+      // present on any other status.
+      ...(result.status === "FETCH_FAILED"
+        ? {
+            failureOutcome: result.outcome,
+            message: result.message,
+            httpStatus: result.outcome === "HTTP_ERROR" ? result.httpStatus : undefined,
+          }
+        : {}),
     };
   } catch {
     // Sanitized - never echoes a raw fetch/network error or payload detail.
