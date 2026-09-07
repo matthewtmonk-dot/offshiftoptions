@@ -59,6 +59,13 @@ export type AlphaVantageTextFetchResult = {
  * still signal throttling/errors on these endpoints via an HTTP 200 with a JSON body instead of
  * CSV, so callers must sniff the text (does it start with "{"?) before treating it as CSV - see
  * fetchAlphaVantageEarningsCalendar in earnings-calendar.ts.
+ *
+ * Deliberately sends NO `Accept` header (a plain, unrestricted request) rather than
+ * `Accept: text/csv` - live production evidence (2026-09) showed EARNINGS_CALENDAR returning
+ * HTTP 406 with that explicit, restrictive Accept value. Since the response can legitimately be
+ * either CSV (success) or JSON (throttle/error) and this function already reads it as raw text
+ * either way, an unrestricted request has no downside here and avoids constraining
+ * content-negotiation to a media type Alpha Vantage's endpoint apparently doesn't reliably honor.
  */
 export async function fetchAlphaVantageText({
   apiKey,
@@ -77,9 +84,7 @@ export async function fetchAlphaVantageText({
   }
   url.searchParams.set("apikey", apiKey);
 
-  const response = await fetchFn(url, {
-    headers: { Accept: "text/csv" },
-  });
+  const response = await fetchFn(url);
 
   const text = await response.text();
   return { text, status: response.status };
