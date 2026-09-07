@@ -611,7 +611,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
     // Pre-create the run once (outside the race) so this test isolates the CLAIM race specifically,
     // not the run-creation race already covered above.
-    await getOrCreateActiveTechnicalPreparationRun(matt.id, makeProvider("a"));
+    const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, makeProvider("a"));
 
     const [resultA, resultB] = await Promise.all([
       refreshTechnicalIndicatorCacheBatchForUser(matt.id, makeProvider("a"), { batchSize: 25 }),
@@ -629,7 +629,11 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       expect(count).toBe(1); // every ticker's history was fetched exactly once total, never twice
     }
 
-    const readyRows = await prisma.technicalPreparationItem.count({ where: { status: "READY" } });
+    // Scoped to THIS test's own run - an unscoped global count would pick up READY items from
+    // other concurrently-running test files' own runs under Vitest's parallel-by-file execution
+    // against the shared local dev DB (the same test-isolation hazard documented elsewhere in this
+    // file/PROJECT_HANDOFF.md).
+    const readyRows = await prisma.technicalPreparationItem.count({ where: { status: "READY", runId } });
     expect(readyRows).toBe(40);
   });
 

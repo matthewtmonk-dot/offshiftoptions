@@ -374,3 +374,84 @@ maybeDescribe("database-backed Phase 1B workflows", () => {
     expect(liveRun).toBeNull();
   });
 });
+
+maybeDescribe("ensureMyLstScannerProfileForUser - concurrency", () => {
+  let prisma: typeof import("./prisma").prisma;
+  let workflows: typeof import("./workflows");
+  const createdUserIds: string[] = [];
+
+  beforeAll(async () => {
+    prisma = (await import("./prisma")).prisma;
+    workflows = await import("./workflows");
+  });
+
+  afterAll(async () => {
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await prisma.$disconnect();
+  });
+
+  async function createRaceUser(label: string) {
+    const passwordHash = await hash("not-used", 4);
+    const user = await prisma.user.create({
+      data: {
+        name: `Race ${label}`,
+        email: `race-${label.toLowerCase()}-${Date.now()}-${Math.random().toString(36).slice(2)}@lst.local`,
+        passwordHash,
+      },
+    });
+    createdUserIds.push(user.id);
+    return user;
+  }
+
+  it("two simultaneous calls for a brand-new user yield exactly one My LST profile with the full default rule set, and both return the same profile", async () => {
+    const user = await createRaceUser("A");
+
+    const [profileA, profileB] = await Promise.all([
+      workflows.ensureMyLstScannerProfileForUser(user.id),
+      workflows.ensureMyLstScannerProfileForUser(user.id),
+    ]);
+
+    expect(profileA.id).toBe(profileB.id); // both callers got the same canonical profile, not two
+
+    const profileCount = await prisma.scannerProfile.count({ where: { ownerId: user.id, name: "My LST" } });
+    expect(profileCount).toBe(1); // the unique constraint allowed exactly one row to persist
+
+    const rules = await prisma.scannerRule.findMany({ where: { profileId: profileA.id } });
+    expect(rules).toHaveLength(SCANNER_RULE_DEFINITIONS.length); // fully initialized, never partial
+    expect(new Set(rules.map((rule) => rule.key)).size).toBe(rules.length); // no duplicate child rows
+  });
+
+  it("five simultaneous calls for a brand-new user (higher contention) still yield exactly one profile and one canonical rule set", async () => {
+    const user = await createRaceUser("B");
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => workflows.ensureMyLstScannerProfileForUser(user.id)),
+    );
+
+    expect(new Set(results.map((profile) => profile.id)).size).toBe(1); // every caller got the same profile
+
+    const profileCount = await prisma.scannerProfile.count({ where: { ownerId: user.id, name: "My LST" } });
+    expect(profileCount).toBe(1);
+
+    const rules = await prisma.scannerRule.findMany({ where: { profileId: results[0].id } });
+    expect(rules).toHaveLength(SCANNER_RULE_DEFINITIONS.length);
+  });
+
+  it("resolves two different users' simultaneous races independently - one user's race never creates or touches another user's profile", async () => {
+    const [userA, userB] = await Promise.all([createRaceUser("C"), createRaceUser("D")]);
+
+    await Promise.all([
+      workflows.ensureMyLstScannerProfileForUser(userA.id),
+      workflows.ensureMyLstScannerProfileForUser(userA.id),
+      workflows.ensureMyLstScannerProfileForUser(userB.id),
+      workflows.ensureMyLstScannerProfileForUser(userB.id),
+    ]);
+
+    const [aCount, bCount] = await Promise.all([
+      prisma.scannerProfile.count({ where: { ownerId: userA.id, name: "My LST" } }),
+      prisma.scannerProfile.count({ where: { ownerId: userB.id, name: "My LST" } }),
+    ]);
+    expect(aCount).toBe(1);
+    expect(bCount).toBe(1);
+  });
+});

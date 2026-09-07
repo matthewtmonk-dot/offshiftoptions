@@ -1423,32 +1423,108 @@ export async function markAllNotificationsReadForUser(userId: string) {
   });
 }
 
+const MY_LST_SCANNER_PROFILE_NAME = "My LST";
+
+/** True only for a P2002 violation of ScannerProfile's own `@@unique([ownerId, name])` constraint -
+ * never treats an arbitrary Prisma error (e.g. a genuine validation failure, a different unique
+ * constraint on a nested ScannerRule row, or an unrelated FK error) as this specific race. Verified
+ * against a real concurrent P2002 in this Prisma 7 driver-adapter setup: the violated constraint's
+ * name comes back at `meta.driverAdapterError.cause.constraint.index`, NOT the classic top-level
+ * `meta.target` string/array some other Prisma connector versions use - both shapes are checked so
+ * this stays correct if the underlying adapter/connector ever changes. */
+function isMyLstScannerProfileNameConstraintError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const err = error as {
+    code?: string;
+    meta?: { target?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
+  };
+  if (err.code !== "P2002") return false;
+
+  const driverAdapterIndex = err.meta?.driverAdapterError?.cause?.constraint?.index;
+  if (typeof driverAdapterIndex === "string") {
+    return driverAdapterIndex === "ScannerProfile_ownerId_name_key";
+  }
+
+  const target = err.meta?.target;
+  if (typeof target === "string") return target === "ScannerProfile_ownerId_name_key";
+  if (Array.isArray(target)) return target.includes("ownerId") && target.includes("name");
+
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Bounded wait for a concurrent caller's profile+rules creation to become visible. Unlike the
+ * TechnicalPreparationRun race (a multi-second quote sweep between placeholder and completion),
+ * ScannerProfile creation is one nested Prisma `create()` call - profile and all its default
+ * ScannerRule rows are written as a single atomic operation, so by the time a losing `create()`
+ * throws P2002 the winner's transaction has already committed in full; there is no "still in
+ * progress, partially written" state to poll through here. This loop is defense-in-depth only, not
+ * a wait for real in-flight work - 20 x 25ms = 500ms ceiling, far shorter than the technical-
+ * preparation-run poll's 30s (which genuinely waits out a real quote sweep). */
+const SCANNER_PROFILE_RACE_POLL_INTERVAL_MS = 25;
+const SCANNER_PROFILE_RACE_POLL_MAX_ATTEMPTS = 20;
+
+async function waitForConcurrentMyLstScannerProfileCreation(userId: string) {
+  for (let attempt = 0; attempt < SCANNER_PROFILE_RACE_POLL_MAX_ATTEMPTS; attempt += 1) {
+    const winner = await prisma.scannerProfile.findFirst({
+      where: { ownerId: userId, name: MY_LST_SCANNER_PROFILE_NAME },
+    });
+    if (winner) {
+      return winner;
+    }
+    await sleep(SCANNER_PROFILE_RACE_POLL_INTERVAL_MS);
+  }
+  throw new Error("Timed out waiting for a concurrent My LST scanner profile creation to finish.");
+}
+
+/**
+ * Returns the current user's "My LST" ScannerProfile, creating it (with its full set of default
+ * ScannerRule rows from SCANNER_RULE_DEFINITIONS) only if none exists yet.
+ *
+ * Concurrency-safe by construction: `(ownerId, name)` is a real database unique constraint (see
+ * ScannerProfile's schema). Two overlapping calls that both observe no existing row will both
+ * attempt `create()`; Postgres accepts exactly one and rejects the other with a unique-constraint
+ * error (P2002) on that exact constraint - the loser never creates a second profile or a duplicate
+ * set of rules, it instead re-reads and returns the winner's already-fully-formed canonical
+ * profile. Any other error (a different constraint, a validation failure, a connection error) is
+ * rethrown unchanged rather than being mistaken for this race.
+ */
 export async function ensureMyLstScannerProfileForUser(userId: string) {
   const existing = await prisma.scannerProfile.findFirst({
-    where: { ownerId: userId, name: "My LST" },
+    where: { ownerId: userId, name: MY_LST_SCANNER_PROFILE_NAME },
   });
 
   if (existing) {
     return existing;
   }
 
-  return prisma.scannerProfile.create({
-    data: {
-      ownerId: userId,
-      name: "My LST",
-      visibility: "PRIVATE",
-      rules: {
-        create: SCANNER_RULE_DEFINITIONS.map((definition, index) => ({
-          key: definition.key,
-          name: definition.name,
-          operator: definition.operator,
-          valueJson: { desired: definition.defaultDesired },
-          sortOrder: index,
-          enabled: definition.defaultEnabled,
-        })),
+  try {
+    return await prisma.scannerProfile.create({
+      data: {
+        ownerId: userId,
+        name: MY_LST_SCANNER_PROFILE_NAME,
+        visibility: "PRIVATE",
+        rules: {
+          create: SCANNER_RULE_DEFINITIONS.map((definition, index) => ({
+            key: definition.key,
+            name: definition.name,
+            operator: definition.operator,
+            valueJson: { desired: definition.defaultDesired },
+            sortOrder: index,
+            enabled: definition.defaultEnabled,
+          })),
+        },
       },
-    },
-  });
+    });
+  } catch (error) {
+    if (isMyLstScannerProfileNameConstraintError(error)) {
+      return waitForConcurrentMyLstScannerProfileCreation(userId);
+    }
+    throw error;
+  }
 }
 
 export async function updateScannerSettingsForUser(userId: string, formData: FormData) {
