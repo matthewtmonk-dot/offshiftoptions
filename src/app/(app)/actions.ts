@@ -51,7 +51,6 @@ import {
 } from "@/lib/broker-connections";
 import { runScannerUniverseDryRun } from "@/lib/scanner-universe-dry-run";
 import {
-  getEligibleTechnicalRefreshTickersForUser,
   getTechnicalCacheReadinessForUser,
   refreshTechnicalIndicatorCacheBatchForUser,
   TECHNICAL_REFRESH_BATCH_SIZE,
@@ -550,11 +549,7 @@ export async function getTechnicalCacheReadinessAction(): Promise<TechnicalCache
     };
   }
 
-  const eligible = await getEligibleTechnicalRefreshTickersForUser(user.id, resolved.provider);
-  const status = await getTechnicalCacheReadinessForUser(
-    user.id,
-    eligible.map((item) => item.ticker),
-  );
+  const status = await getTechnicalCacheReadinessForUser(user.id, resolved.provider);
   return {
     status: "OK",
     eligibleCount: status.eligibleCount,

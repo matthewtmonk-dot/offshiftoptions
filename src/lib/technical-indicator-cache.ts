@@ -1,11 +1,13 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
 import { bollingerBands, wilderRsi } from "@/domain/finance/calculations";
 import { previousNyseMarketDay } from "@/domain/finance/marketCalendar";
 import { mapWithConcurrency } from "./concurrency";
 import { prisma } from "./prisma";
 import { ensureMyLstScannerProfileForUser, getResearchUniverseTickersForUser } from "./workflows";
 import { scannerRulesFromRecords } from "@/domain/scanner/profile";
+import type { ScannerRule } from "@/domain/scanner/scanner";
 import { STARTER_LIVE_SCAN_UNIVERSE } from "@/domain/scanner/live-scan";
 import type { MarketDataProvider, MarketQuote } from "@/providers/market-data/types";
 
@@ -13,6 +15,13 @@ import type { MarketDataProvider, MarketQuote } from "@/providers/market-data/ty
  * User-scoped technical indicator cache - see TechnicalIndicatorSnapshot's own schema doc
  * comment for the full design rationale (why user-scoped, why bands not a precomputed bbPercent,
  * why no providerConnectionId). This module is the ONLY place that reads/writes that table.
+ *
+ * Real production evidence (2026-09-07) showed every Phase B (history) batch was ALSO
+ * redundantly repeating the full Phase A (~6,071-symbol OCC quote sweep, ~61 Schwab /quotes
+ * requests) - ~82 invocations to process ~2,036 eligible symbols would have meant ~5,000 wasted
+ * quote requests just to rediscover the same eligible set. TechnicalPreparationRun/
+ * TechnicalPreparationItem (see their own schema doc comments) now persist one sweep's result so
+ * Phase B invocations 2..N never call getQuotes again for the same run.
  *
  * Nothing here is wired into the live scanner or scheduled yet - see PROJECT_HANDOFF.md for the
  * full audit/design report this was built against.
@@ -33,27 +42,50 @@ export type EligibleTechnicalRefreshTicker = {
   priority: TechnicalRefreshPriority;
 };
 
+async function loadUserQuoteStageRules(userId: string): Promise<ScannerRule[]> {
+  const profile = await ensureMyLstScannerProfileForUser(userId);
+  const records = await prisma.scannerRule.findMany({ where: { profileId: profile.id }, orderBy: { sortOrder: "asc" } });
+  return scannerRulesFromRecords(records);
+}
+
+/**
+ * A deterministic fingerprint of ONLY the two quote-stage rules Phase A actually evaluates
+ * (price, stockVolume) - a rule's absence from `rules` already means "disabled" (see
+ * scannerRulesFromRecords), so that absence is itself part of what gets hashed. Used to decide
+ * whether a persisted TechnicalPreparationRun's eligible set is still valid for this user's
+ * CURRENT rule configuration - if Matt changes his price range or volume rule, his fingerprint
+ * changes, and the old run's set is never silently reused. Deliberately does NOT hash Research/
+ * Watchlist membership (that only affects priority ordering, never which tickers are eligible at
+ * all) or any other rule this Phase never looks at.
+ */
+export function computeQuoteStageRulesFingerprint(rules: ScannerRule[]): string {
+  const priceRule = rules.find((rule) => rule.key === "price");
+  const volumeRule = rules.find((rule) => rule.key === "stockVolume");
+  const payload = JSON.stringify({ price: priceRule?.desired ?? null, stockVolume: volumeRule?.desired ?? null });
+  return createHash("sha256").update(payload).digest("hex");
+}
+
 /**
  * Phase A: OCC's public Tier 2 universe (union this user's own private Tier 1 tickers) -> one
  * batched getQuotes call (VERIFIED chunked at SCHWAB_QUOTE_BATCH_SIZE=100 - see
  * SchwabMarketDataProvider.getQuotes) -> this user's own configured price/volume rules. Mirrors
  * runScannerUniverseDryRun's exact same universe-building and quote-only rule evaluation (same
  * evaluateCandidate engine, same rule keys) - never a second/different filtering formula - but
- * returns the actual surviving ticker list (with priority) instead of only counts, since Phase B
- * needs concrete tickers to refresh.
+ * returns the actual surviving ticker list (with priority) instead of only counts.
+ *
+ * Called ONLY when getOrCreateActiveTechnicalPreparationRun decides a fresh sweep is actually
+ * needed (see below) - never on every Phase B batch anymore.
  */
 export async function getEligibleTechnicalRefreshTickersForUser(
   userId: string,
   provider: MarketDataProvider,
 ): Promise<EligibleTechnicalRefreshTicker[]> {
-  const [profile, userTickers, publicUniverse] = await Promise.all([
-    ensureMyLstScannerProfileForUser(userId),
+  const [rules, userTickers, publicUniverse] = await Promise.all([
+    loadUserQuoteStageRules(userId),
     getResearchUniverseTickersForUser(userId),
     prisma.optionableUniverseSymbol.findMany({ select: { ticker: true } }),
   ]);
 
-  const records = await prisma.scannerRule.findMany({ where: { profileId: profile.id }, orderBy: { sortOrder: "asc" } });
-  const rules = scannerRulesFromRecords(records);
   const priceRule = rules.find((rule) => rule.key === "price");
   const volumeRule = rules.find((rule) => rule.key === "stockVolume");
 
@@ -99,7 +131,99 @@ async function fetchQuotesIndividually(provider: MarketDataProvider, tickers: st
 }
 
 // ---------------------------------------------------------------------------------------------
-// Phase B: bounded, resumable background history refresh.
+// Persisted preparation run/queue - so Phase A runs once per cycle, not once per Phase B batch.
+// ---------------------------------------------------------------------------------------------
+
+export type ActiveTechnicalPreparationRun = {
+  runId: string;
+  eligibleCount: number;
+  /** True only when THIS call performed the real quote sweep (a brand new run was created) -
+   * false when an existing, still-valid run was reused. Exposed mainly for tests/observability. */
+  freshlyCreated: boolean;
+};
+
+/**
+ * Returns the current user's active (same marketDate, same rulesFingerprint, IN_PROGRESS)
+ * TechnicalPreparationRun, creating one - and doing the one real Phase A quote sweep - only if no
+ * matching run already exists. This is the ONLY place a new run is created, and therefore the
+ * ONLY place getEligibleTechnicalRefreshTickersForUser (and its Schwab quote sweep) is ever
+ * called from the rest of this module.
+ *
+ * At creation time, each eligible ticker's TechnicalPreparationItem starts PENDING unless its
+ * existing TechnicalIndicatorSnapshot is already READY and fresh (asOfDate >=
+ * previousNyseMarketDay(now)) - in which case the item starts already READY, so Phase B never
+ * wastes a history request re-fetching data that's already current. A ticker whose existing
+ * snapshot is FAILED, stale, or missing always starts PENDING.
+ *
+ * If the quote sweep itself throws (e.g. a Schwab outage), no run/items are created and this
+ * rethrows - the existing TechnicalIndicatorSnapshot cache is completely untouched, exactly like
+ * a failed OCC/earnings refresh never destroys the prior valid cache.
+ */
+export async function getOrCreateActiveTechnicalPreparationRun(
+  userId: string,
+  provider: MarketDataProvider,
+  now: Date = new Date(),
+): Promise<ActiveTechnicalPreparationRun> {
+  const rules = await loadUserQuoteStageRules(userId);
+  const fingerprint = computeQuoteStageRulesFingerprint(rules);
+  const marketDate = dateOnlyUtc(now);
+
+  // Matched on (userId, marketDate, rulesFingerprint) alone - status is deliberately NOT part of
+  // this filter. A COMPLETE run is still the valid, current run for today's rules; excluding it
+  // here would make every call after the run finishes re-trigger a whole new quote sweep just to
+  // discover "there's nothing left to do," defeating the entire point of this persistence layer.
+  const existing = await prisma.technicalPreparationRun.findFirst({
+    where: { userId, marketDate, rulesFingerprint: fingerprint },
+    orderBy: { createdAt: "desc" },
+  });
+  if (existing) {
+    return { runId: existing.id, eligibleCount: existing.eligibleCount, freshlyCreated: false };
+  }
+
+  // Phase A: the one real quote sweep for this cycle.
+  const eligible = await getEligibleTechnicalRefreshTickersForUser(userId, provider);
+  const freshCutoff = dateOnlyUtc(previousNyseMarketDay(now));
+  const existingSnapshots = eligible.length
+    ? await prisma.technicalIndicatorSnapshot.findMany({
+        where: { userId, ticker: { in: eligible.map((item) => item.ticker) } },
+        select: { ticker: true, status: true, asOfDate: true },
+      })
+    : [];
+  const snapshotByTicker = new Map(existingSnapshots.map((row) => [row.ticker, row]));
+
+  const initialStatuses = eligible.map((item) => {
+    const snapshot = snapshotByTicker.get(item.ticker);
+    const alreadyFresh = snapshot?.status === "READY" && !!snapshot.asOfDate && snapshot.asOfDate.getTime() >= freshCutoff.getTime();
+    return { ...item, initialStatus: alreadyFresh ? ("READY" as const) : ("PENDING" as const) };
+  });
+  const pendingCount = initialStatuses.filter((item) => item.initialStatus === "PENDING").length;
+
+  const run = await prisma.technicalPreparationRun.create({
+    data: {
+      userId,
+      marketDate,
+      rulesFingerprint: fingerprint,
+      eligibleCount: eligible.length,
+      status: pendingCount > 0 ? "IN_PROGRESS" : "COMPLETE",
+    },
+  });
+  if (initialStatuses.length) {
+    await prisma.technicalPreparationItem.createMany({
+      data: initialStatuses.map((item) => ({
+        runId: run.id,
+        ticker: item.ticker,
+        priority: item.priority,
+        status: item.initialStatus,
+        processedAt: item.initialStatus === "READY" ? now : null,
+      })),
+    });
+  }
+
+  return { runId: run.id, eligibleCount: eligible.length, freshlyCreated: true };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase B: bounded, resumable background history refresh - consumes a persisted run's queue.
 // ---------------------------------------------------------------------------------------------
 
 /** Conservative default per invocation - Schwab's safe sustained price-history throughput has
@@ -118,10 +242,6 @@ const TECHNICAL_REFRESH_CONCURRENCY = 4;
  * never drift from live-scan.ts's own constant. */
 export const TECHNICAL_REFRESH_HISTORY_DAYS = 80;
 
-/** A failed row is retried on a later batch, but not hammered every single invocation - avoids
- * hot-looping a provider/network failure. */
-const FAILED_RETRY_COOLDOWN_MS = 60 * 60 * 1000;
-
 export const TECHNICAL_SNAPSHOT_FAILURE_REASONS = {
   HISTORY_FETCH_FAILED: "HISTORY_FETCH_FAILED",
 } as const;
@@ -130,24 +250,26 @@ export type TechnicalRefreshBatchResult = {
   processedCount: number;
   succeededCount: number;
   failedCount: number;
-  /** How many eligible tickers still need a refresh (missing/stale/retryable-failed) after this
-   * batch - 0 means fully caught up. Lets a caller decide whether to invoke again. */
+  /** How many PENDING items remain in the active run after this batch - 0 means the run just
+   * completed. Lets a caller decide whether to invoke again. */
   remainingEligibleCount: number;
-  /** Real wall-clock time for this ENTIRE invocation (Phase A's quote sweep + Phase B's bounded
-   * history processing), in milliseconds - the aggregate cost a caller needs to estimate how many
-   * worker invocations a full preparation cycle would take. Never a raw per-request timing
-   * breakdown, no raw provider response, no token - just one aggregate number. */
+  /** Real wall-clock time for this ENTIRE invocation, in milliseconds - on every call except the
+   * one that creates a new run, this reflects ONLY Phase B (history fetch + RSI/BB), since no
+   * quote sweep happens. The aggregate cost a caller needs to estimate how many worker
+   * invocations a full preparation cycle would take. Never a raw per-request timing breakdown, no
+   * raw provider response, no token - just one aggregate number. */
   elapsedMs: number;
 };
 
 /**
- * Phase B: processes at most `batchSize` symbols from this user's eligible set that are missing,
- * stale, or failed-but-retryable - never all ~2,000+ eligible symbols in one call (no long-running
- * single request). Safely repeatable: re-running immediately just reprocesses whatever is still
- * missing/stale/retryable (already-READY-and-fresh rows are skipped), so a resumed or duplicate
- * invocation is idempotent, not additive. One symbol's price-history failure is caught and
- * recorded as a FAILED row for that symbol alone - it never aborts or "poisons" the rest of the
- * batch.
+ * Phase B: processes at most `batchSize` PENDING items from this user's ACTIVE preparation run -
+ * never all ~2,000+ eligible symbols in one call (no long-running single request), and never a
+ * fresh Schwab quote sweep unless getOrCreateActiveTechnicalPreparationRun determines one is
+ * genuinely needed (new day, or the user's price/volume rules changed). Safely repeatable: a
+ * duplicate/resumed invocation only ever pulls whatever is still PENDING (already-processed items
+ * are skipped by construction, since their status is no longer PENDING), so it's idempotent, not
+ * additive. One symbol's price-history failure is caught and recorded as a FAILED row for that
+ * symbol alone - it never aborts or "poisons" the rest of the batch.
  */
 export async function refreshTechnicalIndicatorCacheBatchForUser(
   userId: string,
@@ -158,11 +280,15 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   const now = options.now ?? new Date();
   const batchSize = options.batchSize ?? TECHNICAL_REFRESH_BATCH_SIZE;
 
-  const eligible = await getEligibleTechnicalRefreshTickersForUser(userId, provider);
-  const needsWork = await filterTickersNeedingRefresh(userId, eligible, now);
+  const { runId } = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now);
 
-  const batch = needsWork.slice(0, batchSize);
-  const outcomes = await mapWithConcurrency(batch, TECHNICAL_REFRESH_CONCURRENCY, async (item) => {
+  const pendingItems = await prisma.technicalPreparationItem.findMany({
+    where: { runId, status: "PENDING" },
+    orderBy: [{ priority: "asc" }, { ticker: "asc" }],
+    take: batchSize,
+  });
+
+  const outcomes = await mapWithConcurrency(pendingItems, TECHNICAL_REFRESH_CONCURRENCY, async (item) => {
     try {
       const candles = await provider.getPriceHistory(item.ticker, TECHNICAL_REFRESH_HISTORY_DAYS);
       const closes = candles.map((candle) => candle.close);
@@ -181,6 +307,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
         historyFetchedAt: now,
         now,
       });
+      await prisma.technicalPreparationItem.update({ where: { id: item.id }, data: { status: "READY", processedAt: now } });
       return { ok: true as const };
     } catch {
       // Sanitized - never persists a raw provider error/exception detail.
@@ -196,6 +323,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
         now,
         preserveExistingGoodValues: true,
       });
+      await prisma.technicalPreparationItem.update({ where: { id: item.id }, data: { status: "FAILED", processedAt: now } });
       return { ok: false as const };
     }
   });
@@ -203,38 +331,18 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   const succeededCount = outcomes.filter((outcome) => outcome.ok).length;
   const failedCount = outcomes.length - succeededCount;
 
+  const remainingEligibleCount = await prisma.technicalPreparationItem.count({ where: { runId, status: "PENDING" } });
+  if (remainingEligibleCount === 0) {
+    await prisma.technicalPreparationRun.update({ where: { id: runId }, data: { status: "COMPLETE" } });
+  }
+
   return {
-    processedCount: batch.length,
+    processedCount: pendingItems.length,
     succeededCount,
     failedCount,
-    remainingEligibleCount: Math.max(needsWork.length - batch.length, 0),
+    remainingEligibleCount,
     elapsedMs: Date.now() - startedAt,
   };
-}
-
-async function filterTickersNeedingRefresh(
-  userId: string,
-  eligible: EligibleTechnicalRefreshTicker[],
-  now: Date,
-): Promise<EligibleTechnicalRefreshTicker[]> {
-  if (!eligible.length) return [];
-
-  const existing = await prisma.technicalIndicatorSnapshot.findMany({
-    where: { userId, ticker: { in: eligible.map((item) => item.ticker) } },
-    select: { ticker: true, status: true, asOfDate: true, updatedAt: true },
-  });
-  const byTicker = new Map(existing.map((row) => [row.ticker, row]));
-  const freshCutoff = dateOnlyUtc(previousNyseMarketDay(now));
-
-  return eligible.filter((item) => {
-    const row = byTicker.get(item.ticker);
-    if (!row) return true; // missing
-    if (row.status === "FAILED") {
-      return now.getTime() - row.updatedAt.getTime() >= FAILED_RETRY_COOLDOWN_MS; // failed-but-retryable
-    }
-    // READY - stale if its asOfDate predates the most recent completed trading day.
-    return !row.asOfDate || row.asOfDate.getTime() < freshCutoff.getTime();
-  });
 }
 
 async function upsertSnapshot(
@@ -349,34 +457,31 @@ export type TechnicalCacheReadinessStatus = {
   lastPreparedAt: Date | null;
 };
 
+/**
+ * Reads the CURRENT active preparation run's own item counts - reuses
+ * getOrCreateActiveTechnicalPreparationRun so a readiness check never performs its own separate
+ * quote sweep either (only the very first check of a new run does, same as Phase B).
+ */
 export async function getTechnicalCacheReadinessForUser(
   userId: string,
-  eligibleTickers: string[],
+  provider: MarketDataProvider,
   now: Date = new Date(),
 ): Promise<TechnicalCacheReadinessStatus> {
-  const normalized = [...new Set(eligibleTickers.map((ticker) => ticker.toUpperCase()))];
-  if (!normalized.length) {
+  const { runId, eligibleCount } = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now);
+  if (eligibleCount === 0) {
     return { eligibleCount: 0, readyCount: 0, pendingCount: 0, lastPreparedAt: null };
   }
 
-  const rows = await prisma.technicalIndicatorSnapshot.findMany({
-    where: { userId, ticker: { in: normalized } },
-    select: { ticker: true, status: true, asOfDate: true, updatedAt: true },
-  });
-  const freshCutoff = dateOnlyUtc(previousNyseMarketDay(now));
-  const byTicker = new Map(rows.map((row) => [row.ticker, row]));
+  const [readyCount, pendingCount, lastReady] = await Promise.all([
+    prisma.technicalPreparationItem.count({ where: { runId, status: "READY" } }),
+    prisma.technicalPreparationItem.count({ where: { runId, status: "PENDING" } }),
+    prisma.technicalPreparationItem.findFirst({ where: { runId, status: "READY" }, orderBy: { processedAt: "desc" }, select: { processedAt: true } }),
+  ]);
 
-  let readyCount = 0;
-  let lastPreparedAt: Date | null = null;
-  for (const ticker of normalized) {
-    const row = byTicker.get(ticker);
-    if (row?.status === "READY" && row.asOfDate && row.asOfDate.getTime() >= freshCutoff.getTime()) {
-      readyCount += 1;
-      if (!lastPreparedAt || row.updatedAt > lastPreparedAt) {
-        lastPreparedAt = row.updatedAt;
-      }
-    }
-  }
-
-  return { eligibleCount: normalized.length, readyCount, pendingCount: normalized.length - readyCount, lastPreparedAt };
+  return {
+    eligibleCount,
+    readyCount,
+    pendingCount,
+    lastPreparedAt: lastReady?.processedAt ?? null,
+  };
 }

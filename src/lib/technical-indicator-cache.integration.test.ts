@@ -8,6 +8,10 @@ const maybeDescribe = runDatabaseTests ? describe : describe.skip;
 
 const TEST_SOURCE = "TEST_FIXTURE_TECHNICAL_CACHE";
 
+function syntheticTickers(count: number): string[] {
+  return Array.from({ length: count }, (_, i) => `TECHU${String(i).padStart(3, "0")}`);
+}
+
 /** 80 real-shaped, deterministic daily closes (never real market data) - enough for both RSI
  * (needs >=15) and Bollinger Bands (needs >=20). A simple upward-drifting sawtooth so the
  * resulting RSI/BB are neither degenerate (constant price) nor requiring real market data.
@@ -26,7 +30,10 @@ function fakeProvider(options: {
   quotes: Record<string, { price: number; volume: number }>;
   candlesByTicker?: Record<string, PriceCandle[]>;
   failTickers?: Set<string>;
+  failQuotes?: boolean;
   onGetPriceHistory?: (ticker: string) => void;
+  onGetQuotes?: (symbols: string[]) => void;
+  onGetOptionChain?: (ticker: string) => void;
 }): MarketDataProvider {
   const quotesByTicker = new Map<string, MarketQuote>(
     Object.entries(options.quotes).map(([ticker, { price, volume }]) => [ticker, { symbol: ticker, price, volume, asOf: new Date() }]),
@@ -39,6 +46,10 @@ function fakeProvider(options: {
       return quote;
     },
     async getQuotes(symbols) {
+      options.onGetQuotes?.(symbols);
+      if (options.failQuotes) {
+        throw new Error("simulated quote-sweep provider failure");
+      }
       const result = new Map<string, MarketQuote>();
       for (const symbol of symbols) {
         const quote = quotesByTicker.get(symbol.toUpperCase());
@@ -53,7 +64,8 @@ function fakeProvider(options: {
       }
       return options.candlesByTicker?.[symbol] ?? syntheticCandles(symbol);
     },
-    async getOptionChain() {
+    async getOptionChain(symbol) {
+      options.onGetOptionChain?.(symbol);
       return [];
     },
     async getInstrument(symbol) {
@@ -71,6 +83,8 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   let refreshTechnicalIndicatorCacheBatchForUser: typeof import("./technical-indicator-cache").refreshTechnicalIndicatorCacheBatchForUser;
   let getTechnicalIndicatorSnapshotsForUser: typeof import("./technical-indicator-cache").getTechnicalIndicatorSnapshotsForUser;
   let getTechnicalCacheReadinessForUser: typeof import("./technical-indicator-cache").getTechnicalCacheReadinessForUser;
+  let getOrCreateActiveTechnicalPreparationRun: typeof import("./technical-indicator-cache").getOrCreateActiveTechnicalPreparationRun;
+  let ensureMyLstScannerProfileForUser: typeof import("./workflows").ensureMyLstScannerProfileForUser;
   let matt: { id: string };
   let eric: { id: string };
   const universeTickers: string[] = [];
@@ -82,7 +96,9 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       refreshTechnicalIndicatorCacheBatchForUser,
       getTechnicalIndicatorSnapshotsForUser,
       getTechnicalCacheReadinessForUser,
+      getOrCreateActiveTechnicalPreparationRun,
     } = await import("./technical-indicator-cache"));
+    ({ ensureMyLstScannerProfileForUser } = await import("./workflows"));
 
     const passwordHash = await hash("not-used", 4);
     const timestamp = Date.now();
@@ -92,9 +108,25 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
   afterEach(async () => {
     await prisma.technicalIndicatorSnapshot.deleteMany({ where: { userId: { in: [matt.id, eric.id] } } });
+    // TechnicalPreparationRun rows are keyed by (userId, marketDate, rulesFingerprint) and reused
+    // across calls by design (that's the whole point of this slice) - but that means leftover
+    // runs from an earlier test in this file WOULD be reused by a later one sharing the same real
+    // "today" and default rules unless explicitly cleared here. Cascades to its Items.
+    await prisma.technicalPreparationRun.deleteMany({ where: { userId: { in: [matt.id, eric.id] } } });
     await prisma.optionableUniverseSymbol.deleteMany({ where: { source: TEST_SOURCE } });
     await prisma.watchlistItem.deleteMany({ where: { ownerId: { in: [matt.id, eric.id] } } });
     await prisma.watchlist.deleteMany({ where: { ownerId: { in: [matt.id, eric.id] } } });
+    // Some tests deliberately change the price rule to prove fingerprint invalidation - reset to
+    // the real LST Core default ([10, 50]) so later tests' price=20 fixtures aren't affected.
+    // Scoped to THIS file's own two users' own "My LST" profiles only - never a global update,
+    // which would corrupt other test files' own scanner-rule fixtures running concurrently.
+    const ownProfiles = await prisma.scannerProfile.findMany({ where: { ownerId: { in: [matt.id, eric.id] }, name: "My LST" }, select: { id: true } });
+    if (ownProfiles.length) {
+      await prisma.scannerRule.updateMany({
+        where: { key: "price", profileId: { in: ownProfiles.map((profile) => profile.id) } },
+        data: { valueJson: { desired: [10, 50] } },
+      });
+    }
   });
 
   afterAll(async () => {
@@ -112,6 +144,17 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       acc[ticker] = { price: prices[ticker] ?? 20, volume: 1_000_000 };
       return acc;
     }, {});
+  }
+
+  /** Directly patches the user's own price rule's [min, max] desired range - bypasses the full
+   * updateScannerSettingsForUser form (which requires a valid value for EVERY scanner rule
+   * definition at once) since this test only cares about one rule's stored value changing. */
+  async function setPriceRuleRange(userId: string, min: number, max: number) {
+    const profile = await ensureMyLstScannerProfileForUser(userId);
+    await prisma.scannerRule.update({
+      where: { profileId_key: { profileId: profile.id, key: "price" } },
+      data: { valueJson: { desired: [min, max] } },
+    });
   }
 
   it("cached RSI equals wilderRsi computed directly on the identical candle input - not an approximation", async () => {
@@ -384,18 +427,128 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
   it("getTechnicalCacheReadinessForUser reports honest ready/pending counts and the real last-prepared timestamp", async () => {
     await seedUniverse(["TECHRD1", "TECHRD2", "TECHRD3"]);
-    await refreshTechnicalIndicatorCacheBatchForUser(
-      matt.id,
-      fakeProvider({
-        quotes: { TECHRD1: { price: 20, volume: 1_000_000 }, TECHRD2: { price: 20, volume: 1_000_000 }, TECHRD3: { price: 20, volume: 1_000_000 } },
-      }),
-      { batchSize: 2 },
-    );
+    const provider = fakeProvider({
+      quotes: { TECHRD1: { price: 20, volume: 1_000_000 }, TECHRD2: { price: 20, volume: 1_000_000 }, TECHRD3: { price: 20, volume: 1_000_000 } },
+    });
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 2 });
 
-    const status = await getTechnicalCacheReadinessForUser(matt.id, ["TECHRD1", "TECHRD2", "TECHRD3"]);
+    const status = await getTechnicalCacheReadinessForUser(matt.id, provider);
     expect(status.eligibleCount).toBe(3);
     expect(status.readyCount).toBe(2);
     expect(status.pendingCount).toBe(1);
     expect(status.lastPreparedAt).not.toBeNull();
+  });
+
+  it("one preparation cycle performs the quote-stage eligibility sweep exactly once - the 2nd/3rd/Nth history batch never calls getQuotes again", async () => {
+    await seedUniverse(syntheticTickers(60));
+    let getQuotesCallCount = 0;
+    const provider = fakeProvider({
+      quotes: Object.fromEntries(syntheticTickers(60).map((t) => [t, { price: 20, volume: 1_000_000 }])),
+      onGetQuotes: () => {
+        getQuotesCallCount += 1;
+      },
+    });
+
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 25 });
+    expect(getQuotesCallCount).toBe(1);
+
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 25 });
+    expect(getQuotesCallCount).toBe(1); // still 1 - the second batch reused the persisted run
+
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 25 });
+    expect(getQuotesCallCount).toBe(1); // still 1 across a third invocation too
+
+    await getTechnicalCacheReadinessForUser(matt.id, provider);
+    expect(getQuotesCallCount).toBe(1); // a readiness check also reuses the same run, not a fresh sweep
+  });
+
+  it("a worker invocation resumes the SAME generation (runId) across calls, and completing it stops cleanly with zero further work", async () => {
+    await seedUniverse(syntheticTickers(10));
+    const provider = fakeProvider({ quotes: Object.fromEntries(syntheticTickers(10).map((t) => [t, { price: 20, volume: 1_000_000 }])) });
+
+    const firstRun = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider);
+    expect(firstRun.freshlyCreated).toBe(true);
+    expect(firstRun.eligibleCount).toBe(10);
+
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 5 });
+    const midRun = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider);
+    expect(midRun.runId).toBe(firstRun.runId); // same generation, not a new one
+    expect(midRun.freshlyCreated).toBe(false);
+
+    const second = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 5 });
+    expect(second.remainingEligibleCount).toBe(0); // generation complete
+
+    const completedRun = await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: firstRun.runId } });
+    expect(completedRun.status).toBe("COMPLETE");
+
+    // Calling again after completion does zero work and, critically, does NOT re-sweep quotes.
+    let getQuotesCallCount = 0;
+    const providerWithCounter = fakeProvider({
+      quotes: Object.fromEntries(syntheticTickers(10).map((t) => [t, { price: 20, volume: 1_000_000 }])),
+      onGetQuotes: () => {
+        getQuotesCallCount += 1;
+      },
+    });
+    const third = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, providerWithCounter, { batchSize: 5 });
+    expect(third.processedCount).toBe(0);
+    expect(third.remainingEligibleCount).toBe(0);
+    expect(getQuotesCallCount).toBe(0); // the completed run was reused - no new sweep
+  });
+
+  it("a change to the user's price/volume rules invalidates the persisted eligibility set - a new run (and a real re-sweep) is created", async () => {
+    await seedUniverse(["TECHFP1", "TECHFP2"]);
+    const provider = fakeProvider({ quotes: { TECHFP1: { price: 20, volume: 1_000_000 }, TECHFP2: { price: 20, volume: 1_000_000 } } });
+
+    const firstRun = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider);
+
+    // Change the user's price rule - this changes the rules fingerprint.
+    await setPriceRuleRange(matt.id, 5, 15); // TECHFP1/TECHFP2 (price 20) would now fail this rule
+
+    let getQuotesCallCount = 0;
+    const providerAfterRuleChange = fakeProvider({
+      quotes: { TECHFP1: { price: 20, volume: 1_000_000 }, TECHFP2: { price: 20, volume: 1_000_000 } },
+      onGetQuotes: () => {
+        getQuotesCallCount += 1;
+      },
+    });
+    const secondRun = await getOrCreateActiveTechnicalPreparationRun(matt.id, providerAfterRuleChange);
+    expect(secondRun.freshlyCreated).toBe(true); // a real new sweep happened, not a silent reuse
+    expect(secondRun.runId).not.toBe(firstRun.runId);
+    expect(getQuotesCallCount).toBe(1);
+    expect(secondRun.eligibleCount).toBe(0); // both tickers now fail the tightened price rule
+  });
+
+  it("old technical data survives a failed Phase A quote sweep - no run/items are created, and existing snapshots are untouched", async () => {
+    await seedUniverse(["TECHFAILA"]);
+    const goodProvider = fakeProvider({ quotes: { TECHFAILA: { price: 20, volume: 1_000_000 } } });
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, goodProvider, { batchSize: 5 });
+    const before = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({ where: { userId_ticker: { userId: matt.id, ticker: "TECHFAILA" } } });
+    expect(before.status).toBe("READY");
+
+    // A rule change forces a new sweep attempt, which this time fails outright.
+    await setPriceRuleRange(matt.id, 1, 999);
+    const failingProvider = fakeProvider({ quotes: { TECHFAILA: { price: 20, volume: 1_000_000 } }, failQuotes: true });
+
+    await expect(getOrCreateActiveTechnicalPreparationRun(matt.id, failingProvider)).rejects.toThrow();
+
+    const runCount = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+    expect(runCount).toBe(1); // only the original successful run exists - no partial/broken run was created
+    const after = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({ where: { userId_ticker: { userId: matt.id, ticker: "TECHFAILA" } } });
+    expect(after).toEqual(before); // completely untouched by the failed sweep
+  });
+
+  it("never issues an option-chain request during technical preparation - not Phase A, not Phase B", async () => {
+    await seedUniverse(["TECHNOOPT"]);
+    let optionChainCallCount = 0;
+    const provider = fakeProvider({
+      quotes: { TECHNOOPT: { price: 20, volume: 1_000_000 } },
+      onGetOptionChain: () => {
+        optionChainCallCount += 1;
+      },
+    });
+
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 5 });
+    await getTechnicalCacheReadinessForUser(matt.id, provider);
+    expect(optionChainCallCount).toBe(0);
   });
 });
