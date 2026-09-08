@@ -1695,9 +1695,13 @@ export async function rerunLiveSchwabScannerForUser(
   ]);
   const researchTickerSet = new Set(researchTickers.map((ticker) => ticker.toUpperCase()));
   const universeSourceKind: LiveScanUniverseSource = publicUniverse.length > 0 ? "OCC" : "LIMITED_FALLBACK";
-  const universe = [...new Set([...STARTER_LIVE_SCAN_UNIVERSE, ...researchTickers, ...publicUniverse.map((row) => row.ticker)])].map(
-    (ticker) => ticker.toUpperCase(),
-  );
+  // The fixed starter list is real evidence-backed redundant once OCC is populated - it was
+  // measured to be fully subsumed within OCC's real ~6,071-symbol set (see PROJECT_HANDOFF.md).
+  // Included only as the LIMITED_FALLBACK floor when OCC itself has nothing - never silently
+  // mixed into what should be presented as a genuinely OCC-backed broad scan.
+  const universe = [
+    ...new Set([...(universeSourceKind === "LIMITED_FALLBACK" ? STARTER_LIVE_SCAN_UNIVERSE : []), ...researchTickers, ...publicUniverse.map((row) => row.ticker)]),
+  ].map((ticker) => ticker.toUpperCase());
 
   try {
     const [technicalCache, earningsRows] = await Promise.all([

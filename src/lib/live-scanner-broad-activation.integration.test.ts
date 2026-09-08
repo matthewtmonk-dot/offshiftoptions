@@ -163,6 +163,55 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     expect(result?.summaryStatus).toBe("PASS");
   });
 
+  it("when OCC is unavailable, the scan falls back to the fixed starter list (LIMITED_FALLBACK) rather than an empty universe", async () => {
+    const emptySource = `TEST_FIXTURE_EMPTY_${Date.now()}`; // guaranteed zero rows - never seeded
+    const { STARTER_LIVE_SCAN_UNIVERSE } = await import("@/domain/scanner/live-scan");
+    const starterTicker = STARTER_LIVE_SCAN_UNIVERSE[0];
+    await seedReadySnapshot(matt.id, starterTicker, { rsi: 20, bbLower: 15, bbMiddle: 20, bbUpper: 45 });
+    providerByUserId.set(
+      matt.id,
+      fakeProvider({ [starterTicker]: { price: 20, volume: 1_000_000 } }, { [starterTicker]: defaultPut(starterTicker, 18) }),
+    );
+
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: emptySource });
+    expect(summary.universeSource).toBe("LIMITED_FALLBACK");
+
+    const result = await prisma.scanResult.findFirst({
+      where: { ticker: starterTicker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(result).not.toBeNull(); // the starter list was the floor that kept the scan non-empty
+  });
+
+  it("when OCC is available, the fixed starter list is excluded from the union - a starter-only ticker (not Research, not OCC) never appears", async () => {
+    const occTicker = "OCCPRES1";
+    await seedOccUniverse([occTicker]); // guarantees publicUniverse.length > 0 -> universeSource "OCC"
+    const { STARTER_LIVE_SCAN_UNIVERSE } = await import("@/domain/scanner/live-scan");
+    const starterTicker = STARTER_LIVE_SCAN_UNIVERSE[1]; // a different starter ticker than the fallback test above
+    await seedReadySnapshot(matt.id, starterTicker, { rsi: 20, bbLower: 15, bbMiddle: 20, bbUpper: 45 });
+    providerByUserId.set(
+      matt.id,
+      fakeProvider(
+        { [occTicker]: { price: 20, volume: 1_000_000 }, [starterTicker]: { price: 20, volume: 1_000_000 } },
+        { [occTicker]: defaultPut(occTicker, 18), [starterTicker]: defaultPut(starterTicker, 18) },
+      ),
+    );
+
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+    expect(summary.universeSource).toBe("OCC");
+
+    const starterResult = await prisma.scanResult.findFirst({
+      where: { ticker: starterTicker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(starterResult).toBeNull(); // never quoted/scanned at all - not in the union once OCC is present
+    const occResult = await prisma.scanResult.findFirst({
+      where: { ticker: occTicker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(occResult).not.toBeNull(); // the real OCC ticker was scanned normally
+  });
+
   it("provider.getPriceHistory is never called during a real broad live scan", async () => {
     const ticker = "OCCFRESH2";
     await seedOccUniverse([ticker]);

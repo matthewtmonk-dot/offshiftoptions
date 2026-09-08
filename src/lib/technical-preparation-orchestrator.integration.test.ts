@@ -12,6 +12,30 @@ vi.mock("@/lib/broker-connections", () => ({
   resolveMarketDataProviderForUser: (...args: unknown[]) => resolveMarketDataProviderForUserMock(...args),
 }));
 
+/** Every userId in this set makes getTechnicalPreparationStatusForUser throw the given error
+ * instead of running its real implementation - every other candidate still goes through the real
+ * function unchanged. Lets the "stale candidate during selection" race (a user disappearing
+ * between the connected-user query and its own status lookup) be reproduced deterministically,
+ * without needing to win a real timing race against Postgres's own FK CASCADE (which makes the
+ * "User gone, BrokerConnection still present" state otherwise unreachable outside a live race). */
+const failingStatusLookupUserIds = new Map<string, unknown>();
+vi.mock("./technical-indicator-cache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./technical-indicator-cache")>();
+  return {
+    ...actual,
+    getTechnicalPreparationStatusForUser: async (userId: string, now?: Date) => {
+      if (failingStatusLookupUserIds.has(userId)) {
+        throw failingStatusLookupUserIds.get(userId);
+      }
+      return actual.getTechnicalPreparationStatusForUser(userId, now);
+    },
+  };
+});
+
+function staleCandidateError(): Error {
+  return Object.assign(new Error("Foreign key constraint violated on the constraint: `ScannerProfile_ownerId_fkey`"), { code: "P2003" });
+}
+
 function syntheticTickers(count: number): string[] {
   return Array.from({ length: count }, (_, i) => `ORCH${String(i).padStart(3, "0")}`);
 }
@@ -107,6 +131,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
 
   afterEach(async () => {
     resolveMarketDataProviderForUserMock.mockReset();
+    failingStatusLookupUserIds.clear();
     await prisma.technicalPreparationRun.deleteMany({ where: { userId: { in: [matt.id, eric.id] } } });
     await prisma.technicalIndicatorSnapshot.deleteMany({ where: { userId: { in: [matt.id, eric.id] } } });
     await prisma.optionableUniverseSymbol.deleteMany({ where: { source: TEST_SOURCE } });
@@ -390,5 +415,41 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
 
     expect(optionChainCallCount).toBe(0);
     expect(earningsCountAfter).toBe(earningsCountBefore); // completely untouched
+  });
+
+  it("a candidate whose status lookup fails with a stale-record error (the known deleted-mid-selection edge) is skipped safely - another valid connected user is still selected and processed, with no crash and no cross-user provider use", async () => {
+    // Matt is connected but his own status lookup throws exactly what the real race produces
+    // (ensureMyLstScannerProfileForUser's ScannerProfile.create failing on a foreign key that no
+    // longer resolves, because the user row disappeared between the connected-user query and this
+    // per-candidate lookup) - Eric is a genuinely healthy, working candidate.
+    await createConnectedBrokerRow(matt.id, "matt-stale-candidate");
+    await createConnectedBrokerRow(eric.id, "eric-healthy-candidate");
+    failingStatusLookupUserIds.set(matt.id, staleCandidateError());
+    await seedUniverse(["ORCHSTALE1"]);
+    mockProviderForOnly(eric.id, fakeProvider({ quotes: { ORCHSTALE1: { price: 20, volume: 1_000_000 } } }));
+
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+
+    expect(result.status).toBe("OK"); // never crashes/throws just because Matt's own lookup failed
+    // Eric - the only genuinely eligible candidate - was the one actually processed.
+    const ericRuns = await prisma.technicalPreparationRun.count({ where: { userId: eric.id } });
+    expect(ericRuns).toBe(1);
+    const mattRuns = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+    expect(mattRuns).toBe(0); // Matt was never selected - skipped entirely during status collection
+    // Matt's own (unavailable-by-default) provider was never even consulted - he was filtered out
+    // before candidate ranking/selection ever reached the provider-resolution step.
+    expect(resolveMarketDataProviderForUserMock).not.toHaveBeenCalledWith(matt.id);
+    expect(resolveMarketDataProviderForUserMock).toHaveBeenCalledWith(eric.id);
+  });
+
+  it("a genuinely systemic status-lookup failure (not the known stale-record shape) is never silently swallowed - it still surfaces as a real failure rather than reporting a clean no-op", async () => {
+    await createConnectedBrokerRow(matt.id, "matt-systemic-failure");
+    // No `code` at all - a generic/unclassified error must never be mistaken for the narrow
+    // stale-candidate case (P2003/P2025) and silently treated as "just skip this one."
+    failingStatusLookupUserIds.set(matt.id, new Error("connection pool exhausted"));
+    await seedUniverse(["ORCHSYS1"]);
+    mockProviderForOnly(matt.id, fakeProvider({ quotes: { ORCHSYS1: { price: 20, volume: 1_000_000 } } }));
+
+    await expect(runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW)).rejects.toThrow("connection pool exhausted");
   });
 });

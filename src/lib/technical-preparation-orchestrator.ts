@@ -93,6 +93,22 @@ export function isTechnicalPreparationWindowOpen(now: Date): boolean {
 
 type SelectedUser = { userId: string; provider: MarketDataProvider };
 
+/**
+ * True only for a Prisma error meaning "the specific record this candidate depended on no longer
+ * exists" - P2003 (foreign key constraint violation - e.g. ensureMyLstScannerProfileForUser's own
+ * ScannerProfile.create failing because the candidate's own User row was deleted between the
+ * connected-user query above and this status lookup) or P2025 (an operation expected to find
+ * exactly one existing record and found none). Both mean this ONE candidate genuinely vanished
+ * mid-selection - never a systemic DB/connection problem (timeout, pool exhaustion, network
+ * partition), which must still propagate as a real failure rather than being silently absorbed as
+ * if it were just an ordinary unavailable candidate.
+ */
+function isStaleCandidateError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: string }).code;
+  return code === "P2003" || code === "P2025";
+}
+
 async function selectNextEligibleUserForTechnicalPreparation(now: Date): Promise<SelectedUser | null> {
   const connectedUserIds = await prisma.brokerConnection.findMany({
     where: { provider: "SCHWAB", status: "CONNECTED", accessTokenCiphertext: { not: null }, refreshTokenCiphertext: { not: null } },
@@ -103,9 +119,24 @@ async function selectNextEligibleUserForTechnicalPreparation(now: Date): Promise
     return null;
   }
 
-  const statuses = await Promise.all(
-    connectedUserIds.map(async ({ userId }) => ({ userId, status: await getTechnicalPreparationStatusForUser(userId, now) })),
+  // Each candidate's status lookup is isolated - a single candidate that disappeared between the
+  // connected-user query above and this lookup (isStaleCandidateError) is skipped, never aborting
+  // the whole selection cycle for every other genuinely eligible user. A non-stale error (a real
+  // systemic DB/connection failure) rethrows and fails Promise.all as before - never silently
+  // swallowed just because it happened inside a per-candidate lookup.
+  const statusOutcomes = await Promise.all(
+    connectedUserIds.map(async ({ userId }) => {
+      try {
+        return { userId, status: await getTechnicalPreparationStatusForUser(userId, now) };
+      } catch (error) {
+        if (isStaleCandidateError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    }),
   );
+  const statuses = statusOutcomes.filter((entry): entry is { userId: string; status: Awaited<ReturnType<typeof getTechnicalPreparationStatusForUser>> } => entry !== null);
 
   // Oldest/incompletely-prepared first: a user with no run at all today (lastTouchedAt null)
   // sorts before one who's merely mid-progress, and among in-progress users the one whose run
