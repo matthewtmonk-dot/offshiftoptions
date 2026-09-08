@@ -206,6 +206,25 @@ function oauthHealthStatus(status: string, expiresAt: Date | null): SchwabOAuthH
   return "CONNECTED";
 }
 
+export type SchwabPrimaryConnectionAction = "CONNECT" | "RECONNECT" | "DISCONNECT";
+
+/**
+ * The one primary Schwab action a user should be offered, derived entirely from the canonical
+ * oauthStatus health signal above (the same one behind the "Refresh failed - reconnect required"
+ * label) - never re-derived independently by a caller/UI. Never connected -> Connect. Anything
+ * requiring reauthorization (TOKEN_EXPIRED or REFRESH_FAILED) -> Reconnect, so a broken connection
+ * always offers a way to fix itself, not just Disconnect. Healthy -> Disconnect.
+ */
+export function schwabPrimaryConnectionAction(oauthStatus: SchwabOAuthHealthStatus): SchwabPrimaryConnectionAction {
+  if (oauthStatus === "TOKEN_EXPIRED" || oauthStatus === "REFRESH_FAILED") {
+    return "RECONNECT";
+  }
+  if (oauthStatus === "CONNECTED") {
+    return "DISCONNECT";
+  }
+  return "CONNECT";
+}
+
 /**
  * Reports what actually happened for an existing connection (its own stored
  * developerCredentialId - ground truth from the last successful token save), or what would be
