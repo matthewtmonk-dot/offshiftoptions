@@ -35,7 +35,15 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
   });
 
   afterEach(async () => {
-    await prisma.earningsCalendarEntry.deleteMany({});
+    // Scoped to this file's own far-future synthetic date range (earliest fixture is
+    // STALEENTRY's 2099-01-01), never an unscoped deleteMany({}) - EarningsCalendarEntry is a
+    // genuinely global, unowned table (no per-test source/owner column, unlike
+    // OptionableUniverseSymbol's own `source`), so a blanket delete here would also destroy any
+    // other concurrently-running test file's own real-world-dated rows under Vitest's
+    // parallel-by-file execution against the shared local dev DB - the same test-isolation hazard
+    // documented elsewhere in this codebase, this time found via the broad-scanner-activation
+    // integration tests intermittently losing their own seeded earnings rows mid-test.
+    await prisma.earningsCalendarEntry.deleteMany({ where: { reportDate: { gte: new Date("2099-01-01T00:00:00.000Z") } } });
     // Some tests here pass a `now` more than 24h past TEST_NOW (e.g. TEST_NOW + 25h/+26h, to
     // exercise a later refresh), which rolls the AlphaVantageDailyUsage dateKey onto the next
     // calendar day - clean up the whole file-unique synthetic date range, not just TEST_NOW's own
@@ -65,7 +73,12 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
     const after = await getAlphaVantageUsageToday(TEST_NOW);
     expect(after.totalCount).toBe(before.totalCount + 1);
 
-    const stored = await prisma.earningsCalendarEntry.findMany({ orderBy: { ticker: "asc" } });
+    // Scoped to this file's own far-future date range - see the afterEach cleanup's own note on
+    // why an unscoped read/delete here would be unreliable under Vitest's parallel-file execution.
+    const stored = await prisma.earningsCalendarEntry.findMany({
+      where: { reportDate: { gte: new Date("2099-01-01T00:00:00.000Z") } },
+      orderBy: { ticker: "asc" },
+    });
     expect(stored).toHaveLength(2);
     expect(stored.map((row) => row.ticker)).toEqual(["AAPL", "MSFT"]);
   });
@@ -97,7 +110,8 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
 
   it("a failed fetch never touches the existing cache - yesterday's valid data stays usable", async () => {
     await refreshEarningsCalendarCache({ now: TEST_NOW, fetchFn: fetchFnReturning(SAMPLE_CSV) });
-    const beforeFailure = await prisma.earningsCalendarEntry.findMany();
+    const earningsCacheWhere = { reportDate: { gte: new Date("2099-01-01T00:00:00.000Z") } };
+    const beforeFailure = await prisma.earningsCalendarEntry.findMany({ where: earningsCacheWhere });
 
     const laterButStillWithinBudget = new Date(TEST_NOW.getTime() + 25 * 60 * 60 * 1000); // beyond staleness window
     const failureResult = await refreshEarningsCalendarCache({
@@ -106,7 +120,7 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
     });
     expect(failureResult.status).toBe("FETCH_FAILED");
 
-    const afterFailure = await prisma.earningsCalendarEntry.findMany();
+    const afterFailure = await prisma.earningsCalendarEntry.findMany({ where: earningsCacheWhere });
     expect(afterFailure).toEqual(beforeFailure); // completely untouched by the failed attempt
 
     const status = await getEarningsCalendarCacheStatus(laterButStillWithinBudget);

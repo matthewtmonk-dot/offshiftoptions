@@ -39,6 +39,9 @@ import {
   recordSchwabAccountSyncResult,
 } from "./broker-connections";
 import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
+import { getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
+import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
+import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
 import { mergeBrokerRecords, normalizeSchwabApiPosition, normalizeSchwabApiTransaction } from "@/providers/schwab/csv";
 import type {
   BrokerPosition,
@@ -1615,10 +1618,29 @@ export async function rerunDemoScannerForUser(userId: string, profileId?: string
   return persistScannerRun(userId, profile.id, "DEMO", evaluateDemoScan(rules));
 }
 
+export type LiveScanUniverseSource = "OCC" | "LIMITED_FALLBACK";
+
 export type LiveScanRunSummary = {
+  /** How many candidates were actually persisted as ScanResult rows this run - this user's own
+   * Research/Watchlist/traded tickers (always) plus every genuine stock-stage survivor from the
+   * broader universe. NOT the full universe size - see universeSymbols for that. */
   scanned: number;
   nearMatches: number;
   elapsedMs: number;
+  /** Real broad-universe funnel counts, for the Scanner page's "why did I only get these rows"
+   * summary - see PROJECT_HANDOFF.md. None of these numbers are persisted; they describe only
+   * THIS invocation's own run and are returned directly to the caller. */
+  universeSymbols: number;
+  /** "OCC" when the shared public optionable-universe cache had at least one row this run (the
+   * expected/normal case); "LIMITED_FALLBACK" when it was empty and this scan ran against only
+   * this user's own Research/Watchlist/traded tickers plus the fixed starter list - never silently
+   * presented as a real broad scan when it wasn't one. */
+  universeSource: LiveScanUniverseSource;
+  successfullyQuoted: number;
+  priceAndVolumeSurvivors: number;
+  technicalReadyCount: number;
+  technicalPendingCount: number;
+  optionChainsChecked: number;
 };
 
 /**
@@ -1629,7 +1651,26 @@ export type LiveScanRunSummary = {
  */
 const SCAN_PERSIST_CONCURRENCY = 6;
 
-export async function rerunLiveSchwabScannerForUser(userId: string): Promise<LiveScanRunSummary> {
+/**
+ * Broad-scanner activation (see PROJECT_HANDOFF.md): the real universe is now the shared public
+ * OCC optionable-universe cache union this user's own Research/Watchlist/traded tickers (Tier 1)
+ * union the fixed starter list - never the old fixed 13-ticker DEMO_SCAN_CANDIDATES-derived
+ * universe alone. Technical values (RSI/BB) come EXCLUSIVELY from this user's own
+ * TechnicalIndicatorSnapshot cache (getTechnicalIndicatorSnapshotsForUser) - evaluateLiveMarketScan
+ * is called WITH technicalCache set, which structurally guarantees it never calls
+ * provider.getPriceHistory for the broad universe (see LiveScanOptions.technicalCache's own doc
+ * comment) - a missing/stale/failed cache entry is reported honestly, never silently fetched live.
+ * Earnings distance comes exclusively from the shared EarningsCalendarEntry cache - zero Alpha
+ * Vantage calls from this path. Only a bounded, meaningful subset of the full universe is
+ * persisted as ScanResult rows (this user's own Tier 1 tickers, always, plus every genuine
+ * stock-stage survivor) - the full funnel's exclusion counts are aggregate-only, in the returned
+ * LiveScanRunSummary, never one row per excluded ticker (which would mean thousands of ScanResult
+ * rows re-read on every future Scanner page load).
+ */
+export async function rerunLiveSchwabScannerForUser(
+  userId: string,
+  options: { occSource?: string } = {},
+): Promise<LiveScanRunSummary> {
   const startedAt = Date.now();
   const profile = await ensureMyLstScannerProfileForUser(userId);
   const provider = await getSchwabMarketDataProviderForUser(userId);
@@ -1642,17 +1683,66 @@ export async function rerunLiveSchwabScannerForUser(userId: string): Promise<Liv
     orderBy: { sortOrder: "asc" },
   });
   const rules = scannerRulesFromRecords(records);
-  const researchTickers = await getResearchUniverseTickersForUser(userId);
-  const universe = [...new Set([...STARTER_LIVE_SCAN_UNIVERSE, ...researchTickers])];
+  // Scoped to a specific source (real callers default to OCC_OPTIONABLE_UNIVERSE_SOURCE = "OCC",
+  // matching schwab-quote-batch-diagnostic.ts's own established pattern for this same table) -
+  // never every row regardless of source, which would also sweep in any other future/non-OCC
+  // source (and, in tests, other test files' own synthetic universe fixtures under their own
+  // distinct sources).
+  const occSource = options.occSource ?? OCC_OPTIONABLE_UNIVERSE_SOURCE;
+  const [researchTickers, publicUniverse] = await Promise.all([
+    getResearchUniverseTickersForUser(userId),
+    prisma.optionableUniverseSymbol.findMany({ where: { source: occSource }, select: { ticker: true } }),
+  ]);
+  const researchTickerSet = new Set(researchTickers.map((ticker) => ticker.toUpperCase()));
+  const universeSourceKind: LiveScanUniverseSource = publicUniverse.length > 0 ? "OCC" : "LIMITED_FALLBACK";
+  const universe = [...new Set([...STARTER_LIVE_SCAN_UNIVERSE, ...researchTickers, ...publicUniverse.map((row) => row.ticker)])].map(
+    (ticker) => ticker.toUpperCase(),
+  );
 
   try {
-    const candidates = await evaluateLiveMarketScan({ provider, rules, universe });
-    await persistScannerRun(userId, profile.id, "LIVE:SCHWAB", candidates);
-    await syncVerifiedFundamentalsForUser(userId, candidates);
+    const [technicalCache, earningsRows] = await Promise.all([
+      getTechnicalIndicatorSnapshotsForUser(userId, universe),
+      getEarningsCalendarLookup(universe),
+    ]);
+    const earningsLookup = new Map(
+      [...earningsRows.entries()].map(([ticker, entry]) => [
+        ticker,
+        { daysUntilReport: entry.daysUntilReport, reportDate: entry.reportDate.toISOString().slice(0, 10) },
+      ]),
+    );
+
+    const candidates = await evaluateLiveMarketScan({ provider, rules, universe, technicalCache, earningsLookup });
+
+    // Bound what gets persisted (and re-read on every future Scanner page load) to a meaningful
+    // subset - see this function's own doc comment above.
+    const toPersist = candidates.filter((candidate) => researchTickerSet.has(candidate.ticker) || candidate.funnelStage === "STOCK_STAGE");
+
+    await persistScannerRun(userId, profile.id, "LIVE:SCHWAB", toPersist);
+    await syncVerifiedFundamentalsForUser(userId, toPersist);
+
+    const successfullyQuoted = candidates.filter((candidate) => candidate.funnelStage !== "UNAVAILABLE").length;
+    const priceAndVolumeSurvivors = candidates.filter(
+      (candidate) => candidate.funnelStage === "STOCK_STAGE" || candidate.funnelStage === "HISTORY_UNAVAILABLE",
+    ).length;
+    const technicalPendingCount = candidates.filter(
+      (candidate) => candidate.funnelStage === "STOCK_STAGE" && Boolean(candidate.values.technicalReasonCode),
+    ).length;
+    const technicalReadyCount = candidates.filter(
+      (candidate) => candidate.funnelStage === "STOCK_STAGE" && !candidate.values.technicalReasonCode,
+    ).length;
+    const optionChainsChecked = candidates.filter((candidate) => candidate.reachedOptionChainLookup).length;
+
     return {
-      scanned: candidates.length,
-      nearMatches: candidates.filter((candidate) => getNearMisses(candidate.summary.results).length === 1).length,
+      scanned: toPersist.length,
+      nearMatches: toPersist.filter((candidate) => getNearMisses(candidate.summary.results).length === 1).length,
       elapsedMs: Date.now() - startedAt,
+      universeSymbols: universe.length,
+      universeSource: universeSourceKind,
+      successfullyQuoted,
+      priceAndVolumeSurvivors,
+      technicalReadyCount,
+      technicalPendingCount,
+      optionChainsChecked,
     };
   } catch (error) {
     console.error("Live Schwab scan failed", error);

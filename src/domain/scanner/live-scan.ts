@@ -13,6 +13,21 @@ import { mapWithConcurrency } from "@/lib/concurrency";
 import { DEMO_SCAN_CANDIDATES, SCANNER_RULE_DEFINITIONS } from "./profile";
 import { evaluateCandidate, evaluateCriterion, setupScore, type ScannerRule } from "./scanner";
 
+/**
+ * Which funnel stage a returned ticker reached - lets a caller persisting only a bounded,
+ * meaningful subset of a broad-universe scan (see rerunLiveSchwabScannerForUser) reconstruct
+ * funnel membership without re-deriving it from scanNote text:
+ *  - STOCK_STAGE: survived Stage 1 (quote-only gating) and had its stock-level values computed
+ *    (technical cache or live history, per whichever mode this scan ran in).
+ *  - QUOTE_EXCLUDED: Stage 1 eliminated it on price/volume - its own real quote is still
+ *    preserved, never fabricated.
+ *  - HISTORY_UNAVAILABLE: the quote succeeded, but legacy live-history mode's own
+ *    provider.getPriceHistory call failed for it (never produced when technicalCache is supplied -
+ *    there is no live fetch to fail in that mode).
+ *  - UNAVAILABLE: even the quote itself failed.
+ */
+export type LiveScanFunnelStage = "STOCK_STAGE" | "QUOTE_EXCLUDED" | "HISTORY_UNAVAILABLE" | "UNAVAILABLE";
+
 export type LiveScanCandidate = {
   ticker: string;
   values: Record<string, number | string | boolean | null | undefined>;
@@ -26,7 +41,30 @@ export type LiveScanCandidate = {
    * Null/undefined when the provider didn't supply verified fundamentals (e.g. demo data).
    */
   verifiedFundamentals?: QuoteFundamentals | null;
+  /** Optional because only evaluateLiveMarketScan populates it - evaluateDemoScan's fixed demo
+   * candidates and any pre-existing test fixture predate this field and don't need it; a caller
+   * that cares (see rerunLiveSchwabScannerForUser) treats a missing value as "STOCK_STAGE",
+   * matching every producer that existed before this field was added. */
+  funnelStage?: LiveScanFunnelStage;
+  /** True only for the (at most maxOptionChainLookups) candidates that actually consumed an
+   * option-chain request this scan - independent of whether that lookup then succeeded. Optional
+   * for the same reason as funnelStage. */
+  reachedOptionChainLookup?: boolean;
 };
+
+/** Structurally identical to technical-indicator-cache.ts's own TechnicalIndicatorLookup - kept as
+ * an independent domain-layer type (this module has zero imports from src/lib) rather than a
+ * cross-layer import; TypeScript's structural typing means the real lib type is assignable here
+ * without any explicit conversion at the call site. */
+export type LiveScanTechnicalLookup =
+  | { state: "READY"; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null }
+  | { state: "TECHNICAL_DATA_STALE"; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null }
+  | { state: "TECHNICAL_DATA_PENDING" }
+  | { state: "HISTORY_UNAVAILABLE" };
+
+/** Structurally compatible with earnings-calendar-cache.ts's TickerEarningsLookup, with reportDate
+ * pre-formatted as an ISO date string (matching how this module already stores earningsDate). */
+export type LiveScanEarningsLookup = { daysUntilReport: number; reportDate: string };
 
 export type LiveScanOptions = {
   provider: MarketDataProvider;
@@ -34,6 +72,22 @@ export type LiveScanOptions = {
   universe?: string[];
   asOf?: Date;
   maxOptionChainLookups?: number;
+  /**
+   * User-scoped technical cache (RSI/BB bands) - see technical-indicator-cache.ts's
+   * getTechnicalIndicatorSnapshotsForUser. CRITICAL: when this is provided, Stage 2 NEVER calls
+   * provider.getPriceHistory - a missing/stale/failed cache entry is reported honestly (see
+   * TECHNICAL_SCAN_REASON_MESSAGES) rather than triggering a live fetch, so a broad (hundreds/
+   * thousands-symbol) universe never fetches price history for the whole universe. When this
+   * option is omitted entirely (legacy/demo/test callers - see this module's own test suite),
+   * Stage 2 falls back to its original per-candidate live provider.getPriceHistory call, exactly
+   * as before this option existed.
+   */
+  technicalCache?: Map<string, LiveScanTechnicalLookup>;
+  /** Shared earnings-calendar cache lookup - see earnings-calendar-cache.ts's
+   * getEarningsCalendarLookup. Never a live Alpha Vantage call. A ticker absent from this map
+   * (or the option omitted) reports earningsDistance/earningsDate as null - UNKNOWN, exactly as
+   * before this option existed - never a fabricated "no earnings" claim. */
+  earningsLookup?: Map<string, LiveScanEarningsLookup>;
 };
 
 type StockStageCandidate = {
@@ -46,11 +100,14 @@ type StockStageCandidate = {
 
 export const STARTER_LIVE_SCAN_UNIVERSE = [...new Set(DEMO_SCAN_CANDIDATES.map((candidate) => candidate.ticker))];
 const SCANNER_RULE_DEFAULTS_BY_KEY = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.key, definition]));
-const STOCK_STAGE_RULE_KEYS = new Set(["price", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
+const STOCK_STAGE_RULE_KEYS = new Set(["price", "stockVolume", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
 /** Stage 1 of the stock-level funnel: rules answerable from a quote alone, with no history
- * fetch. Kept as a subset of STOCK_STAGE_RULE_KEYS, never a separate rule vocabulary - see
- * evaluateLiveMarketScan's two-stage stock funnel below. */
-const QUOTE_ONLY_STOCK_RULE_KEYS = new Set(["price"]);
+ * fetch or technical-cache read. Kept as a subset of STOCK_STAGE_RULE_KEYS, never a separate rule
+ * vocabulary - see evaluateLiveMarketScan's two-stage stock funnel below. Includes stockVolume
+ * alongside price (both answerable from the Stage 1 quote alone) so a broad universe never spends
+ * a technical-cache read, earnings lookup, or option-chain request on a ticker this user's own
+ * volume rule already excludes. */
+const QUOTE_ONLY_STOCK_RULE_KEYS = new Set(["price", "stockVolume"]);
 
 /**
  * Caps how many quote/history or option-chain requests run in flight at once for a
@@ -96,6 +153,8 @@ export async function evaluateLiveMarketScan({
   universe = STARTER_LIVE_SCAN_UNIVERSE,
   asOf = new Date(),
   maxOptionChainLookups = 8,
+  technicalCache,
+  earningsLookup,
 }: LiveScanOptions): Promise<LiveScanCandidate[]> {
   const tickers = universe.map((item) => item.toUpperCase());
   // Prefer the provider's native batch quote support (see MarketDataProvider.getQuotes) so a
@@ -133,29 +192,51 @@ export async function evaluateLiveMarketScan({
   const quoteEligible = quoteStage.filter((candidate) => !evaluateCandidate(quoteOnlyRules, candidate.values).results.some((r) => r.status === "FAIL"));
   const quoteExcluded = quoteStage.filter((candidate) => !quoteEligible.includes(candidate));
 
-  const historyOutcomes = await mapWithConcurrency<QuoteStageOutcome & { ok: true }, StockStageOutcome>(
-    quoteEligible,
-    SCAN_FETCH_CONCURRENCY,
-    async (candidate) => {
-      try {
-        const candles = await provider.getPriceHistory(candidate.ticker, 80);
-        return {
-          ticker: candidate.ticker,
-          ok: true,
-          candidate: mergeHistoryValues(candidate.ticker, candidate.quote, candidate.values, candles, candidate.verifiedFundamentals),
-        };
-      } catch (error) {
-        return { ticker: candidate.ticker, ok: false, error };
-      }
-    },
-  );
+  let stockStage: StockStageCandidate[];
+  let historyFailedTickers: Set<string>;
 
-  const stockStage = historyOutcomes
-    .filter((outcome): outcome is StockStageOutcome & { ok: true } => outcome.ok)
-    .map((outcome) => outcome.candidate);
-  const historyFailedTickers = new Set(
-    historyOutcomes.filter((outcome): outcome is StockStageOutcome & { ok: false } => !outcome.ok).map((outcome) => outcome.ticker),
-  );
+  if (technicalCache) {
+    // CRITICAL: no provider.getPriceHistory call anywhere in this branch - technical values come
+    // exclusively from the caller-supplied cache (see LiveScanOptions.technicalCache's own doc
+    // comment). Never used for a broad universe without this being true.
+    stockStage = quoteEligible.map((candidate) =>
+      mergeTechnicalCacheValues(candidate, technicalCache.get(candidate.ticker), earningsLookup?.get(candidate.ticker)),
+    );
+    historyFailedTickers = new Set(); // no live fetch exists in this mode, so nothing can fail this way
+  } else {
+    // Legacy/demo/test mode (no technicalCache supplied) - unchanged from before this option
+    // existed: one live provider.getPriceHistory call per quote-stage survivor.
+    const historyOutcomes = await mapWithConcurrency<QuoteStageOutcome & { ok: true }, StockStageOutcome>(
+      quoteEligible,
+      SCAN_FETCH_CONCURRENCY,
+      async (candidate) => {
+        try {
+          const candles = await provider.getPriceHistory(candidate.ticker, 80);
+          return {
+            ticker: candidate.ticker,
+            ok: true,
+            candidate: mergeHistoryValues(
+              candidate.ticker,
+              candidate.quote,
+              candidate.values,
+              candles,
+              candidate.verifiedFundamentals,
+              earningsLookup?.get(candidate.ticker),
+            ),
+          };
+        } catch (error) {
+          return { ticker: candidate.ticker, ok: false, error };
+        }
+      },
+    );
+
+    stockStage = historyOutcomes
+      .filter((outcome): outcome is StockStageOutcome & { ok: true } => outcome.ok)
+      .map((outcome) => outcome.candidate);
+    historyFailedTickers = new Set(
+      historyOutcomes.filter((outcome): outcome is StockStageOutcome & { ok: false } => !outcome.ok).map((outcome) => outcome.ticker),
+    );
+  }
 
   const shortlist = stockStage
     .filter((candidate) => stockStageIsEligible(candidate, rules))
@@ -180,7 +261,8 @@ export async function evaluateLiveMarketScan({
   }
 
   const evaluated = stockStage.map((candidate) => {
-    const values = shortlistTickers.has(candidate.ticker)
+    const reachedOptionChainLookup = shortlistTickers.has(candidate.ticker);
+    const values = reachedOptionChainLookup
       ? optionChainFailedTickers.has(candidate.ticker)
         ? {
             ...candidate.values,
@@ -192,7 +274,10 @@ export async function evaluateLiveMarketScan({
       : {
           ...candidate.values,
           ...unknownOptionValues(),
-          scanNote: "Stock-stage filter did not reach option-chain lookup in this controlled live scan.",
+          // A candidate may already carry a more specific reason (e.g. technicalReasonCode's own
+          // scanNote, set in mergeTechnicalCacheValues) - preserved rather than overwritten by
+          // this generic fallback, which only applies when nothing more specific is known.
+          scanNote: candidate.values.scanNote ?? "Stock-stage filter did not reach option-chain lookup in this controlled live scan.",
         };
 
     return {
@@ -200,6 +285,8 @@ export async function evaluateLiveMarketScan({
       values,
       summary: evaluateCandidate(rules, values),
       verifiedFundamentals: candidate.verifiedFundamentals ?? null,
+      funnelStage: "STOCK_STAGE" as const,
+      reachedOptionChainLookup,
     };
   });
 
@@ -209,23 +296,39 @@ export async function evaluateLiveMarketScan({
       ...unknownOptionValues(),
       scanNote: "Live market data was unavailable for this ticker; result marked UNKNOWN.",
     };
-    return { ticker: outcome.ticker, values, summary: evaluateCandidate(rules, values), verifiedFundamentals: null };
+    return {
+      ticker: outcome.ticker,
+      values,
+      summary: evaluateCandidate(rules, values),
+      verifiedFundamentals: null,
+      funnelStage: "UNAVAILABLE" as const,
+      reachedOptionChainLookup: false,
+    };
   });
 
-  // Stage 1 excluded these on price alone - a real quote was fetched (never fabricated), but
-  // history/RSI/BB/option-chain requests were never spent on a ticker already known to be
-  // outside the configured price range.
+  // Stage 1 excluded these on price and/or volume - a real quote was fetched (never fabricated),
+  // but history/RSI/BB/option-chain requests were never spent on a ticker already known to be
+  // outside this user's own configured quote-stage rules.
   const priceExcluded = quoteExcluded.map((candidate) => {
     const values = {
       ...candidate.values,
       ...unknownOptionValues(),
-      scanNote: "Outside your configured stock price range; history and option-chain lookups were skipped.",
+      scanNote: quoteStageExclusionScanNote(evaluateCandidate(quoteOnlyRules, candidate.values).results),
     };
-    return { ticker: candidate.ticker, values, summary: evaluateCandidate(rules, values), verifiedFundamentals: candidate.verifiedFundamentals };
+    return {
+      ticker: candidate.ticker,
+      values,
+      summary: evaluateCandidate(rules, values),
+      verifiedFundamentals: candidate.verifiedFundamentals,
+      funnelStage: "QUOTE_EXCLUDED" as const,
+      reachedOptionChainLookup: false,
+    };
   });
 
   // A real quote succeeded but the price-history request itself failed - distinct from
   // priceExcluded (a deliberate filter) and from unavailableTickers (the quote itself failed).
+  // Only ever produced in legacy (no technicalCache) mode - historyFailedTickers is always empty
+  // when a technical cache is supplied, since there is no live fetch to fail in that mode.
   const historyUnavailable = quoteEligible
     .filter((candidate) => historyFailedTickers.has(candidate.ticker))
     .map((candidate) => {
@@ -236,10 +339,34 @@ export async function evaluateLiveMarketScan({
         ...unknownOptionValues(),
         scanNote: "Price history was unavailable for this ticker; RSI/BB and option-chain lookups were skipped.",
       };
-      return { ticker: candidate.ticker, values, summary: evaluateCandidate(rules, values), verifiedFundamentals: candidate.verifiedFundamentals };
+      return {
+        ticker: candidate.ticker,
+        values,
+        summary: evaluateCandidate(rules, values),
+        verifiedFundamentals: candidate.verifiedFundamentals,
+        funnelStage: "HISTORY_UNAVAILABLE" as const,
+        reachedOptionChainLookup: false,
+      };
     });
 
   return [...evaluated, ...priceExcluded, ...historyUnavailable, ...unavailable];
+}
+
+/** Honest, specific reason a Stage 1 quote-stage exclusion happened - price, volume, or both.
+ * Preserves the exact original price-only message (some tests assert on it verbatim) while
+ * adding accurate wording for the newly-added volume gate (see QUOTE_ONLY_STOCK_RULE_KEYS). */
+function quoteStageExclusionScanNote(results: ReturnType<typeof evaluateCandidate>["results"]): string {
+  const failedKeys = new Set(results.filter((result) => result.status === "FAIL").map((result) => result.key));
+  const priceFailed = failedKeys.has("price");
+  const volumeFailed = failedKeys.has("stockVolume");
+
+  if (priceFailed && volumeFailed) {
+    return "Outside your configured stock price range and below your minimum underlying volume; history and option-chain lookups were skipped.";
+  }
+  if (volumeFailed) {
+    return "Below your configured minimum underlying volume; history and option-chain lookups were skipped.";
+  }
+  return "Outside your configured stock price range; history and option-chain lookups were skipped.";
 }
 
 /** Stage 1: everything knowable from a quote alone - RSI/BB stay null until (if) Stage 2 runs. */
@@ -263,14 +390,38 @@ function buildQuoteOnlyValues(quote: MarketQuote): Record<string, number | strin
   };
 }
 
-/** Stage 2: merges price-history-derived RSI/BB (and the candle-fallback volume, only relevant
- * once history has actually been fetched) into the Stage 1 quote-only values. */
+/** Honest, specific reason a candidate's technical values (RSI/BB) are null when they come from
+ * the user-scoped cache rather than a live history fetch - distinguishes a background job that
+ * simply hasn't reached this ticker yet from a genuinely stale or failed one, so the scan's
+ * scanNote/summary can be specific rather than a generic "unknown." Never fabricated for the
+ * legacy (no technicalCache) live-history mode, which has its own distinct historyUnavailable
+ * category instead. */
+export type TechnicalScanReasonCode = "TECHNICAL_DATA_PENDING" | "TECHNICAL_DATA_STALE" | "TECHNICAL_DATA_FAILED";
+
+const TECHNICAL_SCAN_REASON_MESSAGES: Record<TechnicalScanReasonCode, string> = {
+  TECHNICAL_DATA_PENDING: "Technical preparation for this ticker has not completed yet; RSI/BB are pending.",
+  TECHNICAL_DATA_STALE: "Cached technical data for this ticker is stale; RSI/BB were not used to avoid a false read.",
+  TECHNICAL_DATA_FAILED: "Technical preparation failed for this ticker; RSI/BB are unavailable.",
+};
+
+function earningsValuesFor(entry: LiveScanEarningsLookup | undefined): { earningsDate: string | null; earningsDistance: number | null } {
+  if (!entry) {
+    return { earningsDate: null, earningsDistance: null };
+  }
+  return { earningsDate: entry.reportDate, earningsDistance: entry.daysUntilReport };
+}
+
+/** Stage 2 (legacy/demo/test mode only - see LiveScanOptions.technicalCache): merges
+ * price-history-derived RSI/BB (and the candle-fallback volume, only relevant once history has
+ * actually been fetched) into the Stage 1 quote-only values, plus the earnings-cache lookup
+ * (independent of which technical mode is active). */
 function mergeHistoryValues(
   ticker: string,
   quote: MarketQuote,
   quoteValues: Record<string, number | string | boolean | null | undefined>,
   candles: PriceCandle[],
   verifiedFundamentals: QuoteFundamentals | null,
+  earningsEntry: LiveScanEarningsLookup | undefined,
 ): StockStageCandidate {
   const closes = candles.map((candle) => candle.close);
   const rsi = wilderRsi(closes);
@@ -282,11 +433,73 @@ function mergeHistoryValues(
     candles,
     values: {
       ...quoteValues,
+      ...earningsValuesFor(earningsEntry),
       stockVolume: quoteValues.stockVolume ?? candles.at(-1)?.volume ?? null,
       rsi,
       bbPercent: bands ? bollingerPositionPercent(quote.price, bands) : null,
     },
     verifiedFundamentals,
+  };
+}
+
+/** Stage 2 (technical-cache mode - see LiveScanOptions.technicalCache): NEVER calls
+ * provider.getPriceHistory. Only a READY cache entry contributes real rsi/bands; every other
+ * state (stale/pending/failed/missing) leaves rsi/bbPercent null with an honest
+ * technicalReasonCode + scanNote - evaluateCriterion already treats a null actualValue as UNKNOWN
+ * (never PASS, never FAIL), so a non-READY ticker can never fake a PASS on rsi/bbPercent. BB
+ * position is always recomputed from the LIVE quote price + cached bands (bollingerPositionPercent),
+ * never a stale precomputed percent - matching the cache's own documented contract. */
+function mergeTechnicalCacheValues(
+  candidate: QuoteStageOutcome & { ok: true },
+  technical: LiveScanTechnicalLookup | undefined,
+  earningsEntry: LiveScanEarningsLookup | undefined,
+): StockStageCandidate {
+  const base = {
+    ticker: candidate.ticker,
+    quote: candidate.quote,
+    candles: [] as PriceCandle[],
+    verifiedFundamentals: candidate.verifiedFundamentals,
+  };
+  const earnings = earningsValuesFor(earningsEntry);
+
+  // Only a READY entry ever contributes a real rsi/bbPercent - stale/pending/failed/missing all
+  // fall through to the honest reason-code branch below, exactly per the "stale technical cannot
+  // fake PASS" requirement (evaluateCriterion treats a null actualValue as UNKNOWN, never PASS).
+  if (technical?.state === "READY") {
+    const bands =
+      technical.bbLower !== null && technical.bbMiddle !== null && technical.bbUpper !== null
+        ? { lower: technical.bbLower, middle: technical.bbMiddle, upper: technical.bbUpper }
+        : null;
+    return {
+      ...base,
+      values: {
+        ...candidate.values,
+        ...earnings,
+        rsi: technical.rsi,
+        // Bands genuinely never computed yet (fewer than 20 real closes existed when the
+        // background worker last ran) - bbPercent honestly stays null even though rsi may be real.
+        bbPercent: bands ? bollingerPositionPercent(candidate.quote.price, bands) : null,
+      },
+    };
+  }
+
+  const reasonCode: TechnicalScanReasonCode =
+    technical?.state === "TECHNICAL_DATA_STALE"
+      ? "TECHNICAL_DATA_STALE"
+      : technical?.state === "HISTORY_UNAVAILABLE"
+        ? "TECHNICAL_DATA_FAILED"
+        : "TECHNICAL_DATA_PENDING"; // covers TECHNICAL_DATA_PENDING and a missing map entry
+
+  return {
+    ...base,
+    values: {
+      ...candidate.values,
+      ...earnings,
+      rsi: null,
+      bbPercent: null,
+      technicalReasonCode: reasonCode,
+      scanNote: TECHNICAL_SCAN_REASON_MESSAGES[reasonCode],
+    },
   };
 }
 

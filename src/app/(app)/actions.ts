@@ -23,6 +23,7 @@ import {
   removeWatchlistItemForUser,
   rerunDemoScannerForUser,
   rerunLiveSchwabScannerForUser,
+  type LiveScanRunSummary,
   resetScannerSettingsToLstCoreForUser,
   rollCampaignPutForUser,
   safeReturnPath,
@@ -411,7 +412,7 @@ export async function runDemoScannerAction() {
 }
 
 export type RunLiveScanResult =
-  | { ok: true; scanned: number; nearMatches: number; elapsedMs: number }
+  | ({ ok: true } & LiveScanRunSummary)
   | { ok: false; error: string };
 
 export async function runLiveSchwabScannerAction(): Promise<RunLiveScanResult> {
