@@ -613,6 +613,143 @@ export async function getTechnicalCacheReadinessForUser(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Freshness breakdown - answers "of the items marked READY, how many are actually USABLE right
+// now by the live scan's own freshness rule" (see PROJECT_HANDOFF.md's readiness-vs-live-scan
+// investigation). TechnicalPreparationItem.status=READY is a pure workflow-completion flag (see
+// getTechnicalCacheReadinessForUser above) that is never re-validated for asOfDate freshness once
+// set - this function is the one place that cross-checks it against the EXACT SAME freshness rule
+// getTechnicalIndicatorSnapshotsForUser (the live scan's own read path) uses, so the diagnostic and
+// the scanner can never disagree about what "fresh" means. Deliberately takes no MarketDataProvider
+// and performs no getOrCreate/quote-sweep - a plain read of whatever run already exists (or
+// honestly reports none exists yet) - so this is always safe to call from a diagnostic page with
+// zero Schwab spend, per explicit instruction.
+// ---------------------------------------------------------------------------------------------
+
+export type TechnicalCacheFreshnessBreakdown = {
+  hasActiveRun: boolean;
+  eligibleCount: number;
+  /** TechnicalPreparationItem.status=READY count - identical to getTechnicalCacheReadinessForUser's
+   * own readyCount, included here so a caller never needs to reconcile two separate numbers. */
+  workflowReadyCount: number;
+  /** Of the workflow-ready items, how many have a TechnicalIndicatorSnapshot whose asOfDate is >=
+   * the live scan's own required market date right now - i.e. would actually be used (not treated
+   * as stale) if a live scan ran this instant. */
+  freshUsableCount: number;
+  /** Workflow-ready items whose snapshot exists but whose asOfDate is older than the required
+   * market date (or null) - marked READY, but the live scan would refuse to trust them. */
+  staleSnapshotCount: number;
+  /** Workflow-ready items whose snapshot's own status is FAILED, despite the workflow item itself
+   * reading READY - should not normally happen (see technical-indicator-cache's own write path)
+   * but reported honestly rather than assumed impossible. */
+  failedSnapshotCount: number;
+  /** Workflow-ready items with NO TechnicalIndicatorSnapshot row at all - should not normally
+   * happen, reported honestly rather than assumed impossible. */
+  missingSnapshotCount: number;
+  pendingCount: number;
+  /** The live scan's own required market date right now (previousNyseMarketDay(now),
+   * date-only) - the exact cutoff freshUsableCount/staleSnapshotCount are computed against. */
+  requiredMarketDate: Date;
+  /** Newest asOfDate among this run's workflow-ready items' snapshots, or null if none have one. */
+  newestSnapshotMarketDate: Date | null;
+  /** Oldest asOfDate among only the FRESH (usable) workflow-ready snapshots, or null if none are
+   * fresh - deliberately excludes stale ones so this reads as "how far back does usable data go,"
+   * not diluted by known-stale rows. */
+  oldestFreshSnapshotMarketDate: Date | null;
+};
+
+/**
+ * DB-only diagnostic breakdown of the current active preparation run's READY items, cross-checked
+ * against the live scan's own freshness rule. Requires no Schwab call - if no run exists yet for
+ * today's (marketDate, rulesFingerprint) identity, returns hasActiveRun: false with zero counts
+ * rather than creating one (unlike getTechnicalCacheReadinessForUser/getOrCreateActiveTechnicalPreparationRun,
+ * which are allowed to trigger a real quote sweep on first use).
+ */
+export async function getTechnicalCacheFreshnessBreakdownForUser(userId: string, now: Date = new Date()): Promise<TechnicalCacheFreshnessBreakdown> {
+  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const rules = await loadUserQuoteStageRules(userId);
+  const fingerprint = computeQuoteStageRulesFingerprint(rules);
+  const marketDate = dateOnlyUtc(now);
+
+  const run = await prisma.technicalPreparationRun.findUnique({
+    where: { userId_marketDate_rulesFingerprint: { userId, marketDate, rulesFingerprint: fingerprint } },
+  });
+  if (!run || run.eligibleCount === null) {
+    return {
+      hasActiveRun: false,
+      eligibleCount: 0,
+      workflowReadyCount: 0,
+      freshUsableCount: 0,
+      staleSnapshotCount: 0,
+      failedSnapshotCount: 0,
+      missingSnapshotCount: 0,
+      pendingCount: 0,
+      requiredMarketDate,
+      newestSnapshotMarketDate: null,
+      oldestFreshSnapshotMarketDate: null,
+    };
+  }
+
+  const [readyItems, pendingCount] = await Promise.all([
+    prisma.technicalPreparationItem.findMany({ where: { runId: run.id, status: "READY" }, select: { ticker: true } }),
+    prisma.technicalPreparationItem.count({ where: { runId: run.id, status: { in: ["PENDING", "PROCESSING"] } } }),
+  ]);
+
+  const readyTickers = readyItems.map((item) => item.ticker);
+  const snapshots = readyTickers.length
+    ? await prisma.technicalIndicatorSnapshot.findMany({
+        where: { userId, ticker: { in: readyTickers } },
+        select: { ticker: true, status: true, asOfDate: true },
+      })
+    : [];
+  const snapshotByTicker = new Map(snapshots.map((row) => [row.ticker, row]));
+
+  let freshUsableCount = 0;
+  let staleSnapshotCount = 0;
+  let failedSnapshotCount = 0;
+  let missingSnapshotCount = 0;
+  let newestSnapshotMarketDate: Date | null = null;
+  let oldestFreshSnapshotMarketDate: Date | null = null;
+
+  for (const ticker of readyTickers) {
+    const snapshot = snapshotByTicker.get(ticker);
+    if (!snapshot) {
+      missingSnapshotCount += 1;
+      continue;
+    }
+    if (snapshot.status === "FAILED") {
+      failedSnapshotCount += 1;
+      continue;
+    }
+    if (snapshot.asOfDate && (!newestSnapshotMarketDate || snapshot.asOfDate.getTime() > newestSnapshotMarketDate.getTime())) {
+      newestSnapshotMarketDate = snapshot.asOfDate;
+    }
+    const isFresh = !!snapshot.asOfDate && snapshot.asOfDate.getTime() >= requiredMarketDate.getTime();
+    if (isFresh) {
+      freshUsableCount += 1;
+      if (snapshot.asOfDate && (!oldestFreshSnapshotMarketDate || snapshot.asOfDate.getTime() < oldestFreshSnapshotMarketDate.getTime())) {
+        oldestFreshSnapshotMarketDate = snapshot.asOfDate;
+      }
+    } else {
+      staleSnapshotCount += 1;
+    }
+  }
+
+  return {
+    hasActiveRun: true,
+    eligibleCount: run.eligibleCount,
+    workflowReadyCount: readyTickers.length,
+    freshUsableCount,
+    staleSnapshotCount,
+    failedSnapshotCount,
+    missingSnapshotCount,
+    pendingCount,
+    requiredMarketDate,
+    newestSnapshotMarketDate,
+    oldestFreshSnapshotMarketDate,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Orchestration support - cheap, DB-only status reads for technical-preparation-orchestrator.ts.
 // Deliberately never touches a provider or does a quote sweep itself - only
 // getOrCreateActiveTechnicalPreparationRun (already above) is allowed to do that.

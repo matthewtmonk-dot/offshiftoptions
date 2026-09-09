@@ -52,6 +52,7 @@ import {
 } from "@/lib/broker-connections";
 import { runScannerUniverseDryRun } from "@/lib/scanner-universe-dry-run";
 import {
+  getTechnicalCacheFreshnessBreakdownForUser,
   getTechnicalCacheReadinessForUser,
   refreshTechnicalIndicatorCacheBatchForUser,
   TECHNICAL_REFRESH_BATCH_SIZE,
@@ -557,6 +558,47 @@ export async function getTechnicalCacheReadinessAction(): Promise<TechnicalCache
     readyCount: status.readyCount,
     pendingCount: status.pendingCount,
     lastPreparedAt: status.lastPreparedAt?.toISOString() ?? null,
+  };
+}
+
+export type TechnicalCacheFreshnessBreakdownActionResult =
+  | { status: "NO_ACTIVE_RUN" }
+  | {
+      status: "OK";
+      eligibleCount: number;
+      workflowReadyCount: number;
+      freshUsableCount: number;
+      staleSnapshotCount: number;
+      failedSnapshotCount: number;
+      missingSnapshotCount: number;
+      pendingCount: number;
+      requiredMarketDate: string;
+      newestSnapshotMarketDate: string | null;
+      oldestFreshSnapshotMarketDate: string | null;
+    };
+
+/** DB-only - no Schwab call, no provider resolution. Refines the plain workflow-completion
+ * readyCount above with the live scan's own asOfDate freshness rule (getTechnicalIndicatorSnapshotsForUser),
+ * so this panel and the scanner can never disagree about what "ready" means. Never lists individual
+ * tickers or exposes broker/account data - aggregate counts and safe date-only fields only. */
+export async function getTechnicalCacheFreshnessBreakdownAction(): Promise<TechnicalCacheFreshnessBreakdownActionResult> {
+  const user = await requireCurrentUser();
+  const breakdown = await getTechnicalCacheFreshnessBreakdownForUser(user.id);
+  if (!breakdown.hasActiveRun) {
+    return { status: "NO_ACTIVE_RUN" };
+  }
+  return {
+    status: "OK",
+    eligibleCount: breakdown.eligibleCount,
+    workflowReadyCount: breakdown.workflowReadyCount,
+    freshUsableCount: breakdown.freshUsableCount,
+    staleSnapshotCount: breakdown.staleSnapshotCount,
+    failedSnapshotCount: breakdown.failedSnapshotCount,
+    missingSnapshotCount: breakdown.missingSnapshotCount,
+    pendingCount: breakdown.pendingCount,
+    requiredMarketDate: breakdown.requiredMarketDate.toISOString().slice(0, 10),
+    newestSnapshotMarketDate: breakdown.newestSnapshotMarketDate?.toISOString().slice(0, 10) ?? null,
+    oldestFreshSnapshotMarketDate: breakdown.oldestFreshSnapshotMarketDate?.toISOString().slice(0, 10) ?? null,
   };
 }
 

@@ -619,6 +619,50 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     expect(summary.technicalStaleCount).toBeGreaterThanOrEqual(1);
   });
 
+  it("PART E - immediate-stale-worker reproduction: if the worker's own last available candle is one trading day short of what freshness requires (Schwab's daily bar not yet posted for the just-closed session), the resulting snapshot is stale THE MOMENT it's written - with zero elapsed real time between prep and scan, refuting 'staleness = elapsed time' as the sole explanation", async () => {
+    const { getOrCreateActiveTechnicalPreparationRun, refreshTechnicalIndicatorCacheBatchForUser, getTechnicalCacheReadinessForUser } =
+      await import("./technical-indicator-cache");
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+
+    const ticker = "RMISLAG01";
+    await seedOccUniverse([ticker]);
+
+    const realNow = new Date();
+    const requiredMarketDate = previousNyseMarketDay(realNow); // what live-scan freshness demands right now (the scan below always reads real time)
+    const laggedCandleDate = previousNyseMarketDay(requiredMarketDate); // one trading day SHORT of that - simulates Schwab not yet exposing the just-closed session's own daily candle
+    // A synthetic, unique preparation-run identity ("now" for getOrCreateActiveTechnicalPreparationRun
+    // only, keyed by (userId, marketDate, rulesFingerprint)) - this file's other tests above also
+    // call getOrCreateActiveTechnicalPreparationRun with the real `new Date()` for matt.id, and
+    // would otherwise collide with (reuse) this test's own run before RMISLAG01 could ever become a
+    // claimable item in it. The written asOfDate itself comes purely from the candle's own `date`
+    // field (see refreshTechnicalIndicatorCacheBatchForUser), never from this run-identity `now` -
+    // so this substitution has zero effect on what's actually being tested.
+    const runIdentityNow = new Date(Date.now() + 400 * 24 * 60 * 60 * 1000);
+    const quotes = { [ticker]: { price: 20, volume: 1_000_000 } };
+    const prepProvider = fakeProviderWithHistory(quotes, { [ticker]: syntheticCandlesEndingOn(ticker, laggedCandleDate) });
+
+    providerByUserId.set(matt.id, prepProvider);
+    await getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, runIdentityNow);
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, prepProvider, { batchSize: 1, now: runIdentityNow });
+
+    const snapshot = await prisma.technicalIndicatorSnapshot.findUnique({ where: { userId_ticker: { userId: matt.id, ticker } } });
+    expect(snapshot?.status).toBe("READY"); // the worker itself succeeded - this is not a fetch failure
+    expect(snapshot?.asOfDate?.toISOString().slice(0, 10)).toBe(laggedCandleDate.toISOString().slice(0, 10));
+
+    // Readiness (workflow-completion only, no freshness re-check) reports this ticker READY.
+    const readiness = await getTechnicalCacheReadinessForUser(matt.id, prepProvider, runIdentityNow);
+    expect(readiness.readyCount).toBeGreaterThanOrEqual(1);
+
+    // The live scan, run immediately after (same real moment for all practical purposes - no
+    // sleep, no simulated multi-day gap), correctly refuses to trust it.
+    providerByUserId.set(matt.id, fakeProvider(quotes, { [ticker]: defaultPut(ticker, 18) }));
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+    const result = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+
+    expect((result?.snapshotJson as Record<string, unknown>)?.technicalReasonCode).toBe("TECHNICAL_DATA_STALE");
+    expect(summary.technicalStaleCount).toBeGreaterThanOrEqual(1);
+  });
+
   it("a READY technical snapshot for a ticker that fails THIS scan's own quote-stage filter is never counted as live-ready - readiness is scoped to genuine survivors only", async () => {
     const readyButExcludedTicker = "RMISEXCL1";
     await seedOccUniverse([readyButExcludedTicker]);

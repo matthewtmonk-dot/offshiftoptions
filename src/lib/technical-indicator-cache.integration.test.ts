@@ -452,6 +452,48 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(status.lastPreparedAt).not.toBeNull();
   });
 
+  it("getTechnicalCacheFreshnessBreakdownForUser: workflow-READY items split correctly into fresh-usable vs stale, matching getTechnicalIndicatorSnapshotsForUser's own freshness verdict exactly (same underlying rule)", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
+
+    const now = new Date();
+    const requiredMarketDate = previousNyseMarketDay(now);
+    const laggedDate = previousNyseMarketDay(requiredMarketDate); // one trading day short - stale by construction
+
+    await seedUniverse(["TECHFR1", "TECHFR2"]);
+    const provider = fakeProvider({
+      quotes: { TECHFR1: { price: 20, volume: 1_000_000 }, TECHFR2: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: {
+        TECHFR1: syntheticCandles("TECHFR1", 80, requiredMarketDate), // exactly fresh
+        TECHFR2: syntheticCandles("TECHFR2", 80, laggedDate), // one trading day short - stale
+      },
+    });
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 2, now });
+
+    const breakdown = await getTechnicalCacheFreshnessBreakdownForUser(matt.id, now);
+    expect(breakdown.hasActiveRun).toBe(true);
+    expect(breakdown.workflowReadyCount).toBe(2); // both items ARE workflow-READY - the bug this proves
+    expect(breakdown.freshUsableCount).toBe(1);
+    expect(breakdown.staleSnapshotCount).toBe(1);
+    expect(breakdown.failedSnapshotCount).toBe(0);
+    expect(breakdown.missingSnapshotCount).toBe(0);
+    expect(breakdown.requiredMarketDate.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10));
+    expect(breakdown.newestSnapshotMarketDate?.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10));
+    expect(breakdown.oldestFreshSnapshotMarketDate?.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10));
+
+    // Cross-check against the live scan's OWN read path for the exact same tickers/moment - the
+    // diagnostic and the scanner must never disagree about which of these is actually usable.
+    const liveScanView = await getTechnicalIndicatorSnapshotsForUser(matt.id, ["TECHFR1", "TECHFR2"], now);
+    expect(liveScanView.get("TECHFR1")?.state).toBe("READY");
+    expect(liveScanView.get("TECHFR2")?.state).toBe("TECHNICAL_DATA_STALE");
+  });
+
+  it("getTechnicalCacheFreshnessBreakdownForUser reports hasActiveRun: false and performs no provider work when no run exists yet for today", async () => {
+    const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
+    const breakdown = await getTechnicalCacheFreshnessBreakdownForUser(matt.id);
+    expect(breakdown).toMatchObject({ hasActiveRun: false, eligibleCount: 0, workflowReadyCount: 0, freshUsableCount: 0 });
+  });
+
   it("one preparation cycle performs the quote-stage eligibility sweep exactly once - the 2nd/3rd/Nth history batch never calls getQuotes again", async () => {
     await seedUniverse(syntheticTickers(60));
     let getQuotesCallCount = 0;
