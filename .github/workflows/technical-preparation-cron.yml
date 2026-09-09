@@ -1,14 +1,16 @@
 name: Technical Preparation Worker
 
 on:
-  schedule:
-    # 21:10-23:55 UTC, Mon-Fri, every 5 minutes - runs after the reference-refresh workflow (21:05
-    # UTC) so shared OCC/earnings data is current first. All NYSE market-day/session/DST/holiday
-    # logic lives server-side in the endpoint itself (isTechnicalPreparationWindowOpen) - this
-    # window is deliberately just a broad container for it to be called in; a tick outside the
-    # real preparation window, or once every connected user is already complete, is a safe no-op.
-    - cron: "10-55/5 21 * * 1-5"
-    - cron: "*/5 22-23 * * 1-5"
+  # No `schedule:` trigger for now - deliberately temporary (see PROJECT_HANDOFF.md's readiness-
+  # mismatch investigation). The prior evening-after-close schedule (21:10-23:55 UTC) is now known
+  # to be too early (real Sep 8 evidence: the provider had not yet posted the just-closed
+  # session's own daily candle). The endpoint's own isTechnicalPreparationWindowOpen was corrected
+  # to the right morning-before-open semantics, but the REAL time the provider reliably publishes
+  # that candle each morning has not been measured yet - that is exactly what the new
+  # latest-candle-freshness diagnostic (Scanner Engineering Diagnostics page) exists to answer.
+  # Until Matt has that evidence, technical preparation runs ONLY via workflow_dispatch (manual) or
+  # a direct authenticated call to the endpoint - never automatically. A follow-up slice restores a
+  # real, evidence-backed `schedule:` once the provider's actual publish time is known.
   workflow_dispatch:
 
 # One bounded cycle claims real TechnicalPreparationItem rows via the existing DB claim mechanism
