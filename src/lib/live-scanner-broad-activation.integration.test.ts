@@ -1,6 +1,6 @@
 import { hash } from "bcryptjs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { MarketDataProvider, MarketQuote, OptionContractSnapshot } from "@/providers/market-data/types";
+import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle } from "@/providers/market-data/types";
 
 /**
  * Broad scanner activation (see PROJECT_HANDOFF.md) - Run Live Scan now uses the real OCC
@@ -55,6 +55,56 @@ function defaultPut(symbol: string, strike: number, bid = 0.3): OptionContractSn
 // rather than either throwing (which would fail the whole scan - see evaluateLiveMarketScan's
 // "every ticker unavailable" guard) or accidentally passing and polluting a test's assertions.
 const UNCONFIGURED_TICKER_DEFAULT_QUOTE = { price: 999, volume: 1_000_000 };
+
+/** 80 real-shaped, deterministic daily closes ending exactly on `endDate` - mirrors
+ * technical-indicator-cache.integration.test.ts's own fixture convention, so the resulting
+ * asOfDate is deterministic and controllable (used to reproduce the readiness-vs-live-scan
+ * freshness question with a REAL, non-mocked getPriceHistory call and a REAL RSI/BB computation,
+ * not a hand-authored technicalCache map). */
+function syntheticCandlesEndingOn(ticker: string, endDate: Date, count = 80): PriceCandle[] {
+  return Array.from({ length: count }, (_, i) => {
+    const close = 100 + i * 0.3 + (i % 5 === 0 ? -2 : 1);
+    const date = new Date(endDate.getTime() - (count - 1 - i) * 24 * 60 * 60 * 1000);
+    return { symbol: ticker, date, open: close - 0.5, high: close + 1, low: close - 1, close, volume: 1_000_000 };
+  });
+}
+
+/** Unlike fakeProvider above (which deliberately throws on getPriceHistory to prove the live scan
+ * never calls it), this provider DOES implement it - used only to drive the real technical
+ * preparation worker (getOrCreateActiveTechnicalPreparationRun / refreshTechnicalIndicatorCacheBatchForUser),
+ * never the live scan itself. */
+function fakeProviderWithHistory(
+  quotes: Record<string, { price: number; volume: number }>,
+  candlesByTicker: Record<string, PriceCandle[]>,
+): MarketDataProvider {
+  return {
+    async getQuote(symbol) {
+      const quote = quotes[symbol];
+      if (!quote) throw new Error(`no quote for ${symbol}`);
+      return { symbol, price: quote.price, volume: quote.volume, asOf: new Date() };
+    },
+    async getQuotes(symbols) {
+      const map = new Map<string, MarketQuote>();
+      for (const symbol of symbols) {
+        const quote = quotes[symbol];
+        if (quote) map.set(symbol, { symbol, price: quote.price, volume: quote.volume, asOf: new Date() });
+      }
+      return map;
+    },
+    async getPriceHistory(symbol) {
+      return candlesByTicker[symbol] ?? [];
+    },
+    async getOptionChain() {
+      return [];
+    },
+    async getInstrument(symbol) {
+      return { symbol, description: symbol, assetType: "EQUITY" };
+    },
+    async getMarketHours() {
+      return { isOpen: true };
+    },
+  };
+}
 
 function fakeProvider(
   quotes: Record<string, { price: number; volume: number }>,
@@ -458,5 +508,131 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     const result = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
     expect((result?.snapshotJson as Record<string, unknown>)?.rsi).toBeNull(); // stale data never used, even though rsi=15 would PASS
     expect((result?.snapshotJson as Record<string, unknown>)?.technicalReasonCode).toBe("TECHNICAL_DATA_STALE");
+  });
+
+  it("the readiness diagnostic and the live scanner's own technicalReadyCount agree, when checked at the same moment via the REAL preparation pipeline (not a hand-authored technicalCache map)", async () => {
+    const { getOrCreateActiveTechnicalPreparationRun, refreshTechnicalIndicatorCacheBatchForUser, getTechnicalCacheReadinessForUser, getTechnicalIndicatorSnapshotsForUser } =
+      await import("./technical-indicator-cache");
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+
+    const tickers = Array.from({ length: 12 }, (_, index) => `RMIS${String(index).padStart(6, "0")}`);
+    await seedOccUniverse(tickers);
+
+    const now = new Date();
+    // The realistic shape of a real worker run's own last-available candle - the most recently
+    // COMPLETED trading day, never a day that hasn't closed yet (matches how Schwab's own
+    // price-history endpoint behaves - see technical-indicator-cache.ts's own TECHNICAL_REFRESH_HISTORY_DAYS note).
+    const lastCloseDate = previousNyseMarketDay(now);
+    const quotes = Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 1_000_000 }]));
+    const candlesByTicker = Object.fromEntries(tickers.map((ticker) => [ticker, syntheticCandlesEndingOn(ticker, lastCloseDate)]));
+    const prepProvider = fakeProviderWithHistory(quotes, candlesByTicker);
+
+    // Drive the REAL preparation worker end to end - the same functions the technical
+    // preparation orchestrator itself calls, never a shortcut or a mocked cache map.
+    providerByUserId.set(matt.id, prepProvider);
+    await getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, now);
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, prepProvider, { batchSize: tickers.length, now });
+
+    const readiness = await getTechnicalCacheReadinessForUser(matt.id, prepProvider, now);
+    // A. Technical snapshots READY for this user, per the real preparation worker.
+    const readySnapshotCountA = readiness.readyCount;
+    expect(readySnapshotCountA).toBe(tickers.length); // sanity: the real worker actually succeeded for all of them
+
+    // Direct proof of what the live scan's own read path sees for these exact tickers, at the
+    // same moment - D and E below.
+    const directLookup = await getTechnicalIndicatorSnapshotsForUser(matt.id, tickers, now);
+    const directReadyCountD = [...directLookup.values()].filter((entry) => entry.state === "READY").length;
+
+    // Now run the actual live scan for the SAME user, SAME universe, SAME real moment (no
+    // artificial delay - a real production gap would only make staleness MORE likely, never
+    // less, so a passing same-moment test is the strongest possible proof this is a real,
+    // reproducible bug rather than a timing coincidence).
+    providerByUserId.set(
+      matt.id,
+      fakeProvider(quotes, Object.fromEntries(tickers.map((ticker) => [ticker, defaultPut(ticker, 18)]))),
+    );
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+
+    // B. Current quote-stage survivors (from this exact live scan).
+    const survivorCountB = summary.priceAndVolumeSurvivors;
+    // C. Intersection of A and B - every one of these 12 tickers is both technically-ready AND a
+    // quote-stage survivor in this scan (identical quotes were used for both steps).
+    const intersectionCountC = tickers.length;
+    // E. READY values actually consumed by the live scanner, per its own returned summary.
+    const consumedReadyCountE = summary.technicalReadyCount;
+
+    expect({
+      A_readySnapshots: readySnapshotCountA,
+      B_quoteStageSurvivors: survivorCountB >= tickers.length,
+      C_intersection: intersectionCountC,
+      D_directLookupReady: directReadyCountD,
+      E_liveScanConsumedReady: consumedReadyCountE,
+    }).toEqual({
+      A_readySnapshots: tickers.length,
+      B_quoteStageSurvivors: true,
+      C_intersection: tickers.length,
+      D_directLookupReady: tickers.length,
+      E_liveScanConsumedReady: tickers.length,
+    });
+  });
+
+  it("root cause of the readiness-vs-live-scan mismatch: getTechnicalCacheReadinessForUser's READY count never re-checks asOfDate freshness, so it keeps reporting a ticker ready long after the live scan correctly stops trusting it", async () => {
+    const { getOrCreateActiveTechnicalPreparationRun, getTechnicalCacheReadinessForUser } = await import("./technical-indicator-cache");
+
+    const ticker = "RMISOLD01";
+    await seedOccUniverse([ticker]);
+    const now = new Date();
+    const quotes = { [ticker]: { price: 20, volume: 1_000_000 } };
+
+    // Create a real, current TechnicalPreparationRun/Item for this exact ticker via the real
+    // get-or-create path, then manually advance it straight to READY (mirroring exactly what
+    // refreshTechnicalIndicatorCacheBatchForUser itself does on success) - but with an asOfDate
+    // that is genuinely 10 real days old, simulating "the worker succeeded a while ago, then real
+    // time passed before the user actually clicked Run Live Scan," the exact real-world sequence
+    // production evidence points to.
+    const prepProvider = fakeProviderWithHistory(quotes, {});
+    const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, now);
+    await prisma.technicalPreparationItem.updateMany({ where: { runId, ticker }, data: { status: "READY", processedAt: now } });
+    const oldAsOfDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    oldAsOfDate.setUTCHours(0, 0, 0, 0);
+    await prisma.technicalIndicatorSnapshot.upsert({
+      where: { userId_ticker: { userId: matt.id, ticker } },
+      create: { userId: matt.id, ticker, status: "READY", asOfDate: oldAsOfDate, rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+      update: { status: "READY", asOfDate: oldAsOfDate, rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+    });
+
+    // The readiness diagnostic (what "125/2073 READY" reflects in production) still reports this
+    // ticker READY - it only checks TechnicalPreparationItem.status, never asOfDate freshness.
+    const readiness = await getTechnicalCacheReadinessForUser(matt.id, prepProvider, now);
+    expect(readiness.readyCount).toBeGreaterThanOrEqual(1);
+
+    // But the live scan, which re-validates freshness at read time via
+    // getTechnicalIndicatorSnapshotsForUser, correctly refuses to use the 10-day-old cached value
+    // - exactly the real production symptom (readiness says ready, scan says not ready), and
+    // exactly the honest behavior required: a stale value must never fake a PASS.
+    providerByUserId.set(matt.id, fakeProvider(quotes, { [ticker]: defaultPut(ticker, 18) }));
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+    const result = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+
+    expect((result?.snapshotJson as Record<string, unknown>)?.rsi).toBeNull();
+    expect((result?.snapshotJson as Record<string, unknown>)?.technicalReasonCode).toBe("TECHNICAL_DATA_STALE");
+    expect(summary.technicalStaleCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a READY technical snapshot for a ticker that fails THIS scan's own quote-stage filter is never counted as live-ready - readiness is scoped to genuine survivors only", async () => {
+    const readyButExcludedTicker = "RMISEXCL1";
+    await seedOccUniverse([readyButExcludedTicker]);
+    await seedReadySnapshot(matt.id, readyButExcludedTicker, { rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 });
+    // A real, current READY snapshot exists for this ticker - but THIS scan's own quote gives it
+    // a price far outside the configured range, so it must never count toward technicalReadyCount.
+    providerByUserId.set(matt.id, fakeProvider({ [readyButExcludedTicker]: { price: 999, volume: 1_000_000 } }));
+
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+
+    const result = await prisma.scanResult.findFirst({ where: { ticker: readyButExcludedTicker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+    expect(result).toBeNull(); // quote-excluded, non-Research - aggregate-only, never persisted
+    // The READY snapshot exists in the DB, but this scan's own survivor set never reached it -
+    // a real, non-mocked proof that a stale/irrelevant READY row can't inflate technicalReadyCount.
+    expect(summary.technicalReadyCount).toBe(0);
   });
 });

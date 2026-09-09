@@ -74,6 +74,29 @@ export type ScannerViewResult = {
   };
 };
 
+/**
+ * Plain (non-component) helper, deliberately kept outside ScannerPage's own render body - React's
+ * component-purity rule flags Date.now() timing inside a component/hook as an impure render
+ * side effect, even for a Server Component's own data-fetching. Safe, sanitized timing
+ * (milliseconds only) for the Scanner page's own server-side data load - see PROJECT_HANDOFF.md's
+ * "post-scan loading" audit (this is what the /scanner loading.tsx boundary is waiting on,
+ * whether from a normal navigation or a revalidatePath-triggered refresh right after Run Live
+ * Scan). Logged unconditionally so a real production page load gives real numbers, not a guess.
+ */
+async function loadScannerPageBundle(userId: string) {
+  const startedAt = Date.now();
+  const result = await Promise.all([
+    getScannerPageData(userId),
+    prisma.user.findMany({ where: { id: { not: userId } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+    prisma.watchlistItem.findMany({
+      where: { ownerId: userId },
+      select: { ticker: true, researchStatus: true },
+    }),
+  ]);
+  console.info("Scanner page data load (ms):", Date.now() - startedAt);
+  return result;
+}
+
 export default async function ScannerPage({
   searchParams,
 }: {
@@ -82,14 +105,7 @@ export default async function ScannerPage({
   const user = await requireCurrentUser();
 
   const params = await searchParams;
-  const [initialProfile, buddies, researchItems] = await Promise.all([
-    getScannerPageData(user.id),
-    prisma.user.findMany({ where: { id: { not: user.id } }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
-    prisma.watchlistItem.findMany({
-      where: { ownerId: user.id },
-      select: { ticker: true, researchStatus: true },
-    }),
-  ]);
+  const [initialProfile, buddies, researchItems] = await loadScannerPageBundle(user.id);
   let profile = initialProfile;
   if (!profile) {
     await ensureMyLstScannerProfileForUser(user.id);

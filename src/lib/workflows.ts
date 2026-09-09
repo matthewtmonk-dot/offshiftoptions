@@ -1726,11 +1726,22 @@ export async function rerunLiveSchwabScannerForUser(
   let stage: LiveScanStage = "PROFILE";
   let resultsPersisted = false;
   let persistedCount = 0;
+  // Safe, sanitized per-stage timing (stage names + milliseconds only) - see PROJECT_HANDOFF.md's
+  // "22.3s live-scan request profile" audit. Logged once at the end (success or failure) rather
+  // than per-transition, so a real production run gives a full breakdown in one line without
+  // needing separate log correlation.
+  const stageDurationsMs: Partial<Record<LiveScanStage, number>> = {};
+  let stageStartedAt = startedAt;
+  function advanceStage(next: LiveScanStage) {
+    stageDurationsMs[stage] = Date.now() - stageStartedAt;
+    stage = next;
+    stageStartedAt = Date.now();
+  }
 
   try {
     const profile = await ensureMyLstScannerProfileForUser(userId);
 
-    stage = "PROVIDER";
+    advanceStage("PROVIDER");
     const provider = await getSchwabMarketDataProviderForUser(userId);
     if (!provider) {
       throw new ValidationError("LIVE DATA UNAVAILABLE: connect Schwab in Account settings with usable Schwab developer credentials.");
@@ -1742,7 +1753,7 @@ export async function rerunLiveSchwabScannerForUser(
     });
     const rules = scannerRulesFromRecords(records);
 
-    stage = "UNIVERSE_LOAD";
+    advanceStage("UNIVERSE_LOAD");
     // Scoped to a specific source (real callers default to OCC_OPTIONABLE_UNIVERSE_SOURCE = "OCC",
     // matching schwab-quote-batch-diagnostic.ts's own established pattern for this same table) -
     // never every row regardless of source, which would also sweep in any other future/non-OCC
@@ -1763,10 +1774,10 @@ export async function rerunLiveSchwabScannerForUser(
       ...new Set([...(universeSourceKind === "LIMITED_FALLBACK" ? STARTER_LIVE_SCAN_UNIVERSE : []), ...researchTickers, ...publicUniverse.map((row) => row.ticker)]),
     ].map((ticker) => ticker.toUpperCase());
 
-    stage = "TECHNICAL_JOIN";
+    advanceStage("TECHNICAL_JOIN");
     const technicalCache = await getTechnicalIndicatorSnapshotsForUser(userId, universe);
 
-    stage = "EARNINGS_JOIN";
+    advanceStage("EARNINGS_JOIN");
     const earningsRows = await getEarningsCalendarLookup(universe);
     const earningsLookup = new Map(
       [...earningsRows.entries()].map(([ticker, entry]) => [
@@ -1775,7 +1786,7 @@ export async function rerunLiveSchwabScannerForUser(
       ]),
     );
 
-    stage = "EVALUATE";
+    advanceStage("EVALUATE");
     const candidates = await evaluateLiveMarketScan({ provider, rules, universe, technicalCache, earningsLookup });
 
     // Bound what gets persisted (and re-read on every future Scanner page load) - this user's own
@@ -1789,15 +1800,15 @@ export async function rerunLiveSchwabScannerForUser(
       .slice(0, MAX_DISPLAYED_STOCK_STAGE_RESULTS);
     const toPersist = [...tier1Persisted, ...rankedNonTier1StockStage];
 
-    stage = "PERSIST_RESULTS";
+    advanceStage("PERSIST_RESULTS");
     await persistScannerRun(userId, profile.id, "LIVE:SCHWAB", toPersist);
     resultsPersisted = true;
     persistedCount = toPersist.length;
 
-    stage = "FUNDAMENTALS_SYNC";
+    advanceStage("FUNDAMENTALS_SYNC");
     await syncVerifiedFundamentalsForUser(userId, toPersist);
 
-    stage = "BUILD_RESPONSE";
+    advanceStage("BUILD_RESPONSE");
     const successfullyQuoted = candidates.filter((candidate) => candidate.funnelStage !== "UNAVAILABLE").length;
     const priceAndVolumeSurvivors = candidates.filter(
       (candidate) => candidate.funnelStage === "STOCK_STAGE" || candidate.funnelStage === "HISTORY_UNAVAILABLE",
@@ -1809,6 +1820,9 @@ export async function rerunLiveSchwabScannerForUser(
     const technicalStaleCount = candidates.filter((candidate) => candidate.values.technicalReasonCode === "TECHNICAL_DATA_STALE").length;
     const technicalFailedCount = candidates.filter((candidate) => candidate.values.technicalReasonCode === "TECHNICAL_DATA_FAILED").length;
     const optionChainsChecked = candidates.filter((candidate) => candidate.reachedOptionChainLookup).length;
+
+    stageDurationsMs.BUILD_RESPONSE = Date.now() - stageStartedAt;
+    console.info("Live Schwab scan stage timing (ms)", stageDurationsMs, "total:", Date.now() - startedAt);
 
     return {
       scanned: toPersist.length,
@@ -1825,10 +1839,11 @@ export async function rerunLiveSchwabScannerForUser(
       optionChainsChecked,
     };
   } catch (error) {
+    stageDurationsMs[stage] = Date.now() - stageStartedAt;
     if (error instanceof ValidationError) {
       throw error; // an already-honest, already-sanitized message - never re-wrapped
     }
-    console.error(`Live Schwab scan failed at stage ${stage}`, error);
+    console.error(`Live Schwab scan failed at stage ${stage}`, error, "stage timing (ms):", stageDurationsMs);
     throw new ValidationError(buildLiveScanFailureMessage(stage, resultsPersisted, persistedCount));
   }
 }
