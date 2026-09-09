@@ -52,6 +52,7 @@ import {
 } from "@/lib/broker-connections";
 import { runScannerUniverseDryRun } from "@/lib/scanner-universe-dry-run";
 import { runLatestCandleFreshnessDiagnostic } from "@/lib/latest-candle-freshness-diagnostic";
+import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "@/lib/occ-optionable-universe-refresh";
 import {
   getTechnicalCacheFreshnessBreakdownForUser,
   getTechnicalCacheReadinessForUser,
@@ -504,6 +505,15 @@ export type TechnicalCacheWarmActionResult =
       failedCount: number;
       remainingEligibleCount: number;
       elapsedMs: number;
+    }
+  | {
+      /** The global daily-candle-availability gate was not ready - no bulk work was attempted
+       * (at most 5 read-only history requests were spent probing). */
+      status: "DAILY_CANDLE_NOT_READY";
+      requiredMarketDate: string;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
     };
 
 /**
@@ -529,7 +539,24 @@ export async function warmTechnicalIndicatorCacheAction(): Promise<TechnicalCach
   }
 
   const result = await refreshTechnicalIndicatorCacheBatchForUser(user.id, resolved.provider, { batchSize: TECHNICAL_REFRESH_BATCH_SIZE });
-  return { status: "OK", ...result };
+  if (result.status === "DAILY_CANDLE_NOT_READY") {
+    return {
+      status: "DAILY_CANDLE_NOT_READY",
+      requiredMarketDate: result.requiredMarketDate.toISOString().slice(0, 10),
+      freshProbeCount: result.freshProbeCount,
+      staleProbeCount: result.staleProbeCount,
+      unavailableProbeCount: result.unavailableProbeCount,
+    };
+  }
+  return {
+    status: "OK",
+    processedCount: result.processedCount,
+    succeededCount: result.succeededCount,
+    deferredCount: result.deferredCount,
+    failedCount: result.failedCount,
+    remainingEligibleCount: result.remainingEligibleCount,
+    elapsedMs: result.elapsedMs,
+  };
 }
 
 export type TechnicalCacheReadinessActionResult =
@@ -542,6 +569,13 @@ export type TechnicalCacheReadinessActionResult =
       deferredCount: number;
       failedCount: number;
       lastPreparedAt: string | null;
+    }
+  | {
+      status: "DAILY_CANDLE_NOT_READY";
+      requiredMarketDate: string;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
     };
 
 /** Read-only - never fetches a quote or history, just reports the current cache state (still
@@ -562,6 +596,15 @@ export async function getTechnicalCacheReadinessAction(): Promise<TechnicalCache
   }
 
   const status = await getTechnicalCacheReadinessForUser(user.id, resolved.provider);
+  if (status.status === "DAILY_CANDLE_NOT_READY") {
+    return {
+      status: "DAILY_CANDLE_NOT_READY",
+      requiredMarketDate: status.requiredMarketDate.toISOString().slice(0, 10),
+      freshProbeCount: status.freshProbeCount,
+      staleProbeCount: status.staleProbeCount,
+      unavailableProbeCount: status.unavailableProbeCount,
+    };
+  }
   return {
     status: "OK",
     eligibleCount: status.eligibleCount,
@@ -643,7 +686,7 @@ export async function runLatestCandleFreshnessDiagnosticAction(): Promise<Latest
     };
   }
 
-  const result = await runLatestCandleFreshnessDiagnostic(resolved.provider);
+  const result = await runLatestCandleFreshnessDiagnostic(resolved.provider, new Date(), { universeSource: OCC_OPTIONABLE_UNIVERSE_SOURCE });
   return { status: "OK", requiredMarketDate: result.requiredMarketDate, rows: result.rows };
 }
 

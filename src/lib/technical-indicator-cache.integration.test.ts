@@ -91,24 +91,77 @@ function fakeProvider(options: {
 maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces existing RSI/BB math exactly", () => {
   let prisma: typeof import("./prisma").prisma;
   let getEligibleTechnicalRefreshTickersForUser: typeof import("./technical-indicator-cache").getEligibleTechnicalRefreshTickersForUser;
-  let refreshTechnicalIndicatorCacheBatchForUser: typeof import("./technical-indicator-cache").refreshTechnicalIndicatorCacheBatchForUser;
+  let refreshTechnicalIndicatorCacheBatchForUserRaw: typeof import("./technical-indicator-cache").refreshTechnicalIndicatorCacheBatchForUser;
   let getTechnicalIndicatorSnapshotsForUser: typeof import("./technical-indicator-cache").getTechnicalIndicatorSnapshotsForUser;
-  let getTechnicalCacheReadinessForUser: typeof import("./technical-indicator-cache").getTechnicalCacheReadinessForUser;
-  let getOrCreateActiveTechnicalPreparationRun: typeof import("./technical-indicator-cache").getOrCreateActiveTechnicalPreparationRun;
+  let getTechnicalCacheReadinessForUserRaw: typeof import("./technical-indicator-cache").getTechnicalCacheReadinessForUser;
+  let getOrCreateActiveTechnicalPreparationRunRaw: typeof import("./technical-indicator-cache").getOrCreateActiveTechnicalPreparationRun;
+  let checkDailyCandleAvailabilityGate: typeof import("./technical-indicator-cache").checkDailyCandleAvailabilityGate;
   let PROCESSING_CLAIM_TIMEOUT_MS: typeof import("./technical-indicator-cache").PROCESSING_CLAIM_TIMEOUT_MS;
   let ensureMyLstScannerProfileForUser: typeof import("./workflows").ensureMyLstScannerProfileForUser;
   let matt: { id: string };
   let eric: { id: string };
   const universeTickers: string[] = [];
 
+  // These 3 functions can now legitimately return a DAILY_CANDLE_NOT_READY variant (see the
+  // global daily-candle-availability gate) instead of their normal OK shape. Every existing test
+  // below predates that gate and asserts on the OK shape directly - rather than touching each of
+  // the ~50 call sites individually, these thin wrappers (same names the tests already call)
+  // narrow to OK and throw a clear, diagnosable error if a test unexpectedly hits the gate
+  // instead (which would itself indicate a real bug, e.g. an under-seeded probe pool - see the
+  // gate's own dedicated tests further below, which call the Raw functions directly to inspect
+  // the NOT_READY shape on purpose).
+  // probeUniverseSource defaults to THIS file's own TEST_SOURCE (never the real production
+  // OCC_OPTIONABLE_UNIVERSE_SOURCE default) so the gate's probe pool is deterministic - scoped to
+  // exactly what seedUniverse itself seeds - rather than depending on whatever else happens to
+  // exist in the shared table under Vitest's parallel-by-file execution.
+  async function getOrCreateActiveTechnicalPreparationRun(
+    userId: string,
+    provider: MarketDataProvider,
+    now: Date = new Date(),
+    options: { probeUniverseSource?: string } = {},
+  ): Promise<Extract<Awaited<ReturnType<typeof getOrCreateActiveTechnicalPreparationRunRaw>>, { status: "OK" }>> {
+    const result = await getOrCreateActiveTechnicalPreparationRunRaw(userId, withGateControlTickers(provider, now), now, {
+      probeUniverseSource: options.probeUniverseSource ?? TEST_SOURCE,
+    });
+    if (result.status !== "OK") throw new Error(`getOrCreateActiveTechnicalPreparationRun: expected OK, got ${JSON.stringify(result)}`);
+    return result;
+  }
+  async function refreshTechnicalIndicatorCacheBatchForUser(
+    userId: string,
+    provider: MarketDataProvider,
+    options: { batchSize?: number; now?: Date; probeUniverseSource?: string } = {},
+  ): Promise<Extract<Awaited<ReturnType<typeof refreshTechnicalIndicatorCacheBatchForUserRaw>>, { status: "OK" }>> {
+    const now = options.now ?? new Date();
+    const result = await refreshTechnicalIndicatorCacheBatchForUserRaw(userId, withGateControlTickers(provider, now), {
+      ...options,
+      now,
+      probeUniverseSource: options.probeUniverseSource ?? TEST_SOURCE,
+    });
+    if (result.status !== "OK") throw new Error(`refreshTechnicalIndicatorCacheBatchForUser: expected OK, got ${JSON.stringify(result)}`);
+    return result;
+  }
+  async function getTechnicalCacheReadinessForUser(
+    userId: string,
+    provider: MarketDataProvider,
+    now: Date = new Date(),
+    options: { probeUniverseSource?: string } = {},
+  ): Promise<Extract<Awaited<ReturnType<typeof getTechnicalCacheReadinessForUserRaw>>, { status: "OK" }>> {
+    const result = await getTechnicalCacheReadinessForUserRaw(userId, withGateControlTickers(provider, now), now, {
+      probeUniverseSource: options.probeUniverseSource ?? TEST_SOURCE,
+    });
+    if (result.status !== "OK") throw new Error(`getTechnicalCacheReadinessForUser: expected OK, got ${JSON.stringify(result)}`);
+    return result;
+  }
+
   beforeAll(async () => {
     prisma = (await import("./prisma")).prisma;
     ({
       getEligibleTechnicalRefreshTickersForUser,
-      refreshTechnicalIndicatorCacheBatchForUser,
+      refreshTechnicalIndicatorCacheBatchForUser: refreshTechnicalIndicatorCacheBatchForUserRaw,
       getTechnicalIndicatorSnapshotsForUser,
-      getTechnicalCacheReadinessForUser,
-      getOrCreateActiveTechnicalPreparationRun,
+      getTechnicalCacheReadinessForUser: getTechnicalCacheReadinessForUserRaw,
+      getOrCreateActiveTechnicalPreparationRun: getOrCreateActiveTechnicalPreparationRunRaw,
+      checkDailyCandleAvailabilityGate,
       PROCESSING_CLAIM_TIMEOUT_MS,
     } = await import("./technical-indicator-cache"));
     ({ ensureMyLstScannerProfileForUser } = await import("./workflows"));
@@ -147,10 +200,42 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     await prisma.$disconnect();
   });
 
+  /** 5 dedicated tickers, deliberately named to sort alphabetically FIRST (a leading "0" - every
+   * real test ticker in this file starts with a letter) so the global daily-candle-availability
+   * gate's own 5-symbol probe (ORDER BY ticker ASC LIMIT 5 - see checkDailyCandleAvailabilityGate)
+   * always lands on exactly these control rows, never on whatever ticker(s) an individual test is
+   * deliberately trying to exercise (which may be intentionally stale/lagged/unavailable). Never
+   * explicitly registered in any test's own fakeProvider `candlesByTicker`/`failTickers` options,
+   * so they fall through to fakeProvider's own default `syntheticCandles(symbol)` - which ends
+   * "today" (fresh) by default - automatically satisfying the gate without any test needing to
+   * think about it. seedUniverse inserts these on every call (skipDuplicates - safe if a test
+   * seeds more than once) so the gate passes by construction throughout this whole file. */
+  const GATE_CONTROL_TICKERS = ["0GATECTRLTC0", "0GATECTRLTC1", "0GATECTRLTC2", "0GATECTRLTC3", "0GATECTRLTC4"];
+  const GATE_CONTROL_TICKER_SET = new Set(GATE_CONTROL_TICKERS);
+
+  /** Wraps a test's own provider so the 5 gate-control tickers always return candles ending
+   * EXACTLY at `now` (guaranteed fresh relative to previousNyseMarketDay(now), for whatever `now`
+   * this specific call uses - including a test's own far-future/far-past synthetic `now`) -
+   * delegating every other ticker to the real provider completely unchanged. Needed because a
+   * plain default (e.g. always "real current time") would appear stale to a test that advances
+   * `now` forward/backward relative to real wall-clock time. */
+  function withGateControlTickers(provider: MarketDataProvider, now: Date): MarketDataProvider {
+    return {
+      ...provider,
+      async getPriceHistory(symbol, days) {
+        if (GATE_CONTROL_TICKER_SET.has(symbol)) {
+          return syntheticCandles(symbol, 80, now);
+        }
+        return provider.getPriceHistory(symbol, days);
+      },
+    };
+  }
+
   async function seedUniverse(tickers: string[], prices: Record<string, number> = {}) {
     const now = new Date();
     await prisma.optionableUniverseSymbol.createMany({
-      data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: now })),
+      data: [...GATE_CONTROL_TICKERS, ...tickers].map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: now })),
+      skipDuplicates: true,
     });
     universeTickers.push(...tickers);
     return tickers.reduce<Record<string, { price: number; volume: number }>>((acc, ticker) => {
@@ -498,7 +583,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("getTechnicalCacheFreshnessBreakdownForUser still catches a READY-but-stale item as a defense-in-depth safety net, even though the fixed worker itself should never produce one", async () => {
-    const { getOrCreateActiveTechnicalPreparationRun, getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
+    const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
     const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
 
     const ticker = "TECHFRSAFETY1";
@@ -1003,5 +1088,179 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(mattRuns).toHaveLength(1);
     expect(ericRuns).toHaveLength(1);
     expect(mattRuns[0].id).not.toBe(ericRuns[0].id); // structurally separate generations, never shared
+  });
+
+  describe("Global daily-candle-availability gate (checkDailyCandleAvailabilityGate) - see PROJECT_HANDOFF.md", () => {
+    /** These tests exercise the RAW module functions directly (bypassing the describe-level OK-
+     * narrowing wrappers above, which inject GATE_CONTROL_TICKERS specifically so OTHER tests
+     * never have to think about the gate) - they need full, explicit control over exactly which
+     * tickers get probed and what the gate itself decides, including the NOT_READY shape. */
+    let previousNyseMarketDayFn: typeof import("@/domain/finance/marketCalendar").previousNyseMarketDay;
+
+    beforeAll(async () => {
+      ({ previousNyseMarketDay: previousNyseMarketDayFn } = await import("@/domain/finance/marketCalendar"));
+    });
+
+    it("never issues more than LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT (5) history requests, regardless of how large the universe is", async () => {
+      const tickers = Array.from({ length: 20 }, (_, i) => `TECHGATEBIG${String(i).padStart(2, "0")}`);
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      let callCount = 0;
+      const provider = fakeProvider({
+        quotes: {},
+        candlesByTicker: Object.fromEntries(tickers.map((t) => [t, syntheticCandles(t, 80, now)])),
+        onGetPriceHistory: () => (callCount += 1),
+      });
+
+      const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
+      expect(gate.ready).toBe(true);
+      expect(callCount).toBeLessThanOrEqual(5);
+      expect(callCount).toBe(5); // exactly 5 - the universe has more than enough to probe
+    });
+
+    it("a globally-stale probe sample skips Phase A entirely - no quote sweep, no run, no items created - costing only the probe requests", async () => {
+      const tickers = ["TECHGATESTALE0", "TECHGATESTALE1", "TECHGATESTALE2", "TECHGATESTALE3", "TECHGATESTALE4", "TECHGATESTALE5"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      let getQuotesCallCount = 0;
+      const provider = fakeProvider({
+        quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+        candlesByTicker: Object.fromEntries(tickers.map((t) => [t, syntheticCandles(t, 80, laggedDate)])),
+        onGetQuotes: () => (getQuotesCallCount += 1),
+      });
+
+      const result = await getOrCreateActiveTechnicalPreparationRunRaw(matt.id, provider, now, { probeUniverseSource: TEST_SOURCE });
+      expect(result.status).toBe("DAILY_CANDLE_NOT_READY");
+      if (result.status !== "DAILY_CANDLE_NOT_READY") throw new Error("expected DAILY_CANDLE_NOT_READY");
+      expect(result.staleProbeCount).toBeGreaterThanOrEqual(3);
+      expect(result.freshProbeCount).toBe(0);
+
+      expect(getQuotesCallCount).toBe(0); // Phase A's own ~6,071-symbol-equivalent quote sweep never ran
+      const runCount = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+      const itemCount = await prisma.technicalPreparationItem.count({ where: { run: { userId: matt.id } } });
+      expect(runCount).toBe(0); // no placeholder, no run at all
+      expect(itemCount).toBe(0); // no bulk work items - never "thousands of DEFERRED rows"
+    });
+
+    it("a globally-stale gate prevents refreshTechnicalIndicatorCacheBatchForUser from claiming or processing anything - bounded to the probe cost alone", async () => {
+      const tickers = ["TECHGATEBATCH0", "TECHGATEBATCH1", "TECHGATEBATCH2", "TECHGATEBATCH3", "TECHGATEBATCH4"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      let historyCallCount = 0;
+      const provider = fakeProvider({
+        quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+        candlesByTicker: Object.fromEntries(tickers.map((t) => [t, syntheticCandles(t, 80, laggedDate)])),
+        onGetPriceHistory: () => (historyCallCount += 1),
+      });
+
+      const result = await refreshTechnicalIndicatorCacheBatchForUserRaw(matt.id, provider, { batchSize: 25, now, probeUniverseSource: TEST_SOURCE });
+      expect(result.status).toBe("DAILY_CANDLE_NOT_READY");
+      expect(historyCallCount).toBeLessThanOrEqual(5); // never "hundreds/thousands of histories"
+
+      const itemCount = await prisma.technicalPreparationItem.count({ where: { run: { userId: matt.id } } });
+      expect(itemCount).toBe(0);
+    });
+
+    it("a fresh probe sample allows normal preparation to proceed exactly as before - Stage A runs, items are created, Phase B succeeds", async () => {
+      const tickers = ["TECHGATEOK0", "TECHGATEOK1", "TECHGATEOK2"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const provider = fakeProvider({
+        quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+        candlesByTicker: Object.fromEntries(tickers.map((t) => [t, syntheticCandles(t, 80, now)])),
+      });
+
+      const result = await refreshTechnicalIndicatorCacheBatchForUserRaw(matt.id, provider, { batchSize: 25, now, probeUniverseSource: TEST_SOURCE });
+      expect(result.status).toBe("OK");
+      if (result.status !== "OK") throw new Error("expected OK");
+      expect(result.succeededCount).toBe(3);
+    });
+
+    it("the gate uses only the calling user's OWN passed-in provider - Matt's gate result reflects Matt's provider, never Eric's, even for the identical shared universe", async () => {
+      const tickers = ["TECHGATEISO0", "TECHGATEISO1", "TECHGATEISO2", "TECHGATEISO3", "TECHGATEISO4"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      const mattProvider = fakeProvider({
+        quotes: {},
+        candlesByTicker: Object.fromEntries(tickers.map((t) => [t, syntheticCandles(t, 80, laggedDate)])), // all stale
+      });
+      const ericProvider = fakeProvider({
+        quotes: {},
+        candlesByTicker: Object.fromEntries(tickers.map((t) => [t, syntheticCandles(t, 80, now)])), // all fresh
+      });
+
+      const mattGate = await checkDailyCandleAvailabilityGate(mattProvider, now, { probeUniverseSource: TEST_SOURCE });
+      const ericGate = await checkDailyCandleAvailabilityGate(ericProvider, now, { probeUniverseSource: TEST_SOURCE });
+      expect(mattGate.ready).toBe(false); // Matt's own provider's stale data
+      expect(ericGate.ready).toBe(true); // Eric's own provider's fresh data - completely independent
+    });
+
+    it("a single SYMBOL_UNAVAILABLE probe never permanently blocks the gate when enough OTHER probes succeed and are fresh", async () => {
+      const freshTickers = ["TECHGATEUNAVAIL1", "TECHGATEUNAVAIL2", "TECHGATEUNAVAIL3", "TECHGATEUNAVAIL4"];
+      const unavailableTicker = "TECHGATEUNAVAIL0"; // sorts first alphabetically among these 5
+      await prisma.optionableUniverseSymbol.createMany({
+        data: [unavailableTicker, ...freshTickers].map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const provider = fakeProvider({
+        quotes: {},
+        // unavailableTicker deliberately has NO entry in candlesByTicker AND no default - fakeProvider's
+        // own default is real synthetic candles, so explicitly fail it instead to simulate genuine unavailability.
+        failTickers: new Set([unavailableTicker]),
+        candlesByTicker: Object.fromEntries(freshTickers.map((t) => [t, syntheticCandles(t, 80, now)])),
+      });
+
+      const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
+      expect(gate.ready).toBe(true); // 4 successful+fresh probes >= GATE_MIN_SUCCESSFUL_PROBES, 1 unavailable never counted against it
+    });
+
+    it("the automatic gate and the manual latest-candle-freshness diagnostic agree exactly on which probe symbols are fresh - same underlying helper, never a second date-comparison formula", async () => {
+      const tickers = ["TECHGATESHARE0", "TECHGATESHARE1", "TECHGATESHARE2", "TECHGATESHARE3", "TECHGATESHARE4"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      // A deliberate mix - some fresh, some stale - so the two call paths have something real to agree on.
+      const provider = fakeProvider({
+        quotes: {},
+        candlesByTicker: {
+          TECHGATESHARE0: syntheticCandles("TECHGATESHARE0", 80, now),
+          TECHGATESHARE1: syntheticCandles("TECHGATESHARE1", 80, now),
+          TECHGATESHARE2: syntheticCandles("TECHGATESHARE2", 80, laggedDate),
+          TECHGATESHARE3: syntheticCandles("TECHGATESHARE3", 80, laggedDate),
+          TECHGATESHARE4: syntheticCandles("TECHGATESHARE4", 80, now),
+        },
+      });
+
+      const { runLatestCandleFreshnessDiagnostic } = await import("./technical-indicator-cache");
+      const diagnostic = await runLatestCandleFreshnessDiagnostic(provider, now, { universeSource: TEST_SOURCE, symbolCount: 5 });
+      const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
+
+      const diagnosticFreshCount = diagnostic.rows.filter((r) => r.fresh).length;
+      const diagnosticStaleCount = diagnostic.rows.filter((r) => !r.fresh && r.latestCandleMarketDate !== null).length;
+      expect(diagnosticFreshCount).toBe(3);
+      expect(diagnosticStaleCount).toBe(2);
+      // The gate is NOT ready here (2 stale probes) - proving it reached the exact same per-symbol
+      // verdicts the manual diagnostic just reported, not a second/different comparison.
+      expect(gate.ready).toBe(false);
+      if (!gate.ready) {
+        expect(gate.freshProbeCount).toBe(diagnosticFreshCount);
+        expect(gate.staleProbeCount).toBe(diagnosticStaleCount);
+      }
+    });
   });
 });

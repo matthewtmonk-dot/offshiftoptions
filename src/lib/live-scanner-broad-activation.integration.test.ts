@@ -106,6 +106,43 @@ function fakeProviderWithHistory(
   };
 }
 
+/** getOrCreateActiveTechnicalPreparationRun/refreshTechnicalIndicatorCacheBatchForUser/
+ * getTechnicalCacheReadinessForUser can now legitimately return a DAILY_CANDLE_NOT_READY variant
+ * (see the global daily-candle-availability gate) instead of their normal OK shape. Every test
+ * below that drives these directly predates that gate and asserts on the OK shape - this narrows
+ * to OK and throws a clear, diagnosable error if a test unexpectedly hits the gate instead (which
+ * would itself indicate a real bug, e.g. an under-seeded probe pool). */
+async function expectOk<T extends { status: string }>(promise: Promise<T>): Promise<Exclude<T, { status: "DAILY_CANDLE_NOT_READY" }>> {
+  const result = await promise;
+  if (result.status === "DAILY_CANDLE_NOT_READY") {
+    throw new Error(`Expected OK, got DAILY_CANDLE_NOT_READY: ${JSON.stringify(result)}`);
+  }
+  return result as Exclude<T, { status: "DAILY_CANDLE_NOT_READY" }>;
+}
+
+/** 5 dedicated tickers, deliberately named to sort alphabetically FIRST (a leading "0" - every
+ * real test ticker in this file starts with a letter) so the global daily-candle-availability
+ * gate's own 5-symbol probe (ORDER BY ticker ASC LIMIT 5) always lands on exactly these control
+ * rows, never on whatever ticker(s) a test is deliberately trying to exercise (which may be
+ * intentionally stale/lagged). seedOccUniverse always includes these. */
+const GATE_CONTROL_TICKERS = ["0GATECTRLBS0", "0GATECTRLBS1", "0GATECTRLBS2", "0GATECTRLBS3", "0GATECTRLBS4"];
+const GATE_CONTROL_TICKER_SET = new Set(GATE_CONTROL_TICKERS);
+
+/** Wraps a test's own provider so the 5 gate-control tickers always return candles ending EXACTLY
+ * at `now` (guaranteed fresh relative to previousNyseMarketDay(now), for whatever `now` this call
+ * uses) - delegating every other ticker to the real provider unchanged. */
+function withGateControlTickers(provider: MarketDataProvider, now: Date): MarketDataProvider {
+  return {
+    ...provider,
+    async getPriceHistory(symbol, days) {
+      if (GATE_CONTROL_TICKER_SET.has(symbol)) {
+        return syntheticCandlesEndingOn(symbol, now);
+      }
+      return provider.getPriceHistory(symbol, days);
+    },
+  };
+}
+
 function fakeProvider(
   quotes: Record<string, { price: number; volume: number }>,
   optionsByTicker: Record<string, OptionContractSnapshot[]> = {},
@@ -181,7 +218,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
 
   async function seedOccUniverse(tickers: string[]) {
     await prisma.optionableUniverseSymbol.createMany({
-      data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      data: [...GATE_CONTROL_TICKERS, ...tickers].map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
       skipDuplicates: true,
     });
   }
@@ -530,10 +567,17 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     // Drive the REAL preparation worker end to end - the same functions the technical
     // preparation orchestrator itself calls, never a shortcut or a mocked cache map.
     providerByUserId.set(matt.id, prepProvider);
-    await getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, now);
-    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, prepProvider, { batchSize: tickers.length, now });
+    const gateSafePrepProvider = withGateControlTickers(prepProvider, now);
+    await expectOk(getOrCreateActiveTechnicalPreparationRun(matt.id, gateSafePrepProvider, now, { probeUniverseSource: TEST_SOURCE }));
+    await expectOk(
+      refreshTechnicalIndicatorCacheBatchForUser(matt.id, gateSafePrepProvider, {
+        batchSize: tickers.length,
+        now,
+        probeUniverseSource: TEST_SOURCE,
+      }),
+    );
 
-    const readiness = await getTechnicalCacheReadinessForUser(matt.id, prepProvider, now);
+    const readiness = await expectOk(getTechnicalCacheReadinessForUser(matt.id, gateSafePrepProvider, now, { probeUniverseSource: TEST_SOURCE }));
     // A. Technical snapshots READY for this user, per the real preparation worker.
     const readySnapshotCountA = readiness.readyCount;
     expect(readySnapshotCountA).toBe(tickers.length); // sanity: the real worker actually succeeded for all of them
@@ -590,8 +634,8 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     // that is genuinely 10 real days old, simulating "the worker succeeded a while ago, then real
     // time passed before the user actually clicked Run Live Scan," the exact real-world sequence
     // production evidence points to.
-    const prepProvider = fakeProviderWithHistory(quotes, {});
-    const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, now);
+    const prepProvider = withGateControlTickers(fakeProviderWithHistory(quotes, {}), now);
+    const { runId } = await expectOk(getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, now, { probeUniverseSource: TEST_SOURCE }));
     await prisma.technicalPreparationItem.updateMany({ where: { runId, ticker }, data: { status: "READY", processedAt: now } });
     const oldAsOfDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
     oldAsOfDate.setUTCHours(0, 0, 0, 0);
@@ -603,7 +647,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
 
     // The readiness diagnostic (what "125/2073 READY" reflects in production) still reports this
     // ticker READY - it only checks TechnicalPreparationItem.status, never asOfDate freshness.
-    const readiness = await getTechnicalCacheReadinessForUser(matt.id, prepProvider, now);
+    const readiness = await expectOk(getTechnicalCacheReadinessForUser(matt.id, prepProvider, now, { probeUniverseSource: TEST_SOURCE }));
     expect(readiness.readyCount).toBeGreaterThanOrEqual(1);
 
     // But the live scan, which re-validates freshness at read time via
@@ -639,8 +683,11 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     const prepProvider = fakeProviderWithHistory(quotes, { [ticker]: syntheticCandlesEndingOn(ticker, laggedCandleDate) });
 
     providerByUserId.set(eric.id, prepProvider);
-    await getOrCreateActiveTechnicalPreparationRun(eric.id, prepProvider, now);
-    const batch = await refreshTechnicalIndicatorCacheBatchForUser(eric.id, prepProvider, { batchSize: 1, now });
+    const gateSafePrepProvider = withGateControlTickers(prepProvider, now);
+    await expectOk(getOrCreateActiveTechnicalPreparationRun(eric.id, gateSafePrepProvider, now, { probeUniverseSource: TEST_SOURCE }));
+    const batch = await expectOk(
+      refreshTechnicalIndicatorCacheBatchForUser(eric.id, gateSafePrepProvider, { batchSize: 1, now, probeUniverseSource: TEST_SOURCE }),
+    );
     expect(batch.deferredCount).toBe(1); // lagged, not a failure - correctly never became READY
 
     const snapshot = await prisma.technicalIndicatorSnapshot.findUnique({ where: { userId_ticker: { userId: eric.id, ticker } } });
@@ -652,7 +699,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
 
     // Readiness correctly does NOT report this ticker ready - the fix eliminates the mismatch at
     // its source rather than papering over it downstream.
-    const readiness = await getTechnicalCacheReadinessForUser(eric.id, prepProvider, now);
+    const readiness = await expectOk(getTechnicalCacheReadinessForUser(eric.id, gateSafePrepProvider, now, { probeUniverseSource: TEST_SOURCE }));
     expect(readiness.readyCount).toBe(0);
     expect(readiness.deferredCount).toBe(1);
 

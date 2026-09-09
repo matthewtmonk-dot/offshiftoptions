@@ -112,6 +112,27 @@ export function TechnicalCachePanel() {
   );
 }
 
+function DailyCandleNotReadyResult({
+  result,
+}: {
+  result: { requiredMarketDate: string; freshProbeCount: number; staleProbeCount: number; unavailableProbeCount: number };
+}) {
+  return (
+    <Panel title="Provider Not Ready Yet">
+      <p className="text-sm text-zinc-300">
+        The provider has not yet published the required market date&apos;s ({shortCalendarDate(result.requiredMarketDate)}) daily candle
+        for enough of a small probe sample - skipped bulk preparation this click rather than creating thousands of items that would all
+        just wait on the same real cause.
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2 text-xs">
+        <Badge tone="good">{result.freshProbeCount} fresh probe(s)</Badge>
+        <Badge tone="warn">{result.staleProbeCount} stale probe(s)</Badge>
+        {result.unavailableProbeCount > 0 ? <Badge tone="neutral">{result.unavailableProbeCount} unavailable probe(s)</Badge> : null}
+      </div>
+    </Panel>
+  );
+}
+
 function ReadinessResult({ result }: { result: TechnicalCacheReadinessActionResult }) {
   if (result.status === "UNAVAILABLE") {
     return (
@@ -119,6 +140,9 @@ function ReadinessResult({ result }: { result: TechnicalCacheReadinessActionResu
         <p className="text-sm text-zinc-300">{result.message}</p>
       </Panel>
     );
+  }
+  if (result.status === "DAILY_CANDLE_NOT_READY") {
+    return <DailyCandleNotReadyResult result={result} />;
   }
   return (
     <Panel title="Technical Cache Readiness">
@@ -178,6 +202,9 @@ function WarmResult({ result }: { result: TechnicalCacheWarmActionResult }) {
         <p className="text-sm text-zinc-300">{result.message}</p>
       </Panel>
     );
+  }
+  if (result.status === "DAILY_CANDLE_NOT_READY") {
+    return <DailyCandleNotReadyResult result={result} />;
   }
   return (
     <Panel title="Warm-Up Result">

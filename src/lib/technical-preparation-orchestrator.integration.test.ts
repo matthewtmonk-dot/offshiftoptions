@@ -189,7 +189,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
   });
 
   it("is a safe no-op when no connected user needs preparation", async () => {
-    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(result.status).toBe("NO_ELIGIBLE_USER");
   });
 
@@ -210,12 +210,14 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     });
     mockProviderForOnly(matt.id, provider);
 
-    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(result.status).toBe("OK");
     if (result.status !== "OK") throw new Error("expected OK");
     expect(result.subBatchesProcessed).toBe(5); // MAX_SUB_BATCHES_PER_INVOCATION
-    expect(result.historySymbolsProcessed).toBe(125); // 5 * 25
-    expect(historyCallCount).toBe(125); // never more than the cap's worth of real history calls
+    expect(result.historySymbolsProcessed).toBe(125); // 5 * 25 - Phase B only, never counts the gate's own probe
+    // 125 real Phase B fetches + 5 one-time gate probe requests (checkDailyCandleAvailabilityGate,
+    // spent once when this invocation creates the new run) - never more than that fixed overhead.
+    expect(historyCallCount).toBe(130);
     expect(getQuotesCallCount).toBe(1); // Stage A swept exactly once for this whole invocation
     expect(result.generationStatus).toBe("IN_PROGRESS"); // 200 eligible, only 125 done
     expect(result.remainingEligibleCount).toBe(75);
@@ -235,14 +237,14 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     });
     mockProviderForOnly(matt.id, provider);
 
-    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(first.status).toBe("OK");
     if (first.status !== "OK") throw new Error("expected OK");
     expect(first.generationStatus).toBe("COMPLETE"); // only 10 eligible - done in one sub-batch
     expect(getQuotesCallCount).toBe(1);
 
     // A second invocation should find nothing left to do for Matt (COMPLETE) - safe no-op.
-    const second = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const second = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(second.status).toBe("NO_ELIGIBLE_USER");
     expect(getQuotesCallCount).toBe(1); // still exactly one sweep across both invocations
   });
@@ -254,13 +256,13 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     const provider = fakeProvider({ quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])) });
     mockProviderForOnly(matt.id, provider);
 
-    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     if (first.status !== "OK") throw new Error("expected OK");
     expect(first.subBatchesProcessed).toBe(5); // hit the per-invocation cap
     expect(first.remainingEligibleCount).toBe(15); // 140 - 125
     expect(first.generationStatus).toBe("IN_PROGRESS");
 
-    const second = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const second = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     if (second.status !== "OK") throw new Error("expected OK");
     expect(second.remainingEligibleCount).toBe(0); // 15 - 15, done in the remaining single sub-batch
     expect(second.generationStatus).toBe("COMPLETE");
@@ -273,14 +275,14 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     const provider = fakeProvider({ quotes: { ORCHRULE1: { price: 20, volume: 1_000_000 } }, onGetQuotes: () => (getQuotesCallCount += 1) });
     mockProviderForOnly(matt.id, provider);
 
-    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(getQuotesCallCount).toBe(1);
 
     const { ensureMyLstScannerProfileForUser } = await import("./workflows");
     const profile = await ensureMyLstScannerProfileForUser(matt.id);
     await prisma.scannerRule.update({ where: { profileId_key: { profileId: profile.id, key: "price" } }, data: { valueJson: { desired: [5, 15] } } });
 
-    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(getQuotesCallCount).toBe(2); // a genuinely new generation swept again
 
     await prisma.scannerRule.update({ where: { profileId_key: { profileId: profile.id, key: "price" } }, data: { valueJson: { desired: [10, 50] } } });
@@ -307,7 +309,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
       return { provider: null, source: "UNAVAILABLE", label: "unrecognized", reason: "NO_USER_CONNECTION", sharedFallback: "DISABLED_POLICY_NOT_VERIFIED" };
     });
 
-    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(result.status).toBe("OK");
     if (result.status !== "OK") throw new Error("expected OK");
     // Eric was selected instead - proven by his own run now existing while Matt has none.
@@ -327,8 +329,11 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
       async getQuotes() {
         throw new Error("simulated unexpected failure mid-sweep");
       },
-      async getPriceHistory() {
-        return [];
+      // The global daily-candle-availability gate probes this same ticker via getPriceHistory
+      // BEFORE Stage A's own getQuotes sweep - it must return a real, fresh candle so the gate
+      // passes and the test actually reaches the intended getQuotes failure, not the gate itself.
+      async getPriceHistory(symbol) {
+        return syntheticCandles(symbol);
       },
       async getOptionChain() {
         return [];
@@ -342,7 +347,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     };
     mockProviderForOnly(matt.id, crashingProvider);
 
-    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(result.status).toBe("USER_CYCLE_FAILED"); // never an unhandled throw out of the orchestrator
 
     const runCount = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
@@ -356,7 +361,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     const provider = fakeProvider({ quotes: { ORCHONLY1: { price: 20, volume: 1_000_000 } } });
     mockProviderForOnly(matt.id, provider);
 
-    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     expect(resolveMarketDataProviderForUserMock).toHaveBeenCalledTimes(1);
     expect(resolveMarketDataProviderForUserMock).toHaveBeenCalledWith(matt.id); // never called for Eric
   });
@@ -368,7 +373,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     mockProviderForOnly(matt.id, fakeProvider({ quotes: Object.fromEntries(bigTickers.map((t) => [t, { price: 20, volume: 1_000_000 }])) }));
 
     // First invocation: only Matt is connected - he gets a real, recently-touched IN_PROGRESS run.
-    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const first = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     if (first.status !== "OK") throw new Error("expected OK");
     expect(first.generationStatus).toBe("IN_PROGRESS"); // 200 eligible, only 125 done - still needs more work
 
@@ -388,7 +393,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     });
     await seedUniverse(["ORCHFAIR1"]);
 
-    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
 
     // Eric - never touched before - was picked this time, not Matt (who still has 75 remaining
     // and would otherwise be the "obvious" continuation target).
@@ -411,7 +416,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     mockProviderForOnly(matt.id, provider);
 
     const earningsCountBefore = await prisma.earningsCalendarEntry.count();
-    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
     const earningsCountAfter = await prisma.earningsCalendarEntry.count();
 
     expect(optionChainCallCount).toBe(0);
@@ -429,7 +434,7 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     await seedUniverse(["ORCHSTALE1"]);
     mockProviderForOnly(eric.id, fakeProvider({ quotes: { ORCHSTALE1: { price: 20, volume: 1_000_000 } } }));
 
-    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW);
+    const result = await runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
 
     expect(result.status).toBe("OK"); // never crashes/throws just because Matt's own lookup failed
     // Eric - the only genuinely eligible candidate - was the one actually processed.
@@ -451,6 +456,6 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     await seedUniverse(["ORCHSYS1"]);
     mockProviderForOnly(matt.id, fakeProvider({ quotes: { ORCHSYS1: { price: 20, volume: 1_000_000 } } }));
 
-    await expect(runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW)).rejects.toThrow("connection pool exhausted");
+    await expect(runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE })).rejects.toThrow("connection pool exhausted");
   });
 });

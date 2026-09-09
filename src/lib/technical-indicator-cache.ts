@@ -4,6 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { bollingerBands, wilderRsi } from "@/domain/finance/calculations";
 import { previousNyseMarketDay } from "@/domain/finance/marketCalendar";
 import { mapWithConcurrency } from "./concurrency";
+import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
 import { prisma } from "./prisma";
 import { ensureMyLstScannerProfileForUser, getResearchUniverseTickersForUser } from "./workflows";
 import { scannerRulesFromRecords } from "@/domain/scanner/profile";
@@ -141,6 +142,179 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Latest-candle-freshness probe - a small, read-only price-history check shared by BOTH the
+// manual explicit-click diagnostic (Scanner Engineering Diagnostics page) and the automatic
+// daily-candle-availability gate below, so the two can never disagree about what "fresh" means.
+// Lives here (not a separate module) specifically to avoid a circular import between this file
+// and the gate that consumes it.
+// ---------------------------------------------------------------------------------------------
+
+/** Default probe count for both the manual diagnostic and the automatic gate - 5 is deliberately
+ * small (a handful of read-only history requests, never a bulk operation). */
+export const LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT = 5;
+
+/** `source` is optional and, when omitted, queries the WHOLE OptionableUniverseSymbol table with
+ * no filter. Real callers (the manual diagnostic action, the automatic gate below) always pass an
+ * explicit `source` (defaulting to OCC_OPTIONABLE_UNIVERSE_SOURCE - real "public OCC underlyings")
+ * so the probe pool is deterministic and never accidentally widened by a concurrently-running test
+ * file's own differently-sourced fixture rows under Vitest's parallel-by-file execution. */
+async function loadDeterministicSymbols(limit: number, source?: string): Promise<string[]> {
+  const rows = await prisma.optionableUniverseSymbol.findMany({
+    where: source ? { source } : undefined,
+    select: { ticker: true },
+    orderBy: { ticker: "asc" },
+    take: limit,
+  });
+  const seen = new Set<string>();
+  const distinct: string[] = [];
+  for (const row of rows) {
+    const ticker = row.ticker.trim().toUpperCase();
+    if (ticker && !seen.has(ticker)) {
+      seen.add(ticker);
+      distinct.push(ticker);
+    }
+  }
+  return distinct;
+}
+
+export type LatestCandleFreshnessRow = {
+  ticker: string;
+  /** ISO date-only (YYYY-MM-DD), or null if the provider returned no usable candle at all. */
+  latestCandleMarketDate: string | null;
+  fresh: boolean;
+};
+
+export type LatestCandleFreshnessDiagnosticResult = {
+  readOnly: true;
+  nothingSaved: true;
+  accountDataTouched: false;
+  /** ISO date-only (YYYY-MM-DD) - previousNyseMarketDay(now), the exact same freshness cutoff the
+   * live scan itself uses (see getTechnicalIndicatorSnapshotsForUser). */
+  requiredMarketDate: string;
+  rows: LatestCandleFreshnessRow[];
+};
+
+/**
+ * Requests price history for up to `symbolCount` (default
+ * LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT = 5) deterministic public symbols via the
+ * caller's OWN resolved provider - never a shared connection, never account/position/transaction
+ * data, no DB writes. A per-symbol fetch failure is reported as `latestCandleMarketDate: null,
+ * fresh: false` rather than aborting the rest. Never more than `symbolCount` history requests.
+ */
+export async function runLatestCandleFreshnessDiagnostic(
+  provider: MarketDataProvider,
+  now: Date = new Date(),
+  options: { universeSource?: string; symbolCount?: number } = {},
+): Promise<LatestCandleFreshnessDiagnosticResult> {
+  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const symbols = await loadDeterministicSymbols(options.symbolCount ?? LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT, options.universeSource);
+
+  const rows: LatestCandleFreshnessRow[] = [];
+  for (const ticker of symbols) {
+    try {
+      const candles = await provider.getPriceHistory(ticker, TECHNICAL_REFRESH_HISTORY_DAYS);
+      const latest = candles.at(-1)?.date ? dateOnlyUtc(candles.at(-1)!.date) : null;
+      rows.push({
+        ticker,
+        latestCandleMarketDate: latest ? latest.toISOString().slice(0, 10) : null,
+        fresh: !!latest && latest.getTime() >= requiredMarketDate.getTime(),
+      });
+    } catch {
+      rows.push({ ticker, latestCandleMarketDate: null, fresh: false });
+    }
+  }
+
+  return {
+    readOnly: true,
+    nothingSaved: true,
+    accountDataTouched: false,
+    requiredMarketDate: requiredMarketDate.toISOString().slice(0, 10),
+    rows,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Global daily-candle-availability gate - see PROJECT_HANDOFF.md's readiness-mismatch
+// investigation. Before a NEW generation begins bulk work (the ~6,071-symbol Phase A quote sweep,
+// then potentially thousands of TechnicalPreparationItem rows and history requests), probe a
+// handful of symbols to answer one cheap question first: "has the provider published the
+// required completed daily candle yet AT ALL, globally?" If not, skip Phase A and item creation
+// entirely rather than creating thousands of DEFERRED rows that will all just retry the same real
+// cause. This directly reuses runLatestCandleFreshnessDiagnostic - the manual diagnostic and this
+// automatic gate can never disagree about what "fresh" means, by construction.
+// ---------------------------------------------------------------------------------------------
+
+/** How many successful (non-SYMBOL_UNAVAILABLE) probes are required before the gate will make a
+ * READY/NOT_READY determination at all - deliberately small (3 of 5) so one or two permanently-
+ * delisted/unavailable probe tickers can never single-handedly force a false NOT_READY forever.
+ * Scaled down to the ACTUAL probe pool size when fewer than GATE_PROBE_SYMBOL_COUNT symbols exist
+ * at all (e.g. an empty/tiny OptionableUniverseSymbol table) - with nothing meaningful to probe,
+ * there is also nothing meaningful to gate, so the gate is vacuously READY rather than
+ * permanently blocking a user who has no real universe yet. */
+const GATE_MIN_SUCCESSFUL_PROBES = 3;
+
+export type DailyCandleAvailabilityGateResult =
+  | { ready: true }
+  | {
+      ready: false;
+      requiredMarketDate: Date;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
+    };
+
+/**
+ * Runs the shared 5-symbol probe (never more than LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT
+ * history requests) and applies a conservative decision rule: ready only if at least
+ * min(GATE_MIN_SUCCESSFUL_PROBES, probed count) symbols returned real data AND every one of them
+ * is fresh. A single SYMBOL_UNAVAILABLE probe (the ticker's own history is genuinely absent,
+ * unrelated to daily-candle timing) is tracked separately from a stale one and never counted
+ * against readiness on its own - see GATE_MIN_SUCCESSFUL_PROBES. `probeUniverseSource` defaults to
+ * OCC_OPTIONABLE_UNIVERSE_SOURCE (real "public OCC underlyings," per spec) - overridable so tests
+ * can scope the probe to their own deterministic fixture pool instead of the live table (which,
+ * under Vitest's parallel-by-file execution, holds many concurrently-running test files' own
+ * rows).
+ */
+export async function checkDailyCandleAvailabilityGate(
+  provider: MarketDataProvider,
+  now: Date,
+  options: { probeUniverseSource?: string } = {},
+): Promise<DailyCandleAvailabilityGateResult> {
+  const diagnostic = await runLatestCandleFreshnessDiagnostic(provider, now, {
+    symbolCount: LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT,
+    universeSource: options.probeUniverseSource ?? OCC_OPTIONABLE_UNIVERSE_SOURCE,
+  });
+
+  let freshProbeCount = 0;
+  let staleProbeCount = 0;
+  let unavailableProbeCount = 0;
+  for (const row of diagnostic.rows) {
+    if (row.latestCandleMarketDate === null) {
+      unavailableProbeCount += 1;
+    } else if (row.fresh) {
+      freshProbeCount += 1;
+    } else {
+      staleProbeCount += 1;
+    }
+  }
+
+  const successfulProbeCount = freshProbeCount + staleProbeCount;
+  const requiredSuccessfulProbes = Math.min(GATE_MIN_SUCCESSFUL_PROBES, diagnostic.rows.length);
+  const ready = successfulProbeCount >= requiredSuccessfulProbes && staleProbeCount === 0;
+
+  if (ready) {
+    return { ready: true };
+  }
+  return {
+    ready: false,
+    requiredMarketDate: dateOnlyUtc(previousNyseMarketDay(now)),
+    freshProbeCount,
+    staleProbeCount,
+    unavailableProbeCount,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Persisted preparation run/queue - so Phase A runs once per cycle, not once per Phase B batch,
 // and never twice under overlapping invocations.
 // ---------------------------------------------------------------------------------------------
@@ -153,6 +327,20 @@ export type ActiveTechnicalPreparationRun = {
    * won the race to create). Exposed mainly for tests/observability. */
   freshlyCreated: boolean;
 };
+
+export type GetOrCreateTechnicalPreparationRunResult =
+  | ({ status: "OK" } & ActiveTechnicalPreparationRun)
+  | {
+      /** The global daily-candle-availability gate (see checkDailyCandleAvailabilityGate) was not
+       * ready when a NEW run would otherwise have been created - no run, no items, no Phase A
+       * quote sweep were performed. Cost: at most LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT
+       * (5) price-history requests, never the ~6,071-symbol sweep or bulk item creation. */
+      status: "DAILY_CANDLE_NOT_READY";
+      requiredMarketDate: Date;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
+    };
 
 /** Bounded wait for a concurrent caller's in-flight run creation to finish - polling, not
  * blocking, and not a distributed lock: cheap DB reads only, no HTTP calls happen in this loop.
@@ -181,7 +369,8 @@ async function waitForConcurrentRunCreation(runId: string): Promise<ActiveTechni
 /**
  * Returns the current user's active TechnicalPreparationRun for (marketDate, rulesFingerprint),
  * creating one - and doing the one real Phase A quote sweep - only if no matching run already
- * exists. This is the ONLY place a new run is created, and therefore the ONLY place
+ * exists AND the global daily-candle-availability gate (checkDailyCandleAvailabilityGate) reports
+ * ready. This is the ONLY place a new run is created, and therefore the ONLY place
  * getEligibleTechnicalRefreshTickersForUser (and its Schwab quote sweep) is ever called from the
  * rest of this module.
  *
@@ -193,6 +382,9 @@ async function waitForConcurrentRunCreation(runId: string): Promise<ActiveTechni
  * (waitForConcurrentRunCreation) for the winner's sweep to finish and returns that result. A
  * winner whose sweep or item-creation throws deletes its own placeholder row before rethrowing,
  * so the unique constraint is freed for a clean future retry rather than left permanently broken.
+ * The gate check runs BEFORE either racer attempts `create()` - a redundant duplicate probe under
+ * a genuine race is cheap (at most 5 extra history requests) and does not affect the create-race
+ * invariant above at all.
  *
  * At creation time, each eligible ticker's TechnicalPreparationItem starts PENDING unless its
  * existing TechnicalIndicatorSnapshot is already READY and fresh (asOfDate >=
@@ -208,7 +400,8 @@ export async function getOrCreateActiveTechnicalPreparationRun(
   userId: string,
   provider: MarketDataProvider,
   now: Date = new Date(),
-): Promise<ActiveTechnicalPreparationRun> {
+  options: { probeUniverseSource?: string } = {},
+): Promise<GetOrCreateTechnicalPreparationRunResult> {
   const rules = await loadUserQuoteStageRules(userId);
   const fingerprint = computeQuoteStageRulesFingerprint(rules);
   const marketDate = dateOnlyUtc(now);
@@ -221,9 +414,25 @@ export async function getOrCreateActiveTechnicalPreparationRun(
   const existing = await prisma.technicalPreparationRun.findUnique({ where: identity });
   if (existing) {
     if (existing.eligibleCount === null) {
-      return waitForConcurrentRunCreation(existing.id); // someone else is still creating it
+      const result = await waitForConcurrentRunCreation(existing.id); // someone else is still creating it
+      return { status: "OK", ...result };
     }
-    return { runId: existing.id, eligibleCount: existing.eligibleCount, freshlyCreated: false };
+    return { status: "OK", runId: existing.id, eligibleCount: existing.eligibleCount, freshlyCreated: false };
+  }
+
+  // No existing run for this identity - before spending a real Phase A quote sweep (and
+  // potentially creating thousands of TechnicalPreparationItem rows), cheaply probe whether the
+  // provider has published the required daily candle AT ALL yet (see the module-level doc comment
+  // above checkDailyCandleAvailabilityGate). A run/placeholder is never created while not ready.
+  const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: options.probeUniverseSource });
+  if (!gate.ready) {
+    return {
+      status: "DAILY_CANDLE_NOT_READY",
+      requiredMarketDate: gate.requiredMarketDate,
+      freshProbeCount: gate.freshProbeCount,
+      staleProbeCount: gate.staleProbeCount,
+      unavailableProbeCount: gate.unavailableProbeCount,
+    };
   }
 
   // Claim the right to create this run. eligibleCount starts NULL - a concurrent loser reading
@@ -240,9 +449,10 @@ export async function getOrCreateActiveTechnicalPreparationRun(
         throw new Error("A concurrent technical preparation run creation failed - retry.");
       }
       if (theirs.eligibleCount === null) {
-        return waitForConcurrentRunCreation(theirs.id);
+        const result = await waitForConcurrentRunCreation(theirs.id);
+        return { status: "OK", ...result };
       }
-      return { runId: theirs.id, eligibleCount: theirs.eligibleCount, freshlyCreated: false };
+      return { status: "OK", runId: theirs.id, eligibleCount: theirs.eligibleCount, freshlyCreated: false };
     }
     throw error;
   }
@@ -282,7 +492,7 @@ export async function getOrCreateActiveTechnicalPreparationRun(
       data: { eligibleCount: eligible.length, status: pendingCount > 0 ? "IN_PROGRESS" : "COMPLETE" },
     });
 
-    return { runId: placeholder.id, eligibleCount: eligible.length, freshlyCreated: true };
+    return { status: "OK", runId: placeholder.id, eligibleCount: eligible.length, freshlyCreated: true };
   } catch (error) {
     // Free the unique constraint for a clean future retry - never leave a permanently-NULL
     // placeholder that every future call (and every waiting concurrent loser) would hang on.
@@ -324,50 +534,60 @@ export const TECHNICAL_SNAPSHOT_FAILURE_REASONS = {
  * reclaimed out from under it, while a genuinely dead worker's rows don't stay stuck forever. */
 export const PROCESSING_CLAIM_TIMEOUT_MS = 5 * 60 * 1000;
 
-/** How long a DEFERRED item (provider's latest candle exists but is older than the run's own
- * required market date - see PROJECT_HANDOFF.md's readiness-mismatch investigation) waits before
- * it becomes reclaimable again - deliberately NOT immediate, so a scheduled cron ticking every 5
- * minutes doesn't hammer the same lagged tickers on every single tick. */
-export const DEFERRED_RETRY_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes
+/** How long a DEFERRED item (this ONE ticker's own provider candle exists but is older than the
+ * run's required market date, despite the global daily-candle-availability gate having already
+ * passed - see checkDailyCandleAvailabilityGate) waits before it becomes reclaimable again -
+ * deliberately NOT immediate, so a scheduled cron ticking every 5 minutes doesn't hammer the same
+ * lagged ticker on every single tick. */
+export const DEFERRED_RETRY_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
 /** Bounded retry cap for a DEFERRED item - after this many lagged-candle attempts, the item
  * becomes FAILED (terminal, exactly like a genuine history-fetch failure) rather than retrying
  * forever.
  *
- * Sized deliberately larger than a first-pass "3 attempts" guess: at
- * DEFERRED_RETRY_INTERVAL_MS = 20 minutes, 3 attempts would exhaust in ~45 minutes - if
- * preparation starts at the morning window's 5:00 AM ET open, that means giving up by ~5:45 AM,
- * with no evidence the provider publishes the prior session's daily candle by then (the real
- * incident this fix responds to proved only that 9:32 PM ET is too early - the actual morning
- * publish time is exactly what the new latest-candle-freshness diagnostic exists to measure, not
- * something to guess here). 8 attempts x 20 minutes = ~160 minutes (2h40m) of real retry span
- * from first deferral - comfortably absorbs a provider that publishes anywhere in the first
- * ~2.5 hours after this ran, without exhausting a small user's entire retry budget in the
- * opening minutes of the window, while still remaining bounded (never infinite) and well short of
- * hammering the provider for the full ~4h15m window. Worst-case request volume: a persistently-
- * lagged symbol accumulates at most 8 total getPriceHistory calls (1 initial + 7 retries) across
- * the whole retry span, not once per 5-minute cron tick - see PROJECT_HANDOFF.md for the audited
- * per-generation totals. */
-export const MAX_DEFERRED_ATTEMPTS = 8;
+ * Deliberately small (3 attempts x 15 minutes = 45 minutes of real retry span). This constant
+ * used to also be the system's ONLY defense against a GLOBAL provider-timing issue (the real Sep
+ * 8 incident, where the provider hadn't published ANY ticker's daily candle yet) - that role has
+ * moved to checkDailyCandleAvailabilityGate, which now stops bulk work entirely before it starts
+ * in that scenario. DEFERRED is reserved for the genuinely rare case where the gate's own 5-symbol
+ * probe passed (most of the universe IS current) but one ISOLATED ticker's own history still
+ * happens to lag - a per-symbol anomaly, not a systemic one, so a small bounded retry is
+ * appropriate rather than the large multi-hour budget a global-outage assumption would need. */
+export const MAX_DEFERRED_ATTEMPTS = 3;
 
-export type TechnicalRefreshBatchResult = {
-  processedCount: number;
-  succeededCount: number;
-  /** Items whose provider candle existed but was older than the run's required market date, and
-   * have not yet exhausted MAX_DEFERRED_ATTEMPTS - not counted in failedCount (not a failure). */
-  deferredCount: number;
-  failedCount: number;
-  /** PENDING + PROCESSING + DEFERRED items remaining in the active run after this batch (i.e. work
-   * not yet finished OR still waiting on a retryable deferred candle) - 0 means the run just
-   * completed. Lets a caller decide whether to invoke again. */
-  remainingEligibleCount: number;
-  /** Real wall-clock time for this ENTIRE invocation, in milliseconds - on every call except the
-   * one that creates a new run, this reflects ONLY Phase B (claim + history fetch + RSI/BB),
-   * since no quote sweep happens. The aggregate cost a caller needs to estimate how many worker
-   * invocations a full preparation cycle would take. Never a raw per-request timing breakdown, no
-   * raw provider response, no token - just one aggregate number. */
-  elapsedMs: number;
-};
+export type TechnicalRefreshBatchResult =
+  | {
+      status: "OK";
+      processedCount: number;
+      succeededCount: number;
+      /** Items whose provider candle existed but was older than the run's required market date,
+       * and have not yet exhausted MAX_DEFERRED_ATTEMPTS - not counted in failedCount (not a
+       * failure). After the global gate fix, this should only ever reflect rare, isolated
+       * per-symbol anomalies - a systemic provider-timing issue is now caught by
+       * checkDailyCandleAvailabilityGate before any items are even created. */
+      deferredCount: number;
+      failedCount: number;
+      /** PENDING + PROCESSING + DEFERRED items remaining in the active run after this batch (i.e.
+       * work not yet finished OR still waiting on a retryable deferred candle) - 0 means the run
+       * just completed. Lets a caller decide whether to invoke again. */
+      remainingEligibleCount: number;
+      /** Real wall-clock time for this ENTIRE invocation, in milliseconds - on every call except
+       * the one that creates a new run, this reflects ONLY Phase B (claim + history fetch +
+       * RSI/BB), since no quote sweep happens. The aggregate cost a caller needs to estimate how
+       * many worker invocations a full preparation cycle would take. Never a raw per-request
+       * timing breakdown, no raw provider response, no token - just one aggregate number. */
+      elapsedMs: number;
+    }
+  | {
+      /** The global daily-candle-availability gate was not ready - no run/items were created and
+       * no bulk work was attempted this call. See GetOrCreateTechnicalPreparationRunResult. */
+      status: "DAILY_CANDLE_NOT_READY";
+      requiredMarketDate: Date;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
+      elapsedMs: number;
+    };
 
 /**
  * Atomically claims up to `batchSize` PENDING (or retryable DEFERRED) items for this run and marks
@@ -449,14 +669,25 @@ type ItemOutcome = { outcome: "READY" | "DEFERRED" | "DEFERRED_EXHAUSTED" | "FAI
 export async function refreshTechnicalIndicatorCacheBatchForUser(
   userId: string,
   provider: MarketDataProvider,
-  options: { batchSize?: number; now?: Date } = {},
+  options: { batchSize?: number; now?: Date; probeUniverseSource?: string } = {},
 ): Promise<TechnicalRefreshBatchResult> {
   const startedAt = Date.now();
   const now = options.now ?? new Date();
   const batchSize = options.batchSize ?? TECHNICAL_REFRESH_BATCH_SIZE;
   const claimToken = randomUUID(); // a random, non-secret, per-invocation identifier - never a credential
 
-  const { runId } = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now);
+  const runResult = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now, { probeUniverseSource: options.probeUniverseSource });
+  if (runResult.status === "DAILY_CANDLE_NOT_READY") {
+    return {
+      status: "DAILY_CANDLE_NOT_READY",
+      requiredMarketDate: runResult.requiredMarketDate,
+      freshProbeCount: runResult.freshProbeCount,
+      staleProbeCount: runResult.staleProbeCount,
+      unavailableProbeCount: runResult.unavailableProbeCount,
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+  const { runId } = runResult;
 
   await recoverAbandonedClaims(runId, now);
   const claimedItems = await claimNextPendingItems(runId, batchSize, claimToken, now);
@@ -591,6 +822,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   }
 
   return {
+    status: "OK",
     processedCount: claimedItems.length,
     succeededCount,
     deferredCount,
@@ -705,22 +937,34 @@ export async function getTechnicalIndicatorSnapshotsForUser(
 // Readiness status - the minimal aggregate a UI needs ("1,842 / 2,036 ready").
 // ---------------------------------------------------------------------------------------------
 
-export type TechnicalCacheReadinessStatus = {
-  eligibleCount: number;
-  /** Item status = READY. After the immediate-stale-candle fix, an item can ONLY become READY
-   * when its fetched candle was fresh enough for the live scan's own required market date at
-   * write time (see refreshTechnicalIndicatorCacheBatchForUser) - so this now directly means
-   * "fresh and usable right now," not merely "the worker attempted this ticker once." */
-  readyCount: number;
-  /** PENDING + PROCESSING only - never claimed/attempted yet, or actively being fetched right now. */
-  pendingCount: number;
-  /** Provider's latest candle exists but is older than what's required - waiting on
-   * DEFERRED_RETRY_INTERVAL_MS before another attempt, not a failure. */
-  deferredCount: number;
-  /** Genuine history-fetch failure, or a DEFERRED item that exhausted MAX_DEFERRED_ATTEMPTS. */
-  failedCount: number;
-  lastPreparedAt: Date | null;
-};
+export type TechnicalCacheReadinessStatus =
+  | {
+      status: "OK";
+      eligibleCount: number;
+      /** Item status = READY. After the immediate-stale-candle fix, an item can ONLY become READY
+       * when its fetched candle was fresh enough for the live scan's own required market date at
+       * write time (see refreshTechnicalIndicatorCacheBatchForUser) - so this now directly means
+       * "fresh and usable right now," not merely "the worker attempted this ticker once." */
+      readyCount: number;
+      /** PENDING + PROCESSING only - never claimed/attempted yet, or actively being fetched right now. */
+      pendingCount: number;
+      /** This ONE ticker's own candle exists but is older than what's required, despite the
+       * global gate having already passed - a rare, isolated per-symbol anomaly, waiting on
+       * DEFERRED_RETRY_INTERVAL_MS before another attempt, not a failure. */
+      deferredCount: number;
+      /** Genuine history-fetch failure, or a DEFERRED item that exhausted MAX_DEFERRED_ATTEMPTS. */
+      failedCount: number;
+      lastPreparedAt: Date | null;
+    }
+  | {
+      /** The global daily-candle-availability gate was not ready - no run/items exist yet this
+       * cycle. See GetOrCreateTechnicalPreparationRunResult. */
+      status: "DAILY_CANDLE_NOT_READY";
+      requiredMarketDate: Date;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
+    };
 
 /**
  * Reads the CURRENT active preparation run's own item counts - reuses
@@ -731,10 +975,21 @@ export async function getTechnicalCacheReadinessForUser(
   userId: string,
   provider: MarketDataProvider,
   now: Date = new Date(),
+  options: { probeUniverseSource?: string } = {},
 ): Promise<TechnicalCacheReadinessStatus> {
-  const { runId, eligibleCount } = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now);
+  const runResult = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now, { probeUniverseSource: options.probeUniverseSource });
+  if (runResult.status === "DAILY_CANDLE_NOT_READY") {
+    return {
+      status: "DAILY_CANDLE_NOT_READY",
+      requiredMarketDate: runResult.requiredMarketDate,
+      freshProbeCount: runResult.freshProbeCount,
+      staleProbeCount: runResult.staleProbeCount,
+      unavailableProbeCount: runResult.unavailableProbeCount,
+    };
+  }
+  const { runId, eligibleCount } = runResult;
   if (eligibleCount === 0) {
-    return { eligibleCount: 0, readyCount: 0, pendingCount: 0, deferredCount: 0, failedCount: 0, lastPreparedAt: null };
+    return { status: "OK", eligibleCount: 0, readyCount: 0, pendingCount: 0, deferredCount: 0, failedCount: 0, lastPreparedAt: null };
   }
 
   const [readyCount, pendingCount, deferredCount, failedCount, lastReady] = await Promise.all([
@@ -746,6 +1001,7 @@ export async function getTechnicalCacheReadinessForUser(
   ]);
 
   return {
+    status: "OK",
     eligibleCount,
     readyCount,
     pendingCount,

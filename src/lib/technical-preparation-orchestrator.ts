@@ -191,19 +191,37 @@ export type TechnicalPreparationOrchestratorResult =
       remainingEligibleCount: number;
       elapsedMs: number;
     }
-  | { status: "USER_CYCLE_FAILED" };
+  | { status: "USER_CYCLE_FAILED" }
+  | {
+      /** The global daily-candle-availability gate (see checkDailyCandleAvailabilityGate in
+       * technical-indicator-cache.ts) was not ready for the selected user - no Phase A quote
+       * sweep, no bulk TechnicalPreparationItem creation, no bulk history requests were attempted
+       * this invocation. Costs at most 5 read-only price-history probe requests, then stops. */
+      status: "DAILY_CANDLE_NOT_READY";
+      requiredMarketDate: string;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
+    };
 
 /**
  * One bounded invocation: picks at most one user (see selectNextEligibleUserForTechnicalPreparation),
  * then runs up to MAX_SUB_BATCHES_PER_INVOCATION of the EXISTING, unmodified 25-symbol
  * refreshTechnicalIndicatorCacheBatchForUser batches for them, stopping as soon as ANY of these is
  * true: the run reports 0 remaining (COMPLETE), the sub-batch cap is reached, the wall-clock
- * budget is reached, or a batch claimed/processed nothing (meaning everything left is either done
- * or actively claimed by another concurrent invocation - no point spinning further sub-batches).
- * A GitHub Actions schedule is expected to call this endpoint repeatedly during a bounded
- * after-close window and simply NO-OP once every connected user is COMPLETE for the day.
+ * budget is reached, a batch claimed/processed nothing (meaning everything left is either done or
+ * actively claimed by another concurrent invocation - no point spinning further sub-batches), or
+ * the VERY FIRST sub-batch call reports DAILY_CANDLE_NOT_READY (the gate result cannot change
+ * mid-invocation, so there is no point spending further probe/sub-batch attempts once it's known -
+ * see refreshTechnicalIndicatorCacheBatchForUser/getOrCreateActiveTechnicalPreparationRun). A
+ * GitHub Actions schedule is expected to call this endpoint repeatedly during a bounded
+ * before-open window and simply NO-OP once every connected user is COMPLETE for the day, or once
+ * the gate reports not ready.
  */
-export async function runTechnicalPreparationOrchestratorCycle(now: Date = new Date()): Promise<TechnicalPreparationOrchestratorResult> {
+export async function runTechnicalPreparationOrchestratorCycle(
+  now: Date = new Date(),
+  options: { probeUniverseSource?: string } = {},
+): Promise<TechnicalPreparationOrchestratorResult> {
   if (!isTechnicalPreparationWindowOpen(now)) {
     return { status: "OUTSIDE_WINDOW" };
   }
@@ -229,7 +247,21 @@ export async function runTechnicalPreparationOrchestratorCycle(now: Date = new D
       const batch = await refreshTechnicalIndicatorCacheBatchForUser(selected.userId, selected.provider, {
         batchSize: TECHNICAL_REFRESH_BATCH_SIZE,
         now,
+        probeUniverseSource: options.probeUniverseSource,
       });
+
+      if (batch.status === "DAILY_CANDLE_NOT_READY") {
+        // Never spend further sub-batch attempts probing again this same invocation - the gate
+        // result cannot change within one call, and each probe already cost real requests.
+        return {
+          status: "DAILY_CANDLE_NOT_READY",
+          requiredMarketDate: batch.requiredMarketDate.toISOString().slice(0, 10),
+          freshProbeCount: batch.freshProbeCount,
+          staleProbeCount: batch.staleProbeCount,
+          unavailableProbeCount: batch.unavailableProbeCount,
+        };
+      }
+
       subBatchesProcessed += 1;
       historySymbolsProcessed += batch.processedCount;
       succeededCount += batch.succeededCount;
