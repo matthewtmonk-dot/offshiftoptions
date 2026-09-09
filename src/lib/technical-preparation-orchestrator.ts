@@ -48,7 +48,20 @@ export const ORCHESTRATOR_WALL_CLOCK_BUDGET_MS = 20_000;
 // Intl, never a fixed UTC-offset assumption).
 // -------------------------------------------------------------------------------------------
 
-const REGULAR_SESSION_CLOSE_HOUR_ET = 16; // 4:00 PM ET, matching the existing daily-candle semantics
+/**
+ * Morning preparation window, America/New_York, before the regular session opens - see
+ * PROJECT_HANDOFF.md's readiness-mismatch investigation. Real production evidence proved an
+ * evening-after-close run (~9:32 PM ET) could see a provider that had NOT yet posted the
+ * just-closed session's own daily candle, producing an immediately-stale snapshot. Moving
+ * preparation to the following morning (before that day's own open) gives the provider the
+ * whole overnight window to post the prior session's candle, and DEFERRED/retry (see
+ * refreshTechnicalIndicatorCacheBatchForUser) safely absorbs the case where it still hasn't by
+ * the time the window opens. 5:00-9:15 AM ET is a starting default, not a measured optimum -
+ * adjust the start after inspecting real provider behavior (see the new latest-candle-freshness
+ * diagnostic on the Scanner Engineering Diagnostics page).
+ */
+const PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET = 5 * 60; // 5:00 AM ET
+const PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET = 9 * 60 + 15; // 9:15 AM ET (inclusive)
 
 function nyDateTimeParts(date: Date): { year: number; month: number; day: number; hour: number; minute: number } {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -67,22 +80,24 @@ function nyDateTimeParts(date: Date): { year: number; month: number; day: number
 }
 
 /**
- * True whenever it is safe to run a technical-preparation cycle right now: NOT during a live
- * NYSE regular trading session (avoids intraday indicator-refresh churn - RSI/BB are computed
- * from DAILY candles, so nothing new exists until close anyway). On a genuine NYSE market day,
- * that means after 4:00 PM ET. On a weekend or NYSE holiday, always true - Friday's close stays
- * valid and safe to keep preparing against all weekend, and a holiday never fabricates a fake
- * trading day (getOrCreateActiveTechnicalPreparationRun's own history fetch would simply return
- * the same real last-trading-day candles either way - see PROJECT_HANDOFF.md for the full
- * reasoning this deliberately does not over-engineer around).
+ * True whenever it is safe to run a technical-preparation cycle right now: America/New_York wall-
+ * clock time (via Intl, never a fixed UTC-offset assumption - DST-safe by construction), between
+ * PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET and PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET, on a real
+ * NYSE market day only - preparing before an open that isn't actually happening today has no
+ * purpose. A worker invoked inside this window computes its own required market date via
+ * previousNyseMarketDay(now) (see technical-indicator-cache.ts), which already correctly resolves
+ * "the previous completed trading day" across weekends/holidays (e.g. Tuesday morning after Labor
+ * Day correctly requires the prior Friday, never a fabricated Monday) - no separate calendar logic
+ * is needed here beyond deciding whether the window itself is currently open.
  */
 export function isTechnicalPreparationWindowOpen(now: Date): boolean {
   const ny = nyDateTimeParts(now);
   const nyDateUtc = new Date(Date.UTC(ny.year, ny.month - 1, ny.day));
   if (!isNyseMarketDay(nyDateUtc)) {
-    return true;
+    return false;
   }
-  return ny.hour >= REGULAR_SESSION_CLOSE_HOUR_ET;
+  const minuteOfDay = ny.hour * 60 + ny.minute;
+  return minuteOfDay >= PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET && minuteOfDay <= PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET;
 }
 
 // -------------------------------------------------------------------------------------------

@@ -324,12 +324,41 @@ export const TECHNICAL_SNAPSHOT_FAILURE_REASONS = {
  * reclaimed out from under it, while a genuinely dead worker's rows don't stay stuck forever. */
 export const PROCESSING_CLAIM_TIMEOUT_MS = 5 * 60 * 1000;
 
+/** How long a DEFERRED item (provider's latest candle exists but is older than the run's own
+ * required market date - see PROJECT_HANDOFF.md's readiness-mismatch investigation) waits before
+ * it becomes reclaimable again - deliberately NOT immediate, so a scheduled cron ticking every 5
+ * minutes doesn't hammer the same lagged tickers on every single tick. */
+export const DEFERRED_RETRY_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes
+
+/** Bounded retry cap for a DEFERRED item - after this many lagged-candle attempts, the item
+ * becomes FAILED (terminal, exactly like a genuine history-fetch failure) rather than retrying
+ * forever.
+ *
+ * Sized deliberately larger than a first-pass "3 attempts" guess: at
+ * DEFERRED_RETRY_INTERVAL_MS = 20 minutes, 3 attempts would exhaust in ~45 minutes - if
+ * preparation starts at the morning window's 5:00 AM ET open, that means giving up by ~5:45 AM,
+ * with no evidence the provider publishes the prior session's daily candle by then (the real
+ * incident this fix responds to proved only that 9:32 PM ET is too early - the actual morning
+ * publish time is exactly what the new latest-candle-freshness diagnostic exists to measure, not
+ * something to guess here). 8 attempts x 20 minutes = ~160 minutes (2h40m) of real retry span
+ * from first deferral - comfortably absorbs a provider that publishes anywhere in the first
+ * ~2.5 hours after this ran, without exhausting a small user's entire retry budget in the
+ * opening minutes of the window, while still remaining bounded (never infinite) and well short of
+ * hammering the provider for the full ~4h15m window. Worst-case request volume: a persistently-
+ * lagged symbol accumulates at most 8 total getPriceHistory calls (1 initial + 7 retries) across
+ * the whole retry span, not once per 5-minute cron tick - see PROJECT_HANDOFF.md for the audited
+ * per-generation totals. */
+export const MAX_DEFERRED_ATTEMPTS = 8;
+
 export type TechnicalRefreshBatchResult = {
   processedCount: number;
   succeededCount: number;
+  /** Items whose provider candle existed but was older than the run's required market date, and
+   * have not yet exhausted MAX_DEFERRED_ATTEMPTS - not counted in failedCount (not a failure). */
+  deferredCount: number;
   failedCount: number;
-  /** PENDING + PROCESSING items remaining in the active run after this batch (i.e. work not yet
-   * finished, whether by this invocation or another one still in flight) - 0 means the run just
+  /** PENDING + PROCESSING + DEFERRED items remaining in the active run after this batch (i.e. work
+   * not yet finished OR still waiting on a retryable deferred candle) - 0 means the run just
    * completed. Lets a caller decide whether to invoke again. */
   remainingEligibleCount: number;
   /** Real wall-clock time for this ENTIRE invocation, in milliseconds - on every call except the
@@ -341,32 +370,37 @@ export type TechnicalRefreshBatchResult = {
 };
 
 /**
- * Atomically claims up to `batchSize` PENDING items for this run and marks them PROCESSING under
- * `claimToken` - a single `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)` statement,
- * the standard Postgres claim-queue pattern. Two overlapping claims against the same run are
- * guaranteed disjoint by Postgres itself: the second claim's row-lock attempt SKIPS whatever the
- * first has already locked rather than blocking or double-claiming, so it can never return more
- * than what's genuinely still PENDING, and never the same ticker as the other invocation. This is
- * the ONLY database work in this claim step - no Schwab HTTP call happens until after it commits,
- * and no explicit transaction wrapper is used or needed (a single statement is already atomic).
+ * Atomically claims up to `batchSize` PENDING (or retryable DEFERRED) items for this run and marks
+ * them PROCESSING under `claimToken` - a single `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE
+ * SKIP LOCKED)` statement, the standard Postgres claim-queue pattern. Two overlapping claims
+ * against the same run are guaranteed disjoint by Postgres itself: the second claim's row-lock
+ * attempt SKIPS whatever the first has already locked rather than blocking or double-claiming, so
+ * it can never return more than what's genuinely claimable, and never the same ticker as the other
+ * invocation. A DEFERRED item whose `retryAfter` hasn't passed yet is excluded from the WHERE
+ * clause entirely - it is never reclaimed early, and its exclusion naturally lets the query fall
+ * through to the next PENDING/retryable ticker in priority/ticker order, so a block of tickers
+ * still waiting out their retry delay can never starve the rest of the queue. This is the ONLY
+ * database work in this claim step - no Schwab HTTP call happens until after it commits, and no
+ * explicit transaction wrapper is used or needed (a single statement is already atomic).
  */
 async function claimNextPendingItems(
   runId: string,
   batchSize: number,
   claimToken: string,
   now: Date,
-): Promise<{ id: string; ticker: string; priority: number }[]> {
-  return prisma.$queryRaw<{ id: string; ticker: string; priority: number }[]>`
+): Promise<{ id: string; ticker: string; priority: number; deferredAttempts: number }[]> {
+  return prisma.$queryRaw<{ id: string; ticker: string; priority: number; deferredAttempts: number }[]>`
     UPDATE "TechnicalPreparationItem"
     SET "status" = 'PROCESSING', "claimToken" = ${claimToken}, "claimedAt" = ${now}
     WHERE "id" IN (
       SELECT "id" FROM "TechnicalPreparationItem"
-      WHERE "runId" = ${runId} AND "status" = 'PENDING'
+      WHERE "runId" = ${runId}
+        AND ("status" = 'PENDING' OR ("status" = 'DEFERRED' AND "retryAfter" <= ${now}))
       ORDER BY "priority" ASC, "ticker" ASC
       LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED
     )
-    RETURNING "id", "ticker", "priority"
+    RETURNING "id", "ticker", "priority", "deferredAttempts"
   `;
 }
 
@@ -383,19 +417,34 @@ async function recoverAbandonedClaims(runId: string, now: Date): Promise<void> {
   });
 }
 
+type ItemOutcome = { outcome: "READY" | "DEFERRED" | "DEFERRED_EXHAUSTED" | "FAILED" };
+
 /**
- * Phase B: claims and processes at most `batchSize` PENDING items from this user's ACTIVE
- * preparation run - never all ~2,000+ eligible symbols in one call (no long-running single
- * request), and never a fresh Schwab quote sweep unless getOrCreateActiveTechnicalPreparationRun
- * determines one is genuinely needed. Safely repeatable AND safe under real overlapping
- * invocations: claiming is atomic (see claimNextPendingItems) so two simultaneous calls always
- * receive disjoint symbol sets, never the same ticker twice. One symbol's price-history failure
- * is caught and recorded as a FAILED row for that symbol alone - it never aborts or "poisons" the
- * rest of the batch. FAILED is a terminal state for this run/generation - see
- * TECHNICAL_SNAPSHOT_FAILURE_REASONS's own note; a future run (new day, or a rule change) gives
- * every ticker, including previously-FAILED ones, a fresh PENDING item and another real attempt.
- * No bounded retry-within-a-run is implemented deliberately, to avoid an unbounded retry loop
- * against a persistently failing symbol/provider.
+ * Phase B: claims and processes at most `batchSize` PENDING (or retryable DEFERRED) items from
+ * this user's ACTIVE preparation run - never all ~2,000+ eligible symbols in one call (no
+ * long-running single request), and never a fresh Schwab quote sweep unless
+ * getOrCreateActiveTechnicalPreparationRun determines one is genuinely needed. Safely repeatable
+ * AND safe under real overlapping invocations: claiming is atomic (see claimNextPendingItems) so
+ * two simultaneous calls always receive disjoint symbol sets, never the same ticker twice.
+ *
+ * A history-fetch call that returns NO usable candle at all is a genuine, immediately-terminal
+ * FAILED (existing behavior, isolated per-ticker via try/catch - never poisons the batch).
+ *
+ * A history-fetch call that DOES return real candles, but whose latest one is older than THIS
+ * run's own required market date (`previousNyseMarketDay(now)`, the exact same freshness rule the
+ * live scan itself uses via getTechnicalIndicatorSnapshotsForUser) is NOT marked READY - the
+ * provider simply hasn't posted the just-closed session's own daily candle yet (see
+ * PROJECT_HANDOFF.md's readiness-mismatch investigation). It is marked DEFERRED and becomes
+ * reclaimable again after DEFERRED_RETRY_INTERVAL_MS, up to MAX_DEFERRED_ATTEMPTS before becoming
+ * FAILED (terminal, same as a genuine fetch failure - never an unbounded retry loop). A lagged
+ * fetch NEVER regresses an existing TechnicalIndicatorSnapshot to an older asOfDate than it
+ * already had - the write only happens if the newly-fetched candle is at least as new as whatever
+ * is already stored, exactly mirroring the existing "a failed refresh never destroys yesterday's
+ * valid cache" pattern.
+ *
+ * FAILED (whether from a genuine fetch failure or exhausted deferral) is terminal for this
+ * run/generation - a future run (new day, or a rule change) gives every ticker, including
+ * previously-FAILED ones, a fresh PENDING item and another real attempt.
  */
 export async function refreshTechnicalIndicatorCacheBatchForUser(
   userId: string,
@@ -412,27 +461,99 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   await recoverAbandonedClaims(runId, now);
   const claimedItems = await claimNextPendingItems(runId, batchSize, claimToken, now);
 
-  const outcomes = await mapWithConcurrency(claimedItems, TECHNICAL_REFRESH_CONCURRENCY, async (item) => {
+  // The live scan's own freshness cutoff, computed once for this whole batch - a candle must be
+  // at least this new to be marked READY. Never derived from invocation time alone; always via
+  // the same canonical previousNyseMarketDay helper the live scan itself uses.
+  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+
+  const existingSnapshots = claimedItems.length
+    ? await prisma.technicalIndicatorSnapshot.findMany({
+        where: { userId, ticker: { in: claimedItems.map((item) => item.ticker) } },
+        select: { ticker: true, asOfDate: true },
+      })
+    : [];
+  const existingAsOfByTicker = new Map(existingSnapshots.map((row) => [row.ticker, row.asOfDate]));
+
+  const outcomes: ItemOutcome[] = await mapWithConcurrency(claimedItems, TECHNICAL_REFRESH_CONCURRENCY, async (item) => {
     try {
       const candles = await provider.getPriceHistory(item.ticker, TECHNICAL_REFRESH_HISTORY_DAYS);
-      const closes = candles.map((candle) => candle.close);
-      const rsi = wilderRsi(closes);
-      const bands = bollingerBands(closes);
-      const asOfDate = candles.at(-1)?.date ?? null;
+      const latestCandleDate = candles.at(-1)?.date ? dateOnlyUtc(candles.at(-1)!.date) : null;
 
-      await upsertSnapshot(userId, item.ticker, {
-        status: "READY",
-        asOfDate: asOfDate ? dateOnlyUtc(asOfDate) : null,
-        rsi,
-        bbLower: bands?.lower ?? null,
-        bbMiddle: bands?.middle ?? null,
-        bbUpper: bands?.upper ?? null,
-        failureReason: null,
-        historyFetchedAt: now,
-        now,
+      if (!latestCandleDate) {
+        // No usable candle at all - a genuine data-unavailable failure, not a lag.
+        await upsertSnapshot(userId, item.ticker, {
+          status: "FAILED",
+          asOfDate: null,
+          rsi: null,
+          bbLower: null,
+          bbMiddle: null,
+          bbUpper: null,
+          failureReason: TECHNICAL_SNAPSHOT_FAILURE_REASONS.HISTORY_FETCH_FAILED,
+          historyFetchedAt: null,
+          now,
+          preserveExistingGoodValues: true,
+        });
+        await prisma.technicalPreparationItem.update({
+          where: { id: item.id },
+          data: { status: "FAILED", processedAt: now, retryAfter: null },
+        });
+        return { outcome: "FAILED" as const };
+      }
+
+      const existingAsOfDate = existingAsOfByTicker.get(item.ticker) ?? null;
+      const improvesOnExisting = !existingAsOfDate || latestCandleDate.getTime() > existingAsOfDate.getTime();
+      const isFreshEnough = latestCandleDate.getTime() >= requiredMarketDate.getTime();
+
+      if (improvesOnExisting) {
+        // Honest write either way - if not fresh enough, the read path
+        // (getTechnicalIndicatorSnapshotsForUser) already correctly reports this as
+        // TECHNICAL_DATA_STALE on its own via the identical freshness rule. Never regresses an
+        // existing snapshot to an OLDER asOfDate than it already had.
+        const closes = candles.map((candle) => candle.close);
+        const rsi = wilderRsi(closes);
+        const bands = bollingerBands(closes);
+        await upsertSnapshot(userId, item.ticker, {
+          status: "READY",
+          asOfDate: latestCandleDate,
+          rsi,
+          bbLower: bands?.lower ?? null,
+          bbMiddle: bands?.middle ?? null,
+          bbUpper: bands?.upper ?? null,
+          failureReason: null,
+          historyFetchedAt: now,
+          now,
+        });
+      }
+
+      if (isFreshEnough) {
+        await prisma.technicalPreparationItem.update({
+          where: { id: item.id },
+          data: { status: "READY", processedAt: now, retryAfter: null },
+        });
+        return { outcome: "READY" as const };
+      }
+
+      // Lagged - the provider's latest candle is genuinely older than what this run requires.
+      const deferredAttempts = item.deferredAttempts + 1;
+      if (deferredAttempts >= MAX_DEFERRED_ATTEMPTS) {
+        await prisma.technicalPreparationItem.update({
+          where: { id: item.id },
+          data: { status: "FAILED", processedAt: now, deferredAttempts, retryAfter: null },
+        });
+        return { outcome: "DEFERRED_EXHAUSTED" as const };
+      }
+      await prisma.technicalPreparationItem.update({
+        where: { id: item.id },
+        data: {
+          status: "DEFERRED",
+          processedAt: null,
+          deferredAttempts,
+          retryAfter: new Date(now.getTime() + DEFERRED_RETRY_INTERVAL_MS),
+          claimToken: null,
+          claimedAt: null,
+        },
       });
-      await prisma.technicalPreparationItem.update({ where: { id: item.id }, data: { status: "READY", processedAt: now } });
-      return { ok: true as const };
+      return { outcome: "DEFERRED" as const };
     } catch {
       // Sanitized - never persists a raw provider error/exception detail.
       await upsertSnapshot(userId, item.ticker, {
@@ -447,17 +568,24 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
         now,
         preserveExistingGoodValues: true,
       });
-      await prisma.technicalPreparationItem.update({ where: { id: item.id }, data: { status: "FAILED", processedAt: now } });
-      return { ok: false as const };
+      await prisma.technicalPreparationItem.update({
+        where: { id: item.id },
+        data: { status: "FAILED", processedAt: now, retryAfter: null },
+      });
+      return { outcome: "FAILED" as const };
     }
   });
 
-  const succeededCount = outcomes.filter((outcome) => outcome.ok).length;
-  const failedCount = outcomes.length - succeededCount;
+  const succeededCount = outcomes.filter((o) => o.outcome === "READY").length;
+  const deferredCount = outcomes.filter((o) => o.outcome === "DEFERRED").length;
+  const failedCount = outcomes.filter((o) => o.outcome === "FAILED" || o.outcome === "DEFERRED_EXHAUSTED").length;
 
-  // COMPLETE requires zero PENDING and zero PROCESSING - never declared while another worker
-  // still owns claimed-but-unfinished rows.
-  const remainingEligibleCount = await prisma.technicalPreparationItem.count({ where: { runId, status: { in: ["PENDING", "PROCESSING"] } } });
+  // COMPLETE requires zero PENDING, PROCESSING, and DEFERRED - never declared while another
+  // worker still owns claimed-but-unfinished rows, or while a deferred item still has a real
+  // retry attempt left.
+  const remainingEligibleCount = await prisma.technicalPreparationItem.count({
+    where: { runId, status: { in: ["PENDING", "PROCESSING", "DEFERRED"] } },
+  });
   if (remainingEligibleCount === 0) {
     await prisma.technicalPreparationRun.update({ where: { id: runId }, data: { status: "COMPLETE" } });
   }
@@ -465,6 +593,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   return {
     processedCount: claimedItems.length,
     succeededCount,
+    deferredCount,
     failedCount,
     remainingEligibleCount,
     elapsedMs: Date.now() - startedAt,
@@ -518,7 +647,7 @@ async function upsertSnapshot(
   `;
 }
 
-function dateOnlyUtc(date: Date): Date {
+export function dateOnlyUtc(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
 
@@ -578,8 +707,18 @@ export async function getTechnicalIndicatorSnapshotsForUser(
 
 export type TechnicalCacheReadinessStatus = {
   eligibleCount: number;
+  /** Item status = READY. After the immediate-stale-candle fix, an item can ONLY become READY
+   * when its fetched candle was fresh enough for the live scan's own required market date at
+   * write time (see refreshTechnicalIndicatorCacheBatchForUser) - so this now directly means
+   * "fresh and usable right now," not merely "the worker attempted this ticker once." */
   readyCount: number;
+  /** PENDING + PROCESSING only - never claimed/attempted yet, or actively being fetched right now. */
   pendingCount: number;
+  /** Provider's latest candle exists but is older than what's required - waiting on
+   * DEFERRED_RETRY_INTERVAL_MS before another attempt, not a failure. */
+  deferredCount: number;
+  /** Genuine history-fetch failure, or a DEFERRED item that exhausted MAX_DEFERRED_ATTEMPTS. */
+  failedCount: number;
   lastPreparedAt: Date | null;
 };
 
@@ -595,12 +734,14 @@ export async function getTechnicalCacheReadinessForUser(
 ): Promise<TechnicalCacheReadinessStatus> {
   const { runId, eligibleCount } = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now);
   if (eligibleCount === 0) {
-    return { eligibleCount: 0, readyCount: 0, pendingCount: 0, lastPreparedAt: null };
+    return { eligibleCount: 0, readyCount: 0, pendingCount: 0, deferredCount: 0, failedCount: 0, lastPreparedAt: null };
   }
 
-  const [readyCount, pendingCount, lastReady] = await Promise.all([
+  const [readyCount, pendingCount, deferredCount, failedCount, lastReady] = await Promise.all([
     prisma.technicalPreparationItem.count({ where: { runId, status: "READY" } }),
     prisma.technicalPreparationItem.count({ where: { runId, status: { in: ["PENDING", "PROCESSING"] } } }),
+    prisma.technicalPreparationItem.count({ where: { runId, status: "DEFERRED" } }),
+    prisma.technicalPreparationItem.count({ where: { runId, status: "FAILED" } }),
     prisma.technicalPreparationItem.findFirst({ where: { runId, status: "READY" }, orderBy: { processedAt: "desc" }, select: { processedAt: true } }),
   ]);
 
@@ -608,6 +749,8 @@ export async function getTechnicalCacheReadinessForUser(
     eligibleCount,
     readyCount,
     pendingCount,
+    deferredCount,
+    failedCount,
     lastPreparedAt: lastReady?.processedAt ?? null,
   };
 }
@@ -646,6 +789,9 @@ export type TechnicalCacheFreshnessBreakdown = {
    * happen, reported honestly rather than assumed impossible. */
   missingSnapshotCount: number;
   pendingCount: number;
+  /** Items whose provider candle exists but was older than the required market date, still
+   * within their retry budget - not counted in workflowReadyCount, and not a failure. */
+  deferredCount: number;
   /** The live scan's own required market date right now (previousNyseMarketDay(now),
    * date-only) - the exact cutoff freshUsableCount/staleSnapshotCount are computed against. */
   requiredMarketDate: Date;
@@ -683,15 +829,17 @@ export async function getTechnicalCacheFreshnessBreakdownForUser(userId: string,
       failedSnapshotCount: 0,
       missingSnapshotCount: 0,
       pendingCount: 0,
+      deferredCount: 0,
       requiredMarketDate,
       newestSnapshotMarketDate: null,
       oldestFreshSnapshotMarketDate: null,
     };
   }
 
-  const [readyItems, pendingCount] = await Promise.all([
+  const [readyItems, pendingCount, deferredCount] = await Promise.all([
     prisma.technicalPreparationItem.findMany({ where: { runId: run.id, status: "READY" }, select: { ticker: true } }),
     prisma.technicalPreparationItem.count({ where: { runId: run.id, status: { in: ["PENDING", "PROCESSING"] } } }),
+    prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "DEFERRED" } }),
   ]);
 
   const readyTickers = readyItems.map((item) => item.ticker);
@@ -743,6 +891,7 @@ export async function getTechnicalCacheFreshnessBreakdownForUser(userId: string,
     failedSnapshotCount,
     missingSnapshotCount,
     pendingCount,
+    deferredCount,
     requiredMarketDate,
     newestSnapshotMarketDate,
     oldestFreshSnapshotMarketDate,

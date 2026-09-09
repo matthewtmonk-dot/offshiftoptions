@@ -89,10 +89,11 @@ function fakeProvider(options: {
   };
 }
 
-// A real trading day well after close (see technical-preparation-orchestrator.test.ts for the
-// pure window-function tests) - Tue Sep 8 2026, 8:00 PM ET.
-const WITHIN_WINDOW_NOW = new Date("2026-09-09T00:00:00Z");
-// Tue Sep 8 2026, 2:00 PM ET - inside the live regular session.
+// A real trading day, inside the morning preparation window (see
+// technical-preparation-orchestrator.test.ts for the pure window-function tests) - Wed Sep 9 2026,
+// 6:00 AM ET, before that day's own open.
+const WITHIN_WINDOW_NOW = new Date("2026-09-09T10:00:00Z");
+// Tue Sep 8 2026, 2:00 PM ET - inside the live regular session, well outside the morning window.
 const OUTSIDE_WINDOW_NOW = new Date("2026-09-08T18:00:00Z");
 
 maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isolated", () => {

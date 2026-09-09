@@ -452,7 +452,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(status.lastPreparedAt).not.toBeNull();
   });
 
-  it("getTechnicalCacheFreshnessBreakdownForUser: workflow-READY items split correctly into fresh-usable vs stale, matching getTechnicalIndicatorSnapshotsForUser's own freshness verdict exactly (same underlying rule)", async () => {
+  it("getTechnicalCacheFreshnessBreakdownForUser: after the immediate-stale-candle fix, a lagged candle never becomes workflow-READY in the first place - it's DEFERRED, and freshUsableCount/workflowReadyCount agree", async () => {
     const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
     const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
 
@@ -468,24 +468,241 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
         TECHFR2: syntheticCandles("TECHFR2", 80, laggedDate), // one trading day short - stale
       },
     });
-    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 2, now });
+    const batch = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 2, now });
+    expect(batch.succeededCount).toBe(1); // only TECHFR1
+    expect(batch.deferredCount).toBe(1); // TECHFR2 - lagged, not a failure, retryable later
 
     const breakdown = await getTechnicalCacheFreshnessBreakdownForUser(matt.id, now);
     expect(breakdown.hasActiveRun).toBe(true);
-    expect(breakdown.workflowReadyCount).toBe(2); // both items ARE workflow-READY - the bug this proves
+    expect(breakdown.workflowReadyCount).toBe(1); // TECHFR2 correctly never became READY
     expect(breakdown.freshUsableCount).toBe(1);
-    expect(breakdown.staleSnapshotCount).toBe(1);
+    expect(breakdown.staleSnapshotCount).toBe(0); // no READY-but-stale item can arise post-fix
     expect(breakdown.failedSnapshotCount).toBe(0);
     expect(breakdown.missingSnapshotCount).toBe(0);
+    expect(breakdown.deferredCount).toBe(1); // TECHFR2 shows up in its own bucket, not conflated with pending
     expect(breakdown.requiredMarketDate.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10));
     expect(breakdown.newestSnapshotMarketDate?.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10));
     expect(breakdown.oldestFreshSnapshotMarketDate?.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10));
 
-    // Cross-check against the live scan's OWN read path for the exact same tickers/moment - the
-    // diagnostic and the scanner must never disagree about which of these is actually usable.
+    // The lagged ticker's own item is DEFERRED (not READY, not FAILED), with a real retryAfter.
+    const deferredItem = await prisma.technicalPreparationItem.findFirst({ where: { ticker: "TECHFR2" } });
+    expect(deferredItem?.status).toBe("DEFERRED");
+    expect(deferredItem?.deferredAttempts).toBe(1);
+    expect(deferredItem?.retryAfter?.getTime()).toBeGreaterThan(now.getTime());
+
+    // The snapshot itself is still written honestly (real asOfDate, real values) - the live scan's
+    // OWN independent freshness check still correctly flags it stale, exactly as before the fix.
     const liveScanView = await getTechnicalIndicatorSnapshotsForUser(matt.id, ["TECHFR1", "TECHFR2"], now);
     expect(liveScanView.get("TECHFR1")?.state).toBe("READY");
     expect(liveScanView.get("TECHFR2")?.state).toBe("TECHNICAL_DATA_STALE");
+  });
+
+  it("getTechnicalCacheFreshnessBreakdownForUser still catches a READY-but-stale item as a defense-in-depth safety net, even though the fixed worker itself should never produce one", async () => {
+    const { getOrCreateActiveTechnicalPreparationRun, getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+
+    const ticker = "TECHFRSAFETY1";
+    await seedUniverse([ticker]);
+    const now = new Date();
+    const provider = fakeProvider({ quotes: { [ticker]: { price: 20, volume: 1_000_000 } } });
+
+    const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider, now);
+    // Manually force an item to READY with a real stale asOfDate - simulating a hypothetical
+    // future regression, never something the fixed worker itself would do.
+    await prisma.technicalPreparationItem.updateMany({ where: { runId, ticker }, data: { status: "READY", processedAt: now } });
+    const staleDate = previousNyseMarketDay(previousNyseMarketDay(now));
+    await prisma.technicalIndicatorSnapshot.upsert({
+      where: { userId_ticker: { userId: matt.id, ticker } },
+      create: { userId: matt.id, ticker, status: "READY", asOfDate: staleDate, rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+      update: { status: "READY", asOfDate: staleDate },
+    });
+
+    const breakdown = await getTechnicalCacheFreshnessBreakdownForUser(matt.id, now);
+    expect(breakdown.workflowReadyCount).toBeGreaterThanOrEqual(1);
+    expect(breakdown.staleSnapshotCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a current-enough candle marks the item READY on the very first attempt (deferredAttempts stays 0)", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    await seedUniverse(["TECHOK1"]);
+    const now = new Date();
+    const requiredMarketDate = previousNyseMarketDay(now);
+    const provider = fakeProvider({
+      quotes: { TECHOK1: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: { TECHOK1: syntheticCandles("TECHOK1", 80, requiredMarketDate) },
+    });
+
+    const batch = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 1, now });
+    expect(batch.succeededCount).toBe(1);
+    expect(batch.deferredCount).toBe(0);
+
+    const item = await prisma.technicalPreparationItem.findFirst({ where: { ticker: "TECHOK1" } });
+    expect(item?.status).toBe("READY");
+    expect(item?.deferredAttempts).toBe(0);
+    expect(item?.retryAfter).toBeNull();
+  });
+
+  it("a DEFERRED item cannot be reclaimed before its retryAfter - a second invocation immediately afterward claims nothing for it", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    await seedUniverse(["TECHDEF1"]);
+    const now = new Date();
+    const requiredMarketDate = previousNyseMarketDay(now);
+    const laggedDate = previousNyseMarketDay(requiredMarketDate);
+    const provider = fakeProvider({
+      quotes: { TECHDEF1: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: { TECHDEF1: syntheticCandles("TECHDEF1", 80, laggedDate) },
+    });
+
+    const first = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 1, now });
+    expect(first.deferredCount).toBe(1);
+
+    // Immediately afterward (same moment) - the item is DEFERRED with a future retryAfter, so
+    // nothing is claimable for this ticker; it is not the only eligible ticker in this run, but it
+    // is the ONLY one, so the second batch must claim (and therefore process) nothing at all.
+    const second = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 1, now });
+    expect(second.processedCount).toBe(0);
+  });
+
+  it("a DEFERRED item becomes reclaimable once its retryAfter has passed, and can succeed on retry with a now-current candle", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { DEFERRED_RETRY_INTERVAL_MS } = await import("./technical-indicator-cache");
+    await seedUniverse(["TECHRETRY1"]);
+    const now = new Date();
+    const requiredMarketDate = previousNyseMarketDay(now);
+    const laggedDate = previousNyseMarketDay(requiredMarketDate);
+
+    const laggedProvider = fakeProvider({
+      quotes: { TECHRETRY1: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: { TECHRETRY1: syntheticCandles("TECHRETRY1", 80, laggedDate) },
+    });
+    const first = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, laggedProvider, { batchSize: 1, now });
+    expect(first.deferredCount).toBe(1);
+
+    // Retrying right after retryAfter, with a provider that NOW returns a current candle (as if
+    // Schwab finally posted the just-closed session's own daily bar) - succeeds this time.
+    const retryNow = new Date(now.getTime() + DEFERRED_RETRY_INTERVAL_MS + 1000);
+    const caughtUpProvider = fakeProvider({
+      quotes: { TECHRETRY1: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: { TECHRETRY1: syntheticCandles("TECHRETRY1", 80, previousNyseMarketDay(retryNow)) },
+    });
+    const second = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, caughtUpProvider, { batchSize: 1, now: retryNow });
+    expect(second.processedCount).toBe(1);
+    expect(second.succeededCount).toBe(1);
+
+    const item = await prisma.technicalPreparationItem.findFirst({ where: { ticker: "TECHRETRY1" } });
+    expect(item?.status).toBe("READY");
+    expect(item?.deferredAttempts).toBe(1); // the one real deferred attempt is preserved, not reset
+  });
+
+  it("a DEFERRED item never starves an unrelated genuinely-PENDING item - the claim query skips a not-yet-retryable row and moves on", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    await seedUniverse(["TECHSTARVEA", "TECHSTARVEB"]); // alphabetically A sorts before B
+    const now = new Date();
+    const requiredMarketDate = previousNyseMarketDay(now);
+    const laggedDate = previousNyseMarketDay(requiredMarketDate);
+    const provider = fakeProvider({
+      quotes: { TECHSTARVEA: { price: 20, volume: 1_000_000 }, TECHSTARVEB: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: {
+        TECHSTARVEA: syntheticCandles("TECHSTARVEA", 80, laggedDate), // will be DEFERRED
+        TECHSTARVEB: syntheticCandles("TECHSTARVEB", 80, requiredMarketDate), // fresh, would be READY
+      },
+    });
+
+    // First call: batchSize 1 claims only TECHSTARVEA (alphabetically first) - it becomes DEFERRED.
+    const first = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 1, now });
+    expect(first.deferredCount).toBe(1);
+
+    // Second call, same moment (TECHSTARVEA's retryAfter has NOT passed) - the claim query must
+    // skip it and claim TECHSTARVEB instead, never blocking on the not-yet-retryable row.
+    const second = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 1, now });
+    expect(second.processedCount).toBe(1);
+    expect(second.succeededCount).toBe(1);
+    const bItem = await prisma.technicalPreparationItem.findFirst({ where: { ticker: "TECHSTARVEB" } });
+    expect(bItem?.status).toBe("READY");
+  });
+
+  it("a run cannot become COMPLETE while a DEFERRED item still has a real retry attempt left", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    await seedUniverse(["TECHNOCOMPLETE1"]);
+    const now = new Date();
+    const laggedDate = previousNyseMarketDay(previousNyseMarketDay(now));
+    const provider = fakeProvider({
+      quotes: { TECHNOCOMPLETE1: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: { TECHNOCOMPLETE1: syntheticCandles("TECHNOCOMPLETE1", 80, laggedDate) },
+    });
+
+    const batch = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 1, now });
+    expect(batch.remainingEligibleCount).toBe(1); // the DEFERRED item still counts as remaining work
+
+    const item = await prisma.technicalPreparationItem.findFirst({ where: { ticker: "TECHNOCOMPLETE1" } });
+    const run = await prisma.technicalPreparationRun.findUnique({ where: { id: item!.runId } });
+    expect(run?.status).toBe("IN_PROGRESS"); // never COMPLETE while retryable deferred work remains
+  });
+
+  it("bounded retry: a candle that never catches up becomes FAILED after MAX_DEFERRED_ATTEMPTS, and the run can then COMPLETE", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { DEFERRED_RETRY_INTERVAL_MS, MAX_DEFERRED_ATTEMPTS } = await import("./technical-indicator-cache");
+    await seedUniverse(["TECHBOUNDED1"]);
+
+    let now = new Date();
+    const laggedDate = previousNyseMarketDay(previousNyseMarketDay(now));
+    // A provider whose candle NEVER catches up, no matter how many times it's asked - simulating a
+    // provider outage/persistent lag, never resolved within this run/generation.
+    const provider = fakeProvider({
+      quotes: { TECHBOUNDED1: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: { TECHBOUNDED1: syntheticCandles("TECHBOUNDED1", 80, laggedDate) },
+    });
+
+    let lastBatch;
+    for (let attempt = 0; attempt < MAX_DEFERRED_ATTEMPTS; attempt += 1) {
+      lastBatch = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 1, now });
+      now = new Date(now.getTime() + DEFERRED_RETRY_INTERVAL_MS + 1000);
+    }
+
+    expect(lastBatch!.failedCount).toBe(1); // exhausted on the final attempt, never an unbounded loop
+    const item = await prisma.technicalPreparationItem.findFirst({ where: { ticker: "TECHBOUNDED1" } });
+    expect(item?.status).toBe("FAILED");
+    expect(item?.deferredAttempts).toBe(MAX_DEFERRED_ATTEMPTS);
+    expect(item?.retryAfter).toBeNull();
+
+    // FAILED no longer counts as remaining - the run can now genuinely complete.
+    const run = await prisma.technicalPreparationRun.findUnique({ where: { id: item!.runId } });
+    expect(run?.status).toBe("COMPLETE");
+  });
+
+  it("a lagged refetch never regresses an existing, already-fresher TechnicalIndicatorSnapshot to an older asOfDate", async () => {
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const ticker = "TECHNOREGRESS1";
+    await seedUniverse([ticker]);
+    const now = new Date();
+    const requiredMarketDate = previousNyseMarketDay(now);
+    const laggedDate = previousNyseMarketDay(requiredMarketDate);
+
+    // A real, already-good snapshot exists - fresher than what this fetch is about to return.
+    await prisma.technicalIndicatorSnapshot.create({
+      data: { userId: matt.id, ticker, status: "READY", asOfDate: requiredMarketDate, rsi: 42, bbLower: 10, bbMiddle: 20, bbUpper: 30 },
+    });
+
+    // Manually seed a PENDING item in a real run for this ticker (simulating the edge case where an
+    // item is re-attempted despite an existing fresh snapshot - the "skip if already fresh"
+    // optimization only applies at run-creation time, so this is a legitimate defensive scenario).
+    const provider = fakeProvider({ quotes: { [ticker]: { price: 20, volume: 1_000_000 } } });
+    const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider, now);
+    await prisma.technicalPreparationItem.upsert({
+      where: { runId_ticker: { runId, ticker } },
+      create: { runId, ticker, priority: 2, status: "PENDING" },
+      update: { status: "PENDING", deferredAttempts: 0, retryAfter: null },
+    });
+
+    const laggedProvider = fakeProvider({
+      quotes: { [ticker]: { price: 20, volume: 1_000_000 } },
+      candlesByTicker: { [ticker]: syntheticCandles(ticker, 80, laggedDate) },
+    });
+    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, laggedProvider, { batchSize: 1, now });
+
+    const snapshot = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({ where: { userId_ticker: { userId: matt.id, ticker } } });
+    expect(snapshot.asOfDate?.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10)); // unchanged
+    expect(snapshot.rsi).toBe(42); // unchanged - the old good values were preserved, never overwritten
   });
 
   it("getTechnicalCacheFreshnessBreakdownForUser reports hasActiveRun: false and performs no provider work when no run exists yet for today", async () => {

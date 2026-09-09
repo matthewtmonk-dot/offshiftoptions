@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { requireCurrentUser } from "@/lib/auth";
+import { LatestCandleFreshnessPanel } from "./latest-candle-freshness-panel";
 import { QuoteBatchDiagnosticPanel } from "./quote-batch-diagnostic-panel";
 import { ScannerUniverseDryRunPanel } from "./scanner-universe-dry-run-panel";
 import { TechnicalCachePanel } from "./technical-cache-panel";
@@ -68,6 +69,18 @@ export default async function SchwabQuoteBatchDiagnosticPage() {
           </p>
         </div>
         <TechnicalCachePanel />
+      </div>
+
+      <div className="space-y-3 border-t border-zinc-800 pt-6">
+        <div>
+          <h2 className="text-xl font-semibold text-zinc-50">Latest Candle Freshness</h2>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            For 5 deterministic public OCC symbols, fetches the same price history technical preparation itself uses
+            and reports only whether the latest available daily candle is fresh enough right now. No raw candles or
+            prices shown, no account data touched, nothing saved - at most 5 history requests.
+          </p>
+        </div>
+        <LatestCandleFreshnessPanel />
       </div>
     </div>
   );

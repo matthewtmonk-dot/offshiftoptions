@@ -51,6 +51,7 @@ import {
   resolveMarketDataProviderForUser,
 } from "@/lib/broker-connections";
 import { runScannerUniverseDryRun } from "@/lib/scanner-universe-dry-run";
+import { runLatestCandleFreshnessDiagnostic } from "@/lib/latest-candle-freshness-diagnostic";
 import {
   getTechnicalCacheFreshnessBreakdownForUser,
   getTechnicalCacheReadinessForUser,
@@ -499,6 +500,7 @@ export type TechnicalCacheWarmActionResult =
       status: "OK";
       processedCount: number;
       succeededCount: number;
+      deferredCount: number;
       failedCount: number;
       remainingEligibleCount: number;
       elapsedMs: number;
@@ -532,7 +534,15 @@ export async function warmTechnicalIndicatorCacheAction(): Promise<TechnicalCach
 
 export type TechnicalCacheReadinessActionResult =
   | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string }
-  | { status: "OK"; eligibleCount: number; readyCount: number; pendingCount: number; lastPreparedAt: string | null };
+  | {
+      status: "OK";
+      eligibleCount: number;
+      readyCount: number;
+      pendingCount: number;
+      deferredCount: number;
+      failedCount: number;
+      lastPreparedAt: string | null;
+    };
 
 /** Read-only - never fetches a quote or history, just reports the current cache state (still
  * needs the user's resolved provider to compute the CURRENT eligible set via Phase A's quote
@@ -557,6 +567,8 @@ export async function getTechnicalCacheReadinessAction(): Promise<TechnicalCache
     eligibleCount: status.eligibleCount,
     readyCount: status.readyCount,
     pendingCount: status.pendingCount,
+    deferredCount: status.deferredCount,
+    failedCount: status.failedCount,
     lastPreparedAt: status.lastPreparedAt?.toISOString() ?? null,
   };
 }
@@ -572,6 +584,7 @@ export type TechnicalCacheFreshnessBreakdownActionResult =
       failedSnapshotCount: number;
       missingSnapshotCount: number;
       pendingCount: number;
+      deferredCount: number;
       requiredMarketDate: string;
       newestSnapshotMarketDate: string | null;
       oldestFreshSnapshotMarketDate: string | null;
@@ -596,10 +609,42 @@ export async function getTechnicalCacheFreshnessBreakdownAction(): Promise<Techn
     failedSnapshotCount: breakdown.failedSnapshotCount,
     missingSnapshotCount: breakdown.missingSnapshotCount,
     pendingCount: breakdown.pendingCount,
+    deferredCount: breakdown.deferredCount,
     requiredMarketDate: breakdown.requiredMarketDate.toISOString().slice(0, 10),
     newestSnapshotMarketDate: breakdown.newestSnapshotMarketDate?.toISOString().slice(0, 10) ?? null,
     oldestFreshSnapshotMarketDate: breakdown.oldestFreshSnapshotMarketDate?.toISOString().slice(0, 10) ?? null,
   };
+}
+
+export type LatestCandleFreshnessDiagnosticActionResult =
+  | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string }
+  | {
+      status: "OK";
+      requiredMarketDate: string;
+      rows: { ticker: string; latestCandleMarketDate: string | null; fresh: boolean }[];
+    };
+
+/** Read-only, explicit-click - see PROJECT_HANDOFF.md's readiness-mismatch investigation. Fetches
+ * real price history (the same window technical preparation itself uses) for up to 5
+ * deterministic public OCC symbols via this user's OWN connection only, and reports only whether
+ * each one's latest available candle is fresh enough right now - never raw candles, prices, or
+ * account data, and never more than 5 history requests. */
+export async function runLatestCandleFreshnessDiagnosticAction(): Promise<LatestCandleFreshnessDiagnosticActionResult> {
+  const user = await requireCurrentUser();
+  const resolved = await resolveMarketDataProviderForUser(user.id);
+  if (!resolved.provider) {
+    return {
+      status: "UNAVAILABLE",
+      reason: resolved.reason,
+      message:
+        resolved.reason === "NO_USER_CONNECTION"
+          ? "Connect Schwab from Account to run this read-only diagnostic."
+          : "Reconnect Schwab from Account to run this read-only diagnostic.",
+    };
+  }
+
+  const result = await runLatestCandleFreshnessDiagnostic(resolved.provider);
+  return { status: "OK", requiredMarketDate: result.requiredMarketDate, rows: result.rows };
 }
 
 export async function runBrokerRecordClassificationDiagnosticAction(): Promise<BrokerRecordClassificationReport> {

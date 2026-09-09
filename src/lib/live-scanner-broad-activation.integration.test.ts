@@ -619,7 +619,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     expect(summary.technicalStaleCount).toBeGreaterThanOrEqual(1);
   });
 
-  it("PART E - immediate-stale-worker reproduction: if the worker's own last available candle is one trading day short of what freshness requires (Schwab's daily bar not yet posted for the just-closed session), the resulting snapshot is stale THE MOMENT it's written - with zero elapsed real time between prep and scan, refuting 'staleness = elapsed time' as the sole explanation", async () => {
+  it("PART E - immediate-stale-worker: a candle one trading day short of what freshness requires is DEFERRED (retryable), never marked READY, and the live scan still correctly treats the honestly-written snapshot as stale - with zero elapsed real time between prep and scan", async () => {
     const { getOrCreateActiveTechnicalPreparationRun, refreshTechnicalIndicatorCacheBatchForUser, getTechnicalCacheReadinessForUser } =
       await import("./technical-indicator-cache");
     const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
@@ -627,37 +627,41 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     const ticker = "RMISLAG01";
     await seedOccUniverse([ticker]);
 
-    const realNow = new Date();
-    const requiredMarketDate = previousNyseMarketDay(realNow); // what live-scan freshness demands right now (the scan below always reads real time)
+    // Eric, never used by any other test in this file for a real preparation run - avoids
+    // colliding with (reusing) another test's already-created run for today's real marketDate,
+    // without needing a synthetic "now" (which would no longer be safe now that Phase B's own
+    // freshness check is keyed on `now` too - a synthetic run-identity `now` far from real time
+    // would silently compute a different required market date than intended).
+    const now = new Date();
+    const requiredMarketDate = previousNyseMarketDay(now); // what live-scan freshness demands right now (the scan below always reads real time)
     const laggedCandleDate = previousNyseMarketDay(requiredMarketDate); // one trading day SHORT of that - simulates Schwab not yet exposing the just-closed session's own daily candle
-    // A synthetic, unique preparation-run identity ("now" for getOrCreateActiveTechnicalPreparationRun
-    // only, keyed by (userId, marketDate, rulesFingerprint)) - this file's other tests above also
-    // call getOrCreateActiveTechnicalPreparationRun with the real `new Date()` for matt.id, and
-    // would otherwise collide with (reuse) this test's own run before RMISLAG01 could ever become a
-    // claimable item in it. The written asOfDate itself comes purely from the candle's own `date`
-    // field (see refreshTechnicalIndicatorCacheBatchForUser), never from this run-identity `now` -
-    // so this substitution has zero effect on what's actually being tested.
-    const runIdentityNow = new Date(Date.now() + 400 * 24 * 60 * 60 * 1000);
     const quotes = { [ticker]: { price: 20, volume: 1_000_000 } };
     const prepProvider = fakeProviderWithHistory(quotes, { [ticker]: syntheticCandlesEndingOn(ticker, laggedCandleDate) });
 
-    providerByUserId.set(matt.id, prepProvider);
-    await getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, runIdentityNow);
-    await refreshTechnicalIndicatorCacheBatchForUser(matt.id, prepProvider, { batchSize: 1, now: runIdentityNow });
+    providerByUserId.set(eric.id, prepProvider);
+    await getOrCreateActiveTechnicalPreparationRun(eric.id, prepProvider, now);
+    const batch = await refreshTechnicalIndicatorCacheBatchForUser(eric.id, prepProvider, { batchSize: 1, now });
+    expect(batch.deferredCount).toBe(1); // lagged, not a failure - correctly never became READY
 
-    const snapshot = await prisma.technicalIndicatorSnapshot.findUnique({ where: { userId_ticker: { userId: matt.id, ticker } } });
-    expect(snapshot?.status).toBe("READY"); // the worker itself succeeded - this is not a fetch failure
+    const snapshot = await prisma.technicalIndicatorSnapshot.findUnique({ where: { userId_ticker: { userId: eric.id, ticker } } });
+    expect(snapshot?.status).toBe("READY"); // the snapshot itself is still written honestly - real data, real values
     expect(snapshot?.asOfDate?.toISOString().slice(0, 10)).toBe(laggedCandleDate.toISOString().slice(0, 10));
 
-    // Readiness (workflow-completion only, no freshness re-check) reports this ticker READY.
-    const readiness = await getTechnicalCacheReadinessForUser(matt.id, prepProvider, runIdentityNow);
-    expect(readiness.readyCount).toBeGreaterThanOrEqual(1);
+    const item = await prisma.technicalPreparationItem.findFirst({ where: { ticker } });
+    expect(item?.status).toBe("DEFERRED"); // the fix: never claimed as workflow-complete while lagged
+
+    // Readiness correctly does NOT report this ticker ready - the fix eliminates the mismatch at
+    // its source rather than papering over it downstream.
+    const readiness = await getTechnicalCacheReadinessForUser(eric.id, prepProvider, now);
+    expect(readiness.readyCount).toBe(0);
+    expect(readiness.deferredCount).toBe(1);
 
     // The live scan, run immediately after (same real moment for all practical purposes - no
-    // sleep, no simulated multi-day gap), correctly refuses to trust it.
-    providerByUserId.set(matt.id, fakeProvider(quotes, { [ticker]: defaultPut(ticker, 18) }));
-    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
-    const result = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+    // sleep, no simulated multi-day gap), still correctly refuses to trust the honestly-stale
+    // snapshot data, independent of the item-level fix above.
+    providerByUserId.set(eric.id, fakeProvider(quotes, { [ticker]: defaultPut(ticker, 18) }));
+    const summary = await workflows.rerunLiveSchwabScannerForUser(eric.id, { occSource: TEST_SOURCE });
+    const result = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: eric.id, source: "LIVE:SCHWAB" } } });
 
     expect((result?.snapshotJson as Record<string, unknown>)?.technicalReasonCode).toBe("TECHNICAL_DATA_STALE");
     expect(summary.technicalStaleCount).toBeGreaterThanOrEqual(1);

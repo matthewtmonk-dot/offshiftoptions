@@ -274,6 +274,11 @@ enum TechnicalPreparationItemStatus {
   PENDING
   PROCESSING
   READY
+  /// The provider's latest available daily candle exists but is older than the run's required
+  /// market date (see previousNyseMarketDay-based freshness in technical-indicator-cache.ts) -
+  /// e.g. the provider hasn't yet posted the just-closed session's own candle. Not a failure:
+  /// retryable after `retryAfter`, up to MAX_DEFERRED_ATTEMPTS before becoming FAILED.
+  DEFERRED
   FAILED
 }
 
@@ -1299,7 +1304,8 @@ model TechnicalPreparationRun {
 /// can have a perfectly valid (if aging) TechnicalIndicatorSnapshot row while not being part of
 /// today's run at all (e.g. price moved out of range), or vice versa.
 ///
-/// PENDING -> PROCESSING -> READY|FAILED. PROCESSING exists specifically so two overlapping
+/// PENDING -> PROCESSING -> READY|DEFERRED|FAILED, with DEFERRED -> PROCESSING -> READY|DEFERRED|FAILED
+/// retryable up to MAX_DEFERRED_ATTEMPTS. PROCESSING exists specifically so two overlapping
 /// worker invocations can never claim the same row: a claim is one atomic
 /// `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT n)` statement (see
 /// claimNextPendingItems in technical-indicator-cache.ts) - Postgres itself guarantees a second
@@ -1307,16 +1313,24 @@ model TechnicalPreparationRun {
 /// blocks waiting for the first to finish. `claimToken`/`claimedAt` identify which invocation
 /// currently owns a PROCESSING row and when it claimed it, purely for abandoned-claim recovery
 /// (see PROCESSING_CLAIM_TIMEOUT_MS) - never a credential, never derived from one.
+///
+/// `deferredAttempts`/`retryAfter` back the DEFERRED state (a provider candle that exists but is
+/// older than the run's required market date - see technical-indicator-cache.ts's
+/// DEFERRED_RETRY_INTERVAL_MS/MAX_DEFERRED_ATTEMPTS): a DEFERRED row is only reclaimable once
+/// `retryAfter` has passed (never immediately on the very next 5-minute cron tick), and becomes
+/// FAILED once `deferredAttempts` reaches the bounded cap rather than retrying forever.
 model TechnicalPreparationItem {
-  id          String                         @id @default(cuid())
-  runId       String
-  ticker      String
-  priority    Int
-  status      TechnicalPreparationItemStatus @default(PENDING)
-  claimToken  String?
-  claimedAt   DateTime?
-  processedAt DateTime?
-  run         TechnicalPreparationRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  id               String                         @id @default(cuid())
+  runId            String
+  ticker           String
+  priority         Int
+  status           TechnicalPreparationItemStatus @default(PENDING)
+  claimToken       String?
+  claimedAt        DateTime?
+  processedAt      DateTime?
+  deferredAttempts Int                            @default(0)
+  retryAfter       DateTime?
+  run              TechnicalPreparationRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@unique([runId, ticker])
   @@index([runId, status, priority])

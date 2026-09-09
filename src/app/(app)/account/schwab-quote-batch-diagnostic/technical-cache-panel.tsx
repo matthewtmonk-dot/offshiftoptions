@@ -124,9 +124,11 @@ function ReadinessResult({ result }: { result: TechnicalCacheReadinessActionResu
     <Panel title="Technical Cache Readiness">
       <div className="flex flex-wrap gap-2">
         <Badge tone="good">
-          {result.readyCount} / {result.eligibleCount} ready
+          Fresh usable: {result.readyCount} / {result.eligibleCount}
         </Badge>
-        <Badge tone="neutral">{result.pendingCount} pending</Badge>
+        <Badge tone="neutral">Pending: {result.pendingCount}</Badge>
+        {result.deferredCount > 0 ? <Badge tone="warn">Waiting for latest daily candle: {result.deferredCount}</Badge> : null}
+        {result.failedCount > 0 ? <Badge tone="bad">Failed: {result.failedCount}</Badge> : null}
         <Badge tone="info">Last prepared: {result.lastPreparedAt ? shortDateTime(result.lastPreparedAt) : "never"}</Badge>
       </div>
     </Panel>
@@ -152,6 +154,7 @@ function FreshnessResult({ result }: { result: TechnicalCacheFreshnessBreakdownA
         {result.staleSnapshotCount > 0 ? <Badge tone="bad">{result.staleSnapshotCount} stale</Badge> : null}
         {result.failedSnapshotCount > 0 ? <Badge tone="bad">{result.failedSnapshotCount} failed</Badge> : null}
         {result.missingSnapshotCount > 0 ? <Badge tone="bad">{result.missingSnapshotCount} missing snapshot</Badge> : null}
+        {result.deferredCount > 0 ? <Badge tone="warn">{result.deferredCount} waiting for latest daily candle</Badge> : null}
         <Badge tone="neutral">{result.pendingCount} pending</Badge>
       </div>
       <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-400">
@@ -181,6 +184,7 @@ function WarmResult({ result }: { result: TechnicalCacheWarmActionResult }) {
       <div className="flex flex-wrap gap-2 text-xs">
         <Badge tone="neutral">{result.processedCount} selected</Badge>
         <Badge tone="good">{result.succeededCount} refreshed</Badge>
+        {result.deferredCount > 0 ? <Badge tone="warn">{result.deferredCount} waiting for latest daily candle</Badge> : null}
         {result.failedCount > 0 ? <Badge tone="bad">{result.failedCount} failed</Badge> : null}
         <Badge tone="neutral">{result.remainingEligibleCount} remaining after this batch</Badge>
         <Badge tone="info">{result.elapsedMs}ms elapsed</Badge>
