@@ -50,6 +50,11 @@ export type LiveScanCandidate = {
    * option-chain request this scan - independent of whether that lookup then succeeded. Optional
    * for the same reason as funnelStage. */
   reachedOptionChainLookup?: boolean;
+  /** Only present for STOCK_STAGE candidates - the same rank used to choose the option-chain
+   * shortlist (lower = stronger). Exposed so a caller persisting a bounded, ranked subset of a
+   * broad-universe scan never has to reimplement the ranking formula (see
+   * rerunLiveSchwabScannerForUser's own result cap). */
+  stockStageRank?: number;
 };
 
 /** Structurally identical to technical-indicator-cache.ts's own TechnicalIndicatorLookup - kept as
@@ -287,6 +292,12 @@ export async function evaluateLiveMarketScan({
       verifiedFundamentals: candidate.verifiedFundamentals ?? null,
       funnelStage: "STOCK_STAGE" as const,
       reachedOptionChainLookup,
+      // The exact same rank used for shortlist selection above (lower = stronger; a real READY
+      // technical value always ranks better than a pending/stale/failed one, which is pinned at
+      // the maximum possible score - see stockStageRank's own doc comment) - exposed so a caller
+      // persisting a bounded, ranked subset of a broad-universe scan (see
+      // rerunLiveSchwabScannerForUser) never has to reimplement this formula.
+      stockStageRank: stockStageRank(candidate),
     };
   });
 
@@ -509,6 +520,15 @@ function stockStageIsEligible(candidate: StockStageCandidate, rules: ScannerRule
   return !summary.results.some((result) => result.status === "FAIL");
 }
 
+/**
+ * Lower is stronger. A real RSI is 0-100 and a real bbPercent is typically 0-100, so a genuinely
+ * READY candidate's rank is always <= 100 + 100/10 = 110 - a missing value (pending/stale/failed
+ * technical data, via `?? 100`) is PINNED AT EXACTLY that same worst-case ceiling. This
+ * structurally guarantees a READY candidate never ranks worse than a non-READY one for any real
+ * (finite, in-range) RSI/BB combination, so the scarce option-chain shortlist below can never
+ * systematically prefer pending/stale/failed technicals over technically-qualified ones - verified
+ * directly by live-scan.technical-cache.test.ts.
+ */
 function stockStageRank(candidate: StockStageCandidate) {
   return (numericValue(candidate.values.rsi) ?? 100) + (numericValue(candidate.values.bbPercent) ?? 100) / 10;
 }
@@ -749,7 +769,24 @@ function midpoint(bid: number, ask: number) {
   return (bid + ask) / 2;
 }
 
+/**
+ * Real, pre-existing bug fixed here (found during broad-scanner activation - see
+ * PROJECT_HANDOFF.md): `Number(null) === 0` and `Number(undefined) === NaN` in JavaScript, so
+ * without this explicit guard, a genuinely missing/unknown value (e.g. a PENDING candidate's null
+ * rsi/bbPercent in stockStageRank) silently coerced to the numeric value 0 - the BEST possible
+ * rank - rather than being treated as unknown. This was dormant for years because every other
+ * call site of this function (strike/bid/ask/dte from a real option contract) is never actually
+ * null in practice; only stockStageRank's rsi/bbPercent - always null for a non-READY technical
+ * candidate under the broad-universe technical cache - exercised it at real scale, letting
+ * PENDING candidates systematically outrank genuinely READY ones for the scarce option-chain
+ * shortlist. Confirmed safe for every other call site: annualizedRor's own comparison already has
+ * its own explicit `?? 0` fallback (identical result either way), and strike/bid/ask/dte are
+ * always real numbers from an actual OptionContractSnapshot, never null, at every other call site.
+ */
 function numericValue(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }

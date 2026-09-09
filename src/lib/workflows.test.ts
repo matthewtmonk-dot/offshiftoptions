@@ -1,7 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { buildSchwabRecordsToPersist, fetchSchwabAccountActivity } from "./workflows";
+import { buildLiveScanFailureMessage, buildSchwabRecordsToPersist, fetchSchwabAccountActivity } from "./workflows";
 import type { BrokerReadProvider, BrokerTransaction } from "@/providers/broker-read/types";
 import { SchwabApiError } from "@/providers/schwab/client";
+
+describe("buildLiveScanFailureMessage", () => {
+  it("reports LIVE DATA UNAVAILABLE when nothing was persisted before the failure", () => {
+    const message = buildLiveScanFailureMessage("EVALUATE", false, 0);
+    expect(message).toContain("LIVE DATA UNAVAILABLE");
+    expect(message).toContain("stage: EVALUATE");
+    expect(message).not.toContain("saved");
+  });
+
+  it("honestly reports that results were saved when a later stage fails after persistence - never implying the whole scan produced nothing", () => {
+    const message = buildLiveScanFailureMessage("BUILD_RESPONSE", true, 137);
+    expect(message).toContain("saved 137 results");
+    expect(message).toContain("stage: BUILD_RESPONSE");
+    expect(message).not.toContain("LIVE DATA UNAVAILABLE");
+  });
+
+  it("uses singular 'result' for exactly one persisted row", () => {
+    const message = buildLiveScanFailureMessage("FUNDAMENTALS_SYNC", true, 1);
+    expect(message).toContain("saved 1 result ");
+    expect(message).not.toContain("1 results");
+  });
+
+  it("never includes a raw error, stack trace, token, or provider payload - only a fixed-vocabulary stage name and a count", () => {
+    const message = buildLiveScanFailureMessage("PERSIST_RESULTS", true, 42);
+    expect(message).not.toMatch(/at \S+\.(ts|js):\d+/); // no stack-trace-shaped text
+    expect(message).not.toMatch(/[A-Za-z0-9+/]{40,}={0,2}/); // no token/base64-shaped blob
+  });
+});
 
 function fakeProvider(overrides: Partial<BrokerReadProvider> = {}): BrokerReadProvider {
   return {

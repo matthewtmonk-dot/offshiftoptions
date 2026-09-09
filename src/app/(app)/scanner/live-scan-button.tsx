@@ -19,9 +19,10 @@ const MATERIAL_TECHNICAL_COVERAGE_THRESHOLD = 0.9;
 const COMPLETION_MESSAGE_VISIBLE_MS = 8000;
 
 function isTechnicalCoverageMaterial(state: Extract<RunLiveScanResult, { ok: true }>): boolean {
-  const total = state.technicalReadyCount + state.technicalPendingCount;
-  if (total === 0 || state.technicalPendingCount === 0) {
-    return false; // nothing pending - never a caution when there's nothing to be incomplete about
+  const notReady = state.technicalPendingCount + state.technicalStaleCount + state.technicalFailedCount;
+  const total = state.technicalReadyCount + notReady;
+  if (total === 0 || notReady === 0) {
+    return false; // nothing pending/stale/failed - never a caution when there's nothing incomplete
   }
   return state.technicalReadyCount / total < MATERIAL_TECHNICAL_COVERAGE_THRESHOLD;
 }
@@ -105,8 +106,10 @@ export function LiveScanButton() {
               Universe: {state.universeSymbols}
               {state.universeSource === "LIMITED_FALLBACK" ? " (limited - OCC cache empty)" : ""} · Quoted: {state.successfullyQuoted} ·
               Price/volume survivors: {state.priceAndVolumeSurvivors} · Technical ready: {state.technicalReadyCount}
-              {state.technicalPendingCount > 0 ? ` (${state.technicalPendingCount} pending)` : ""} · Option chains checked:{" "}
-              {state.optionChainsChecked} · Results: {state.scanned}
+              {state.technicalPendingCount + state.technicalStaleCount + state.technicalFailedCount > 0
+                ? ` (${state.technicalPendingCount + state.technicalStaleCount + state.technicalFailedCount} not ready)`
+                : ""}{" "}
+              · Option chains checked: {state.optionChainsChecked} · Results: {state.scanned}
             </p>
             {isTechnicalCoverageMaterial(state) ? (
               <p className="text-amber-300">

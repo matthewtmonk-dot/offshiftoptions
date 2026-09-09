@@ -343,4 +343,120 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     expect(priceExcludedRow).toBeNull();
     expect(volumeExcludedRow).toBeNull();
   });
+
+  it("the persisted result count is bounded, not unbounded, for a large stock-stage survivor pool - and the aggregate funnel count is unaffected by the cap", async () => {
+    const { MAX_DISPLAYED_STOCK_STAGE_RESULTS } = await import("./workflows");
+    const poolSize = MAX_DISPLAYED_STOCK_STAGE_RESULTS + 30; // deliberately more than the cap
+    const tickers = Array.from({ length: poolSize }, (_, index) => `CAP${String(index).padStart(6, "0")}`);
+    await seedOccUniverse(tickers);
+    // Strictly increasing rsi by index - ticker 0 ranks best, the last ticker ranks worst.
+    await Promise.all(tickers.map((ticker, index) => seedReadySnapshot(matt.id, ticker, { rsi: index, bbLower: 15, bbMiddle: 20, bbUpper: 45 })));
+
+    const quotes = Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 1_000_000 }]));
+    const optionsByTicker = Object.fromEntries(tickers.map((ticker) => [ticker, defaultPut(ticker, 18)]));
+    providerByUserId.set(matt.id, fakeProvider(quotes, optionsByTicker));
+
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+
+    expect(summary.priceAndVolumeSurvivors).toBeGreaterThanOrEqual(poolSize); // the full pool, uncapped
+    expect(summary.scanned).toBeLessThanOrEqual(MAX_DISPLAYED_STOCK_STAGE_RESULTS); // but persistence is bounded
+
+    const persistedCount = await prisma.scanResult.count({
+      where: { ticker: { in: tickers }, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } },
+    });
+    expect(persistedCount).toBeLessThanOrEqual(MAX_DISPLAYED_STOCK_STAGE_RESULTS);
+    expect(persistedCount).toBe(summary.scanned); // the summary count and the real persisted row count agree exactly
+
+    // The best-ranked ticker (lowest index -> lowest rsi -> best rank) must be among the
+    // persisted set - never dropped in favor of an arbitrary/worse one.
+    const bestRow = await prisma.scanResult.findFirst({ where: { ticker: tickers[0], run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+    expect(bestRow).not.toBeNull();
+    // The worst-ranked ticker (highest index) must NOT be persisted - it's outside the cap.
+    const worstRow = await prisma.scanResult.findFirst({ where: { ticker: tickers[tickers.length - 1], run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+    expect(worstRow).toBeNull();
+  });
+
+  it("Tier 1 (Research/Watchlist/traded) tickers are never subject to the result cap, even when the broad pool is large", async () => {
+    const { MAX_DISPLAYED_STOCK_STAGE_RESULTS } = await import("./workflows");
+    const tier1Ticker = "TIER1CAP1";
+    const item = await workflows.createWatchlistItemForUser(matt.id, tier1Ticker);
+    await prisma.watchlistItem.update({ where: { id: item.id }, data: { researchStatus: "LIKE" } });
+    // Give the Tier 1 ticker a deliberately WORSE rank than every broad-pool ticker below, so its
+    // survival can only be explained by Tier 1 exemption, never by ranking into the cap normally.
+    await seedReadySnapshot(matt.id, tier1Ticker, { rsi: 89, bbLower: 15, bbMiddle: 20, bbUpper: 45 });
+
+    const poolSize = MAX_DISPLAYED_STOCK_STAGE_RESULTS + 10;
+    const tickers = Array.from({ length: poolSize }, (_, index) => `TCAP${String(index).padStart(5, "0")}`);
+    await seedOccUniverse(tickers);
+    await Promise.all(tickers.map((ticker, index) => seedReadySnapshot(matt.id, ticker, { rsi: index, bbLower: 15, bbMiddle: 20, bbUpper: 45 })));
+
+    const quotes = { [tier1Ticker]: { price: 20, volume: 1_000_000 }, ...Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 1_000_000 }])) };
+    const optionsByTicker = { [tier1Ticker]: defaultPut(tier1Ticker, 18), ...Object.fromEntries(tickers.map((ticker) => [ticker, defaultPut(ticker, 18)])) };
+    providerByUserId.set(matt.id, fakeProvider(quotes, optionsByTicker));
+
+    await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+
+    const tier1Row = await prisma.scanResult.findFirst({ where: { ticker: tier1Ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+    expect(tier1Row).not.toBeNull(); // present despite ranking worse than the cap would normally allow
+
+    await prisma.watchlistItem.delete({ where: { id: item.id } }).catch(() => {});
+  });
+
+  it("READY technical candidates always win the scarce option-chain shortlist over PENDING ones, even in a larger mixed pool", async () => {
+    const readyTickers = ["RDY001", "RDY002", "RDY003"];
+    const pendingTickers = Array.from({ length: 17 }, (_, index) => `PEND${String(index).padStart(3, "0")}`);
+    await seedOccUniverse([...readyTickers, ...pendingTickers]);
+    await Promise.all(readyTickers.map((ticker) => seedReadySnapshot(matt.id, ticker, { rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 })));
+    // pendingTickers deliberately get no snapshot at all - genuinely pending.
+
+    const allTickers = [...readyTickers, ...pendingTickers];
+    const quotes = Object.fromEntries(allTickers.map((ticker) => [ticker, { price: 20, volume: 1_000_000 }]));
+    const optionsByTicker = Object.fromEntries(allTickers.map((ticker) => [ticker, defaultPut(ticker, 18)]));
+    providerByUserId.set(matt.id, fakeProvider(quotes, optionsByTicker));
+
+    await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+
+    for (const ticker of readyTickers) {
+      const row = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+      expect((row?.snapshotJson as Record<string, unknown>)?.strike).not.toBeNull(); // reached option-chain enrichment
+    }
+  });
+
+  it("ticker normalization: an OCC row seeded with non-canonical casing still joins the technical cache correctly", async () => {
+    const canonicalTicker = "NORMCASE1";
+    await prisma.optionableUniverseSymbol.createMany({
+      data: [{ ticker: canonicalTicker.toLowerCase(), name: "lowercase seeded", source: TEST_SOURCE, lastSeenAt: new Date() }],
+      skipDuplicates: true,
+    });
+    await seedReadySnapshot(matt.id, canonicalTicker, { rsi: 20, bbLower: 15, bbMiddle: 20, bbUpper: 45 });
+    providerByUserId.set(
+      matt.id,
+      fakeProvider({ [canonicalTicker]: { price: 20, volume: 1_000_000 } }, { [canonicalTicker]: defaultPut(canonicalTicker, 18) }),
+    );
+
+    await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+
+    const result = await prisma.scanResult.findFirst({ where: { ticker: canonicalTicker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+    expect(result).not.toBeNull();
+    expect((result?.snapshotJson as Record<string, unknown>)?.rsi).toBe(20); // the READY snapshot was actually joined, not silently missed
+  });
+
+  it("a genuinely stale technical snapshot (asOfDate several real days old) is honestly reported as stale, not silently read as READY", async () => {
+    const ticker = "STALEREAL1";
+    await seedOccUniverse([ticker]);
+    const staleDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    staleDate.setUTCHours(0, 0, 0, 0);
+    await prisma.technicalIndicatorSnapshot.upsert({
+      where: { userId_ticker: { userId: matt.id, ticker } },
+      create: { userId: matt.id, ticker, status: "READY", asOfDate: staleDate, rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+      update: { status: "READY", asOfDate: staleDate, rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+    });
+    providerByUserId.set(matt.id, fakeProvider({ [ticker]: { price: 20, volume: 1_000_000 } }, { [ticker]: defaultPut(ticker, 18) }));
+
+    await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+
+    const result = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });
+    expect((result?.snapshotJson as Record<string, unknown>)?.rsi).toBeNull(); // stale data never used, even though rsi=15 would PASS
+    expect((result?.snapshotJson as Record<string, unknown>)?.technicalReasonCode).toBe("TECHNICAL_DATA_STALE");
+  });
 });
