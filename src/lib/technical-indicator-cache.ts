@@ -153,20 +153,44 @@ function sleep(ms: number): Promise<void> {
  * small (a handful of read-only history requests, never a bulk operation). */
 export const LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT = 5;
 
+const DAILY_CANDLE_GATE_PREFERRED_PROBE_SYMBOLS = ["AAPL", "MSFT", "NVDA", "AMD", "SPY", "QQQ", "IWM", "F", "T"] as const;
+
 /** `source` is optional and, when omitted, queries the WHOLE OptionableUniverseSymbol table with
  * no filter. Real callers (the manual diagnostic action, the automatic gate below) always pass an
  * explicit `source` (defaulting to OCC_OPTIONABLE_UNIVERSE_SOURCE - real "public OCC underlyings")
  * so the probe pool is deterministic and never accidentally widened by a concurrently-running test
- * file's own differently-sourced fixture rows under Vitest's parallel-by-file execution. */
+ * file's own differently-sourced fixture rows under Vitest's parallel-by-file execution. When the
+ * configured universe contains a few broad, liquid public tickers, prefer them over a blind
+ * alphabetic prefix so a stale-feed gate is not held hostage by obscure corporate-action symbols. */
 async function loadDeterministicSymbols(limit: number, source?: string): Promise<string[]> {
-  const rows = await prisma.optionableUniverseSymbol.findMany({
-    where: source ? { source } : undefined,
+  if (limit <= 0) return [];
+
+  const sourceFilter = source ? { source } : {};
+  const preferredRows = await prisma.optionableUniverseSymbol.findMany({
+    where: { ...sourceFilter, ticker: { in: [...DAILY_CANDLE_GATE_PREFERRED_PROBE_SYMBOLS] } },
     select: { ticker: true },
-    orderBy: { ticker: "asc" },
-    take: limit,
   });
   const seen = new Set<string>();
   const distinct: string[] = [];
+
+  const availablePreferred = new Set(preferredRows.map((row) => row.ticker.trim().toUpperCase()));
+  for (const ticker of DAILY_CANDLE_GATE_PREFERRED_PROBE_SYMBOLS) {
+    if (availablePreferred.has(ticker) && !seen.has(ticker)) {
+      seen.add(ticker);
+      distinct.push(ticker);
+      if (distinct.length >= limit) return distinct;
+    }
+  }
+
+  const rows = await prisma.optionableUniverseSymbol.findMany({
+    where: {
+      ...sourceFilter,
+      ...(distinct.length ? { ticker: { notIn: distinct } } : {}),
+    },
+    select: { ticker: true },
+    orderBy: { ticker: "asc" },
+    take: limit - distinct.length,
+  });
   for (const row of rows) {
     const ticker = row.ticker.trim().toUpperCase();
     if (ticker && !seen.has(ticker)) {
@@ -244,19 +268,23 @@ export async function runLatestCandleFreshnessDiagnostic(
 // automatic gate can never disagree about what "fresh" means, by construction.
 // ---------------------------------------------------------------------------------------------
 
-/** How many successful (non-SYMBOL_UNAVAILABLE) probes are required before the gate will make a
- * READY/NOT_READY determination at all - deliberately small (3 of 5) so one or two permanently-
- * delisted/unavailable probe tickers can never single-handedly force a false NOT_READY forever.
- * Scaled down to the ACTUAL probe pool size when fewer than GATE_PROBE_SYMBOL_COUNT symbols exist
- * at all (e.g. an empty/tiny OptionableUniverseSymbol table) - with nothing meaningful to probe,
- * there is also nothing meaningful to gate, so the gate is vacuously READY rather than
- * permanently blocking a user who has no real universe yet. */
+/** How many successful (non-SYMBOL_UNAVAILABLE) probes are required before the gate may pass.
+ * Deliberately small (3 of 5) so one or two permanently-unavailable probe tickers cannot block
+ * forever, but never scaled down to zero: an empty/tiny probe pool is inconclusive, not ready. */
 const GATE_MIN_SUCCESSFUL_PROBES = 3;
 
 export type DailyCandleAvailabilityGateResult =
-  | { ready: true }
+  | {
+      ready: true;
+      status: "READY";
+      requiredMarketDate: Date;
+      freshProbeCount: number;
+      staleProbeCount: number;
+      unavailableProbeCount: number;
+    }
   | {
       ready: false;
+      status: "NOT_READY" | "INCONCLUSIVE";
       requiredMarketDate: Date;
       freshProbeCount: number;
       staleProbeCount: number;
@@ -266,10 +294,11 @@ export type DailyCandleAvailabilityGateResult =
 /**
  * Runs the shared 5-symbol probe (never more than LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT
  * history requests) and applies a conservative decision rule: ready only if at least
- * min(GATE_MIN_SUCCESSFUL_PROBES, probed count) symbols returned real data AND every one of them
- * is fresh. A single SYMBOL_UNAVAILABLE probe (the ticker's own history is genuinely absent,
- * unrelated to daily-candle timing) is tracked separately from a stale one and never counted
- * against readiness on its own - see GATE_MIN_SUCCESSFUL_PROBES. `probeUniverseSource` defaults to
+ * GATE_MIN_SUCCESSFUL_PROBES symbols returned real data AND every successful probe is fresh. One
+ * stale successful probe is NOT_READY; zero or too-few successful probes is INCONCLUSIVE. A
+ * SYMBOL_UNAVAILABLE probe (the ticker's own history is genuinely absent, unrelated to
+ * daily-candle timing) is tracked separately from a stale one and never counted against readiness
+ * on its own - see GATE_MIN_SUCCESSFUL_PROBES. `probeUniverseSource` defaults to
  * OCC_OPTIONABLE_UNIVERSE_SOURCE (real "public OCC underlyings," per spec) - overridable so tests
  * can scope the probe to their own deterministic fixture pool instead of the live table (which,
  * under Vitest's parallel-by-file execution, holds many concurrently-running test files' own
@@ -299,15 +328,16 @@ export async function checkDailyCandleAvailabilityGate(
   }
 
   const successfulProbeCount = freshProbeCount + staleProbeCount;
-  const requiredSuccessfulProbes = Math.min(GATE_MIN_SUCCESSFUL_PROBES, diagnostic.rows.length);
-  const ready = successfulProbeCount >= requiredSuccessfulProbes && staleProbeCount === 0;
+  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const ready = successfulProbeCount >= GATE_MIN_SUCCESSFUL_PROBES && staleProbeCount === 0;
 
   if (ready) {
-    return { ready: true };
+    return { ready: true, status: "READY", requiredMarketDate, freshProbeCount, staleProbeCount, unavailableProbeCount };
   }
   return {
     ready: false,
-    requiredMarketDate: dateOnlyUtc(previousNyseMarketDay(now)),
+    status: staleProbeCount > 0 ? "NOT_READY" : "INCONCLUSIVE",
+    requiredMarketDate,
     freshProbeCount,
     staleProbeCount,
     unavailableProbeCount,
@@ -328,19 +358,22 @@ export type ActiveTechnicalPreparationRun = {
   freshlyCreated: boolean;
 };
 
+type DailyCandleGateBlockedStatus = "DAILY_CANDLE_NOT_READY" | "CANDLE_GATE_INCONCLUSIVE";
+type DailyCandleGateBlockedResult = {
+  /** The global daily-candle-availability gate (see checkDailyCandleAvailabilityGate) was not
+   * safe to pass - no run/items were created for a new generation, and no bulk work is claimed
+   * for an existing generation. NOT_READY means at least one successful probe was stale;
+   * INCONCLUSIVE means there were fewer than 3 successful probes. */
+  status: DailyCandleGateBlockedStatus;
+  requiredMarketDate: Date;
+  freshProbeCount: number;
+  staleProbeCount: number;
+  unavailableProbeCount: number;
+};
+
 export type GetOrCreateTechnicalPreparationRunResult =
   | ({ status: "OK" } & ActiveTechnicalPreparationRun)
-  | {
-      /** The global daily-candle-availability gate (see checkDailyCandleAvailabilityGate) was not
-       * ready when a NEW run would otherwise have been created - no run, no items, no Phase A
-       * quote sweep were performed. Cost: at most LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT
-       * (5) price-history requests, never the ~6,071-symbol sweep or bulk item creation. */
-      status: "DAILY_CANDLE_NOT_READY";
-      requiredMarketDate: Date;
-      freshProbeCount: number;
-      staleProbeCount: number;
-      unavailableProbeCount: number;
-    };
+  | DailyCandleGateBlockedResult;
 
 /** Bounded wait for a concurrent caller's in-flight run creation to finish - polling, not
  * blocking, and not a distributed lock: cheap DB reads only, no HTTP calls happen in this loop.
@@ -364,6 +397,101 @@ async function waitForConcurrentRunCreation(runId: string): Promise<ActiveTechni
     await sleep(RUN_CREATION_POLL_INTERVAL_MS);
   }
   throw new Error("Timed out waiting for a concurrent technical preparation run to finish being created.");
+}
+
+function gateBlockedResult(gate: Extract<DailyCandleAvailabilityGateResult, { ready: false }>): DailyCandleGateBlockedResult {
+  return {
+    status: gate.status === "INCONCLUSIVE" ? "CANDLE_GATE_INCONCLUSIVE" : "DAILY_CANDLE_NOT_READY",
+    requiredMarketDate: gate.requiredMarketDate,
+    freshProbeCount: gate.freshProbeCount,
+    staleProbeCount: gate.staleProbeCount,
+    unavailableProbeCount: gate.unavailableProbeCount,
+  };
+}
+
+type ReadyItemReconciliationResult = {
+  genuineReadyCount: number;
+  repairedCount: number;
+  remainingProcessableCount: number;
+};
+
+async function reconcileReadyItemsForRun(
+  userId: string,
+  runId: string,
+  requiredMarketDate: Date,
+): Promise<ReadyItemReconciliationResult> {
+  const readyItems = await prisma.technicalPreparationItem.findMany({
+    where: { runId, status: "READY" },
+    select: { id: true, ticker: true },
+  });
+
+  let genuineReadyCount = 0;
+  const repairItemIds: string[] = [];
+
+  if (readyItems.length) {
+    const snapshots = await prisma.technicalIndicatorSnapshot.findMany({
+      where: { userId, ticker: { in: readyItems.map((item) => item.ticker) } },
+      select: { ticker: true, status: true, asOfDate: true },
+    });
+    const snapshotByTicker = new Map(snapshots.map((snapshot) => [snapshot.ticker, snapshot]));
+
+    for (const item of readyItems) {
+      const snapshot = snapshotByTicker.get(item.ticker);
+      const genuinelyReady =
+        snapshot?.status === "READY" && !!snapshot.asOfDate && snapshot.asOfDate.getTime() >= requiredMarketDate.getTime();
+      if (genuinelyReady) {
+        genuineReadyCount += 1;
+      } else {
+        repairItemIds.push(item.id);
+      }
+    }
+  }
+
+  if (repairItemIds.length) {
+    await prisma.technicalPreparationItem.updateMany({
+      where: { runId, id: { in: repairItemIds }, status: "READY" },
+      data: { status: "PENDING", processedAt: null, claimToken: null, claimedAt: null, deferredAttempts: 0, retryAfter: null },
+    });
+    await prisma.technicalPreparationRun.update({ where: { id: runId }, data: { status: "IN_PROGRESS" } });
+  }
+
+  const remainingProcessableCount = await prisma.technicalPreparationItem.count({
+    where: { runId, status: { in: ["PENDING", "PROCESSING", "DEFERRED"] } },
+  });
+
+  return { genuineReadyCount, repairedCount: repairItemIds.length, remainingProcessableCount };
+}
+
+async function reconcileRunCompletionState(userId: string, runId: string, requiredMarketDate: Date): Promise<ReadyItemReconciliationResult> {
+  const reconciliation = await reconcileReadyItemsForRun(userId, runId, requiredMarketDate);
+  if (reconciliation.remainingProcessableCount === 0) {
+    await prisma.technicalPreparationRun.update({ where: { id: runId }, data: { status: "COMPLETE" } });
+  }
+  return reconciliation;
+}
+
+async function existingRunResultAfterSafetyChecks(
+  userId: string,
+  provider: MarketDataProvider,
+  run: ActiveTechnicalPreparationRun,
+  now: Date,
+  options: { probeUniverseSource?: string },
+): Promise<GetOrCreateTechnicalPreparationRunResult> {
+  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const reconciliation = await reconcileRunCompletionState(userId, run.runId, requiredMarketDate);
+
+  if (reconciliation.remainingProcessableCount === 0) {
+    return { status: "OK", ...run };
+  }
+  if (reconciliation.genuineReadyCount >= GATE_MIN_SUCCESSFUL_PROBES) {
+    return { status: "OK", ...run };
+  }
+
+  const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: options.probeUniverseSource });
+  if (!gate.ready) {
+    return gateBlockedResult(gate);
+  }
+  return { status: "OK", ...run };
 }
 
 /**
@@ -415,9 +543,15 @@ export async function getOrCreateActiveTechnicalPreparationRun(
   if (existing) {
     if (existing.eligibleCount === null) {
       const result = await waitForConcurrentRunCreation(existing.id); // someone else is still creating it
-      return { status: "OK", ...result };
+      return existingRunResultAfterSafetyChecks(userId, provider, result, now, options);
     }
-    return { status: "OK", runId: existing.id, eligibleCount: existing.eligibleCount, freshlyCreated: false };
+    return existingRunResultAfterSafetyChecks(
+      userId,
+      provider,
+      { runId: existing.id, eligibleCount: existing.eligibleCount, freshlyCreated: false },
+      now,
+      options,
+    );
   }
 
   // No existing run for this identity - before spending a real Phase A quote sweep (and
@@ -426,13 +560,7 @@ export async function getOrCreateActiveTechnicalPreparationRun(
   // above checkDailyCandleAvailabilityGate). A run/placeholder is never created while not ready.
   const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: options.probeUniverseSource });
   if (!gate.ready) {
-    return {
-      status: "DAILY_CANDLE_NOT_READY",
-      requiredMarketDate: gate.requiredMarketDate,
-      freshProbeCount: gate.freshProbeCount,
-      staleProbeCount: gate.staleProbeCount,
-      unavailableProbeCount: gate.unavailableProbeCount,
-    };
+    return gateBlockedResult(gate);
   }
 
   // Claim the right to create this run. eligibleCount starts NULL - a concurrent loser reading
@@ -450,9 +578,15 @@ export async function getOrCreateActiveTechnicalPreparationRun(
       }
       if (theirs.eligibleCount === null) {
         const result = await waitForConcurrentRunCreation(theirs.id);
-        return { status: "OK", ...result };
+        return existingRunResultAfterSafetyChecks(userId, provider, result, now, options);
       }
-      return { status: "OK", runId: theirs.id, eligibleCount: theirs.eligibleCount, freshlyCreated: false };
+      return existingRunResultAfterSafetyChecks(
+        userId,
+        provider,
+        { runId: theirs.id, eligibleCount: theirs.eligibleCount, freshlyCreated: false },
+        now,
+        options,
+      );
     }
     throw error;
   }
@@ -578,16 +712,10 @@ export type TechnicalRefreshBatchResult =
        * timing breakdown, no raw provider response, no token - just one aggregate number. */
       elapsedMs: number;
     }
-  | {
-      /** The global daily-candle-availability gate was not ready - no run/items were created and
-       * no bulk work was attempted this call. See GetOrCreateTechnicalPreparationRunResult. */
-      status: "DAILY_CANDLE_NOT_READY";
-      requiredMarketDate: Date;
-      freshProbeCount: number;
-      staleProbeCount: number;
-      unavailableProbeCount: number;
+  | (DailyCandleGateBlockedResult & {
+      /** No bulk work was attempted this call. See GetOrCreateTechnicalPreparationRunResult. */
       elapsedMs: number;
-    };
+    });
 
 /**
  * Atomically claims up to `batchSize` PENDING (or retryable DEFERRED) items for this run and marks
@@ -677,9 +805,9 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   const claimToken = randomUUID(); // a random, non-secret, per-invocation identifier - never a credential
 
   const runResult = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now, { probeUniverseSource: options.probeUniverseSource });
-  if (runResult.status === "DAILY_CANDLE_NOT_READY") {
+  if (runResult.status !== "OK") {
     return {
-      status: "DAILY_CANDLE_NOT_READY",
+      status: runResult.status,
       requiredMarketDate: runResult.requiredMarketDate,
       freshProbeCount: runResult.freshProbeCount,
       staleProbeCount: runResult.staleProbeCount,
@@ -956,15 +1084,7 @@ export type TechnicalCacheReadinessStatus =
       failedCount: number;
       lastPreparedAt: Date | null;
     }
-  | {
-      /** The global daily-candle-availability gate was not ready - no run/items exist yet this
-       * cycle. See GetOrCreateTechnicalPreparationRunResult. */
-      status: "DAILY_CANDLE_NOT_READY";
-      requiredMarketDate: Date;
-      freshProbeCount: number;
-      staleProbeCount: number;
-      unavailableProbeCount: number;
-    };
+  | DailyCandleGateBlockedResult;
 
 /**
  * Reads the CURRENT active preparation run's own item counts - reuses
@@ -978,9 +1098,9 @@ export async function getTechnicalCacheReadinessForUser(
   options: { probeUniverseSource?: string } = {},
 ): Promise<TechnicalCacheReadinessStatus> {
   const runResult = await getOrCreateActiveTechnicalPreparationRun(userId, provider, now, { probeUniverseSource: options.probeUniverseSource });
-  if (runResult.status === "DAILY_CANDLE_NOT_READY") {
+  if (runResult.status !== "OK") {
     return {
-      status: "DAILY_CANDLE_NOT_READY",
+      status: runResult.status,
       requiredMarketDate: runResult.requiredMarketDate,
       freshProbeCount: runResult.freshProbeCount,
       staleProbeCount: runResult.staleProbeCount,
@@ -1187,5 +1307,12 @@ export async function getTechnicalPreparationStatusForUser(userId: string, now: 
   if (!run) {
     return { hasRunForToday: false, isComplete: false, lastTouchedAt: null };
   }
-  return { hasRunForToday: true, isComplete: run.status === "COMPLETE", lastTouchedAt: run.updatedAt };
+  if (run.eligibleCount === null) {
+    return { hasRunForToday: true, isComplete: false, lastTouchedAt: run.updatedAt };
+  }
+
+  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const reconciliation = await reconcileRunCompletionState(userId, run.id, requiredMarketDate);
+  const isComplete = reconciliation.remainingProcessableCount === 0;
+  return { hasRunForToday: true, isComplete, lastTouchedAt: run.updatedAt };
 }

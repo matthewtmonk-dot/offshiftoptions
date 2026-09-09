@@ -6,6 +6,7 @@ const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env
 const maybeDescribe = runDatabaseTests ? describe : describe.skip;
 
 const TEST_SOURCE = "TEST_FIXTURE_TECHNICAL_ORCHESTRATOR";
+const GATE_CONTROL_TICKERS = ["0GATECTRLOR0", "0GATECTRLOR1", "0GATECTRLOR2", "0GATECTRLOR3", "0GATECTRLOR4"];
 
 const resolveMarketDataProviderForUserMock = vi.fn();
 vi.mock("@/lib/broker-connections", () => ({
@@ -147,7 +148,8 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
   async function seedUniverse(tickers: string[]) {
     const now = new Date();
     await prisma.optionableUniverseSymbol.createMany({
-      data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: now })),
+      data: [...GATE_CONTROL_TICKERS, ...tickers].map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: now })),
+      skipDuplicates: true,
     });
   }
 

@@ -107,17 +107,19 @@ function fakeProviderWithHistory(
 }
 
 /** getOrCreateActiveTechnicalPreparationRun/refreshTechnicalIndicatorCacheBatchForUser/
- * getTechnicalCacheReadinessForUser can now legitimately return a DAILY_CANDLE_NOT_READY variant
+ * getTechnicalCacheReadinessForUser can now legitimately return a daily-candle gate-stop variant
  * (see the global daily-candle-availability gate) instead of their normal OK shape. Every test
  * below that drives these directly predates that gate and asserts on the OK shape - this narrows
  * to OK and throws a clear, diagnosable error if a test unexpectedly hits the gate instead (which
  * would itself indicate a real bug, e.g. an under-seeded probe pool). */
-async function expectOk<T extends { status: string }>(promise: Promise<T>): Promise<Exclude<T, { status: "DAILY_CANDLE_NOT_READY" }>> {
+async function expectOk<T extends { status: string }>(
+  promise: Promise<T>,
+): Promise<Exclude<T, { status: "DAILY_CANDLE_NOT_READY" | "CANDLE_GATE_INCONCLUSIVE" }>> {
   const result = await promise;
-  if (result.status === "DAILY_CANDLE_NOT_READY") {
-    throw new Error(`Expected OK, got DAILY_CANDLE_NOT_READY: ${JSON.stringify(result)}`);
+  if (result.status === "DAILY_CANDLE_NOT_READY" || result.status === "CANDLE_GATE_INCONCLUSIVE") {
+    throw new Error(`Expected OK, got ${result.status}: ${JSON.stringify(result)}`);
   }
-  return result as Exclude<T, { status: "DAILY_CANDLE_NOT_READY" }>;
+  return result as Exclude<T, { status: "DAILY_CANDLE_NOT_READY" | "CANDLE_GATE_INCONCLUSIVE" }>;
 }
 
 /** 5 dedicated tickers, deliberately named to sort alphabetically FIRST (a leading "0" - every
@@ -620,20 +622,19 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     });
   });
 
-  it("root cause of the readiness-vs-live-scan mismatch: getTechnicalCacheReadinessForUser's READY count never re-checks asOfDate freshness, so it keeps reporting a ticker ready long after the live scan correctly stops trusting it", async () => {
+  it("a legacy READY-but-stale preparation item is repaired before readiness reports it, while the live scan still refuses the stale snapshot", async () => {
     const { getOrCreateActiveTechnicalPreparationRun, getTechnicalCacheReadinessForUser } = await import("./technical-indicator-cache");
 
     const ticker = "RMISOLD01";
+    await prisma.technicalPreparationRun.deleteMany({ where: { userId: matt.id } });
+    await prisma.technicalIndicatorSnapshot.deleteMany({ where: { userId: matt.id, ticker } });
     await seedOccUniverse([ticker]);
     const now = new Date();
     const quotes = { [ticker]: { price: 20, volume: 1_000_000 } };
 
     // Create a real, current TechnicalPreparationRun/Item for this exact ticker via the real
-    // get-or-create path, then manually advance it straight to READY (mirroring exactly what
-    // refreshTechnicalIndicatorCacheBatchForUser itself does on success) - but with an asOfDate
-    // that is genuinely 10 real days old, simulating "the worker succeeded a while ago, then real
-    // time passed before the user actually clicked Run Live Scan," the exact real-world sequence
-    // production evidence points to.
+    // get-or-create path, then manually advance it straight to READY with an asOfDate that is
+    // genuinely stale - the production-shaped legacy state old code could leave behind.
     const prepProvider = withGateControlTickers(fakeProviderWithHistory(quotes, {}), now);
     const { runId } = await expectOk(getOrCreateActiveTechnicalPreparationRun(matt.id, prepProvider, now, { probeUniverseSource: TEST_SOURCE }));
     await prisma.technicalPreparationItem.updateMany({ where: { runId, ticker }, data: { status: "READY", processedAt: now } });
@@ -645,15 +646,17 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
       update: { status: "READY", asOfDate: oldAsOfDate, rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
     });
 
-    // The readiness diagnostic (what "125/2073 READY" reflects in production) still reports this
-    // ticker READY - it only checks TechnicalPreparationItem.status, never asOfDate freshness.
+    // The readiness path now repairs the old false READY row before reporting counts, using the
+    // same freshness cutoff the live scan itself uses.
     const readiness = await expectOk(getTechnicalCacheReadinessForUser(matt.id, prepProvider, now, { probeUniverseSource: TEST_SOURCE }));
-    expect(readiness.readyCount).toBeGreaterThanOrEqual(1);
+    expect(readiness.readyCount).toBe(0);
+    expect(readiness.pendingCount).toBeGreaterThanOrEqual(1);
+    const repairedItem = await prisma.technicalPreparationItem.findFirstOrThrow({ where: { runId, ticker } });
+    expect(repairedItem.status).toBe("PENDING");
 
-    // But the live scan, which re-validates freshness at read time via
-    // getTechnicalIndicatorSnapshotsForUser, correctly refuses to use the 10-day-old cached value
-    // - exactly the real production symptom (readiness says ready, scan says not ready), and
-    // exactly the honest behavior required: a stale value must never fake a PASS.
+    // The old TechnicalIndicatorSnapshot itself is preserved, and the live scan still re-validates
+    // freshness at read time and refuses to use the stale cached value. A stale value must never
+    // fake a PASS.
     providerByUserId.set(matt.id, fakeProvider(quotes, { [ticker]: defaultPut(ticker, 18) }));
     const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
     const result = await prisma.scanResult.findFirst({ where: { ticker, run: { ownerId: matt.id, source: "LIVE:SCHWAB" } } });

@@ -507,9 +507,9 @@ export type TechnicalCacheWarmActionResult =
       elapsedMs: number;
     }
   | {
-      /** The global daily-candle-availability gate was not ready - no bulk work was attempted
-       * (at most 5 read-only history requests were spent probing). */
-      status: "DAILY_CANDLE_NOT_READY";
+      /** The global daily-candle-availability gate was not safe to pass - no bulk work was
+       * attempted (at most 5 read-only history requests were spent probing). */
+      status: "DAILY_CANDLE_NOT_READY" | "CANDLE_GATE_INCONCLUSIVE";
       requiredMarketDate: string;
       freshProbeCount: number;
       staleProbeCount: number;
@@ -539,9 +539,9 @@ export async function warmTechnicalIndicatorCacheAction(): Promise<TechnicalCach
   }
 
   const result = await refreshTechnicalIndicatorCacheBatchForUser(user.id, resolved.provider, { batchSize: TECHNICAL_REFRESH_BATCH_SIZE });
-  if (result.status === "DAILY_CANDLE_NOT_READY") {
+  if (result.status !== "OK") {
     return {
-      status: "DAILY_CANDLE_NOT_READY",
+      status: result.status,
       requiredMarketDate: result.requiredMarketDate.toISOString().slice(0, 10),
       freshProbeCount: result.freshProbeCount,
       staleProbeCount: result.staleProbeCount,
@@ -571,7 +571,7 @@ export type TechnicalCacheReadinessActionResult =
       lastPreparedAt: string | null;
     }
   | {
-      status: "DAILY_CANDLE_NOT_READY";
+      status: "DAILY_CANDLE_NOT_READY" | "CANDLE_GATE_INCONCLUSIVE";
       requiredMarketDate: string;
       freshProbeCount: number;
       staleProbeCount: number;
@@ -596,9 +596,9 @@ export async function getTechnicalCacheReadinessAction(): Promise<TechnicalCache
   }
 
   const status = await getTechnicalCacheReadinessForUser(user.id, resolved.provider);
-  if (status.status === "DAILY_CANDLE_NOT_READY") {
+  if (status.status !== "OK") {
     return {
-      status: "DAILY_CANDLE_NOT_READY",
+      status: status.status,
       requiredMarketDate: status.requiredMarketDate.toISOString().slice(0, 10),
       freshProbeCount: status.freshProbeCount,
       staleProbeCount: status.staleProbeCount,

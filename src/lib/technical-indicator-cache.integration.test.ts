@@ -1,6 +1,7 @@
 import { hash } from "bcryptjs";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { bollingerBands, bollingerPositionPercent, wilderRsi } from "@/domain/finance/calculations";
+import { scannerRulesFromRecords } from "@/domain/scanner/profile";
 import type { MarketDataProvider, MarketQuote, PriceCandle } from "@/providers/market-data/types";
 
 const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
@@ -96,6 +97,9 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   let getTechnicalCacheReadinessForUserRaw: typeof import("./technical-indicator-cache").getTechnicalCacheReadinessForUser;
   let getOrCreateActiveTechnicalPreparationRunRaw: typeof import("./technical-indicator-cache").getOrCreateActiveTechnicalPreparationRun;
   let checkDailyCandleAvailabilityGate: typeof import("./technical-indicator-cache").checkDailyCandleAvailabilityGate;
+  let computeQuoteStageRulesFingerprint: typeof import("./technical-indicator-cache").computeQuoteStageRulesFingerprint;
+  let dateOnlyUtc: typeof import("./technical-indicator-cache").dateOnlyUtc;
+  let getTechnicalPreparationStatusForUser: typeof import("./technical-indicator-cache").getTechnicalPreparationStatusForUser;
   let PROCESSING_CLAIM_TIMEOUT_MS: typeof import("./technical-indicator-cache").PROCESSING_CLAIM_TIMEOUT_MS;
   let ensureMyLstScannerProfileForUser: typeof import("./workflows").ensureMyLstScannerProfileForUser;
   let matt: { id: string };
@@ -162,6 +166,9 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       getTechnicalCacheReadinessForUser: getTechnicalCacheReadinessForUserRaw,
       getOrCreateActiveTechnicalPreparationRun: getOrCreateActiveTechnicalPreparationRunRaw,
       checkDailyCandleAvailabilityGate,
+      computeQuoteStageRulesFingerprint,
+      dateOnlyUtc,
+      getTechnicalPreparationStatusForUser,
       PROCESSING_CLAIM_TIMEOUT_MS,
     } = await import("./technical-indicator-cache"));
     ({ ensureMyLstScannerProfileForUser } = await import("./workflows"));
@@ -202,14 +209,13 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
   /** 5 dedicated tickers, deliberately named to sort alphabetically FIRST (a leading "0" - every
    * real test ticker in this file starts with a letter) so the global daily-candle-availability
-   * gate's own 5-symbol probe (ORDER BY ticker ASC LIMIT 5 - see checkDailyCandleAvailabilityGate)
-   * always lands on exactly these control rows, never on whatever ticker(s) an individual test is
-   * deliberately trying to exercise (which may be intentionally stale/lagged/unavailable). Never
-   * explicitly registered in any test's own fakeProvider `candlesByTicker`/`failTickers` options,
-   * so they fall through to fakeProvider's own default `syntheticCandles(symbol)` - which ends
-   * "today" (fresh) by default - automatically satisfying the gate without any test needing to
-   * think about it. seedUniverse inserts these on every call (skipDuplicates - safe if a test
-   * seeds more than once) so the gate passes by construction throughout this whole file. */
+   * gate's own fixture-source fallback probe always lands on exactly these control rows, never on
+   * whatever ticker(s) an individual test is deliberately trying to exercise (which may be
+   * intentionally stale/lagged/unavailable). Never explicitly registered in any test's own
+   * fakeProvider `candlesByTicker`/`failTickers` options, so withGateControlTickers can satisfy the
+   * gate without any test needing to think about it. seedUniverse inserts these on every call
+   * (skipDuplicates - safe if a test seeds more than once) so the gate passes by construction
+   * throughout this whole file. */
   const GATE_CONTROL_TICKERS = ["0GATECTRLTC0", "0GATECTRLTC1", "0GATECTRLTC2", "0GATECTRLTC3", "0GATECTRLTC4"];
   const GATE_CONTROL_TICKER_SET = new Set(GATE_CONTROL_TICKERS);
 
@@ -242,6 +248,30 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       acc[ticker] = { price: prices[ticker] ?? 20, volume: 1_000_000 };
       return acc;
     }, {});
+  }
+
+  async function createPreparationRunWithItems(
+    userId: string,
+    now: Date,
+    items: { ticker: string; status: "PENDING" | "PROCESSING" | "READY" | "DEFERRED" | "FAILED"; priority?: number; processedAt?: Date | null }[],
+    status: "IN_PROGRESS" | "COMPLETE" = "IN_PROGRESS",
+  ) {
+    const profile = await ensureMyLstScannerProfileForUser(userId);
+    const records = await prisma.scannerRule.findMany({ where: { profileId: profile.id }, orderBy: { sortOrder: "asc" } });
+    const rulesFingerprint = computeQuoteStageRulesFingerprint(scannerRulesFromRecords(records));
+    const run = await prisma.technicalPreparationRun.create({
+      data: { userId, marketDate: dateOnlyUtc(now), rulesFingerprint, eligibleCount: items.length, status },
+    });
+    await prisma.technicalPreparationItem.createMany({
+      data: items.map((item) => ({
+        runId: run.id,
+        ticker: item.ticker,
+        priority: item.priority ?? 2,
+        status: item.status,
+        processedAt: item.processedAt ?? (item.status === "READY" || item.status === "FAILED" ? now : null),
+      })),
+    });
+    return run;
   }
 
   /** Directly patches the user's own price rule's [min, max] desired range - bypasses the full
@@ -541,7 +571,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
     const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
 
-    const now = new Date();
+    const now = new Date("2026-09-09T14:00:00Z");
     const requiredMarketDate = previousNyseMarketDay(now);
     const laggedDate = previousNyseMarketDay(requiredMarketDate); // one trading day short - stale by construction
 
@@ -588,7 +618,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
     const ticker = "TECHFRSAFETY1";
     await seedUniverse([ticker]);
-    const now = new Date();
+    const now = new Date("2026-09-09T14:00:00Z");
     const provider = fakeProvider({ quotes: { [ticker]: { price: 20, volume: 1_000_000 } } });
 
     const { runId } = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider, now);
@@ -652,7 +682,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
     const { DEFERRED_RETRY_INTERVAL_MS } = await import("./technical-indicator-cache");
     await seedUniverse(["TECHRETRY1"]);
-    const now = new Date();
+    const now = new Date("2026-09-09T14:00:00Z");
     const requiredMarketDate = previousNyseMarketDay(now);
     const laggedDate = previousNyseMarketDay(requiredMarketDate);
 
@@ -682,7 +712,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   it("a DEFERRED item never starves an unrelated genuinely-PENDING item - the claim query skips a not-yet-retryable row and moves on", async () => {
     const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
     await seedUniverse(["TECHSTARVEA", "TECHSTARVEB"]); // alphabetically A sorts before B
-    const now = new Date();
+    const now = new Date("2026-09-09T14:00:00Z");
     const requiredMarketDate = previousNyseMarketDay(now);
     const laggedDate = previousNyseMarketDay(requiredMarketDate);
     const provider = fakeProvider({
@@ -729,7 +759,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     const { DEFERRED_RETRY_INTERVAL_MS, MAX_DEFERRED_ATTEMPTS } = await import("./technical-indicator-cache");
     await seedUniverse(["TECHBOUNDED1"]);
 
-    let now = new Date();
+    let now = new Date("2026-09-09T14:00:00Z");
     const laggedDate = previousNyseMarketDay(previousNyseMarketDay(now));
     // A provider whose candle NEVER catches up, no matter how many times it's asked - simulating a
     // provider outage/persistent lag, never resolved within this run/generation.
@@ -1120,6 +1150,91 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       expect(callCount).toBe(5); // exactly 5 - the universe has more than enough to probe
     });
 
+    it("zero probes is INCONCLUSIVE, never vacuously ready", async () => {
+      const now = new Date();
+      let callCount = 0;
+      const provider = fakeProvider({
+        quotes: {},
+        onGetPriceHistory: () => {
+          callCount += 1;
+        },
+      });
+
+      const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
+
+      expect(gate.ready).toBe(false);
+      expect(gate.status).toBe("INCONCLUSIVE");
+      expect(gate.freshProbeCount).toBe(0);
+      expect(gate.staleProbeCount).toBe(0);
+      expect(gate.unavailableProbeCount).toBe(0);
+      expect(callCount).toBe(0);
+    });
+
+    it.each([1, 2])("%i successful current probe(s) is still INCONCLUSIVE", async (successfulProbeCount) => {
+      await prisma.optionableUniverseSymbol.deleteMany({ where: { source: TEST_SOURCE } });
+      const tickers = Array.from({ length: successfulProbeCount }, (_, i) => `TECHGATEFEW${successfulProbeCount}${i}`);
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const provider = fakeProvider({
+        quotes: {},
+        candlesByTicker: Object.fromEntries(tickers.map((ticker) => [ticker, syntheticCandles(ticker, 80, now)])),
+      });
+
+      const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
+
+      expect(gate.ready).toBe(false);
+      expect(gate.status).toBe("INCONCLUSIVE");
+      expect(gate.freshProbeCount).toBe(successfulProbeCount);
+      expect(gate.staleProbeCount).toBe(0);
+      expect(gate.unavailableProbeCount).toBe(0);
+    });
+
+    it("three successful current probes are enough to pass the gate", async () => {
+      const tickers = ["TECHGATETHREE0", "TECHGATETHREE1", "TECHGATETHREE2"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const provider = fakeProvider({
+        quotes: {},
+        candlesByTicker: Object.fromEntries(tickers.map((ticker) => [ticker, syntheticCandles(ticker, 80, now)])),
+      });
+
+      const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
+
+      expect(gate.ready).toBe(true);
+      expect(gate.status).toBe("READY");
+      expect(gate.freshProbeCount).toBe(3);
+      expect(gate.staleProbeCount).toBe(0);
+      expect(gate.unavailableProbeCount).toBe(0);
+    });
+
+    it("one stale successful probe is NOT_READY even when the rest are unavailable", async () => {
+      const staleTicker = "TECHGATESTALERULE0";
+      const unavailableTickers = ["TECHGATESTALERULE1", "TECHGATESTALERULE2", "TECHGATESTALERULE3", "TECHGATESTALERULE4"];
+      const tickers = [staleTicker, ...unavailableTickers];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const now = new Date();
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      const provider = fakeProvider({
+        quotes: {},
+        failTickers: new Set(unavailableTickers),
+        candlesByTicker: { [staleTicker]: syntheticCandles(staleTicker, 80, laggedDate) },
+      });
+
+      const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
+
+      expect(gate.ready).toBe(false);
+      expect(gate.status).toBe("NOT_READY");
+      expect(gate.freshProbeCount).toBe(0);
+      expect(gate.staleProbeCount).toBe(1);
+      expect(gate.unavailableProbeCount).toBe(4);
+    });
+
     it("a globally-stale probe sample skips Phase A entirely - no quote sweep, no run, no items created - costing only the probe requests", async () => {
       const tickers = ["TECHGATESTALE0", "TECHGATESTALE1", "TECHGATESTALE2", "TECHGATESTALE3", "TECHGATESTALE4", "TECHGATESTALE5"];
       await prisma.optionableUniverseSymbol.createMany({
@@ -1167,6 +1282,164 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
       const itemCount = await prisma.technicalPreparationItem.count({ where: { run: { userId: matt.id } } });
       expect(itemCount).toBe(0);
+    });
+
+    it("an existing legacy IN_PROGRESS generation is repaired and gated before any bulk history work", async () => {
+      const now = new Date("2026-09-09T10:00:00Z");
+      const requiredMarketDate = previousNyseMarketDayFn(now);
+      const staleDate = new Date("2026-09-04T20:00:00Z");
+      const probeTickers = ["TECHLEGACYGATE0", "TECHLEGACYGATE1", "TECHLEGACYGATE2", "TECHLEGACYGATE3", "TECHLEGACYGATE4"];
+      const workTickers = ["ZZTECHLEGACYSTALE", "ZZTECHLEGACYFAILED", "ZZTECHLEGACYMISSING", "ZZTECHLEGACYPENDING"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: probeTickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const run = await createPreparationRunWithItems(matt.id, now, [
+        { ticker: workTickers[0], status: "READY" },
+        { ticker: workTickers[1], status: "READY" },
+        { ticker: workTickers[2], status: "READY" },
+        { ticker: workTickers[3], status: "PENDING" },
+      ]);
+      await prisma.technicalIndicatorSnapshot.create({
+        data: { userId: matt.id, ticker: workTickers[0], status: "READY", asOfDate: dateOnlyUtc(staleDate), rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+      });
+      await prisma.technicalIndicatorSnapshot.create({
+        data: { userId: matt.id, ticker: workTickers[1], status: "FAILED", asOfDate: dateOnlyUtc(staleDate), failureReason: "HISTORY_FETCH_FAILED" },
+      });
+
+      let firstQuoteSweepCount = 0;
+      let firstHistoryCallCount = 0;
+      let firstOptionChainCallCount = 0;
+      const staleProvider = fakeProvider({
+        quotes: Object.fromEntries([...probeTickers, ...workTickers].map((ticker) => [ticker, { price: 20, volume: 1_000_000 }])),
+        candlesByTicker: Object.fromEntries(probeTickers.map((ticker) => [ticker, syntheticCandles(ticker, 80, staleDate)])),
+        onGetQuotes: () => {
+          firstQuoteSweepCount += 1;
+        },
+        onGetPriceHistory: () => {
+          firstHistoryCallCount += 1;
+        },
+        onGetOptionChain: () => {
+          firstOptionChainCallCount += 1;
+        },
+      });
+
+      const first = await refreshTechnicalIndicatorCacheBatchForUserRaw(matt.id, staleProvider, { batchSize: 25, now, probeUniverseSource: TEST_SOURCE });
+
+      expect(first.status).toBe("DAILY_CANDLE_NOT_READY");
+      expect(firstHistoryCallCount).toBe(5); // the gate only
+      expect(firstQuoteSweepCount).toBe(0); // existing run: no repeated Stage A
+      expect(firstOptionChainCallCount).toBe(0);
+      expect(await prisma.technicalPreparationRun.count({ where: { userId: matt.id } })).toBe(1);
+      expect((await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("IN_PROGRESS");
+      expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "READY" } })).toBe(0);
+      expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "PENDING" } })).toBe(4);
+      const preservedStaleSnapshot = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({
+        where: { userId_ticker: { userId: matt.id, ticker: workTickers[0] } },
+      });
+      expect(preservedStaleSnapshot.asOfDate?.toISOString().slice(0, 10)).toBe("2026-09-04");
+
+      let secondQuoteSweepCount = 0;
+      let secondHistoryCallCount = 0;
+      const freshProvider = fakeProvider({
+        quotes: Object.fromEntries([...probeTickers, ...workTickers].map((ticker) => [ticker, { price: 20, volume: 1_000_000 }])),
+        candlesByTicker: Object.fromEntries(
+          [...probeTickers, ...workTickers].map((ticker) => [ticker, syntheticCandles(ticker, 80, requiredMarketDate)]),
+        ),
+        onGetQuotes: () => {
+          secondQuoteSweepCount += 1;
+        },
+        onGetPriceHistory: () => {
+          secondHistoryCallCount += 1;
+        },
+      });
+
+      const second = await refreshTechnicalIndicatorCacheBatchForUserRaw(matt.id, freshProvider, { batchSize: 25, now, probeUniverseSource: TEST_SOURCE });
+
+      expect(second.status).toBe("OK");
+      if (second.status !== "OK") throw new Error("expected OK");
+      expect(second.processedCount).toBe(4);
+      expect(second.succeededCount).toBe(4);
+      expect(second.remainingEligibleCount).toBe(0);
+      expect(secondHistoryCallCount).toBe(9); // 5 gate probes + 4 real work items
+      expect(secondQuoteSweepCount).toBe(0); // same existing run reused, still no Stage A repeat
+      expect(await prisma.technicalPreparationRun.count({ where: { userId: matt.id } })).toBe(1);
+      expect((await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("COMPLETE");
+      expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "READY" } })).toBe(4);
+      const repairedSnapshot = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({
+        where: { userId_ticker: { userId: matt.id, ticker: workTickers[0] } },
+      });
+      expect(repairedSnapshot.asOfDate?.toISOString().slice(0, 10)).toBe(requiredMarketDate.toISOString().slice(0, 10));
+    });
+
+    it("an existing generation with enough genuinely-fresh READY items skips repeated gate probes on later work", async () => {
+      const now = new Date("2026-09-09T10:00:00Z");
+      const requiredMarketDate = previousNyseMarketDayFn(now);
+      const laggedDate = previousNyseMarketDayFn(requiredMarketDate);
+      const probeTickers = ["TECHSKIPGATE0", "TECHSKIPGATE1", "TECHSKIPGATE2", "TECHSKIPGATE3", "TECHSKIPGATE4"];
+      const readyTickers = ["ZZTECHSKIPREADY0", "ZZTECHSKIPREADY1", "ZZTECHSKIPREADY2"];
+      const pendingTickers = ["ZZTECHSKIPPENDING0", "ZZTECHSKIPPENDING1"];
+      await prisma.optionableUniverseSymbol.createMany({
+        data: probeTickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
+      });
+      const run = await createPreparationRunWithItems(matt.id, now, [
+        ...readyTickers.map((ticker) => ({ ticker, status: "READY" as const })),
+        ...pendingTickers.map((ticker) => ({ ticker, status: "PENDING" as const })),
+      ]);
+      await prisma.technicalIndicatorSnapshot.createMany({
+        data: readyTickers.map((ticker) => ({
+          userId: matt.id,
+          ticker,
+          status: "READY" as const,
+          asOfDate: dateOnlyUtc(requiredMarketDate),
+          rsi: 15,
+          bbLower: 15,
+          bbMiddle: 20,
+          bbUpper: 45,
+        })),
+      });
+
+      const historyCalls: string[] = [];
+      const provider = fakeProvider({
+        quotes: Object.fromEntries([...probeTickers, ...pendingTickers].map((ticker) => [ticker, { price: 20, volume: 1_000_000 }])),
+        candlesByTicker: {
+          ...Object.fromEntries(probeTickers.map((ticker) => [ticker, syntheticCandles(ticker, 80, laggedDate)])),
+          ...Object.fromEntries(pendingTickers.map((ticker) => [ticker, syntheticCandles(ticker, 80, requiredMarketDate)])),
+        },
+        onGetPriceHistory: (ticker) => {
+          historyCalls.push(ticker);
+        },
+      });
+
+      const result = await refreshTechnicalIndicatorCacheBatchForUserRaw(matt.id, provider, { batchSize: 25, now, probeUniverseSource: TEST_SOURCE });
+
+      expect(result.status).toBe("OK");
+      if (result.status !== "OK") throw new Error("expected OK");
+      expect(result.processedCount).toBe(2);
+      expect([...historyCalls].sort()).toEqual(pendingTickers);
+      expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "READY" } })).toBe(5);
+    });
+
+    it("legacy READY reconciliation is user-scoped and prevents a fake COMPLETE run from staying complete", async () => {
+      const now = new Date("2026-09-09T10:00:00Z");
+      const staleDate = new Date("2026-09-04T20:00:00Z");
+      const mattTicker = "TECHMATTFAKEREADY";
+      const ericTicker = "TECHERICFAKEREADY";
+      const mattRun = await createPreparationRunWithItems(matt.id, now, [{ ticker: mattTicker, status: "READY" }], "COMPLETE");
+      const ericRun = await createPreparationRunWithItems(eric.id, now, [{ ticker: ericTicker, status: "READY" }], "COMPLETE");
+      await prisma.technicalIndicatorSnapshot.createMany({
+        data: [
+          { userId: matt.id, ticker: mattTicker, status: "READY" as const, asOfDate: dateOnlyUtc(staleDate), rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+          { userId: eric.id, ticker: ericTicker, status: "READY" as const, asOfDate: dateOnlyUtc(staleDate), rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
+        ],
+      });
+
+      const status = await getTechnicalPreparationStatusForUser(matt.id, now);
+
+      expect(status).toMatchObject({ hasRunForToday: true, isComplete: false });
+      expect((await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: mattRun.id } })).status).toBe("IN_PROGRESS");
+      expect((await prisma.technicalPreparationItem.findFirstOrThrow({ where: { runId: mattRun.id, ticker: mattTicker } })).status).toBe("PENDING");
+      expect((await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: ericRun.id } })).status).toBe("COMPLETE");
+      expect((await prisma.technicalPreparationItem.findFirstOrThrow({ where: { runId: ericRun.id, ticker: ericTicker } })).status).toBe("READY");
     });
 
     it("a fresh probe sample allows normal preparation to proceed exactly as before - Stage A runs, items are created, Phase B succeeds", async () => {
@@ -1225,6 +1498,8 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
       const gate = await checkDailyCandleAvailabilityGate(provider, now, { probeUniverseSource: TEST_SOURCE });
       expect(gate.ready).toBe(true); // 4 successful+fresh probes >= GATE_MIN_SUCCESSFUL_PROBES, 1 unavailable never counted against it
+      expect(gate.staleProbeCount).toBe(0);
+      expect(gate.unavailableProbeCount).toBe(1);
     });
 
     it("the automatic gate and the manual latest-candle-freshness diagnostic agree exactly on which probe symbols are fresh - same underlying helper, never a second date-comparison formula", async () => {

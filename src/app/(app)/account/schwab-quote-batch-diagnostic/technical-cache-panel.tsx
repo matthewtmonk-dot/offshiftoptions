@@ -115,14 +115,25 @@ export function TechnicalCachePanel() {
 function DailyCandleNotReadyResult({
   result,
 }: {
-  result: { requiredMarketDate: string; freshProbeCount: number; staleProbeCount: number; unavailableProbeCount: number };
+  result: {
+    status: "DAILY_CANDLE_NOT_READY" | "CANDLE_GATE_INCONCLUSIVE";
+    requiredMarketDate: string;
+    freshProbeCount: number;
+    staleProbeCount: number;
+    unavailableProbeCount: number;
+  };
 }) {
+  const inconclusive = result.status === "CANDLE_GATE_INCONCLUSIVE";
   return (
-    <Panel title="Provider Not Ready Yet">
+    <Panel title={inconclusive ? "Provider Readiness Inconclusive" : "Provider Not Ready Yet"}>
       <p className="text-sm text-zinc-300">
-        The provider has not yet published the required market date&apos;s ({shortCalendarDate(result.requiredMarketDate)}) daily candle
-        for enough of a small probe sample - skipped bulk preparation this click rather than creating thousands of items that would all
-        just wait on the same real cause.
+        {inconclusive
+          ? `Fewer than 3 public probe symbols returned usable history for the required market date (${shortCalendarDate(
+              result.requiredMarketDate,
+            )}) - skipped bulk preparation this click because readiness could not be proven.`
+          : `The provider has not yet published the required market date's (${shortCalendarDate(
+              result.requiredMarketDate,
+            )}) daily candle for the public probe sample - skipped bulk preparation this click rather than creating thousands of items that would all wait on the same real cause.`}
       </p>
       <div className="mt-2 flex flex-wrap gap-2 text-xs">
         <Badge tone="good">{result.freshProbeCount} fresh probe(s)</Badge>
@@ -141,7 +152,7 @@ function ReadinessResult({ result }: { result: TechnicalCacheReadinessActionResu
       </Panel>
     );
   }
-  if (result.status === "DAILY_CANDLE_NOT_READY") {
+  if (result.status !== "OK") {
     return <DailyCandleNotReadyResult result={result} />;
   }
   return (
@@ -203,7 +214,7 @@ function WarmResult({ result }: { result: TechnicalCacheWarmActionResult }) {
       </Panel>
     );
   }
-  if (result.status === "DAILY_CANDLE_NOT_READY") {
+  if (result.status !== "OK") {
     return <DailyCandleNotReadyResult result={result} />;
   }
   return (

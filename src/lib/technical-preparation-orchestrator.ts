@@ -197,7 +197,7 @@ export type TechnicalPreparationOrchestratorResult =
        * technical-indicator-cache.ts) was not ready for the selected user - no Phase A quote
        * sweep, no bulk TechnicalPreparationItem creation, no bulk history requests were attempted
        * this invocation. Costs at most 5 read-only price-history probe requests, then stops. */
-      status: "DAILY_CANDLE_NOT_READY";
+      status: "DAILY_CANDLE_NOT_READY" | "CANDLE_GATE_INCONCLUSIVE";
       requiredMarketDate: string;
       freshProbeCount: number;
       staleProbeCount: number;
@@ -211,7 +211,7 @@ export type TechnicalPreparationOrchestratorResult =
  * true: the run reports 0 remaining (COMPLETE), the sub-batch cap is reached, the wall-clock
  * budget is reached, a batch claimed/processed nothing (meaning everything left is either done or
  * actively claimed by another concurrent invocation - no point spinning further sub-batches), or
- * the VERY FIRST sub-batch call reports DAILY_CANDLE_NOT_READY (the gate result cannot change
+ * the VERY FIRST sub-batch call reports a daily-candle gate stop (the gate result cannot change
  * mid-invocation, so there is no point spending further probe/sub-batch attempts once it's known -
  * see refreshTechnicalIndicatorCacheBatchForUser/getOrCreateActiveTechnicalPreparationRun). A
  * GitHub Actions schedule is expected to call this endpoint repeatedly during a bounded
@@ -250,11 +250,11 @@ export async function runTechnicalPreparationOrchestratorCycle(
         probeUniverseSource: options.probeUniverseSource,
       });
 
-      if (batch.status === "DAILY_CANDLE_NOT_READY") {
+      if (batch.status !== "OK") {
         // Never spend further sub-batch attempts probing again this same invocation - the gate
         // result cannot change within one call, and each probe already cost real requests.
         return {
-          status: "DAILY_CANDLE_NOT_READY",
+          status: batch.status,
           requiredMarketDate: batch.requiredMarketDate.toISOString().slice(0, 10),
           freshProbeCount: batch.freshProbeCount,
           staleProbeCount: batch.staleProbeCount,
