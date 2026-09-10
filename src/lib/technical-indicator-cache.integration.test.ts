@@ -99,7 +99,9 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   let checkDailyCandleAvailabilityGate: typeof import("./technical-indicator-cache").checkDailyCandleAvailabilityGate;
   let computeQuoteStageRulesFingerprint: typeof import("./technical-indicator-cache").computeQuoteStageRulesFingerprint;
   let dateOnlyUtc: typeof import("./technical-indicator-cache").dateOnlyUtc;
+  let getTechnicalPreparationRunAggregatesForUser: typeof import("./technical-indicator-cache").getTechnicalPreparationRunAggregatesForUser;
   let getTechnicalPreparationStatusForUser: typeof import("./technical-indicator-cache").getTechnicalPreparationStatusForUser;
+  let requiredTechnicalMarketDateUtc: typeof import("./technical-indicator-cache").requiredTechnicalMarketDateUtc;
   let PROCESSING_CLAIM_TIMEOUT_MS: typeof import("./technical-indicator-cache").PROCESSING_CLAIM_TIMEOUT_MS;
   let ensureMyLstScannerProfileForUser: typeof import("./workflows").ensureMyLstScannerProfileForUser;
   let matt: { id: string };
@@ -168,7 +170,9 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       checkDailyCandleAvailabilityGate,
       computeQuoteStageRulesFingerprint,
       dateOnlyUtc,
+      getTechnicalPreparationRunAggregatesForUser,
       getTechnicalPreparationStatusForUser,
+      requiredTechnicalMarketDateUtc,
       PROCESSING_CLAIM_TIMEOUT_MS,
     } = await import("./technical-indicator-cache"));
     ({ ensureMyLstScannerProfileForUser } = await import("./workflows"));
@@ -189,8 +193,8 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     await prisma.optionableUniverseSymbol.deleteMany({ where: { source: TEST_SOURCE } });
     await prisma.watchlistItem.deleteMany({ where: { ownerId: { in: [matt.id, eric.id] } } });
     await prisma.watchlist.deleteMany({ where: { ownerId: { in: [matt.id, eric.id] } } });
-    // Some tests deliberately change the price rule to prove fingerprint invalidation - reset to
-    // the real LST Core default ([10, 50]) so later tests' price=20 fixtures aren't affected.
+    // Some tests deliberately change price/volume rules to prove fingerprint behavior - reset to
+    // the real LST Core defaults so later tests' price=20/volume fixtures aren't affected.
     // Scoped to THIS file's own two users' own "My LST" profiles only - never a global update,
     // which would corrupt other test files' own scanner-rule fixtures running concurrently.
     const ownProfiles = await prisma.scannerProfile.findMany({ where: { ownerId: { in: [matt.id, eric.id] }, name: "My LST" }, select: { id: true } });
@@ -198,6 +202,10 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
       await prisma.scannerRule.updateMany({
         where: { key: "price", profileId: { in: ownProfiles.map((profile) => profile.id) } },
         data: { valueJson: { desired: [10, 50] } },
+      });
+      await prisma.scannerRule.updateMany({
+        where: { key: "stockVolume", profileId: { in: ownProfiles.map((profile) => profile.id) } },
+        data: { valueJson: { desired: 40_000 } },
       });
     }
   });
@@ -282,6 +290,14 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     await prisma.scannerRule.update({
       where: { profileId_key: { profileId: profile.id, key: "price" } },
       data: { valueJson: { desired: [min, max] } },
+    });
+  }
+
+  async function setStockVolumeRuleMinimum(userId: string, minimum: number) {
+    const profile = await ensureMyLstScannerProfileForUser(userId);
+    await prisma.scannerRule.update({
+      where: { profileId_key: { profileId: profile.id, key: "stockVolume" } },
+      data: { valueJson: { desired: minimum } },
     });
   }
 
@@ -527,6 +543,47 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(result.length).toBeGreaterThan(0);
   });
 
+  it("Phase A technical eligibility uses price only, not current quote volume", async () => {
+    await seedUniverse(["TECHLOWVOL", "TECHHIGHVOL", "TECHTOOEXPENSIVE"]);
+    const provider = fakeProvider({
+      quotes: {
+        TECHLOWVOL: { price: 20, volume: 5_000 },
+        TECHHIGHVOL: { price: 20, volume: 1_000_000 },
+        TECHTOOEXPENSIVE: { price: 999, volume: 1_000_000 },
+      },
+    });
+
+    const result = await getEligibleTechnicalRefreshTickersForUser(matt.id, provider);
+    const tickers = result.map((item) => item.ticker);
+
+    expect(tickers).toContain("TECHLOWVOL");
+    expect(tickers).toContain("TECHHIGHVOL");
+    expect(tickers).not.toContain("TECHTOOEXPENSIVE");
+  });
+
+  it("a symbol with acceptable price but low current morning volume can still have RSI/BB prepared", async () => {
+    const now = new Date("2026-09-10T10:00:00Z"); // Sep 10 morning ET; previous NYSE market date is Sep 9.
+    await seedUniverse(["TECHMORNINGLOWVOL"]);
+    const provider = fakeProvider({
+      quotes: { TECHMORNINGLOWVOL: { price: 20, volume: 5_000 } },
+      candlesByTicker: { TECHMORNINGLOWVOL: syntheticCandles("TECHMORNINGLOWVOL", 80, new Date("2026-09-09T20:00:00Z")) },
+    });
+
+    const batch = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, provider, { batchSize: 5, now });
+
+    expect(batch.processedCount).toBe(1);
+    expect(batch.succeededCount).toBe(1);
+    expect(batch.remainingEligibleCount).toBe(0);
+    const item = await prisma.technicalPreparationItem.findFirstOrThrow({ where: { ticker: "TECHMORNINGLOWVOL" } });
+    expect(item.status).toBe("READY");
+    const snapshot = await prisma.technicalIndicatorSnapshot.findUniqueOrThrow({
+      where: { userId_ticker: { userId: matt.id, ticker: "TECHMORNINGLOWVOL" } },
+    });
+    expect(snapshot.status).toBe("READY");
+    expect(snapshot.rsi).not.toBeNull();
+    expect(snapshot.bbLower).not.toBeNull();
+  });
+
   it("never invents financial scoring - non-Research/Watchlist survivors are ordered deterministically (ticker ascending), not by an invented strength score", async () => {
     await seedUniverse(["TECHZ", "TECHA2", "TECHM"]);
     const provider = fakeProvider({
@@ -635,6 +692,185 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     const breakdown = await getTechnicalCacheFreshnessBreakdownForUser(matt.id, now);
     expect(breakdown.workflowReadyCount).toBeGreaterThanOrEqual(1);
     expect(breakdown.staleSnapshotCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("getTechnicalPreparationRunAggregatesForUser reports recent run and item counts without provider work or ticker dumps", async () => {
+    const currentNow = new Date("2026-09-10T10:00:00Z");
+    const oldNow = new Date("2026-09-08T10:00:00Z");
+    await createPreparationRunWithItems(matt.id, oldNow, [{ ticker: "TECHAGGOLD", status: "READY" }], "COMPLETE");
+    await createPreparationRunWithItems(
+      matt.id,
+      currentNow,
+      [
+        { ticker: "TECHAGGPENDING", status: "PENDING" },
+        { ticker: "TECHAGGPROCESSING", status: "PROCESSING" },
+        { ticker: "TECHAGGREADY", status: "READY" },
+        { ticker: "TECHAGGDEFERRED", status: "DEFERRED" },
+        { ticker: "TECHAGGFAILED", status: "FAILED" },
+      ],
+      "IN_PROGRESS",
+    );
+
+    const aggregates = await getTechnicalPreparationRunAggregatesForUser(matt.id, currentNow);
+
+    expect(aggregates.currentMarketDate.toISOString().slice(0, 10)).toBe("2026-09-10");
+    expect(aggregates.requiredMarketDate.toISOString().slice(0, 10)).toBe("2026-09-09");
+    expect(aggregates.runs).toHaveLength(2);
+    const current = aggregates.runs.find((run) => run.marketDate.toISOString().slice(0, 10) === "2026-09-10");
+    expect(current).toMatchObject({
+      status: "IN_PROGRESS",
+      eligibleCount: 5,
+      itemCount: 5,
+      pendingCount: 1,
+      processingCount: 1,
+      readyCount: 1,
+      deferredCount: 1,
+      failedCount: 1,
+      isCurrentRunIdentity: true,
+    });
+    const old = aggregates.runs.find((run) => run.marketDate.toISOString().slice(0, 10) === "2026-09-08");
+    expect(old).toMatchObject({
+      status: "COMPLETE",
+      eligibleCount: 1,
+      itemCount: 1,
+      readyCount: 1,
+      isCurrentRunIdentity: false,
+    });
+  });
+
+  it("Sep 10 5:31 AM ET run treats Sep 9 snapshots as fresh, preserves READY items, skips the gate, and completes", async () => {
+    const now = new Date("2026-09-10T09:31:00Z");
+    const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
+    const readyTickers = ["TECHSEP10READY0", "TECHSEP10READY1", "TECHSEP10READY2"];
+    const pendingTickers = ["TECHSEP10PENDING0", "TECHSEP10PENDING1"];
+    await seedUniverse([...readyTickers, ...pendingTickers]);
+
+    const run = await createPreparationRunWithItems(
+      matt.id,
+      now,
+      [
+        ...readyTickers.map((ticker) => ({ ticker, status: "READY" as const })),
+        ...pendingTickers.map((ticker) => ({ ticker, status: "PENDING" as const })),
+      ],
+      "IN_PROGRESS",
+    );
+    expect(run.marketDate.toISOString().slice(0, 10)).toBe("2026-09-10");
+    expect(requiredMarketDate.toISOString().slice(0, 10)).toBe("2026-09-09");
+
+    await prisma.technicalIndicatorSnapshot.createMany({
+      data: readyTickers.map((ticker) => ({
+        userId: matt.id,
+        ticker,
+        status: "READY" as const,
+        asOfDate: requiredMarketDate,
+        rsi: 25,
+        bbLower: 15,
+        bbMiddle: 20,
+        bbUpper: 25,
+      })),
+    });
+
+    const historyFetches: string[] = [];
+    const provider = fakeProvider({
+      quotes: {},
+      candlesByTicker: Object.fromEntries(pendingTickers.map((ticker) => [ticker, syntheticCandles(ticker, 80, requiredMarketDate)])),
+      onGetPriceHistory: (ticker) => historyFetches.push(ticker),
+    });
+
+    const reused = await getOrCreateActiveTechnicalPreparationRunRaw(matt.id, provider, now, { probeUniverseSource: TEST_SOURCE });
+    expect(reused.status).toBe("OK");
+    if (reused.status !== "OK") throw new Error("expected OK");
+    expect(reused.runId).toBe(run.id);
+    expect(historyFetches).toEqual([]); // 3 genuinely-fresh READY rows are enough proof to skip the gate.
+    expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "READY" } })).toBe(3);
+    expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "PENDING" } })).toBe(2);
+
+    const batch = await refreshTechnicalIndicatorCacheBatchForUserRaw(matt.id, provider, { batchSize: 5, now, probeUniverseSource: TEST_SOURCE });
+    expect(batch.status).toBe("OK");
+    if (batch.status !== "OK") throw new Error("expected OK");
+    expect(batch.processedCount).toBe(2);
+    expect(batch.succeededCount).toBe(2);
+    expect(batch.remainingEligibleCount).toBe(0);
+    expect(historyFetches.sort()).toEqual([...pendingTickers].sort()); // still no gate probe calls.
+
+    const completedRun = await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(completedRun.status).toBe("COMPLETE");
+    expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "READY" } })).toBe(5);
+    const lookup = await getTechnicalIndicatorSnapshotsForUser(matt.id, [...readyTickers, ...pendingTickers], now);
+    for (const ticker of [...readyTickers, ...pendingTickers]) {
+      const entry = lookup.get(ticker);
+      expect(entry?.state).toBe("READY");
+      if (entry?.state === "READY") {
+        expect(entry.asOfDate.toISOString().slice(0, 10)).toBe("2026-09-09");
+      }
+    }
+  });
+
+  it("Sep 10 5:31 AM ET run repairs Sep 8 READY items as stale before reprocessing them", async () => {
+    const now = new Date("2026-09-10T09:31:00Z");
+    const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
+    const staleMarketDate = dateOnlyUtc(new Date("2026-09-08T20:00:00Z"));
+    const tickers = ["TECHSEP8STALE0", "TECHSEP8STALE1", "TECHSEP8STALE2", "TECHSEP8PENDING"];
+    await seedUniverse(tickers);
+
+    const run = await createPreparationRunWithItems(
+      matt.id,
+      now,
+      tickers.map((ticker) => ({ ticker, status: ticker === "TECHSEP8PENDING" ? ("PENDING" as const) : ("READY" as const) })),
+      "COMPLETE",
+    );
+    expect(run.marketDate.toISOString().slice(0, 10)).toBe("2026-09-10");
+    expect(requiredMarketDate.toISOString().slice(0, 10)).toBe("2026-09-09");
+    expect(staleMarketDate.toISOString().slice(0, 10)).toBe("2026-09-08");
+
+    await prisma.technicalIndicatorSnapshot.createMany({
+      data: tickers
+        .filter((ticker) => ticker !== "TECHSEP8PENDING")
+        .map((ticker) => ({
+          userId: matt.id,
+          ticker,
+          status: "READY" as const,
+          asOfDate: staleMarketDate,
+          rsi: 25,
+          bbLower: 15,
+          bbMiddle: 20,
+          bbUpper: 25,
+        })),
+    });
+    expect((await getTechnicalIndicatorSnapshotsForUser(matt.id, ["TECHSEP8STALE0"], now)).get("TECHSEP8STALE0")?.state).toBe(
+      "TECHNICAL_DATA_STALE",
+    );
+
+    const historyFetches: string[] = [];
+    const provider = fakeProvider({
+      quotes: {},
+      candlesByTicker: Object.fromEntries([...GATE_CONTROL_TICKERS, ...tickers].map((ticker) => [ticker, syntheticCandles(ticker, 80, requiredMarketDate)])),
+      onGetPriceHistory: (ticker) => historyFetches.push(ticker),
+    });
+
+    const batch = await refreshTechnicalIndicatorCacheBatchForUserRaw(matt.id, provider, { batchSize: 5, now, probeUniverseSource: TEST_SOURCE });
+    expect(batch.status).toBe("OK");
+    if (batch.status !== "OK") throw new Error("expected OK");
+    expect(batch.processedCount).toBe(4);
+    expect(batch.succeededCount).toBe(4);
+    expect(batch.remainingEligibleCount).toBe(0);
+
+    const gateProbeCalls = historyFetches.filter((ticker) => GATE_CONTROL_TICKER_SET.has(ticker));
+    const workCalls = historyFetches.filter((ticker) => !GATE_CONTROL_TICKER_SET.has(ticker));
+    expect(gateProbeCalls).toHaveLength(5); // stale Sep 8 READY rows did not count as the 3-row gate-skip proof.
+    expect(workCalls.sort()).toEqual([...tickers].sort());
+
+    const completedRun = await prisma.technicalPreparationRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(completedRun.status).toBe("COMPLETE");
+    expect(await prisma.technicalPreparationItem.count({ where: { runId: run.id, status: "READY" } })).toBe(4);
+    const lookup = await getTechnicalIndicatorSnapshotsForUser(matt.id, tickers, now);
+    for (const ticker of tickers) {
+      const entry = lookup.get(ticker);
+      expect(entry?.state).toBe("READY");
+      if (entry?.state === "READY") {
+        expect(entry.asOfDate.toISOString().slice(0, 10)).toBe("2026-09-09");
+      }
+    }
   });
 
   it("a current-enough candle marks the item READY on the very first attempt (deferredAttempts stays 0)", async () => {
@@ -882,7 +1118,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(getQuotesCallCount).toBe(0); // the completed run was reused - no new sweep
   });
 
-  it("a change to the user's price/volume rules invalidates the persisted eligibility set - a new run (and a real re-sweep) is created", async () => {
+  it("a change to the user's price rule invalidates the persisted eligibility set - a new run (and a real re-sweep) is created", async () => {
     await seedUniverse(["TECHFP1", "TECHFP2"]);
     const provider = fakeProvider({ quotes: { TECHFP1: { price: 20, volume: 1_000_000 }, TECHFP2: { price: 20, volume: 1_000_000 } } });
 
@@ -903,6 +1139,29 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(secondRun.runId).not.toBe(firstRun.runId);
     expect(getQuotesCallCount).toBe(1);
     expect(secondRun.eligibleCount).toBe(0); // both tickers now fail the tightened price rule
+  });
+
+  it("a change to the live stock-volume rule does not invalidate technical preparation when volume is not part of preparation eligibility", async () => {
+    await seedUniverse(["TECHFV1", "TECHFV2"]);
+    const provider = fakeProvider({ quotes: { TECHFV1: { price: 20, volume: 100_000 }, TECHFV2: { price: 20, volume: 100_000 } } });
+
+    const firstRun = await getOrCreateActiveTechnicalPreparationRun(matt.id, provider);
+
+    await setStockVolumeRuleMinimum(matt.id, 2_000_000); // live-scan-only now; should not affect prep run identity
+
+    let getQuotesCallCount = 0;
+    const providerAfterRuleChange = fakeProvider({
+      quotes: { TECHFV1: { price: 20, volume: 100_000 }, TECHFV2: { price: 20, volume: 100_000 } },
+      onGetQuotes: () => {
+        getQuotesCallCount += 1;
+      },
+    });
+    const secondRun = await getOrCreateActiveTechnicalPreparationRun(matt.id, providerAfterRuleChange);
+
+    expect(secondRun.freshlyCreated).toBe(false);
+    expect(secondRun.runId).toBe(firstRun.runId);
+    expect(secondRun.eligibleCount).toBe(2);
+    expect(getQuotesCallCount).toBe(0);
   });
 
   it("old technical data survives a failed Phase A quote sweep - no run/items are created, and existing snapshots are untouched", async () => {

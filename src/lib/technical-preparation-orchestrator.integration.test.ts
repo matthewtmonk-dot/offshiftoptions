@@ -1,5 +1,6 @@
 import { hash } from "bcryptjs";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { scannerRulesFromRecords } from "@/domain/scanner/profile";
 import type { MarketDataProvider, MarketQuote, PriceCandle } from "@/providers/market-data/types";
 
 const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
@@ -153,6 +154,23 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     });
   }
 
+  async function createPreparationRunWithPendingItems(userId: string, now: Date, tickers: string[]) {
+    const [{ ensureMyLstScannerProfileForUser }, { computeQuoteStageRulesFingerprint, dateOnlyUtc }] = await Promise.all([
+      import("./workflows"),
+      import("./technical-indicator-cache"),
+    ]);
+    const profile = await ensureMyLstScannerProfileForUser(userId);
+    const records = await prisma.scannerRule.findMany({ where: { profileId: profile.id }, orderBy: { sortOrder: "asc" } });
+    const rulesFingerprint = computeQuoteStageRulesFingerprint(scannerRulesFromRecords(records));
+    const run = await prisma.technicalPreparationRun.create({
+      data: { userId, marketDate: dateOnlyUtc(now), rulesFingerprint, eligibleCount: tickers.length, status: "IN_PROGRESS" },
+    });
+    await prisma.technicalPreparationItem.createMany({
+      data: tickers.map((ticker) => ({ runId: run.id, ticker, priority: 2, status: "PENDING" })),
+    });
+    return run;
+  }
+
   /** Resolves ONLY `userId` to a real working provider - any other candidate (including a stray
    * BrokerConnection row belonging to some other concurrently-running test file's own fixture
    * user) safely resolves to UNAVAILABLE, so this test's assertions about "which user got
@@ -198,7 +216,8 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
   it("processes at most MAX_SUB_BATCHES_PER_INVOCATION existing 25-symbol batches, never more, using the current authenticated user's own provider only", async () => {
     await createConnectedBrokerRow(matt.id, "matt-bounded");
     const tickers = syntheticTickers(200); // far more than one invocation's cap should ever touch
-    await seedUniverse(tickers);
+    await seedUniverse([]);
+    await createPreparationRunWithPendingItems(matt.id, WITHIN_WINDOW_NOW, tickers);
     let getQuotesCallCount = 0;
     let historyCallCount = 0;
     const provider = fakeProvider({
@@ -218,9 +237,10 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
     expect(result.subBatchesProcessed).toBe(5); // MAX_SUB_BATCHES_PER_INVOCATION
     expect(result.historySymbolsProcessed).toBe(125); // 5 * 25 - Phase B only, never counts the gate's own probe
     // 125 real Phase B fetches + 5 one-time gate probe requests (checkDailyCandleAvailabilityGate,
-    // spent once when this invocation creates the new run) - never more than that fixed overhead.
+    // spent once before continuing an existing run with no fresh READY proof yet) - never more
+    // than that fixed overhead.
     expect(historyCallCount).toBe(130);
-    expect(getQuotesCallCount).toBe(1); // Stage A swept exactly once for this whole invocation
+    expect(getQuotesCallCount).toBe(0); // existing run reused - no Phase A quote sweep
     expect(result.generationStatus).toBe("IN_PROGRESS"); // 200 eligible, only 125 done
     expect(result.remainingEligibleCount).toBe(75);
     expect(resolveMarketDataProviderForUserMock).toHaveBeenCalledWith(matt.id);

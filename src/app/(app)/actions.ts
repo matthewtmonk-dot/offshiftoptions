@@ -56,6 +56,7 @@ import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "@/lib/occ-optionable-universe-re
 import {
   getTechnicalCacheFreshnessBreakdownForUser,
   getTechnicalCacheReadinessForUser,
+  getTechnicalPreparationRunAggregatesForUser,
   refreshTechnicalIndicatorCacheBatchForUser,
   TECHNICAL_REFRESH_BATCH_SIZE,
 } from "@/lib/technical-indicator-cache";
@@ -656,6 +657,52 @@ export async function getTechnicalCacheFreshnessBreakdownAction(): Promise<Techn
     requiredMarketDate: breakdown.requiredMarketDate.toISOString().slice(0, 10),
     newestSnapshotMarketDate: breakdown.newestSnapshotMarketDate?.toISOString().slice(0, 10) ?? null,
     oldestFreshSnapshotMarketDate: breakdown.oldestFreshSnapshotMarketDate?.toISOString().slice(0, 10) ?? null,
+  };
+}
+
+export type TechnicalPreparationRunAggregatesActionResult = {
+  status: "OK";
+  currentMarketDate: string;
+  requiredMarketDate: string;
+  runs: {
+    marketDate: string;
+    runStatus: "IN_PROGRESS" | "COMPLETE";
+    eligibleCount: number | null;
+    itemCount: number;
+    pendingCount: number;
+    processingCount: number;
+    readyCount: number;
+    deferredCount: number;
+    failedCount: number;
+    isCurrentRunIdentity: boolean;
+    createdAt: string;
+    updatedAt: string;
+  }[];
+};
+
+/** DB-only aggregate preparation-run diagnostic. It never resolves a provider, never creates or
+ * reconciles a run, never fetches quotes/history, and never lists tickers or account data. */
+export async function getTechnicalPreparationRunAggregatesAction(): Promise<TechnicalPreparationRunAggregatesActionResult> {
+  const user = await requireCurrentUser();
+  const aggregates = await getTechnicalPreparationRunAggregatesForUser(user.id);
+  return {
+    status: "OK",
+    currentMarketDate: aggregates.currentMarketDate.toISOString().slice(0, 10),
+    requiredMarketDate: aggregates.requiredMarketDate.toISOString().slice(0, 10),
+    runs: aggregates.runs.map((run) => ({
+      marketDate: run.marketDate.toISOString().slice(0, 10),
+      runStatus: run.status,
+      eligibleCount: run.eligibleCount,
+      itemCount: run.itemCount,
+      pendingCount: run.pendingCount,
+      processingCount: run.processingCount,
+      readyCount: run.readyCount,
+      deferredCount: run.deferredCount,
+      failedCount: run.failedCount,
+      isCurrentRunIdentity: run.isCurrentRunIdentity,
+      createdAt: run.createdAt.toISOString(),
+      updatedAt: run.updatedAt.toISOString(),
+    })),
   };
 }
 

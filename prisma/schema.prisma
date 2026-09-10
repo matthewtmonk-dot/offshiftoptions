@@ -1249,20 +1249,21 @@ model TechnicalIndicatorSnapshot {
   @@index([userId, status])
 }
 
-/// A single Phase A (quote-stage eligibility) sweep result, persisted so Phase B (history
+/// A single Phase A (technical-preparation eligibility) sweep result, persisted so Phase B (history
 /// processing) never has to repeat it - see technical-indicator-cache.ts. Confirmed by real
 /// production evidence that every history batch was redundantly re-running the full ~6,071-
 /// symbol OCC quote sweep (~61 Schwab /quotes requests) before this - a run is now computed once
 /// and its TechnicalPreparationItem rows are simply consumed by many small Phase B batches.
 ///
-/// `rulesFingerprint` is a deterministic hash of ONLY the two quote-stage rules Phase A actually
-/// evaluates (price, stockVolume - their `desired` values; an absent rule means "disabled," so
-/// its own absence from the hashed input already encodes that). A user changing either rule makes
-/// their current fingerprint stop matching this run's, so a new run is naturally created rather
-/// than silently reusing a stale eligible set computed under different rules - see
-/// computeQuoteStageRulesFingerprint. Deliberately does NOT hash Research/Watchlist membership -
-/// that only affects priority (ordering) within an already-valid set, never which tickers are
-/// eligible at all, so it doesn't need to invalidate a run.
+/// `rulesFingerprint` is a deterministic hash of ONLY the stock-price rule Phase A actually
+/// evaluates for technical coverage. Stock volume remains an interactive live-scan rule, but it
+/// is deliberately not part of preparation eligibility or this fingerprint because current-
+/// session volume does not change which history-derived RSI/BB snapshots should be prepared. A
+/// user changing the price range makes their current fingerprint stop matching this run's, so a
+/// new run is naturally created rather than silently reusing a stale eligible set computed under
+/// different rules - see computeQuoteStageRulesFingerprint. Deliberately does NOT hash Research/
+/// Watchlist membership - that only affects priority (ordering) within an already-valid set,
+/// never which tickers are eligible at all, so it doesn't need to invalidate a run.
 ///
 /// `marketDate` is the calendar date (real Postgres DATE, no timezone shift) this sweep's live
 /// quotes were captured on - used to naturally start a fresh run each new day, alongside the

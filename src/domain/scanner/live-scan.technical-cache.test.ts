@@ -227,6 +227,42 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
     expect(thick?.values.rsi).toBe(25);
   });
 
+  it("once live volume rises above the configured rule, an already-prepared ticker uses cached RSI/BB", async () => {
+    const technicalCache = new Map<string, LiveScanTechnicalLookup>([
+      ["THIN", { state: "READY", rsi: 25, bbLower: 15, bbMiddle: 20, bbUpper: 25 }],
+    ]);
+    const lowVolumeProvider = buildProvider({
+      getQuotes: async (symbols) =>
+        new Map(
+          symbols.map((symbol) => [
+            symbol,
+            { symbol, price: 20, volume: 5_000, asOf: new Date("2026-09-08T12:30:00Z") },
+          ]),
+        ),
+    });
+    const higherVolumeProvider = buildProvider({
+      getQuotes: async (symbols) =>
+        new Map(
+          symbols.map((symbol) => [
+            symbol,
+            { symbol, price: 20, volume: 100_000, asOf: new Date("2026-09-08T14:30:00Z") },
+          ]),
+        ),
+    });
+
+    const earlyResults = await evaluateLiveMarketScan({ provider: lowVolumeProvider, rules, universe: ["THIN"], technicalCache });
+    const laterResults = await evaluateLiveMarketScan({ provider: higherVolumeProvider, rules, universe: ["THIN"], technicalCache });
+    const earlyThin = earlyResults.find((result) => result.ticker === "THIN");
+    const laterThin = laterResults.find((result) => result.ticker === "THIN");
+
+    expect(earlyThin?.funnelStage).toBe("QUOTE_EXCLUDED");
+    expect(earlyThin?.values.rsi).toBeNull();
+    expect(laterThin?.funnelStage).toBe("STOCK_STAGE");
+    expect(laterThin?.values.stockVolume).toBe(100_000);
+    expect(laterThin?.values.rsi).toBe(25);
+    expect(laterThin?.values.bbPercent).toBe(50);
+  });
+
   it("tags funnelStage and reachedOptionChainLookup correctly across every category", async () => {
     const provider = buildProvider({
       async getQuote(symbol) {

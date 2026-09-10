@@ -7,12 +7,14 @@ import { shortCalendarDate, shortDateTime } from "@/lib/format";
 import {
   getTechnicalCacheFreshnessBreakdownAction,
   getTechnicalCacheReadinessAction,
+  getTechnicalPreparationRunAggregatesAction,
   warmTechnicalIndicatorCacheAction,
 } from "../../actions";
 import type {
   TechnicalCacheFreshnessBreakdownActionResult,
   TechnicalCacheReadinessActionResult,
   TechnicalCacheWarmActionResult,
+  TechnicalPreparationRunAggregatesActionResult,
 } from "../../actions";
 
 type PanelState =
@@ -29,9 +31,16 @@ type FreshnessState =
   | { status: "result"; result: TechnicalCacheFreshnessBreakdownActionResult }
   | { status: "unexpected-error" };
 
+type RunAggregatesState =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "result"; result: TechnicalPreparationRunAggregatesActionResult }
+  | { status: "unexpected-error" };
+
 export function TechnicalCachePanel() {
   const [state, setState] = useState<PanelState>({ status: "idle" });
   const [freshness, setFreshness] = useState<FreshnessState>({ status: "idle" });
+  const [runAggregates, setRunAggregates] = useState<RunAggregatesState>({ status: "idle" });
   const busy = state.status === "checking" || state.status === "warming";
 
   async function checkReadiness() {
@@ -53,6 +62,17 @@ export function TechnicalCachePanel() {
       setFreshness({ status: "result", result });
     } catch {
       setFreshness({ status: "unexpected-error" });
+    }
+  }
+
+  async function checkRunAggregates() {
+    if (runAggregates.status === "checking") return;
+    setRunAggregates({ status: "checking" });
+    try {
+      const result = await getTechnicalPreparationRunAggregatesAction();
+      setRunAggregates({ status: "result", result });
+    } catch {
+      setRunAggregates({ status: "unexpected-error" });
     }
   }
 
@@ -100,6 +120,16 @@ export function TechnicalCachePanel() {
           <RefreshCw className={`size-3.5 ${freshness.status === "checking" ? "motion-safe:animate-spin" : ""}`} aria-hidden />
           {freshness.status === "checking" ? "Checking…" : "Freshness Detail (DB only)"}
         </button>
+        <button
+          type="button"
+          onClick={checkRunAggregates}
+          disabled={runAggregates.status === "checking"}
+          data-testid="check-technical-preparation-runs-button"
+          className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100 disabled:cursor-wait disabled:opacity-75"
+        >
+          <RefreshCw className={`size-3.5 ${runAggregates.status === "checking" ? "motion-safe:animate-spin" : ""}`} aria-hidden />
+          {runAggregates.status === "checking" ? "Checking…" : "Run Detail (DB only)"}
+        </button>
       </div>
 
       {state.status === "unexpected-error" ? <p className="text-sm text-red-300">Request failed unexpectedly.</p> : null}
@@ -108,6 +138,8 @@ export function TechnicalCachePanel() {
       {state.status === "warmed" ? <WarmResult result={state.result} /> : null}
       {freshness.status === "unexpected-error" ? <p className="text-sm text-red-300">Request failed unexpectedly.</p> : null}
       {freshness.status === "result" ? <FreshnessResult result={freshness.result} /> : null}
+      {runAggregates.status === "unexpected-error" ? <p className="text-sm text-red-300">Request failed unexpectedly.</p> : null}
+      {runAggregates.status === "result" ? <RunAggregatesResult result={runAggregates.result} /> : null}
     </div>
   );
 }
@@ -202,6 +234,42 @@ function FreshnessResult({ result }: { result: TechnicalCacheFreshnessBreakdownA
           {result.oldestFreshSnapshotMarketDate ? shortCalendarDate(result.oldestFreshSnapshotMarketDate) : "none"}
         </span>
       </div>
+    </Panel>
+  );
+}
+
+function RunAggregatesResult({ result }: { result: TechnicalPreparationRunAggregatesActionResult }) {
+  return (
+    <Panel title="Preparation Runs">
+      <p className="mb-3 text-xs text-zinc-500">
+        Current market date: {shortCalendarDate(result.currentMarketDate)} - Required candle date:{" "}
+        {shortCalendarDate(result.requiredMarketDate)}
+      </p>
+      {result.runs.length === 0 ? (
+        <p className="text-sm text-zinc-300">No technical preparation runs found for your user.</p>
+      ) : (
+        <div className="space-y-3">
+          {result.runs.map((run) => (
+            <div key={`${run.marketDate}-${run.createdAt}`} className="border-t border-zinc-800 pt-3 first:border-t-0 first:pt-0">
+              <div className="mb-2 flex flex-wrap gap-2">
+                <Badge tone="info">Market date: {shortCalendarDate(run.marketDate)}</Badge>
+                <Badge tone={run.runStatus === "COMPLETE" ? "good" : "warn"}>{run.runStatus}</Badge>
+                <Badge tone="neutral">Eligible: {run.eligibleCount ?? "creating"}</Badge>
+                <Badge tone="neutral">Items: {run.itemCount}</Badge>
+                {run.isCurrentRunIdentity ? <Badge tone="good">Current rules</Badge> : <Badge tone="neutral">Prior rules/date</Badge>}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Badge tone="good">Ready: {run.readyCount}</Badge>
+                <Badge tone="neutral">Pending: {run.pendingCount}</Badge>
+                {run.processingCount > 0 ? <Badge tone="info">Processing: {run.processingCount}</Badge> : null}
+                {run.deferredCount > 0 ? <Badge tone="warn">Deferred: {run.deferredCount}</Badge> : null}
+                {run.failedCount > 0 ? <Badge tone="bad">Failed: {run.failedCount}</Badge> : null}
+                <Badge tone="info">Updated: {shortDateTime(run.updatedAt)}</Badge>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </Panel>
   );
 }

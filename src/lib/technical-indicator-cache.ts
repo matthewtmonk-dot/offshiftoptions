@@ -11,6 +11,7 @@ import { scannerRulesFromRecords } from "@/domain/scanner/profile";
 import type { ScannerRule } from "@/domain/scanner/scanner";
 import { STARTER_LIVE_SCAN_UNIVERSE } from "@/domain/scanner/live-scan";
 import type { MarketDataProvider, MarketQuote } from "@/providers/market-data/types";
+import type { TechnicalPreparationItemStatus, TechnicalPreparationRunStatus } from "@/generated/prisma/enums";
 
 /**
  * User-scoped technical indicator cache - see TechnicalIndicatorSnapshot's own schema doc
@@ -31,7 +32,7 @@ import type { MarketDataProvider, MarketQuote } from "@/providers/market-data/ty
  */
 
 // ---------------------------------------------------------------------------------------------
-// Phase A: the eligible-for-technical-refresh ticker set (quote-stage survivors).
+// Phase A: the eligible-for-technical-refresh ticker set (price-scoped technical coverage).
 // ---------------------------------------------------------------------------------------------
 
 export type TechnicalRefreshPriority = 1 | 2;
@@ -39,9 +40,9 @@ export type TechnicalRefreshPriority = 1 | 2;
 export type EligibleTechnicalRefreshTicker = {
   ticker: string;
   /** 1 = this user's own Research/Watchlist/traded tickers (existing Tier 1 concept - see
-   * getResearchUniverseTickersForUser); 2 = every other quote-stage (price+volume) survivor.
+   * getResearchUniverseTickersForUser); 2 = every other price-range survivor.
    * Deliberately just two tiers, in a stable/deterministic order within each - no invented
-   * "strength" scoring beyond what the scanner's own configured rules already decide. */
+   * "strength" scoring beyond what technical preparation itself needs to decide. */
   priority: TechnicalRefreshPriority;
 };
 
@@ -52,29 +53,30 @@ async function loadUserQuoteStageRules(userId: string): Promise<ScannerRule[]> {
 }
 
 /**
- * A deterministic fingerprint of ONLY the two quote-stage rules Phase A actually evaluates
- * (price, stockVolume) - a rule's absence from `rules` already means "disabled" (see
- * scannerRulesFromRecords), so that absence is itself part of what gets hashed. Used to decide
- * whether a persisted TechnicalPreparationRun's eligible set is still valid for this user's
- * CURRENT rule configuration - if Matt changes his price range or volume rule, his fingerprint
- * changes, and the old run's set is never silently reused. Deliberately does NOT hash Research/
- * Watchlist membership (that only affects priority ordering, never which tickers are eligible at
- * all) or any other rule this Phase never looks at.
+ * A deterministic fingerprint of ONLY the rule Phase A actually evaluates for technical coverage:
+ * price. The historical function name is retained because it already keys existing run identity,
+ * but stockVolume is deliberately excluded here: live/current-session volume decides whether a
+ * symbol passes the interactive scanner right now, not whether RSI/BB should be prepared ahead of
+ * time. A rule's absence from `rules` already means "disabled" (see scannerRulesFromRecords), so
+ * that absence is itself part of what gets hashed. Deliberately does NOT hash Research/Watchlist
+ * membership (that only affects priority ordering, never which tickers are eligible at all) or any
+ * other rule this Phase never looks at.
  */
 export function computeQuoteStageRulesFingerprint(rules: ScannerRule[]): string {
   const priceRule = rules.find((rule) => rule.key === "price");
-  const volumeRule = rules.find((rule) => rule.key === "stockVolume");
-  const payload = JSON.stringify({ price: priceRule?.desired ?? null, stockVolume: volumeRule?.desired ?? null });
+  const payload = JSON.stringify({ price: priceRule?.desired ?? null });
   return createHash("sha256").update(payload).digest("hex");
 }
 
 /**
  * Phase A: OCC's public Tier 2 universe (union this user's own private Tier 1 tickers) -> one
  * batched getQuotes call (VERIFIED chunked at SCHWAB_QUOTE_BATCH_SIZE=100 - see
- * SchwabMarketDataProvider.getQuotes) -> this user's own configured price/volume rules. Mirrors
- * runScannerUniverseDryRun's exact same universe-building and quote-only rule evaluation (same
- * evaluateCandidate engine, same rule keys) - never a second/different filtering formula - but
- * returns the actual surviving ticker list (with priority) instead of only counts.
+ * SchwabMarketDataProvider.getQuotes) -> this user's own configured stock-price range. This is
+ * intentionally a SAFE SUPERSET for technical indicator preparation: RSI/BB are history-derived
+ * values that should be ready before the live scanner applies current-session market filters such
+ * as stockVolume. The interactive live scanner still enforces the enabled stockVolume rule at scan
+ * time; preparation simply does not discard a price-eligible ticker because quote.volume is low
+ * before the regular session has accumulated volume.
  *
  * Called ONLY when getOrCreateActiveTechnicalPreparationRun decides a fresh sweep is actually
  * needed (see below) - never on every Phase B batch anymore.
@@ -90,7 +92,6 @@ export async function getEligibleTechnicalRefreshTickersForUser(
   ]);
 
   const priceRule = rules.find((rule) => rule.key === "price");
-  const volumeRule = rules.find((rule) => rule.key === "stockVolume");
 
   const userTickerSet = new Set(userTickers.map((ticker) => ticker.toUpperCase()));
   const universe = [...new Set([...STARTER_LIVE_SCAN_UNIVERSE, ...userTickers, ...publicUniverse.map((row) => row.ticker)])]
@@ -107,11 +108,6 @@ export async function getEligibleTechnicalRefreshTickersForUser(
     if (priceRule) {
       const [low, high] = priceRule.desired as [number, number];
       if (quote.price < low || quote.price > high) continue;
-    }
-    if (volumeRule) {
-      const volume = quote.volume ?? null;
-      const [min] = Array.isArray(volumeRule.desired) ? volumeRule.desired : [volumeRule.desired as number];
-      if (volume === null || volume < min) continue;
     }
 
     survivors.push({ ticker, priority: userTickerSet.has(ticker) ? 1 : 2 });
@@ -230,7 +226,7 @@ export async function runLatestCandleFreshnessDiagnostic(
   now: Date = new Date(),
   options: { universeSource?: string; symbolCount?: number } = {},
 ): Promise<LatestCandleFreshnessDiagnosticResult> {
-  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
   const symbols = await loadDeterministicSymbols(options.symbolCount ?? LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT, options.universeSource);
 
   const rows: LatestCandleFreshnessRow[] = [];
@@ -328,7 +324,7 @@ export async function checkDailyCandleAvailabilityGate(
   }
 
   const successfulProbeCount = freshProbeCount + staleProbeCount;
-  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
   const ready = successfulProbeCount >= GATE_MIN_SUCCESSFUL_PROBES && staleProbeCount === 0;
 
   if (ready) {
@@ -477,7 +473,7 @@ async function existingRunResultAfterSafetyChecks(
   now: Date,
   options: { probeUniverseSource?: string },
 ): Promise<GetOrCreateTechnicalPreparationRunResult> {
-  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
   const reconciliation = await reconcileRunCompletionState(userId, run.runId, requiredMarketDate);
 
   if (reconciliation.remainingProcessableCount === 0) {
@@ -594,7 +590,7 @@ export async function getOrCreateActiveTechnicalPreparationRun(
   // We won the race - perform the one real quote sweep for this cycle.
   try {
     const eligible = await getEligibleTechnicalRefreshTickersForUser(userId, provider);
-    const freshCutoff = dateOnlyUtc(previousNyseMarketDay(now));
+    const freshCutoff = requiredTechnicalMarketDateUtc(now);
     const existingSnapshots = eligible.length
       ? await prisma.technicalIndicatorSnapshot.findMany({
           where: { userId, ticker: { in: eligible.map((item) => item.ticker) } },
@@ -823,7 +819,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
   // The live scan's own freshness cutoff, computed once for this whole batch - a candle must be
   // at least this new to be marked READY. Never derived from invocation time alone; always via
   // the same canonical previousNyseMarketDay helper the live scan itself uses.
-  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
 
   const existingSnapshots = claimedItems.length
     ? await prisma.technicalIndicatorSnapshot.findMany({
@@ -1011,6 +1007,10 @@ export function dateOnlyUtc(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
 
+export function requiredTechnicalMarketDateUtc(now: Date): Date {
+  return dateOnlyUtc(previousNyseMarketDay(now));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Read path: for the eventual live-scan join (NOT wired into evaluateLiveMarketScan yet).
 // ---------------------------------------------------------------------------------------------
@@ -1040,7 +1040,7 @@ export async function getTechnicalIndicatorSnapshotsForUser(
   if (!normalized.length) return map;
 
   const rows = await prisma.technicalIndicatorSnapshot.findMany({ where: { userId, ticker: { in: normalized } } });
-  const freshCutoff = dateOnlyUtc(previousNyseMarketDay(now));
+  const freshCutoff = requiredTechnicalMarketDateUtc(now);
   const byTicker = new Map(rows.map((row) => [row.ticker, row]));
 
   for (const ticker of normalized) {
@@ -1187,7 +1187,7 @@ export type TechnicalCacheFreshnessBreakdown = {
  * which are allowed to trigger a real quote sweep on first use).
  */
 export async function getTechnicalCacheFreshnessBreakdownForUser(userId: string, now: Date = new Date()): Promise<TechnicalCacheFreshnessBreakdown> {
-  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
   const rules = await loadUserQuoteStageRules(userId);
   const fingerprint = computeQuoteStageRulesFingerprint(rules);
   const marketDate = dateOnlyUtc(now);
@@ -1275,6 +1275,106 @@ export async function getTechnicalCacheFreshnessBreakdownForUser(userId: string,
 }
 
 // ---------------------------------------------------------------------------------------------
+// Preparation-run aggregate diagnostic - read-only counts across recent runs. This answers
+// whether an observed worker response represented the whole run or only the remaining claimed
+// work, without listing tickers, touching account data, resolving a provider, creating a run, or
+// reconciling/mutating any item state.
+// ---------------------------------------------------------------------------------------------
+
+export type TechnicalPreparationRunAggregateRow = {
+  marketDate: Date;
+  status: TechnicalPreparationRunStatus;
+  eligibleCount: number | null;
+  itemCount: number;
+  pendingCount: number;
+  processingCount: number;
+  readyCount: number;
+  deferredCount: number;
+  failedCount: number;
+  isCurrentRunIdentity: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type TechnicalPreparationRunAggregates = {
+  currentMarketDate: Date;
+  requiredMarketDate: Date;
+  runs: TechnicalPreparationRunAggregateRow[];
+};
+
+function emptyTechnicalPreparationItemCounts(): Record<TechnicalPreparationItemStatus, number> {
+  return { PENDING: 0, PROCESSING: 0, READY: 0, DEFERRED: 0, FAILED: 0 };
+}
+
+export async function getTechnicalPreparationRunAggregatesForUser(
+  userId: string,
+  now: Date = new Date(),
+  limit = 5,
+): Promise<TechnicalPreparationRunAggregates> {
+  const rules = await loadUserQuoteStageRules(userId);
+  const currentRulesFingerprint = computeQuoteStageRulesFingerprint(rules);
+  const currentMarketDate = dateOnlyUtc(now);
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
+
+  const runs = await prisma.technicalPreparationRun.findMany({
+    where: { userId },
+    orderBy: [{ marketDate: "desc" }, { createdAt: "desc" }],
+    take: limit,
+    select: {
+      id: true,
+      marketDate: true,
+      rulesFingerprint: true,
+      status: true,
+      eligibleCount: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+
+  const countsByRunId = new Map<string, Record<TechnicalPreparationItemStatus, number>>();
+  for (const run of runs) {
+    countsByRunId.set(run.id, emptyTechnicalPreparationItemCounts());
+  }
+
+  if (runs.length) {
+    const grouped = await prisma.technicalPreparationItem.groupBy({
+      by: ["runId", "status"],
+      where: { runId: { in: runs.map((run) => run.id) } },
+      _count: { _all: true },
+    });
+
+    for (const group of grouped) {
+      const counts = countsByRunId.get(group.runId);
+      if (counts) {
+        counts[group.status] = group._count._all;
+      }
+    }
+  }
+
+  return {
+    currentMarketDate,
+    requiredMarketDate,
+    runs: runs.map((run) => {
+      const counts = countsByRunId.get(run.id) ?? emptyTechnicalPreparationItemCounts();
+      return {
+        marketDate: run.marketDate,
+        status: run.status,
+        eligibleCount: run.eligibleCount,
+        itemCount: Object.values(counts).reduce((sum, count) => sum + count, 0),
+        pendingCount: counts.PENDING,
+        processingCount: counts.PROCESSING,
+        readyCount: counts.READY,
+        deferredCount: counts.DEFERRED,
+        failedCount: counts.FAILED,
+        isCurrentRunIdentity: run.marketDate.getTime() === currentMarketDate.getTime() && run.rulesFingerprint === currentRulesFingerprint,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+      };
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Orchestration support - cheap, DB-only status reads for technical-preparation-orchestrator.ts.
 // Deliberately never touches a provider or does a quote sweep itself - only
 // getOrCreateActiveTechnicalPreparationRun (already above) is allowed to do that.
@@ -1311,7 +1411,7 @@ export async function getTechnicalPreparationStatusForUser(userId: string, now: 
     return { hasRunForToday: true, isComplete: false, lastTouchedAt: run.updatedAt };
   }
 
-  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
   const reconciliation = await reconcileRunCompletionState(userId, run.id, requiredMarketDate);
   const isComplete = reconciliation.remainingProcessableCount === 0;
   return { hasRunForToday: true, isComplete, lastTouchedAt: run.updatedAt };
