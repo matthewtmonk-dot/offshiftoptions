@@ -31,7 +31,14 @@ export async function getDashboardData(userId: string) {
       }),
       prisma.tradingAccount.findMany({
         where: { userId },
-        include: { ledgerEntries: { orderBy: { occurredAt: "asc" } } },
+        include: {
+          ledgerEntries: { orderBy: { occurredAt: "asc" } },
+          brokerRecords: {
+            where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
+            orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+            select: brokerPerformanceRecordSelect,
+          },
+        },
       }),
       prisma.campaign.findMany({
         where: { ownerId: userId, status: { in: ["OPEN", "ASSIGNED"] } },
@@ -316,6 +323,11 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
       include: {
         snapshots: { orderBy: { capturedAt: "desc" }, take: 1 },
         ledgerEntries: { orderBy: { occurredAt: "asc" } },
+        brokerRecords: {
+          where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
+          orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+          select: brokerPerformanceRecordSelect,
+        },
         _count: { select: { campaigns: true } },
       },
     }),
@@ -324,8 +336,20 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
       orderBy: [{ user: { name: "asc" } }, { createdAt: "asc" }],
       include: {
         user: { select: { id: true, name: true } },
-        snapshots: { orderBy: { capturedAt: "desc" }, take: 1 },
-        ledgerEntries: { orderBy: { occurredAt: "asc" } },
+        snapshots: {
+          where: { account: { userId } },
+          orderBy: { capturedAt: "desc" },
+          take: 1,
+        },
+        ledgerEntries: {
+          where: { account: { userId } },
+          orderBy: { occurredAt: "asc" },
+        },
+        brokerRecords: {
+          where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
+          orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+          select: brokerPerformanceRecordSelect,
+        },
         _count: { select: { campaigns: true } },
       },
     }),
@@ -489,6 +513,11 @@ export async function getAccountPageData(userId: string) {
       orderBy: [{ source: "asc" }, { createdAt: "asc" }],
       include: {
         ledgerEntries: { orderBy: { occurredAt: "asc" } },
+        brokerRecords: {
+          where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
+          orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+          select: brokerPerformanceRecordSelect,
+        },
       },
     }),
     prisma.campaign.findMany({
@@ -499,3 +528,15 @@ export async function getAccountPageData(userId: string) {
 
   return { accounts, completedCampaigns };
 }
+
+const brokerPerformanceRecordSelect = {
+  id: true,
+  fingerprint: true,
+  kind: true,
+  status: true,
+  occurredAt: true,
+  action: true,
+  description: true,
+  amount: true,
+  metadata: true,
+} as const;

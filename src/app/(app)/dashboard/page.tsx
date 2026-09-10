@@ -9,7 +9,7 @@ import { requireCurrentUser } from "@/lib/auth";
 import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { splitBrokerPositionsByCampaignLink } from "@/lib/broker-reconciliation";
-import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
+import { summarizeAccountPerformance, summarizeAccountsPerformance } from "@/domain/finance/accountLedger";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
@@ -37,7 +37,7 @@ export default async function DashboardPage() {
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
 
   // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
-  // confirmed $0 in a "Realized trading P/L" figure - see getCampaignIdsWithUnknownFees.
+  // confirmed $0 in a Trading P/L figure - see getCampaignIdsWithUnknownFees.
   const unknownFeeCampaignIds = await getCampaignIdsWithUnknownFees(data.completedCampaigns.map((campaign) => campaign.id));
 
   const completedPLByAccount = new Map<string, number>();
@@ -56,12 +56,23 @@ export default async function DashboardPage() {
   });
 
   const accountRows = data.ownAccounts.map((account) => {
-    const ledger = summarizeAccountLedger(account.ledgerEntries);
     const realized = completedPLByAccount.get(account.id) ?? 0;
-    return { account, ledger, realized, current: currentAccountValue(ledger, realized) };
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: account.ledgerEntries,
+      brokerRecords: account.brokerRecords,
+      fallbackTradingPL: realized,
+    });
+    return { account, ledger: performance.ledger, realized, current: { value: performance.currentValue }, performance };
   });
-  const totalValue = accountRows.reduce((sum, row) => sum + (row.current.value ?? 0), 0);
-  const hasAnyAccountValue = accountRows.some((row) => row.current.value !== null);
+  const accountPerformance = summarizeAccountsPerformance(
+    data.ownAccounts.map((account) => ({
+      ledgerEntries: account.ledgerEntries,
+      brokerRecords: account.brokerRecords,
+      fallbackTradingPL: completedPLByAccount.get(account.id) ?? 0,
+    })),
+  );
+  const totalValue = accountPerformance.currentValue ?? 0;
+  const hasAnyAccountValue = accountPerformance.currentValue !== null;
   const totalCash = accountRows.reduce((sum, row) => sum + (row.ledger.latestBrokerSnapshot?.cash ?? 0), 0);
   const hasAnyCash = accountRows.some((row) => row.ledger.latestBrokerSnapshot);
   const latestBrokerSnapshotAt = latestSnapshotAt(
@@ -83,8 +94,8 @@ export default async function DashboardPage() {
   const winLoss = summarizeWinLoss(completedForPerformance);
   const weekly = summarizeWeeklyReturns(completedForPerformance, hasAnyAccountValue ? totalValue : null, WEEKLY_TARGET_PERCENT);
 
-  const hasManualAccountData = accountRows.some((row) => row.ledger.startingValue !== null && !row.ledger.latestBrokerSnapshot);
-  const hasSchwabAccountData = accountRows.some((row) => row.account.source === "SCHWAB" || row.ledger.latestBrokerSnapshot);
+  const hasManualAccountData = accountRows.some((row) => row.performance.currentValueSource === "MANUAL");
+  const hasSchwabAccountData = accountRows.some((row) => row.account.source === "SCHWAB" || row.performance.currentValueSource === "SCHWAB");
   const accountDataSource: "LIVE SCHWAB" | "MANUAL" | "MIXED" | null = hasSchwabAccountData
     ? hasManualAccountData
       ? "MIXED"
@@ -147,10 +158,10 @@ export default async function DashboardPage() {
           />
         </Suspense>
         <Stat
-          label="Realized trading P/L"
-          value={money(winLoss.realizedTradingPL)}
-          tone={winLoss.realizedTradingPL}
-          detail={winLoss.realizedTradingPLExact ? undefined : "Pending - a closed campaign has an unresolved fee"}
+          label="Trading P/L"
+          value={accountPerformance.tradingPL === null ? "No data" : money(accountPerformance.tradingPL)}
+          tone={accountPerformance.tradingPL ?? undefined}
+          detail={dashboardTradingDetail(accountPerformance.tradingPLSource, winLoss.realizedTradingPLExact)}
         />
       </section>
 
@@ -588,6 +599,19 @@ function latestSnapshotAt(dates: (Date | null)[]) {
     }
     return !latest || date > latest ? date : latest;
   }, null);
+}
+
+function dashboardTradingDetail(source: string | null, exact: boolean) {
+  if (source === "BROKER_TRANSACTIONS") {
+    return "Schwab option trade cashflow";
+  }
+  if (source === "MIXED") {
+    return exact ? "Schwab trades + manual campaigns" : "Schwab trades + campaigns with a pending fee";
+  }
+  if (source === "CAMPAIGNS") {
+    return exact ? "Closed campaigns only" : "Closed campaigns only - pending a fee";
+  }
+  return undefined;
 }
 
 function formatAge(date: Date) {

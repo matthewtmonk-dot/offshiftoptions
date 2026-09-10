@@ -2,7 +2,7 @@ import "server-only";
 
 import { Prisma } from "@/generated/prisma/client";
 import type { BrokerRecordKind, BrokerRecordStatus } from "@/generated/prisma/enums";
-import { classifyBrokerTransactionAction, isReviewedBrokerTransactionActivity } from "@/domain/finance/brokerTransactionActions";
+import { classifyBrokerTransactionActivity, isReviewedBrokerTransactionActivity } from "@/domain/finance/brokerTransactionActions";
 import {
   detectSchwabCsvExportType,
   fingerprintCsvContent,
@@ -150,7 +150,10 @@ async function classifyCandidates(
   const byIdentityKey = new Map<string, ExistingRecordRow>(existing.map((row) => [row.identityKey, row]));
 
   return candidates.map((record) => {
-    const activityKind = record.kind === "TRANSACTION" ? classifyBrokerTransactionAction(record.action) : null;
+    const activityKind =
+      record.kind === "TRANSACTION"
+        ? classifyBrokerTransactionActivity({ action: record.action, description: record.description })
+        : null;
     const needsReview = activityKind !== null && !isReviewedBrokerTransactionActivity(activityKind);
 
     const matchByFingerprint = byFingerprint.get(record.fingerprint);

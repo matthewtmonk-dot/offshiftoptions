@@ -66,6 +66,64 @@ export function classifyBrokerTransactionAction(action: string | null | undefine
   return EXACT_ACTION_MAP[normalized] ?? "UNKNOWN";
 }
 
+/**
+ * Some Schwab account-history rows arrive without a normalized action label, especially
+ * RECEIVE_AND_DELIVER and DIVIDEND_OR_INTEREST activity. Use the explicit action first, then
+ * fall back to conservative text matches from Schwab's type/description fields.
+ */
+export function classifyBrokerTransactionActivity(input: {
+  action?: string | null;
+  description?: string | null;
+}): BrokerTransactionActivityKind {
+  const actionKind = classifyBrokerTransactionAction(input.action);
+  if (actionKind !== "UNKNOWN") {
+    return actionKind;
+  }
+
+  const descriptionKind = classifyBrokerTransactionAction(input.description);
+  if (descriptionKind !== "UNKNOWN") {
+    return descriptionKind;
+  }
+
+  const text = `${input.action ?? ""} ${input.description ?? ""}`.trim().toLowerCase();
+  if (!text) {
+    return "UNKNOWN";
+  }
+
+  if (text.includes("removed due to expiration") || text.includes("removed - expiration")) {
+    return "OPTION_REMOVED_EXPIRATION";
+  }
+  if (text.includes("assignment")) {
+    return "ASSIGNMENT";
+  }
+  if (text.includes("exercise")) {
+    return "EXERCISE";
+  }
+  if (text.includes("bank int")) {
+    return "INTEREST";
+  }
+  if (text.includes("dividend")) {
+    return "DIVIDEND";
+  }
+  if (text.includes("interest")) {
+    return "INTEREST";
+  }
+  if (
+    text.includes("security transfer") ||
+    text.includes("toa acat") ||
+    text.includes("moneylink transfer") ||
+    text.includes("wire received") ||
+    text.includes("wire sent") ||
+    text.includes("funds received") ||
+    text.includes("journaled shares") ||
+    text.includes("atm withdrawal")
+  ) {
+    return "TRANSFER";
+  }
+
+  return "UNKNOWN";
+}
+
 /** True when the activity kind is well-understood enough to skip manual review. */
 export function isReviewedBrokerTransactionActivity(kind: BrokerTransactionActivityKind): boolean {
   return kind !== "UNKNOWN";

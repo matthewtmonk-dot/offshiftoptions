@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyBrokerTransactionAction, isReviewedBrokerTransactionActivity } from "./brokerTransactionActions";
+import {
+  classifyBrokerTransactionAction,
+  classifyBrokerTransactionActivity,
+  isReviewedBrokerTransactionActivity,
+} from "./brokerTransactionActions";
 
 describe("classifyBrokerTransactionAction", () => {
   it("classifies the real observed Schwab actions", () => {
@@ -23,5 +27,19 @@ describe("classifyBrokerTransactionAction", () => {
   it("flags UNKNOWN as needing review and everything else as reviewed", () => {
     expect(isReviewedBrokerTransactionActivity("UNKNOWN")).toBe(false);
     expect(isReviewedBrokerTransactionActivity("SELL_TO_OPEN")).toBe(true);
+  });
+});
+
+describe("classifyBrokerTransactionActivity", () => {
+  it("recognizes account activity from Schwab description text when action is missing", () => {
+    expect(classifyBrokerTransactionActivity({ action: null, description: "TOA ACAT 0999" })).toBe("TRANSFER");
+    expect(classifyBrokerTransactionActivity({ action: null, description: "BANK INT 0000000000 SCHWAB BANK" })).toBe("INTEREST");
+    expect(classifyBrokerTransactionActivity({ action: null, description: "Removed due to Expiration PUT RIOT" })).toBe(
+      "OPTION_REMOVED_EXPIRATION",
+    );
+  });
+
+  it("still refuses unrecognized activity", () => {
+    expect(classifyBrokerTransactionActivity({ action: null, description: "Some new Schwab bookkeeping row" })).toBe("UNKNOWN");
   });
 });

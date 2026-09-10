@@ -258,22 +258,26 @@ export function tradingProfitFromAccountValue({
 export function summarizeContributionAdjustedGoal({
   accounts,
   currentValue,
+  actualPL,
   projectedOtmPL,
   targetWeeklyPercent,
   asOf = new Date(),
 }: {
   accounts: AccountGoalInput[];
   currentValue: number | null;
+  actualPL?: number | null;
   projectedOtmPL: number | null;
   targetWeeklyPercent: number;
   asOf?: Date;
 }): ContributionAdjustedGoalSummary {
   const ledgerSummary = summarizeGoalLedgers(accounts, asOf);
-  const tradingPLNow = tradingProfitFromAccountValue({
-    currentValue,
-    startingCapital: ledgerSummary.startingCapital,
-    netContributions: ledgerSummary.netContributions,
-  });
+  const tradingPLNow =
+    actualPL ??
+    tradingProfitFromAccountValue({
+      currentValue,
+      startingCapital: ledgerSummary.startingCapital,
+      netContributions: ledgerSummary.netContributions,
+    });
   const targetProfit =
     ledgerSummary.startingCapital === null ? null : round(ledgerSummary.capitalWeekExposure * (targetWeeklyPercent / 100), 2);
   const actualWeeklyPacePercent =

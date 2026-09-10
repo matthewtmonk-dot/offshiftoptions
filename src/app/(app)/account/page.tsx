@@ -12,7 +12,7 @@ import {
   type SchwabConnectionHealth,
   type SchwabSyncDiagnostics,
 } from "@/lib/broker-connections";
-import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
+import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { money, shortDateTime } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
@@ -98,9 +98,12 @@ export default async function AccountPage({
       <Panel title="Your Accounts">
         <div className="space-y-3">
           {accountData.accounts.map((account) => {
-            const ledger = summarizeAccountLedger(account.ledgerEntries);
             const realized = realizedPLByAccount.get(account.id) ?? 0;
-            const current = currentAccountValue(ledger, realized);
+            const performance = summarizeAccountPerformance({
+              ledgerEntries: account.ledgerEntries,
+              brokerRecords: account.brokerRecords,
+              fallbackTradingPL: realized,
+            });
             return (
               <div key={account.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -109,20 +112,26 @@ export default async function AccountPage({
                     <Badge tone={account.source === "SCHWAB" ? "info" : "neutral"}>{account.source}</Badge>
                     <Badge tone={account.visibility === "PRIVATE" ? "warn" : "good"}>{account.visibility}</Badge>
                   </div>
-                  {current.value === null ? (
+                  {performance.currentValue === null ? (
                     <span className="text-sm text-zinc-500">No value yet</span>
                   ) : (
                     <span className="font-medium text-zinc-100">
-                      {money(current.value)}{" "}
-                      <span className="text-xs text-zinc-500">({current.source === "SCHWAB" ? "live Schwab" : "manual + trading"})</span>
+                      {money(performance.currentValue)}{" "}
+                      <span className="text-xs text-zinc-500">
+                        ({performance.currentValueSource === "SCHWAB" ? "Schwab snapshot" : "manual + trading"})
+                      </span>
                     </span>
                   )}
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-3 text-sm text-zinc-400 sm:grid-cols-4">
-                  <div>Starting: {ledger.startingValue === null ? "UNKNOWN" : money(ledger.startingValue)}</div>
-                  <div>Contributions: {money(ledger.netContributions)}</div>
-                  <div>Trading P/L: {money(realized)}</div>
-                  <div>Cash: {ledger.latestBrokerSnapshot?.cash === null || ledger.latestBrokerSnapshot?.cash === undefined ? "N/A" : money(ledger.latestBrokerSnapshot.cash)}</div>
+                  <div>Starting: {performance.startingCapital === null ? "UNKNOWN" : money(performance.startingCapital)}</div>
+                  <div>Contributions: {performance.netContributions === null ? "UNKNOWN" : signedMoney(performance.netContributions)}</div>
+                  <div>Trading P/L: {performance.tradingPL === null ? "UNKNOWN" : signedMoney(performance.tradingPL)}</div>
+                  <div>Other income/expense: {performance.otherIncome === null ? "UNKNOWN" : signedMoney(performance.otherIncome)}</div>
+                  <div>Total gain: {performance.totalGain === null ? "UNKNOWN" : signedMoney(performance.totalGain)}</div>
+                  <div>Total return: {performance.totalReturnPercent === null ? "N/A" : `${performance.totalReturnPercent.toFixed(2)}%`}</div>
+                  <div>Cash: {performance.ledger.latestBrokerSnapshot?.cash === null || performance.ledger.latestBrokerSnapshot?.cash === undefined ? "N/A" : money(performance.ledger.latestBrokerSnapshot.cash)}</div>
+                  <div>Source: {accountSourceLabel(performance.currentValueSource)}</div>
                 </div>
 
                 {account.source === "MANUAL" ? (
@@ -717,6 +726,23 @@ function linkedAccountLabel(connection: NonNullable<Awaited<ReturnType<typeof ge
 
   const last4s = connection.accountNumberLast4s.map((last4) => `...${last4}`).join(", ");
   return last4s ? `${connection.accountCount} (${last4s})` : String(connection.accountCount);
+}
+
+function signedMoney(value: number) {
+  return `${value > 0 ? "+" : ""}${money(value)}`;
+}
+
+function accountSourceLabel(source: "SCHWAB" | "MANUAL" | "MIXED" | null) {
+  if (source === "SCHWAB") {
+    return "Schwab snapshot";
+  }
+  if (source === "MANUAL") {
+    return "Manual ledger";
+  }
+  if (source === "MIXED") {
+    return "Mixed";
+  }
+  return "N/A";
 }
 
 function schwabMessage(status: string | undefined) {

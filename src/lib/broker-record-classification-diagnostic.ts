@@ -1,7 +1,7 @@
 import "server-only";
 
 import { prisma } from "./prisma";
-import { classifyBrokerTransactionAction, type BrokerTransactionActivityKind } from "@/domain/finance/brokerTransactionActions";
+import { classifyBrokerTransactionActivity, type BrokerTransactionActivityKind } from "@/domain/finance/brokerTransactionActions";
 import { parseOpeningPutTransaction } from "@/domain/finance/schwabReconciliation";
 
 export type BrokerRecordCategory =
@@ -50,9 +50,10 @@ const OPENING_OR_CLOSING_KINDS: BrokerTransactionActivityKind[] = ["SELL_TO_OPEN
 
 /**
  * Sanitized, current-user-scoped, read-only view of this user's already-persisted Schwab
- * TRANSACTION BrokerRecords, re-classified live using the exact same production functions
- * campaign reconciliation itself uses (classifyBrokerTransactionAction, parseOpeningPutTransaction)
- * - never a re-implementation that could drift from the real engine's behavior. Pure database
+ * TRANSACTION BrokerRecords, re-classified live using the production transaction activity
+ * classifier and campaign opening-put parser (classifyBrokerTransactionActivity,
+ * parseOpeningPutTransaction) - never a re-implementation that could drift from the real
+ * engine's behavior. Pure database
  * read; makes no live Schwab API call and needs no active Schwab connection. Never returns
  * ids/fingerprints/account identifiers/Schwab activity ids or any raw payload - only the
  * allowlisted fields below.
@@ -118,7 +119,7 @@ export function classifyRow(row: {
   const strike = numericOrNull(metadata?.strikePrice);
   const expiration = typeof metadata?.expiration === "string" ? metadata.expiration : null;
 
-  const activityKind = classifyBrokerTransactionAction(row.action);
+  const activityKind = classifyBrokerTransactionActivity({ action: row.action, description: row.description });
   const eligible =
     parseOpeningPutTransaction({
       id: "diagnostic",

@@ -16,8 +16,14 @@ test.describe("Performance cockpit and campaign history", () => {
 
     const cockpit = page.getByTestId("performance-cockpit");
     await expect(cockpit).toBeVisible();
-    await expect(cockpit.getByText("Trading P/L Now", { exact: true })).toBeVisible();
-    await expect(cockpit.getByText("Realized P/L", { exact: true }).first()).toBeVisible();
+    await expect(cockpit.getByText("Account Value", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Starting Capital", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Total Gain", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Total Return", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Trading P/L", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Other Income/Expense", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Net Contributions", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Closed Record", { exact: true })).toBeVisible();
     await expect(cockpit.getByText("Current / MTM P/L", { exact: true })).toBeVisible();
     await expect(cockpit.getByText("Projected OTM P/L", { exact: true })).toBeVisible();
     await expect(page.getByText("1% Goal Tracker")).toBeVisible();
@@ -50,7 +56,7 @@ test.describe("Performance cockpit and campaign history", () => {
 
     const tradingHelp = page.getByTestId("help-trading-pl-now");
     await tradingHelp.focus();
-    const tradingTip = page.locator('[role="tooltip"]').filter({ hasText: "current trading result" });
+    const tradingTip = page.locator('[role="tooltip"]').filter({ hasText: "Confirmed net option trade cashflow" });
     await expect(tradingTip).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(tradingTip).toHaveCount(0);

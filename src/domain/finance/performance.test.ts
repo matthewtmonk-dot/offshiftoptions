@@ -348,4 +348,26 @@ describe("contribution-adjusted 1% goal", () => {
     expect(goal.tradingPLNow).toBe(20);
     expect(goal.targetProfit).toBe(100);
   });
+
+  it("can use broker-derived cash-flow events and explicit trading P/L for the current pace", () => {
+    const goal = summarizeContributionAdjustedGoal({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-07-20", amount: 10_000 },
+          ],
+        },
+      ],
+      currentValue: 10_123.77,
+      actualPL: 123.7,
+      projectedOtmPL: null,
+      targetWeeklyPercent: 1,
+      asOf: new Date("2026-07-27"),
+    });
+
+    expect(goal.status).toBe("OK");
+    expect(goal.startingCapital).toBe(10_000);
+    expect(goal.tradingPLNow).toBe(123.7);
+    expect(goal.actualWeeklyPacePercent).toBe(1.24);
+  });
 });

@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
 import { summarizeWinLoss } from "@/domain/finance/performance";
-import { currentAccountValue, summarizeAccountLedger } from "@/domain/finance/accountLedger";
+import { currentAccountValue, summarizeAccountLedger, summarizeAccountPerformance } from "@/domain/finance/accountLedger";
+import { parseSchwabTransactionsCsv } from "@/providers/schwab/csv";
 import { ValidationError } from "./tickers";
 
 const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
@@ -11,6 +13,7 @@ maybeDescribe("account ledger, Schwab isolation, and campaign performance accoun
   let prisma: typeof import("./prisma").prisma;
   let workflows: typeof import("./workflows");
   let appData: typeof import("./app-data");
+  let brokerImport: typeof import("./broker-import");
   let matt: { id: string };
   let eric: { id: string };
   const createdAccounts: string[] = [];
@@ -20,12 +23,14 @@ maybeDescribe("account ledger, Schwab isolation, and campaign performance accoun
     prisma = (await import("./prisma")).prisma;
     workflows = await import("./workflows");
     appData = await import("./app-data");
+    brokerImport = await import("./broker-import");
     matt = await prisma.user.findUniqueOrThrow({ where: { email: "matt@lst.local" }, select: { id: true } });
     eric = await prisma.user.findUniqueOrThrow({ where: { email: "eric@lst.local" }, select: { id: true } });
   });
 
   afterAll(async () => {
     await prisma.campaign.deleteMany({ where: { id: { in: createdCampaigns } } });
+    await prisma.brokerRecord.deleteMany({ where: { accountId: { in: createdAccounts } } });
     await prisma.tradingAccount.deleteMany({ where: { id: { in: createdAccounts } } });
     await prisma.$disconnect();
   });
@@ -198,4 +203,136 @@ maybeDescribe("account ledger, Schwab isolation, and campaign performance accoun
     expect(mattTrackerData.ownCompletedCampaigns.some((c) => c.id === ericCampaign.id)).toBe(false);
     expect(mattTrackerData.ownCompletedCampaigns.every((c) => c.ownerId === matt.id)).toBe(true);
   });
+
+  it("derives a Schwab starting baseline and split performance from deduped broker transaction records", async () => {
+    const account = await prisma.tradingAccount.create({
+      data: {
+        userId: matt.id,
+        name: `Schwab Accounting ${Date.now()}`,
+        brokerName: "Schwab",
+        accountType: "Brokerage",
+        source: "SCHWAB",
+        externalAccountId: `acct-accounting-${Date.now()}`,
+        visibility: "PRIVATE",
+      },
+    });
+    createdAccounts.push(account.id);
+
+    await prisma.accountLedgerEntry.create({
+      data: {
+        accountId: account.id,
+        type: "BROKER_SNAPSHOT",
+        occurredAt: new Date("2026-09-10T12:00:00Z"),
+        accountValue: "10123.77",
+        cash: "10123.77",
+        source: "SCHWAB",
+      },
+    });
+
+    const records = parseSchwabTransactionsCsv(fixture("transactions.csv"), { accountHint: account.id });
+    const first = await brokerImport.persistNormalizedBrokerRecordsForUser(matt.id, account.id, records);
+    const second = await brokerImport.persistNormalizedBrokerRecordsForUser(matt.id, account.id, records);
+    expect(first.inserted).toBe(7);
+    expect(second.inserted).toBe(0);
+    expect(second.duplicatesSkipped).toBe(7);
+
+    const stored = await prisma.brokerRecord.findMany({
+      where: { userId: matt.id, accountId: account.id, kind: "TRANSACTION" },
+      orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+    });
+    expect(stored).toHaveLength(7);
+
+    const summary = summarizeAccountPerformance({
+      ledgerEntries: await prisma.accountLedgerEntry.findMany({ where: { accountId: account.id } }),
+      brokerRecords: stored,
+    });
+    expect(summary.startingCapital).toBe(10_000);
+    expect(summary.netContributions).toBe(0);
+    expect(summary.tradingPL).toBe(123.7);
+    expect(summary.otherIncome).toBe(0.07);
+    expect(summary.currentValue).toBe(10_123.77);
+    expect(summary.totalGain).toBe(123.77);
+    expect(summary.unexplainedGain).toBe(0);
+    expect(summary.totalReturnPercent).toBeCloseTo(1.2377, 4);
+  });
+
+  it("does not fetch another user's account ledger, broker records, or snapshots for shared account cards", async () => {
+    const ericAccount = await prisma.tradingAccount.create({
+      data: {
+        userId: eric.id,
+        name: `Eric Private Financials ${Date.now()}`,
+        brokerName: "Schwab",
+        accountType: "Brokerage",
+        source: "SCHWAB",
+        externalAccountId: `acct-eric-${Date.now()}`,
+        visibility: "SHARED",
+      },
+    });
+    createdAccounts.push(ericAccount.id);
+
+    await prisma.accountLedgerEntry.createMany({
+      data: [
+        { accountId: ericAccount.id, type: "STARTING_VALUE", occurredAt: new Date("2026-07-20"), amount: "10000", source: "SCHWAB" },
+        { accountId: ericAccount.id, type: "BROKER_SNAPSHOT", occurredAt: new Date("2026-09-10T12:00:00Z"), accountValue: "10123.77", cash: "10123.77", source: "SCHWAB" },
+      ],
+    });
+    await brokerImport.persistNormalizedBrokerRecordsForUser(
+      eric.id,
+      ericAccount.id,
+      parseSchwabTransactionsCsv(fixture("transactions.csv"), { accountHint: ericAccount.id }),
+    );
+
+    const mattData = await appData.getTrackerPageData(matt.id, "both");
+    const visibleEricAccount = mattData.visibleAccounts.find((accountRow) => accountRow.id === ericAccount.id);
+    expect(visibleEricAccount).toBeDefined();
+    expect(visibleEricAccount!.ledgerEntries).toHaveLength(0);
+    expect(visibleEricAccount!.brokerRecords).toHaveLength(0);
+    expect(visibleEricAccount!.snapshots).toHaveLength(0);
+    expect(mattData.ownAccounts.some((accountRow) => accountRow.id === ericAccount.id)).toBe(false);
+
+    const mattAccountData = await appData.getAccountPageData(matt.id);
+    expect(mattAccountData.accounts.some((accountRow) => accountRow.id === ericAccount.id)).toBe(false);
+  });
+
+  it("does not expose private account financial summaries through another user's buddy views", async () => {
+    const mattAccount = await prisma.tradingAccount.create({
+      data: {
+        userId: matt.id,
+        name: `Matt Private Financials ${Date.now()}`,
+        brokerName: "Schwab",
+        accountType: "Brokerage",
+        source: "SCHWAB",
+        externalAccountId: `acct-matt-private-${Date.now()}`,
+        visibility: "PRIVATE",
+      },
+    });
+    createdAccounts.push(mattAccount.id);
+
+    await prisma.accountLedgerEntry.createMany({
+      data: [
+        { accountId: mattAccount.id, type: "STARTING_VALUE", occurredAt: new Date("2026-07-20"), amount: "10000", source: "SCHWAB" },
+        { accountId: mattAccount.id, type: "BROKER_SNAPSHOT", occurredAt: new Date("2026-09-10T12:00:00Z"), accountValue: "10123.77", cash: "10123.77", source: "SCHWAB" },
+      ],
+    });
+    await brokerImport.persistNormalizedBrokerRecordsForUser(
+      matt.id,
+      mattAccount.id,
+      parseSchwabTransactionsCsv(fixture("transactions.csv"), { accountHint: mattAccount.id }),
+    );
+
+    const ericBuddyData = await appData.getTrackerPageData(eric.id, "buddy");
+    expect(ericBuddyData.visibleAccounts.some((accountRow) => accountRow.id === mattAccount.id)).toBe(false);
+    expect(ericBuddyData.ownAccounts.some((accountRow) => accountRow.id === mattAccount.id)).toBe(false);
+
+    const ericBothData = await appData.getTrackerPageData(eric.id, "both");
+    expect(ericBothData.visibleAccounts.some((accountRow) => accountRow.id === mattAccount.id)).toBe(false);
+    expect(ericBothData.ownAccounts.some((accountRow) => accountRow.id === mattAccount.id)).toBe(false);
+
+    const ericAccountData = await appData.getAccountPageData(eric.id);
+    expect(ericAccountData.accounts.some((accountRow) => accountRow.id === mattAccount.id)).toBe(false);
+  });
 });
+
+function fixture(name: string) {
+  return readFileSync(new URL(`../providers/schwab/__fixtures__/${name}`, import.meta.url), "utf8");
+}

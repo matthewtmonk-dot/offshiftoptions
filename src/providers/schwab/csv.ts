@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { classifyBrokerTransactionAction } from "@/domain/finance/brokerTransactionActions";
+import { classifyBrokerTransactionActivity } from "@/domain/finance/brokerTransactionActions";
 import { parseOccOptionSymbol } from "@/domain/finance/occOption";
 import type { BrokerPosition, BrokerTransaction } from "@/providers/broker-read/types";
 
@@ -214,7 +214,7 @@ export function parseSchwabTransactionsCsvWithDiagnostics(
         reportedDate: dateText,
         asOfDate: parsedDate.asOfDate?.toISOString() ?? null,
         economicEffect: "ACTIVITY",
-        activityKind: classifyBrokerTransactionAction(action),
+        activityKind: classifyBrokerTransactionActivity({ action, description }),
       },
     };
 
@@ -381,7 +381,7 @@ export function normalizeSchwabApiTransaction(transaction: BrokerTransaction): N
       optionType: transaction.optionType ?? parsed?.optionType ?? null,
       strikePrice: transaction.strike ?? parsed?.strike ?? null,
       expiration: (transaction.expiration ?? parsed?.expiration)?.toISOString() ?? null,
-      activityKind: classifyBrokerTransactionAction(transaction.action ?? null),
+      activityKind: classifyBrokerTransactionActivity({ action: transaction.action ?? null, description: transaction.description }),
     },
   };
 }
