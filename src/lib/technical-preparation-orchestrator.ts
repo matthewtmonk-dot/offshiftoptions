@@ -54,13 +54,13 @@ export const ORCHESTRATOR_WALL_CLOCK_BUDGET_MS = 20_000;
  * evening-after-close run (~9:32 PM ET) could see a provider that had NOT yet posted the
  * just-closed session's own daily candle, producing an immediately-stale snapshot. Moving
  * preparation to the following morning (before that day's own open) gives the provider the
- * whole overnight window to post the prior session's candle, and DEFERRED/retry (see
- * refreshTechnicalIndicatorCacheBatchForUser) safely absorbs the case where it still hasn't by
- * the time the window opens. 5:00-9:15 AM ET is a starting default, not a measured optimum -
- * adjust the start after inspecting real provider behavior (see the new latest-candle-freshness
- * diagnostic on the Scanner Engineering Diagnostics page).
+ * whole overnight window to post the prior session's candle, and the global daily-candle gate
+ * (see refreshTechnicalIndicatorCacheBatchForUser) safely stops bulk work if it still has not.
+ * Real Sep 10, 2026 production evidence from the latest-candle
+ * diagnostic proved the provider's Sep 9 daily candle was current by ~5:31 AM ET, so the
+ * automatic window now starts at 5:45 AM ET with headroom while still finishing before the open.
  */
-const PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET = 5 * 60; // 5:00 AM ET
+const PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET = 5 * 60 + 45; // 5:45 AM ET
 const PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET = 9 * 60 + 15; // 9:15 AM ET (inclusive)
 
 function nyDateTimeParts(date: Date): { year: number; month: number; day: number; hour: number; minute: number } {

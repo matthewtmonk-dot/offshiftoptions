@@ -2,31 +2,31 @@ import { describe, expect, it } from "vitest";
 import { isTechnicalPreparationWindowOpen } from "./technical-preparation-orchestrator";
 
 // Sep 2026 is Eastern Daylight Time (UTC-4). Tue Sep 8 2026 is a real NYSE market day (the day
-// after Labor Day - see marketCalendar.test.ts's own fixture for the same date); Wed Sep 9 2026
+// after Labor Day - see marketCalendar.test.ts's own fixture for the same date); Thu Sep 10 2026
 // is also a real NYSE market day.
 describe("isTechnicalPreparationWindowOpen - morning-before-open window (moved from evening-after-close, see PROJECT_HANDOFF.md)", () => {
-  it("is CLOSED before the 5:00 AM ET window start on a real trading day", () => {
-    // Wed Sep 9 2026, 4:00 AM ET = 08:00 UTC.
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-09T08:00:00Z"))).toBe(false);
+  it("is CLOSED before the 5:45 AM ET window start on a real trading day", () => {
+    // Thu Sep 10 2026, 5:44 AM ET = 09:44 UTC.
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-10T09:44:00Z"))).toBe(false);
   });
 
-  it("is OPEN exactly at the 5:00 AM ET window start on a real trading day", () => {
-    // Wed Sep 9 2026, 5:00 AM ET = 09:00 UTC.
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-09T09:00:00Z"))).toBe(true);
+  it("is OPEN exactly at the 5:45 AM ET window start on an EDT trading day", () => {
+    // Thu Sep 10 2026, 5:45 AM EDT = 09:45 UTC.
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-10T09:45:00Z"))).toBe(true);
   });
 
-  it("is OPEN exactly at the 9:15 AM ET window end (inclusive) on a real trading day", () => {
-    // Wed Sep 9 2026, 9:15 AM ET = 13:15 UTC.
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-09T13:15:00Z"))).toBe(true);
+  it("is OPEN exactly at the 9:15 AM ET window end (inclusive) on an EDT trading day", () => {
+    // Thu Sep 10 2026, 9:15 AM EDT = 13:15 UTC.
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-10T13:15:00Z"))).toBe(true);
   });
 
   it("is CLOSED just after the 9:15 AM ET window end, including the rest of the regular session and evening", () => {
-    // Wed Sep 9 2026, 9:16 AM ET = 13:16 UTC.
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-09T13:16:00Z"))).toBe(false);
-    // Wed Sep 9 2026, 2:00 PM ET (mid-session) = 18:00 UTC.
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-09T18:00:00Z"))).toBe(false);
-    // Wed Sep 9 2026, 8:00 PM ET (evening) = 00:00 UTC Sep 10.
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-10T00:00:00Z"))).toBe(false);
+    // Thu Sep 10 2026, 9:20 AM EDT = 13:20 UTC.
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-10T13:20:00Z"))).toBe(false);
+    // Thu Sep 10 2026, 2:00 PM EDT (mid-session) = 18:00 UTC.
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-10T18:00:00Z"))).toBe(false);
+    // Thu Sep 10 2026, 8:00 PM EDT (evening) = 00:00 UTC Sep 11.
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-11T00:00:00Z"))).toBe(false);
   });
 
   it("is CLOSED all day on a weekend - there is no open to prepare for", () => {
@@ -42,10 +42,10 @@ describe("isTechnicalPreparationWindowOpen - morning-before-open window (moved f
   it("correctly evaluates DST-shifted winter time too (EST, UTC-5) - never a hardcoded UTC offset", () => {
     // Tue Jan 6 2026 (a real weekday, winter/EST) - 4:00 AM ET = 09:00 UTC (not 08:00, proving the
     // DST-aware Intl-based conversion, not a fixed summer-only offset assumption).
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-01-06T09:00:00Z"))).toBe(false); // before window start
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-01-06T10:00:00Z"))).toBe(true); // 5:00 AM EST = 10:00 UTC
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-01-06T10:44:00Z"))).toBe(false); // before window start
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-01-06T10:45:00Z"))).toBe(true); // 5:45 AM EST = 10:45 UTC
     expect(isTechnicalPreparationWindowOpen(new Date("2026-01-06T14:15:00Z"))).toBe(true); // 9:15 AM EST = 14:15 UTC
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-01-06T14:16:00Z"))).toBe(false); // just past window end
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-01-06T14:20:00Z"))).toBe(false); // just past window end
   });
 
   it("Tuesday after Labor Day morning is inside the window (the required market date resolution itself is previousNyseMarketDay's job, not this window function's)", () => {
