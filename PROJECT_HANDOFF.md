@@ -963,7 +963,7 @@ Future AI agents should not casually reverse these:
 
 ### Git / Deployment State (as of this session)
 
-- **This session's Weekend Scanner Readiness slice is committed locally on top of `418e4f5` (which was `HEAD`/`origin/main` at session start) but NOT pushed - awaiting Matt's review.** No migration. See Scanner section and the "NOW" bullet above.
+- **This session's Weekend Scanner Readiness slice is committed locally as `3e2abde`, on top of `418e4f5` (which was `HEAD`/`origin/main` at session start), but NOT pushed - awaiting Matt's review.** No migration. See Scanner section and the "NOW" bullet above.
 
 - The Performance + Campaign History redesign referenced below as "awaiting Matt review" was subsequently reviewed, committed (`0fe4b1b`), and pushed. Since then, Scanner responsiveness/performance (`747f21f`) and Research customization + per-user view preferences (`ce637b1`, migration `20260903201201_research_customization_and_view_preferences` applied to production) have also been committed, pushed, and deployed - see Recent Relevant Commits for the full, current list. `HEAD`/`origin/main` were at `ce637b1` before this session's Schwab Fundamentals diagnostic slice began.
 - The "Auto Schwab fundamentals wired into Research" slice was subsequently reviewed, committed (`52f6d7a`), and pushed - `HEAD`/`origin/main` are at `52f6d7a` as of this session's start.
