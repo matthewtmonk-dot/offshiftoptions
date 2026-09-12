@@ -63,6 +63,38 @@ describe("previousNyseMarketDay - real production timeline (2026-09-08/09 readin
   });
 });
 
+describe("previousNyseMarketDay - weekend scanner readiness (Fri Sep 11 / Sat Sep 12 / Sun Sep 13 / Mon Sep 14, 2026)", () => {
+  // Real Saturday Sep 12, 2026 comparison against an external scanner - see PROJECT_HANDOFF.md's
+  // weekend-coverage investigation. Confirms, with the EXISTING unmodified previousNyseMarketDay,
+  // that the required technical market date is already correct across the whole weekend - the
+  // real bug is a SCHEDULING gap (no invocation ever runs Sat/Sun to write Sep 11 data), never a
+  // calendar-math bug. September 2026 is EDT (UTC-4).
+  it("Friday Sep 11 morning (before that day's own close) requires Thursday Sep 10", () => {
+    expect(key(previousNyseMarketDay(new Date("2026-09-11T06:00:00-04:00")))).toBe("2026-09-10");
+  });
+
+  it("Friday Sep 11 after close (evening) requires Friday Sep 11 itself", () => {
+    expect(key(previousNyseMarketDay(new Date("2026-09-11T21:00:00-04:00")))).toBe("2026-09-11");
+  });
+
+  it("Saturday Sep 12 (any time of day) requires Friday Sep 11", () => {
+    expect(key(previousNyseMarketDay(new Date("2026-09-12T08:00:00-04:00")))).toBe("2026-09-11");
+  });
+
+  it("Sunday Sep 13 (any time of day) STILL requires Friday Sep 11 - the required date does not advance again until Monday's own close", () => {
+    expect(key(previousNyseMarketDay(new Date("2026-09-13T12:00:00-04:00")))).toBe("2026-09-11");
+  });
+
+  it("Monday Sep 14 premarket (before that day's own close) STILL requires Friday Sep 11 - the weekend never produces a new required date on its own", () => {
+    expect(key(previousNyseMarketDay(new Date("2026-09-14T06:00:00-04:00")))).toBe("2026-09-11");
+  });
+
+  it("Saturday and Sunday are themselves never NYSE market days - confirms why the existing weekday-only preparation window has no opportunity to run over the weekend", () => {
+    expect(isNyseMarketDay(new Date("2026-09-12T12:00:00-04:00"))).toBe(false);
+    expect(isNyseMarketDay(new Date("2026-09-13T12:00:00-04:00"))).toBe(false);
+  });
+});
+
 describe("isNyseMarketDay - named holidays", () => {
   it("Labor Day 2026 (Mon Sep 7) is closed", () => {
     expect(isNyseMarketDay(utc(2026, 9, 7))).toBe(false);

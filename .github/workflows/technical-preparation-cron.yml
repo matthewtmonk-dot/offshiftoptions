@@ -2,12 +2,23 @@ name: Technical Preparation Worker
 
 on:
   schedule:
-    # Broad UTC container for the real 5:45-9:15 AM America/New_York window across both EDT and
-    # EST. NYSE market-day, holiday, DST, and exact local-time acceptance stay server-side in
-    # isTechnicalPreparationWindowOpen; a UTC tick outside that local window is a safe no-op.
+    # Weekday morning: broad UTC container for the real 5:45-9:15 AM America/New_York window
+    # across both EDT and EST. NYSE market-day, holiday, DST, and exact local-time acceptance
+    # stay server-side in isTechnicalPreparationWindowOpen; a UTC tick outside that local window
+    # is a safe no-op.
     - cron: "45-59/5 9 * * 1-5"
     - cron: "*/5 10-13 * * 1-5"
     - cron: "0-15/5 14 * * 1-5"
+    # Saturday catch-up: broad UTC container for the real 5:45 AM-12:00 PM America/New_York
+    # window (EDT 09:45-16:00 UTC through EST 10:45-17:00 UTC) - see PROJECT_HANDOFF.md's
+    # weekend-coverage investigation and isTechnicalPreparationWindowOpen's own doc comment.
+    # Wider than the weekday window (no market open to race against, and no known publish time
+    # for Friday's overnight candle) but still bounded, not all-day. Sunday deliberately has no
+    # trigger of its own - a successful Saturday run's snapshots are already fresh all through
+    # Sunday and Monday premarket under the live scan's own freshness check.
+    - cron: "45-59/5 9 * * 6"
+    - cron: "*/5 10-16 * * 6"
+    - cron: "0 17 * * 6"
   workflow_dispatch:
 
 # A job may run up to two bounded cycles sequentially. Each server cycle is still independently

@@ -477,6 +477,14 @@ export function ScannerWorkspace({
                       {result.researchStatus === "NEVER_TRADE" ? (
                         <span className="ml-1.5 inline-flex items-center text-[10px] font-semibold text-red-300/70">EXCLUDED BY YOU</span>
                       ) : null}
+                      {isTechnicallyIncomplete(result) ? (
+                        <span
+                          data-testid="technical-data-pending-label"
+                          className="ml-1.5 inline-flex items-center text-[10px] font-semibold text-zinc-500"
+                        >
+                          Technical data pending
+                        </span>
+                      ) : null}
                       {status.word === "VERIFY" ? <VerifyReasons result={result} /> : null}
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
@@ -1021,8 +1029,16 @@ function applyQuickFilter(results: ScannerViewResult[], quick: QuickKey) {
   }
 }
 
-function sortResults(results: ScannerViewResult[], sort: SortKey) {
-  return [...results].sort((left, right) => {
+/** Both critical technical inputs are unknown - the exact condition that lets hundreds of
+ * candidates tie on the active sort key (most commonly Score) and fall through to raw
+ * alphabetical order, looking like a meaningful ranking when it isn't one. See
+ * PROJECT_HANDOFF.md's weekend-coverage investigation. */
+function isTechnicallyIncomplete(result: ScannerViewResult) {
+  return result.values.rsi === null && result.values.bbPercent === null;
+}
+
+function sortComparator(sort: SortKey) {
+  return (left: ScannerViewResult, right: ScannerViewResult) => {
     if (sort === "ticker") {
       return left.record.ticker.localeCompare(right.record.ticker);
     }
@@ -1030,7 +1046,18 @@ function sortResults(results: ScannerViewResult[], sort: SortKey) {
       return compareAsc(left, right, sort);
     }
     return compareDesc(left, right, sort);
-  });
+  };
+}
+
+function sortResults(results: ScannerViewResult[], sort: SortKey) {
+  const comparator = sortComparator(sort);
+  // Technically-evaluable candidates are grouped ahead of technically-incomplete ones - ordering
+  // WITHIN each group still uses the exact same comparator/tie-break as before (deterministic,
+  // never an invented score) - this only changes which of two TIED groups comes first, never how
+  // a real, known value compares to another.
+  const evaluable = results.filter((result) => !isTechnicallyIncomplete(result)).sort(comparator);
+  const incomplete = results.filter(isTechnicallyIncomplete).sort(comparator);
+  return [...evaluable, ...incomplete];
 }
 
 function compareAsc(left: ScannerViewResult, right: ScannerViewResult, key: SortKey) {

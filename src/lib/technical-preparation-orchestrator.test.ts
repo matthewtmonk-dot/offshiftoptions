@@ -29,9 +29,48 @@ describe("isTechnicalPreparationWindowOpen - morning-before-open window (moved f
     expect(isTechnicalPreparationWindowOpen(new Date("2026-09-11T00:00:00Z"))).toBe(false);
   });
 
-  it("is CLOSED all day on a weekend - there is no open to prepare for", () => {
-    // Sat Sep 5 2026, 6:00 AM ET = 10:00 UTC (inside what would be the weekday window).
-    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-05T10:00:00Z"))).toBe(false);
+  it("is CLOSED all day on a Sunday - there is no open to prepare for, and Saturday's own catch-up run (if successful) already covers Sunday's freshness requirement", () => {
+    // Sun Sep 6 2026, 6:00 AM ET = 10:00 UTC, and again at noon.
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-06T10:00:00Z"))).toBe(false);
+    expect(isTechnicalPreparationWindowOpen(new Date("2026-09-06T16:00:00Z"))).toBe(false);
+  });
+
+  describe("Saturday catch-up window (weekend scanner-readiness gap, see PROJECT_HANDOFF.md)", () => {
+    it("is CLOSED before the 5:45 AM ET Saturday window start", () => {
+      // Sat Sep 5 2026, 5:44 AM EDT = 09:44 UTC.
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-09-05T09:44:00Z"))).toBe(false);
+    });
+
+    it("is OPEN exactly at the 5:45 AM ET Saturday window start", () => {
+      // Sat Sep 5 2026, 5:45 AM EDT = 09:45 UTC.
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-09-05T09:45:00Z"))).toBe(true);
+    });
+
+    it("is OPEN through the middle of the Saturday catch-up window (wider than the weekday one - no market open to race against)", () => {
+      // Sat Sep 5 2026, 9:30 AM EDT = 13:30 UTC - already past the weekday window's own 9:15 AM
+      // end, but still well inside Saturday's wider allowance.
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-09-05T13:30:00Z"))).toBe(true);
+    });
+
+    it("is OPEN exactly at the 12:00 PM ET Saturday window end (inclusive)", () => {
+      // Sat Sep 5 2026, 12:00 PM EDT = 16:00 UTC.
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-09-05T16:00:00Z"))).toBe(true);
+    });
+
+    it("is CLOSED just after the Saturday window end, and for the rest of the day", () => {
+      // Sat Sep 5 2026, 12:05 PM EDT = 16:05 UTC.
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-09-05T16:05:00Z"))).toBe(false);
+      // Sat Sep 5 2026, 8:00 PM EDT = 00:00 UTC Sep 6.
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-09-06T00:00:00Z"))).toBe(false);
+    });
+
+    it("correctly evaluates the Saturday window under EST (winter) too - never a hardcoded UTC offset", () => {
+      // Sat Jan 3 2026 (winter, EST, UTC-5) - 5:45 AM EST = 10:45 UTC, 12:00 PM EST = 17:00 UTC.
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-01-03T10:44:00Z"))).toBe(false);
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-01-03T10:45:00Z"))).toBe(true);
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-01-03T17:00:00Z"))).toBe(true);
+      expect(isTechnicalPreparationWindowOpen(new Date("2026-01-03T17:05:00Z"))).toBe(false);
+    });
   });
 
   it("is CLOSED all day on a real NYSE holiday (Labor Day 2026) - it never fabricates a fake trading session to prepare for", () => {

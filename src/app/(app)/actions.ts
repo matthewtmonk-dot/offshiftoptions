@@ -52,6 +52,7 @@ import {
 } from "@/lib/broker-connections";
 import { runScannerUniverseDryRun } from "@/lib/scanner-universe-dry-run";
 import { runLatestCandleFreshnessDiagnostic } from "@/lib/latest-candle-freshness-diagnostic";
+import { compareScannerTickersForUser, type TickerComparisonResult } from "@/lib/scanner-ticker-comparison";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "@/lib/occ-optionable-universe-refresh";
 import {
   getTechnicalCacheFreshnessBreakdownForUser,
@@ -741,6 +742,32 @@ export async function runLatestCandleFreshnessDiagnosticAction(): Promise<Latest
 
   const result = await runLatestCandleFreshnessDiagnostic(resolved.provider, new Date(), { universeSource: OCC_OPTIONABLE_UNIVERSE_SOURCE });
   return { status: "OK", requiredMarketDate: result.requiredMarketDate, rows: result.rows };
+}
+
+export type ScannerTickerComparisonActionResult =
+  | { status: "UNAVAILABLE"; reason: "NO_USER_CONNECTION" | "TOKEN_UNAVAILABLE"; message: string }
+  | ({ status: "OK" } & TickerComparisonResult);
+
+/** Read-only, explicit-click engineering comparison tool - see PROJECT_HANDOFF.md's
+ * weekend-coverage investigation. Never persists anything; one bounded real quote per supplied
+ * ticker (max 25), the caller's own already-cached technical/earnings data, and the caller's own
+ * last persisted live scan - never a fresh broad-universe sweep. */
+export async function compareScannerTickersAction(rawTickers: string[]): Promise<ScannerTickerComparisonActionResult> {
+  const user = await requireCurrentUser();
+  const resolved = await resolveMarketDataProviderForUser(user.id);
+  if (!resolved.provider) {
+    return {
+      status: "UNAVAILABLE",
+      reason: resolved.reason,
+      message:
+        resolved.reason === "NO_USER_CONNECTION"
+          ? "Connect Schwab from Account to run this read-only comparison."
+          : "Reconnect Schwab from Account to run this read-only comparison.",
+    };
+  }
+
+  const result = await compareScannerTickersForUser(user.id, resolved.provider, rawTickers);
+  return { status: "OK", ...result };
 }
 
 export async function runBrokerRecordClassificationDiagnosticAction(): Promise<BrokerRecordClassificationReport> {

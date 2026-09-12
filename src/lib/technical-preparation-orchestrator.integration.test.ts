@@ -480,4 +480,132 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
 
     await expect(runTechnicalPreparationOrchestratorCycle(WITHIN_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE })).rejects.toThrow("connection pool exhausted");
   });
+
+  describe("Saturday catch-up window (weekend scanner-readiness gap, see PROJECT_HANDOFF.md)", () => {
+    // Sat Sep 12 2026, 8:00 AM ET = 12:00 UTC - inside the new Saturday catch-up window. The
+    // required market date at this instant is Friday Sep 11 (proven directly against
+    // previousNyseMarketDay in marketCalendar.test.ts) - never fabricated here, computed fresh.
+    const SATURDAY_WINDOW_NOW = new Date("2026-09-12T12:00:00Z");
+
+    function providerWithHistoryEndingOn(
+      quotes: Record<string, { price: number; volume: number }>,
+      endDate: Date,
+      hooks: { onGetQuotes?: (symbols: string[]) => void; onGetPriceHistory?: (ticker: string) => void } = {},
+    ): MarketDataProvider {
+      const quotesByTicker = new Map<string, MarketQuote>(
+        Object.entries(quotes).map(([ticker, { price, volume }]) => [ticker, { symbol: ticker, price, volume, asOf: new Date() }]),
+      );
+      return {
+        async getQuote(symbol) {
+          const quote = quotesByTicker.get(symbol.toUpperCase());
+          if (!quote) throw new Error(`no quote for ${symbol}`);
+          return quote;
+        },
+        async getQuotes(symbols) {
+          hooks.onGetQuotes?.(symbols);
+          const result = new Map<string, MarketQuote>();
+          for (const symbol of symbols) {
+            const quote = quotesByTicker.get(symbol.toUpperCase());
+            if (quote) result.set(symbol.toUpperCase(), quote);
+          }
+          return result;
+        },
+        async getPriceHistory(symbol) {
+          hooks.onGetPriceHistory?.(symbol);
+          return syntheticCandles(symbol, 80, endDate);
+        },
+        async getOptionChain() {
+          return [];
+        },
+        async getInstrument(symbol) {
+          return { symbol, description: symbol, assetType: "EQUITY" };
+        },
+        async getMarketHours() {
+          return { isOpen: true };
+        },
+      };
+    }
+
+    it("the window itself is open on Saturday morning (confirms the schedule addition, not just the pure unit test)", () => {
+      // Redundant with technical-preparation-orchestrator.test.ts's own dedicated fixtures, but
+      // worth asserting here too since this whole describe block depends on it being true.
+      expect(SATURDAY_WINDOW_NOW.getUTCDay()).toBe(6); // Saturday
+    });
+
+    it("a not-ready gate on Saturday costs only the probe and creates no run - identical behavior to the weekday gate, using the real required date (Friday Sep 11)", async () => {
+      await createConnectedBrokerRow(matt.id, "matt-saturday-not-ready");
+      const tickers = ["ORCHSATSTALE0", "ORCHSATSTALE1", "ORCHSATSTALE2"];
+      await seedUniverse(tickers);
+      const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+      const requiredMarketDate = previousNyseMarketDay(SATURDAY_WINDOW_NOW); // Friday Sep 11
+      expect(requiredMarketDate.toISOString().slice(0, 10)).toBe("2026-09-11");
+      const laggedDate = previousNyseMarketDay(requiredMarketDate); // Thursday Sep 10 - one trading day short
+
+      let getQuotesCallCount = 0;
+      const provider = providerWithHistoryEndingOn(
+        Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+        laggedDate,
+        { onGetQuotes: () => (getQuotesCallCount += 1) },
+      );
+      mockProviderForOnly(matt.id, provider);
+
+      const result = await runTechnicalPreparationOrchestratorCycle(SATURDAY_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
+      expect(result.status).toBe("DAILY_CANDLE_NOT_READY");
+      expect(getQuotesCallCount).toBe(0); // Stage A's own bulk quote sweep never ran
+      const runCount = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+      expect(runCount).toBe(0);
+    });
+
+    it("a ready gate on Saturday runs normal price-only technical preparation for Friday - and Sunday's own live-scan-style read reuses that same fresh Friday snapshot with zero further preparation work", async () => {
+      await createConnectedBrokerRow(matt.id, "matt-saturday-ready");
+      const tickers = ["ORCHSATOK0", "ORCHSATOK1", "ORCHSATOK2"];
+      await seedUniverse(tickers);
+      const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+      const requiredMarketDate = previousNyseMarketDay(SATURDAY_WINDOW_NOW); // Friday Sep 11
+
+      const provider = providerWithHistoryEndingOn(
+        Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+        requiredMarketDate,
+      );
+      mockProviderForOnly(matt.id, provider);
+
+      const result = await runTechnicalPreparationOrchestratorCycle(SATURDAY_WINDOW_NOW, { probeUniverseSource: TEST_SOURCE });
+      expect(result.status).toBe("OK");
+      if (result.status !== "OK") throw new Error("expected OK");
+      expect(result.succeededCount).toBe(tickers.length);
+
+      const snapshots = await prisma.technicalIndicatorSnapshot.findMany({ where: { userId: matt.id, ticker: { in: tickers } } });
+      expect(snapshots).toHaveLength(tickers.length);
+      for (const snapshot of snapshots) {
+        expect(snapshot.status).toBe("READY");
+        expect(snapshot.asOfDate?.toISOString().slice(0, 10)).toBe("2026-09-11");
+      }
+
+      // Sunday Sep 13, any time - the live scan's own read path (never the orchestrator, never a
+      // provider call) sees Saturday's Friday-dated snapshot as fresh with zero further work.
+      const { getTechnicalIndicatorSnapshotsForUser } = await import("./technical-indicator-cache");
+      const sundayNow = new Date("2026-09-13T16:00:00Z");
+      const sundayView = await getTechnicalIndicatorSnapshotsForUser(matt.id, tickers, sundayNow);
+      for (const ticker of tickers) {
+        expect(sundayView.get(ticker)?.state).toBe("READY");
+      }
+
+      // A second orchestrator invocation on the SAME Saturday (simulating a later 5-minute tick)
+      // must not re-sweep Stage A or duplicate the run - it just finds the already-complete run.
+      let secondCallGetQuotesCount = 0;
+      const secondProvider = providerWithHistoryEndingOn(
+        Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
+        requiredMarketDate,
+        { onGetQuotes: () => (secondCallGetQuotesCount += 1) },
+      );
+      mockProviderForOnly(matt.id, secondProvider);
+      const later = new Date(SATURDAY_WINDOW_NOW.getTime() + 5 * 60 * 1000);
+      const secondResult = await runTechnicalPreparationOrchestratorCycle(later, { probeUniverseSource: TEST_SOURCE });
+      // Already COMPLETE for this generation - no eligible user needs further work.
+      expect(secondResult.status).toBe("NO_ELIGIBLE_USER");
+      expect(secondCallGetQuotesCount).toBe(0);
+      const runCount = await prisma.technicalPreparationRun.count({ where: { userId: matt.id } });
+      expect(runCount).toBe(1); // never duplicated
+    });
+  });
 });

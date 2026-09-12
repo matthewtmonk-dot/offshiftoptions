@@ -18,6 +18,8 @@ import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
 import { prisma } from "@/lib/prisma";
+import { shortCalendarDate } from "@/lib/format";
+import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
 import { ensureMyLstScannerProfileForUser } from "@/lib/workflows";
 import { runDemoScannerAction } from "../actions";
 import { LiveScanButton } from "./live-scan-button";
@@ -92,10 +94,19 @@ async function loadScannerPageBundle(userId: string) {
       where: { ownerId: userId },
       select: { ticker: true, researchStatus: true },
     }),
+    // DB-only (no Schwab call) - lets the page show an honest, always-current staleness warning
+    // even when the visitor never clicks "Run Live Scan" this session (e.g. reloading over a
+    // weekend before any scan re-runs) - see PROJECT_HANDOFF.md's weekend-coverage investigation.
+    getTechnicalCacheFreshnessBreakdownForUser(userId),
   ]);
   console.info("Scanner page data load (ms):", Date.now() - startedAt);
   return result;
 }
+
+/** Same materiality threshold as live-scan-button.tsx's own MATERIAL_TECHNICAL_COVERAGE_THRESHOLD
+ * - kept as a literal here rather than a shared import since the two live in different
+ * client/server boundaries and the constant itself is trivial; keep both in sync if changed. */
+const MATERIAL_TECHNICAL_COVERAGE_THRESHOLD = 0.9;
 
 export default async function ScannerPage({
   searchParams,
@@ -105,7 +116,7 @@ export default async function ScannerPage({
   const user = await requireCurrentUser();
 
   const params = await searchParams;
-  const [initialProfile, buddies, researchItems] = await loadScannerPageBundle(user.id);
+  const [initialProfile, buddies, researchItems, technicalFreshness] = await loadScannerPageBundle(user.id);
   let profile = initialProfile;
   if (!profile) {
     await ensureMyLstScannerProfileForUser(user.id);
@@ -124,6 +135,16 @@ export default async function ScannerPage({
   const averageScore = allResults.length
     ? Math.round(allResults.reduce((sum, result) => sum + result.score, 0) / allResults.length)
     : 0;
+
+  // Honest, always-current staleness warning (never tied to whether "Run Live Scan" was clicked
+  // this session) - only meaningful for a real live scan against a real eligible universe. Uses
+  // the exact same freshness rule the live scan itself uses (getTechnicalCacheFreshnessBreakdownForUser),
+  // so this can never disagree with what a fresh scan would actually find.
+  const showStaleTechnicalWarning =
+    isLiveSchwabRun &&
+    technicalFreshness.hasActiveRun &&
+    technicalFreshness.eligibleCount > 0 &&
+    technicalFreshness.freshUsableCount / technicalFreshness.eligibleCount < MATERIAL_TECHNICAL_COVERAGE_THRESHOLD;
 
   return (
     <div className="space-y-3">
@@ -172,6 +193,20 @@ export default async function ScannerPage({
       {params.error ? (
         <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
           {params.error}
+        </div>
+      ) : null}
+
+      {showStaleTechnicalWarning ? (
+        <div
+          data-testid="stale-technical-cache-warning"
+          className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100"
+        >
+          <p className="font-medium">Technical cache is not current for this scan.</p>
+          <p className="mt-0.5 text-amber-200/90">
+            Required market date: {shortCalendarDate(technicalFreshness.requiredMarketDate)} · Fresh technicals:{" "}
+            {technicalFreshness.freshUsableCount.toLocaleString()} / {technicalFreshness.eligibleCount.toLocaleString()}
+          </p>
+          <p className="mt-0.5 text-amber-200/90">Scanner results are incomplete.</p>
         </div>
       ) : null}
 

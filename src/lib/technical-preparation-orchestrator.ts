@@ -63,6 +63,28 @@ export const ORCHESTRATOR_WALL_CLOCK_BUDGET_MS = 20_000;
 const PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET = 5 * 60 + 45; // 5:45 AM ET
 const PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET = 9 * 60 + 15; // 9:15 AM ET (inclusive)
 
+/**
+ * Saturday catch-up window - see PROJECT_HANDOFF.md's weekend-coverage investigation. Real
+ * external-scanner comparison on Sat Sep 12, 2026 proved OSO's own technical cache still only had
+ * Thursday Sep 10's data: Friday's own morning window necessarily requires Thursday (Friday
+ * hasn't closed yet), and the weekday-only cron never runs again until Monday, by which point the
+ * whole weekend's research was starved of Friday's real RSI/BB. previousNyseMarketDay itself
+ * already correctly requires Friday for all of Saturday, Sunday, and Monday premarket (proven in
+ * marketCalendar.test.ts) - the gap was purely a scheduling one. Saturday gets a wider window than
+ * the weekday one (no market open to race against, and no way to know in advance when Schwab
+ * publishes Friday's candle overnight) but is still bounded, not all-day - the global daily-candle
+ * gate (checkDailyCandleAvailabilityGate) makes any tick where the candle isn't ready yet cost at
+ * most 5 probe requests and stop, so widening this window costs nothing when the provider isn't
+ * ready and simply gives more chances to catch the moment it is. Sunday deliberately gets NO
+ * window of its own: a successful Saturday run writes real TechnicalIndicatorSnapshot rows dated
+ * Friday, and the live scan's own freshness check (previousNyseMarketDay-based, independent of
+ * which run wrote a snapshot) already treats those as fresh all through Sunday and Monday
+ * premarket - re-running on Sunday would only repeat a Stage A sweep for no new data.
+ */
+const SATURDAY_CATCHUP_WINDOW_START_MINUTE_OF_DAY_ET = 5 * 60 + 45; // 5:45 AM ET
+const SATURDAY_CATCHUP_WINDOW_END_MINUTE_OF_DAY_ET = 12 * 60; // 12:00 PM ET (inclusive)
+const SATURDAY_UTC_DAY = 6;
+
 function nyDateTimeParts(date: Date): { year: number; month: number; day: number; hour: number; minute: number } {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -81,23 +103,32 @@ function nyDateTimeParts(date: Date): { year: number; month: number; day: number
 
 /**
  * True whenever it is safe to run a technical-preparation cycle right now: America/New_York wall-
- * clock time (via Intl, never a fixed UTC-offset assumption - DST-safe by construction), between
- * PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET and PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET, on a real
- * NYSE market day only - preparing before an open that isn't actually happening today has no
- * purpose. A worker invoked inside this window computes its own required market date via
- * previousNyseMarketDay(now) (see technical-indicator-cache.ts), which already correctly resolves
- * "the previous completed trading day" across weekends/holidays (e.g. Tuesday morning after Labor
- * Day correctly requires the prior Friday, never a fabricated Monday) - no separate calendar logic
- * is needed here beyond deciding whether the window itself is currently open.
+ * clock time (via Intl, never a fixed UTC-offset assumption - DST-safe by construction).
+ *
+ * On a real NYSE market day: between PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET and
+ * PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET - preparing before an open that isn't actually happening
+ * today has no purpose. A worker invoked inside this window computes its own required market date
+ * via previousNyseMarketDay(now) (see technical-indicator-cache.ts), which already correctly
+ * resolves "the previous completed trading day" across weekends/holidays (e.g. Tuesday morning
+ * after Labor Day correctly requires the prior Friday, never a fabricated Monday) - no separate
+ * calendar logic is needed here beyond deciding whether the window itself is currently open.
+ *
+ * On a Saturday specifically (never Sunday, never any other non-market weekday): between
+ * SATURDAY_CATCHUP_WINDOW_START_MINUTE_OF_DAY_ET and SATURDAY_CATCHUP_WINDOW_END_MINUTE_OF_DAY_ET -
+ * see that constant's own doc comment for the full rationale (weekend scanner-readiness gap).
  */
 export function isTechnicalPreparationWindowOpen(now: Date): boolean {
   const ny = nyDateTimeParts(now);
   const nyDateUtc = new Date(Date.UTC(ny.year, ny.month - 1, ny.day));
-  if (!isNyseMarketDay(nyDateUtc)) {
-    return false;
-  }
   const minuteOfDay = ny.hour * 60 + ny.minute;
-  return minuteOfDay >= PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET && minuteOfDay <= PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET;
+
+  if (isNyseMarketDay(nyDateUtc)) {
+    return minuteOfDay >= PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET && minuteOfDay <= PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET;
+  }
+  if (nyDateUtc.getUTCDay() === SATURDAY_UTC_DAY) {
+    return minuteOfDay >= SATURDAY_CATCHUP_WINDOW_START_MINUTE_OF_DAY_ET && minuteOfDay <= SATURDAY_CATCHUP_WINDOW_END_MINUTE_OF_DAY_ET;
+  }
+  return false;
 }
 
 // -------------------------------------------------------------------------------------------

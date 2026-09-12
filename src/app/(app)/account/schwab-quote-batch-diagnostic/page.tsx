@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { requireCurrentUser } from "@/lib/auth";
 import { LatestCandleFreshnessPanel } from "./latest-candle-freshness-panel";
 import { QuoteBatchDiagnosticPanel } from "./quote-batch-diagnostic-panel";
+import { ScannerTickerComparisonPanel } from "./scanner-ticker-comparison-panel";
 import { ScannerUniverseDryRunPanel } from "./scanner-universe-dry-run-panel";
 import { TechnicalCachePanel } from "./technical-cache-panel";
 
@@ -81,6 +82,19 @@ export default async function SchwabQuoteBatchDiagnosticPage() {
           </p>
         </div>
         <LatestCandleFreshnessPanel />
+      </div>
+
+      <div className="space-y-3 border-t border-zinc-800 pt-6">
+        <div>
+          <h2 className="text-xl font-semibold text-zinc-50">Scanner Ticker Comparison</h2>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            For a small list of tickers you supply, reports whether each is in the universe, survives your
+            price/volume rules on a fresh quote, has a current technical snapshot, and what your last live scan
+            showed for it - without hunting the full results table. One bounded real quote per ticker (max 25),
+            no history, no option chains, nothing saved.
+          </p>
+        </div>
+        <ScannerTickerComparisonPanel />
       </div>
     </div>
   );
