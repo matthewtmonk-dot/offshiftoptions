@@ -314,27 +314,33 @@ export async function addReactionAction(formData: FormData) {
   revalidatePath("/notifications");
 }
 
-export async function sendChatMessageAction(formData: FormData) {
+export type SendChatMessageActionResult =
+  | { ok: true; messageId: string | null; submittedAt: number }
+  | { ok: false; error: string; submittedAt: number };
+
+export async function sendChatMessageAction(formData: FormData): Promise<SendChatMessageActionResult> {
   const user = await requireCurrentUser();
-  const returnTo = actionReturnPath(formData, "/chat");
 
   try {
-    await sendChatMessageForUser(
+    const message = await sendChatMessageForUser(
       user.id,
       String(formData.get("conversationId") ?? ""),
       formData.get("body"),
       formData.get("ticker"),
+      formData.getAll("attachments"),
     );
+
+    revalidatePath("/chat");
+    revalidatePath("/dashboard");
+    revalidatePath("/notifications");
+
+    return { ok: true, messageId: message?.id ?? null, submittedAt: Date.now() };
   } catch (error) {
     if (error instanceof ValidationError) {
-      redirectWithError(returnTo, error.message);
+      return { ok: false, error: error.message, submittedAt: Date.now() };
     }
     throw error;
   }
-
-  revalidatePath("/chat");
-  revalidatePath("/dashboard");
-  revalidatePath("/notifications");
 }
 
 export async function markConversationReadAction(formData: FormData) {

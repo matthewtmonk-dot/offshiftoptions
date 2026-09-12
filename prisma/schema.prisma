@@ -746,10 +746,27 @@ model ChatMessage {
   conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender         User              @relation(fields: [senderId], references: [id], onDelete: Cascade)
   reads          ChatMessageRead[]
+  attachments    ChatAttachment[]
 
   @@index([conversationId, createdAt])
   @@index([senderId])
   @@index([ticker])
+}
+
+model ChatAttachment {
+  id               String      @id @default(cuid())
+  messageId        String
+  storageBucket    String
+  storageKey       String      @unique
+  mimeType         String
+  originalFileName String
+  byteSize         Int
+  width            Int?
+  height           Int?
+  createdAt        DateTime    @default(now())
+  message          ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
 }
 
 model ChatMessageRead {

@@ -42,6 +42,12 @@ import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
 import { getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
 import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
+import {
+  prepareChatImageAttachments,
+  removeUploadedChatAttachments,
+  uploadChatAttachments,
+  type PreparedChatAttachment,
+} from "./chat-attachments";
 import { mergeBrokerRecords, normalizeSchwabApiPosition, normalizeSchwabApiTransaction } from "@/providers/schwab/csv";
 import type {
   BrokerPosition,
@@ -1299,11 +1305,13 @@ export async function sendChatMessageForUser(
   conversationId: string,
   bodyInput: unknown,
   tickerInput?: unknown,
+  attachmentInputs: FormDataEntryValue[] = [],
 ) {
   const body = trimText(bodyInput, 1200);
   const ticker = tickerInput ? requireTicker(tickerInput) : null;
+  const hasAttachmentInput = attachmentInputs.some((entry) => entry instanceof File && entry.size > 0);
 
-  if (!conversationId || !body) {
+  if (!conversationId || (!body && !hasAttachmentInput)) {
     return null;
   }
 
@@ -1320,19 +1328,47 @@ export async function sendChatMessageForUser(
   }
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-  const message = await prisma.chatMessage.create({
-    data: {
-      conversationId,
-      senderId: user.id,
-      body,
-      ticker,
-      reads: {
-        create: {
-          userId: user.id,
+  const preparedAttachments = await prepareChatImageAttachments(conversation.id, attachmentInputs);
+  let uploadedAttachments: PreparedChatAttachment[] = [];
+  let message: Awaited<ReturnType<typeof prisma.chatMessage.create>> | null = null;
+
+  try {
+    uploadedAttachments = await uploadChatAttachments(preparedAttachments);
+    message = await prisma.chatMessage.create({
+      data: {
+        conversationId,
+        senderId: user.id,
+        body,
+        ticker,
+        attachments: {
+          create: uploadedAttachments.map((attachment) => ({
+            storageBucket: attachment.storageBucket,
+            storageKey: attachment.storageKey,
+            mimeType: attachment.mimeType,
+            originalFileName: attachment.originalFileName,
+            byteSize: attachment.byteSize,
+            width: attachment.width,
+            height: attachment.height,
+          })),
+        },
+        reads: {
+          create: {
+            userId: user.id,
+          },
         },
       },
-    },
-  });
+      include: { attachments: true },
+    });
+  } catch (error) {
+    if (uploadedAttachments.length) {
+      await removeUploadedChatAttachments(uploadedAttachments);
+    }
+    throw error;
+  }
+
+  if (!message) {
+    throw new ValidationError("Message could not be sent.");
+  }
 
   await prisma.conversationMember.update({
     where: {
@@ -1353,7 +1389,7 @@ export async function sendChatMessageForUser(
           actorId: user.id,
           type: "MESSAGE",
           title: `${user.name} sent you a message`,
-          body,
+          body: body || (uploadedAttachments.length === 1 ? "Sent an image." : `Sent ${uploadedAttachments.length} images.`),
           href: "/chat",
         }),
       ),

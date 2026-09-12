@@ -1,10 +1,12 @@
-import { Check, Send } from "lucide-react";
+import { Check } from "lucide-react";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireCurrentUser } from "@/lib/auth";
 import { getChatPageData } from "@/lib/app-data";
 import { shortDateTime } from "@/lib/format";
-import { markConversationReadAction, sendChatMessageAction } from "../actions";
+import { markConversationReadAction } from "../actions";
+import { ChatAttachmentGallery } from "./chat-attachment-gallery";
+import { ChatComposer } from "./chat-composer";
 
 export const dynamic = "force-dynamic";
 
@@ -52,7 +54,8 @@ export default async function ChatPage() {
                         {message.ticker ? <span className="text-emerald-300">${message.ticker}</span> : null}
                         <span>{shortDateTime(message.createdAt)}</span>
                       </div>
-                      <p className="text-sm text-zinc-100">{message.body}</p>
+                      {message.body ? <p className="whitespace-pre-wrap text-sm text-zinc-100">{message.body}</p> : null}
+                      <ChatAttachmentGallery attachments={message.attachments} />
                       {own && readByOthers.length ? (
                         <p className="mt-2 text-xs text-emerald-200">Read by {readByOthers.join(", ")}</p>
                       ) : null}
@@ -80,16 +83,7 @@ export default async function ChatPage() {
               </form>
             </div>
 
-            <form action={sendChatMessageAction} className="grid gap-2 md:grid-cols-[120px_1fr_120px]">
-              <input type="hidden" name="conversationId" value={conversation.id} />
-              <input type="hidden" name="returnTo" value="/chat" />
-              <input name="ticker" placeholder="Ticker" className="min-h-11 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100" />
-              <input name="body" placeholder="Message" className="min-h-11 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100" required />
-              <button type="submit" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300">
-                <Send className="size-4" aria-hidden />
-                Send
-              </button>
-            </form>
+            <ChatComposer conversationId={conversation.id} />
           </div>
         ) : (
           <EmptyState>No conversation is seeded for this user.</EmptyState>

@@ -259,7 +259,7 @@ export async function getChatPageData(userId: string) {
       members: { include: { user: true } },
       messages: {
         orderBy: { createdAt: "asc" },
-        include: { sender: true, reads: true },
+        include: { sender: true, reads: true, attachments: { orderBy: { createdAt: "asc" } } },
       },
     },
   });
