@@ -601,6 +601,54 @@ A second, independent fundamentals data source - added specifically to cover the
 
 ---
 
+## Engineering Diagnostics & Repair Tooling
+
+An audit pass (2026-09-12) inventoried every temporary/admin diagnostic and repair tool accumulated during scanner/technical-cache stabilization, verifying each against its actual current code (not assumptions). Recorded here since none of this had a home in the handoff doc before now — two of the tools below are genuine data-mutation repair tools and deserve to be findable without re-deriving their behavior from scratch.
+
+**Current technical-preparation schedule (context for the "Keep for now" list below - do not treat any of the following as stale):** the automatic morning schedule is ACTIVE, not `workflow_dispatch`-only. `.github/workflows/technical-preparation-cron.yml` fires across a broad UTC container covering the real 5:45-9:15 AM America/New_York window (both EDT/EST); the server-side `isTechnicalPreparationWindowOpen` guard remains the sole authority on whether a tick actually does anything. Because GitHub's own schedule cadence is imprecise, each wake-up may run **up to two sequential bounded cycles** (never parallel - `concurrency: {group: technical-preparation-worker, cancel-in-progress: false}` prevents overlap), the second only if the first returned `IN_PROGRESS` with real remaining work - so one job can process up to `MAX_SUB_BATCHES_PER_INVOCATION (5) x TECHNICAL_REFRESH_BATCH_SIZE (25) x 2 cycles = 250` history symbols, still at `TECHNICAL_REFRESH_CONCURRENCY = 4` Schwab requests in flight. The global daily-candle-availability gate (`checkDailyCandleAvailabilityGate`) still runs first and refuses bulk work (Stage A sweep, item creation, bulk history fetches) whenever Schwab's own daily candle for the required market date isn't yet provably available - see the "GLOBAL DAILY-CANDLE-AVAILABILITY GATE" and follow-up hardening entries above for the full mechanism. Reference/OCC/earnings refresh cadence is unrelated and unchanged.
+
+**KEEP FOR NOW** (all read-only except Warm Cache; all on the existing Scanner Engineering Diagnostics page, `/account/schwab-quote-batch-diagnostic`, except the raw functions used by the schedule itself):
+- **Technical Cache Readiness** - workflow-completion + genuinely-fresh-usable counts for the active preparation run.
+- **Freshness Detail** - DB-only cross-check of workflow-READY items against the live scan's own freshness rule (never trusts item status alone).
+- **Run Detail** - DB-only aggregate view of the current run (`getTechnicalPreparationRunAggregatesForUser`).
+- **Latest Candle Freshness** - the 5-symbol probe Matt uses to observe in real time whether Schwab has published the day's candle yet.
+- **Warm Cache** (manual technical-preparation trigger, `warmTechnicalIndicatorCacheAction`) - the only tool in this group that mutates (`TechnicalIndicatorSnapshot`/`TechnicalPreparationItem`/`Run`, all user-scoped upserts, capped at 25 symbols/click, subject to the same daily-candle gate as the schedule). **Correction to an earlier internal note**: this is a fallback/manual engineering tool only - the automatic morning schedule is active (see above), so Warm Cache is not required for technical preparation to run; it exists for manual nudges, testing, and catch-up between scheduled cycles.
+
+**ADMIN / ENGINEERING DIAGNOSTICS** (ongoing debugging value, never needed by an ordinary user, all read-only, all user-scoped):
+- **Scanner Universe Dry Run** - estimates real broad-scan cost (quotes/survivors/history-and-chain-call estimates) against the user's own configured rules; never persists a scan.
+- **Broker Record Classification Diagnostic** - re-classifies this user's own already-synced `BrokerRecord` rows live, to explain why a given trade isn't becoming a Campaign.
+- **Campaign Event Sequence Diagnostic** - shows a user's own Campaigns' exact stored `CampaignEvent` sequence plus linked-record classification, for auditing lifecycle transitions from real stored data.
+- **Alpha Vantage Fundamentals Diagnostic** - checks `OVERVIEW` field availability for a few fixed tickers. **Note the shared-quota impact**: unlike the Schwab-backed tools (each user's own OAuth connection), this draws from the single server-level Alpha Vantage API key's shared 25-request/day budget - any authenticated user's click consumes quota the real fundamentals queue also needs. Not a data-safety issue, but a fairness one worth remembering if usage grows beyond Matt/Eric.
+
+**CANDIDATES FOR REMOVAL AFTER PRODUCTION ACCEPTANCE** (one-time verification questions already answered; no ongoing purpose identified):
+- **Quote Batch Size Diagnostic** - answered its own question (Schwab's real batch limit, verified at 100 in production).
+- **Schwab Transactions Diagnostic** - one-time sync-path verification against raw Schwab transaction/order data.
+- **Schwab Fundamentals Diagnostic** (`/account/schwab-fundamentals`) - one-time field-availability check for 3 fixed tickers. **Also worth fixing if kept**: unlike every other tool on this list, this page is not click-gated - it's a plain `dynamic = "force-dynamic"` server component that fires a real (read-only) Schwab call on every page load/navigation, no button. Not a safety issue (read-only, 3 fixed symbols), just inconsistent with this app's own established "explicit click only" pattern for anything that calls an external provider.
+
+**DESTRUCTIVE REPAIR TOOLS - not normal end-user features, both already merged to `main`:**
+
+1. **Schwab Record Repair** (`src/lib/schwab-record-repair.ts`, panel on `/account/schwab-transactions-diagnostic`, commit `41887c9`) - deletes malformed, unlinked Schwab `TRANSACTION` `BrokerRecord` rows a since-fixed normalizer bug produced, so a corrected re-sync can recreate them cleanly.
+   - User-scoped: every query and the eventual `deleteMany` are keyed off `requireCurrentUser().id`; the action itself accepts no id of any kind from the browser, only an opaque match token.
+   - Preview (`previewSchwabRecordRepairAction`) makes zero writes.
+   - Confirmation is gated by a **server-verified SHA-256 token** computed over the live matching row-id set at repair time - not merely a UI step, since the preview response never returns raw ids, so a token cannot be forged client-side.
+   - Deletes only rows matching the exact predicate: `userId`, `provider: SCHWAB`, `kind: TRANSACTION`, `status: NEEDS_REVIEW`, `linkedCampaignId: null`, `action: null`, `sources` includes `SCHWAB_API`.
+   - Safety cap: 200 rows: `repairMalformedSchwabTransactionRecordsForUser` refuses even with a valid token above that.
+   - Cross-user isolation proven by integration test (`schwab-record-repair.integration.test.ts`).
+   - **Intentionally retained for legacy cleanup** - the bug it targets is already fixed going forward, so this only matters for rows written before the fix.
+
+2. **Campaign History Repair** (`src/lib/campaign-history-repair.ts`, panel on `/account/schwab-transactions-diagnostic`, commit `95c85eb`) - undoes a specific historical bug where a Campaign was prematurely closed via a fabricated `$0` `CLOSE_PUT` event derived from a misclassified Schwab expiration-removal record.
+   - Same user-scoping and server-verified-token confirmation pattern as tool #1 above (opaque token only, no id from the browser).
+   - Preview makes zero writes.
+   - On confirm, for each qualifying Campaign: **deletes** the fabricated `CampaignEvent` row, **reopens** the Campaign (`status: OPEN`, `closedAt: null`), and **rewrites** the linked `BrokerRecord`'s `action`/`metadata` in place (never deleted) and unlinks it - all three writes in one `prisma.$transaction`.
+   - Qualifying predicate is narrow and multi-part (CSP strategy, CLOSED status, Schwab-sourced account, exactly `SELL_PUT` then `CLOSE_PUT`, `premium === 0`, no ASSIGNMENT/EXERCISE evidence, exactly one BUY_TO_CLOSE record whose description matches the known expiration-removal wording) - see the file's own `findQualifyingRepairs` for the exact checks.
+   - Safety cap: 50 campaigns.
+   - Cross-user isolation proven by integration test (`campaign-history-repair.integration.test.ts`).
+   - **Intentionally retained only for legacy repair** - do not extend its predicate or reuse its pattern for new bug classes without a fresh review; it exists to fix specific already-written bad rows, not as a general-purpose campaign-editing tool.
+
+Both repair tools are well-built (proper scoping, cryptographic confirmation, safety caps, tested isolation) but are **destructive by design** - never present either as a routine feature, and treat any future addition to their predicates as a change that needs the same scrutiny this entry gives them.
+
+---
+
 ## Testing
 
 Last verified (September 12, 2026 for the local Buddy Chat private image attachment slice, against local PostgreSQL and a local `next start` production-mode server on port 3001 - nothing run against Supabase):
