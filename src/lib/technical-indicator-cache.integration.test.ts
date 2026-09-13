@@ -1062,6 +1062,50 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     expect(breakdown).toMatchObject({ hasActiveRun: false, eligibleCount: 0, workflowReadyCount: 0, freshUsableCount: 0 });
   });
 
+  it("getTechnicalCacheFreshnessBreakdownForUser({mostRecentRun: true}) does not hide a genuinely stale carried-over cache on a day with no NEW run yet - the Scanner page's own staleness banner depends on this", async () => {
+    const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
+    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+
+    // Friday Sep 11 2026, 6:00 AM ET - a real preparation run created that morning, requiring
+    // Thursday Sep 10's candle (Friday hadn't closed yet). Successful: 3/3 READY, asOfDate = Sep 10.
+    const fridayMorning = new Date("2026-09-11T06:00:00-04:00");
+    const tickers = ["FRESHBANNER0", "FRESHBANNER1", "FRESHBANNER2"];
+    await createPreparationRunWithItems(
+      matt.id,
+      fridayMorning,
+      tickers.map((ticker) => ({ ticker, status: "READY" as const })),
+      "COMPLETE",
+    );
+    await prisma.technicalIndicatorSnapshot.createMany({
+      data: tickers.map((ticker) => ({
+        userId: matt.id,
+        ticker,
+        status: "READY",
+        asOfDate: previousNyseMarketDay(fridayMorning), // Thu Sep 10 - correct/fresh as of Friday morning
+        rsi: 50,
+        historyFetchedAt: fridayMorning,
+      })),
+    });
+
+    // Saturday Sep 12 2026, 8:00 AM ET - no NEW run was ever created for Saturday's own date (e.g.
+    // the catch-up window hasn't opened yet, or the daily-candle gate never let one through this
+    // Saturday). Required market date is now Friday Sep 11 - Thursday's snapshots are genuinely stale.
+    const saturdayNow = new Date("2026-09-12T08:00:00-04:00");
+
+    // The default ("today only") lookup still correctly reports no active run today - unchanged,
+    // proving this fix does not alter the pre-existing Freshness Detail diagnostic's own contract.
+    const defaultBreakdown = await getTechnicalCacheFreshnessBreakdownForUser(matt.id, saturdayNow);
+    expect(defaultBreakdown.hasActiveRun).toBe(false);
+
+    // mostRecentRun: true correctly finds Friday's run and honestly reports it as stale, not hidden.
+    const bannerBreakdown = await getTechnicalCacheFreshnessBreakdownForUser(matt.id, saturdayNow, { mostRecentRun: true });
+    expect(bannerBreakdown.hasActiveRun).toBe(true);
+    expect(bannerBreakdown.eligibleCount).toBe(3);
+    expect(bannerBreakdown.freshUsableCount).toBe(0);
+    expect(bannerBreakdown.staleSnapshotCount).toBe(3);
+    expect(bannerBreakdown.requiredMarketDate.toISOString().slice(0, 10)).toBe("2026-09-11");
+  });
+
   it("one preparation cycle performs the quote-stage eligibility sweep exactly once - the 2nd/3rd/Nth history batch never calls getQuotes again", async () => {
     await seedUniverse(syntheticTickers(60));
     let getQuotesCallCount = 0;

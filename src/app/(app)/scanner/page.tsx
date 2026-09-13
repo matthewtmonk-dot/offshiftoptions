@@ -97,7 +97,11 @@ async function loadScannerPageBundle(userId: string) {
     // DB-only (no Schwab call) - lets the page show an honest, always-current staleness warning
     // even when the visitor never clicks "Run Live Scan" this session (e.g. reloading over a
     // weekend before any scan re-runs) - see PROJECT_HANDOFF.md's weekend-coverage investigation.
-    getTechnicalCacheFreshnessBreakdownForUser(userId),
+    // mostRecentRun: true is required here (not the default "today only" lookup) - otherwise a day
+    // with no NEW run yet (early Saturday before the catch-up window opens, or any day the global
+    // gate never let one be created at all) would report hasActiveRun: false and silently hide a
+    // genuinely stale carried-over technical cache, defeating the whole point of this banner.
+    getTechnicalCacheFreshnessBreakdownForUser(userId, new Date(), { mostRecentRun: true }),
   ]);
   console.info("Scanner page data load (ms):", Date.now() - startedAt);
   return result;

@@ -1185,16 +1185,37 @@ export type TechnicalCacheFreshnessBreakdown = {
  * today's (marketDate, rulesFingerprint) identity, returns hasActiveRun: false with zero counts
  * rather than creating one (unlike getTechnicalCacheReadinessForUser/getOrCreateActiveTechnicalPreparationRun,
  * which are allowed to trigger a real quote sweep on first use).
+ *
+ * `options.mostRecentRun` (default false, preserving the exact original "today only" contract for
+ * the existing Freshness Detail diagnostic - see technical-indicator-cache.integration.test.ts's
+ * "no run exists yet for today" test) - when true, falls back to this user's most recently CREATED
+ * run for the current rules fingerprint instead of requiring an exact marketDate === today match.
+ * Needed for a page-load staleness banner: on a day where no NEW run has been created yet (e.g.
+ * early Saturday morning before the catch-up window opens, or any day the global daily-candle gate
+ * blocked run creation entirely - see checkDailyCandleAvailabilityGate), the exact-today lookup
+ * would otherwise report hasActiveRun: false and silently hide genuinely stale technical data
+ * carried over from an earlier run, even though a live scan run right now would find it stale too.
+ * The freshness math itself is unchanged either way - it always reads live TechnicalIndicatorSnapshot
+ * rows at query time, never a value cached on the run/item.
  */
-export async function getTechnicalCacheFreshnessBreakdownForUser(userId: string, now: Date = new Date()): Promise<TechnicalCacheFreshnessBreakdown> {
+export async function getTechnicalCacheFreshnessBreakdownForUser(
+  userId: string,
+  now: Date = new Date(),
+  options: { mostRecentRun?: boolean } = {},
+): Promise<TechnicalCacheFreshnessBreakdown> {
   const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
   const rules = await loadUserQuoteStageRules(userId);
   const fingerprint = computeQuoteStageRulesFingerprint(rules);
   const marketDate = dateOnlyUtc(now);
 
-  const run = await prisma.technicalPreparationRun.findUnique({
-    where: { userId_marketDate_rulesFingerprint: { userId, marketDate, rulesFingerprint: fingerprint } },
-  });
+  const run = options.mostRecentRun
+    ? await prisma.technicalPreparationRun.findFirst({
+        where: { userId, rulesFingerprint: fingerprint, eligibleCount: { not: null } },
+        orderBy: { createdAt: "desc" },
+      })
+    : await prisma.technicalPreparationRun.findUnique({
+        where: { userId_marketDate_rulesFingerprint: { userId, marketDate, rulesFingerprint: fingerprint } },
+      });
   if (!run || run.eligibleCount === null) {
     return {
       hasActiveRun: false,
