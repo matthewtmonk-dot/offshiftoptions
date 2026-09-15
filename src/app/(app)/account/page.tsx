@@ -161,7 +161,7 @@ export default async function AccountPage({
       </Panel>
 
       <Panel title="Brokerage Connections">
-        <div className="grid gap-4 lg:grid-cols-[1fr_0.85fr]">
+        <div id="brokerage-sync" className="scroll-mt-4 grid gap-4 lg:grid-cols-[1fr_0.85fr]">
           <div className="flex items-start gap-3">
             <div className="grid size-11 shrink-0 place-items-center rounded-md border border-sky-400/30 bg-sky-400/10">
               <ShieldCheck className="size-5 text-sky-200" aria-hidden />
@@ -210,7 +210,7 @@ export default async function AccountPage({
                       className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black transition hover:bg-emerald-300"
                     >
                       <RefreshCw className="size-4" aria-hidden />
-                      Sync now
+                      Brokerage Sync
                     </button>
                   </form>
                   {schwabConnection.lastSyncDiagnostics ? <SyncDiagnosticsDetails diagnostics={schwabConnection.lastSyncDiagnostics} /> : null}

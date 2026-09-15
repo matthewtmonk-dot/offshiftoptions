@@ -4,6 +4,10 @@ Off Shift Options (formerly "LST Buddy") is a private PWA for Matt and Eric to r
 
 This app does not place trades. Trades stay in Schwab/Thinkorswim or another brokerage outside Off Shift Options.
 
+## Resuming work
+
+Read [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) and [AGENTS.md](AGENTS.md) first. The handoff records the active checkpoint, validation, deployment state, and next task. Keep work in small, reviewable slices and update that checkpoint after each meaningful change so a restart does not lose progress.
+
 ## Quick Start With Docker
 
 1. Create local environment values:

@@ -3,6 +3,33 @@ import "server-only";
 import { getSchwabMarketDataProviderForUser } from "./broker-connections";
 import { mapWithConcurrency } from "./concurrency";
 
+export type QuoteSnapshot = { price: number; asOf: Date };
+
+/** Preserve the provider's snapshot time; checking again does not make an old quote new. */
+export async function getQuoteSnapshotsForUser(userId: string, tickers: string[]): Promise<Map<string, QuoteSnapshot | null>> {
+  const uniqueTickers = [...new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
+  const snapshots = new Map<string, QuoteSnapshot | null>(uniqueTickers.map((ticker) => [ticker, null]));
+  if (!uniqueTickers.length) return snapshots;
+  try {
+    const provider = await getSchwabMarketDataProviderForUser(userId);
+    if (!provider) return snapshots;
+    const results = await mapWithConcurrency(uniqueTickers, 4, async (ticker) => {
+      try {
+        const quote = await provider.getQuote(ticker);
+        return Number.isFinite(quote.price) && quote.price > 0 && Number.isFinite(quote.asOf.getTime())
+          ? { price: quote.price, asOf: quote.asOf }
+          : null;
+      } catch {
+        return null;
+      }
+    });
+    uniqueTickers.forEach((ticker, index) => snapshots.set(ticker, results[index]));
+  } catch {
+    // Connection resolution can fail too. Keep the cards readable with unavailable prices.
+  }
+  return snapshots;
+}
+
 /**
  * Batches live quote lookups for a set of tickers under one user's Schwab connection. Never
  * throws and never fabricates a price - a ticker with no connection, no token, or a failed

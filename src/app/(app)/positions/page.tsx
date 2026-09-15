@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
-import { RollStatusBadge, RollStatusUnavailableBadge } from "@/components/roll-status-badge";
+import { RollStatusBadge } from "@/components/roll-status-badge";
 import {
   summarizeAccountPerformance,
   summarizeAccountsPerformance,
@@ -31,6 +31,8 @@ import {
 } from "@/domain/finance/accountLedger";
 import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenPut, optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
+import { daysToExpiration } from "@/domain/finance/calculations";
+import { matchTrackedPut, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import {
   summarizeCampaignProgress,
   summarizeContributionAdjustedGoal,
@@ -43,7 +45,8 @@ import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isRollGuidanceApplicabl
 import { requireCurrentUser } from "@/lib/auth";
 import { getTrackerPageData, normalizeTrackerScope, optionContractKey, type TrackerScope } from "@/lib/app-data";
 import { money, percent, shortCalendarDate, shortDate, toNumber } from "@/lib/format";
-import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
+import { getQuoteSnapshotsForUser, type QuoteSnapshot } from "@/lib/live-quotes";
+import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { resolveInheritedVisibility } from "@/lib/privacy";
 import type { BrokerPosition } from "@/providers/broker-read/types";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
@@ -52,7 +55,6 @@ import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { NewAccountNameAndTypeFields } from "./new-account-name-field";
 import {
   getBrokerActivityAwaitingReviewForUser,
-  splitBrokerPositionsByCampaignLink,
   type BrokerActivityAwaitingReview,
 } from "@/lib/broker-reconciliation";
 import {
@@ -70,6 +72,8 @@ import {
   toggleTradingAccountVisibilityAction,
 } from "../actions";
 import { TrackerTabs } from "./tracker-tabs";
+import { RefreshSnapshot } from "./refresh-snapshot";
+import { snapshotTime } from "./snapshot-time";
 
 export const dynamic = "force-dynamic";
 
@@ -173,7 +177,7 @@ export default async function PositionsPage({
   const previewBatchId = firstParam(query.previewBatch);
   const needsOpenBrokerData = view === "open";
   const needsAccountsImportData = view === "accounts";
-  const [data, schwabPositions, brokerActivityAwaitingReview, importBatches, pendingImport] = await Promise.all([
+  const [data, schwabPositions, brokerActivityAwaitingReview, importBatches, pendingImport, schwabConnection] = await Promise.all([
     getTrackerPageData(user.id, scope, {
       includeLegacyTrades: needsOpenBrokerData,
       includePerformanceCampaigns: view === "performance",
@@ -182,11 +186,8 @@ export default async function PositionsPage({
     needsAccountsImportData ? getBrokerActivityAwaitingReviewForUser(user.id) : Promise.resolve([]),
     needsAccountsImportData ? getBrokerImportBatchesForUser(user.id) : Promise.resolve([]),
     needsAccountsImportData && previewBatchId ? getPendingBrokerImportBatchForUser(user.id, previewBatchId) : Promise.resolve(null),
+    needsOpenBrokerData ? getSchwabConnectionSummaryForUser(user.id) : Promise.resolve(null),
   ]);
-  const { linked: linkedSchwabPositions } = needsOpenBrokerData
-    ? await splitBrokerPositionsByCampaignLink(user.id, schwabPositions ?? [])
-    : { linked: [] };
-  const linkedSchwabSymbols = new Set(linkedSchwabPositions.map((position) => position.symbol));
   const buddyName = data.users[0]?.name ?? "Buddy";
   // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
   // confirmed $0 in a "Net P/L" figure - see getCampaignIdsWithUnknownFees. Checked across
@@ -212,13 +213,18 @@ export default async function PositionsPage({
   const closedCount = closedRows.length;
   const realizedTotal = closedRows.reduce((sum, row) => sum + (row.summary.totalCampaignPL ?? row.summary.realizedPL ?? 0), 0);
   const premiumTotal = rows.reduce((sum, row) => sum + row.summary.netOptionPremium, 0);
-  const openCampaignTickers = new Set(openRows.map((row) => row.campaign.ticker.toUpperCase()));
 
   // Roll Status (see PROJECT_HANDOFF.md) - always uses the VIEWER's own Roll Buffer setting,
   // never the campaign owner's, so a Buddy-scope card reflects what the person looking at it
   // configured for themselves. Only computed for the Open view, where it's actually shown.
   const rollBufferPercent = Number(data.settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
   const openPutsByCampaignId = new Map(openRows.map((row) => [row.campaign.id, getCurrentOpenPut(row.campaign.events)]));
+  const trackedPuts: TrackedPut[] = openRows.flatMap(({ campaign }) => {
+    const put = openPutsByCampaignId.get(campaign.id);
+    return put ? [{ id: campaign.id, ownerId: campaign.ownerId, accountId: campaign.accountId,
+      ticker: campaign.ticker, status: campaign.status, ...put }] : [];
+  });
+  let quoteSnapshots = new Map<string, QuoteSnapshot | null>();
   const rollStatusByCampaignId = new Map<string, RollStatus | "UNAVAILABLE">();
   if (view === "open") {
     // Once a campaign is in Expiration Processing, its fate is already decided and just
@@ -228,17 +234,19 @@ export default async function PositionsPage({
     const tickersNeedingQuotes = rollEligibleRows
       .filter((row) => openPutsByCampaignId.get(row.campaign.id))
       .map((row) => row.campaign.ticker);
-    const prices = await getLiveQuotePricesForUser(user.id, tickersNeedingQuotes);
+    quoteSnapshots = await getQuoteSnapshotsForUser(user.id, tickersNeedingQuotes);
     for (const row of rollEligibleRows) {
       const openPut = openPutsByCampaignId.get(row.campaign.id);
       if (!openPut) {
         continue;
       }
-      const price = prices.get(row.campaign.ticker.toUpperCase()) ?? null;
+      const price = quoteSnapshots.get(row.campaign.ticker.toUpperCase())?.price ?? null;
       const status = price !== null ? computeRollStatus({ currentPrice: price, strike: openPut.strike, rollBufferPercent }) : null;
       rollStatusByCampaignId.set(row.campaign.id, status ?? "UNAVAILABLE");
     }
   }
+
+  const snapshotCheckedAt = new Date();
 
   // Performance is always computed from the current user's own completed campaigns and own
   // accounts, never from the scope-filtered `campaigns`/`visibleAccounts` lists above - so
@@ -348,7 +356,7 @@ export default async function PositionsPage({
         <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100">{error}</div>
       ) : null}
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <TrackerStat
           icon={<ClipboardList className="size-4" aria-hidden />}
           label="Campaigns"
@@ -384,7 +392,7 @@ export default async function PositionsPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <TrackerTabs scope={scope} view={view} />
         <p className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
-          Tracking + live read-only Schwab data. Trade execution stays in thinkorswim.
+          Read-only tracking. Trade execution stays in thinkorswim.
           <InfoTip label="Mine, Eric, and Both" align="end" testId="help-tracker-scope">
             {HELP.scope}
           </InfoTip>
@@ -393,20 +401,18 @@ export default async function PositionsPage({
 
       {view === "open" ? (
         <section className="space-y-4">
-          {data.ownAccounts.length === 0 ? (
-            <NewAccountPanel buddyName={buddyName} userName={user.name} defaultOpen />
-          ) : (
-            <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-              <NewCampaignPanel accounts={data.ownAccounts} buddyName={buddyName} />
-              <NewAccountPanel buddyName={buddyName} userName={user.name} />
-            </section>
-          )}
-
-          <SchwabPositionsPanel
-            positions={schwabPositions}
-            openCampaignTickers={openCampaignTickers}
-            linkedSymbols={linkedSchwabSymbols}
-          />
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-400" data-testid="tracker-snapshot-status">
+            <div className="space-y-1">
+              <p>Snapshot checked: {snapshotTime(snapshotCheckedAt)} · {quoteSnapshots.size ? `${Array.from(quoteSnapshots.values()).filter(Boolean).length}/${quoteSnapshots.size} stock prices available` : "No unexpired puts need prices"}</p>
+              <p>Your brokerage last synced: {snapshotTime(schwabConnection?.lastAccountSyncAt)} · Positions {schwabPositions === null ? "unavailable" : "available"}</p>
+              <p>Snapshots may be delayed or from the last session; quotes and positions can be cached for 15 seconds.</p>
+              <p>Refresh checks prices and positions. Brokerage Sync imports account activity and updates campaign history.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <RefreshSnapshot />
+              <IntentPrefetchLink href="/account#brokerage-sync" className={tinyButtonClass}>Brokerage Sync in Account</IntentPrefetchLink>
+            </div>
+          </div>
 
           <div className="space-y-3">
             {openRows.map((row) => (
@@ -415,17 +421,29 @@ export default async function PositionsPage({
                 row={row}
                 currentUserId={user.id}
                 rollStatus={rollStatusByCampaignId.get(row.campaign.id) ?? null}
+                openView
+                quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
+                asOf={snapshotCheckedAt}
               />
             ))}
             {openRows.length === 0 ? (
               <EmptyState>
                 {data.ownAccounts.length === 0
-                  ? "Add an account above, then start a campaign."
-                  : "No open campaigns for this view. Create one above to start the history."}
+                  ? "Add an account below, then start a campaign."
+                  : "No open campaigns for this view. Create one below to start the history."}
               </EmptyState>
             ) : null}
             {data.legacyTrades.length ? <LegacySnapshots trades={data.legacyTrades} /> : null}
           </div>
+          <SchwabPositionsPanel positions={schwabPositions} userId={user.id} accounts={data.ownAccounts} campaigns={trackedPuts} />
+          {data.ownAccounts.length === 0 ? (
+            <NewAccountPanel buddyName={buddyName} userName={user.name} defaultOpen />
+          ) : (
+            <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+              <NewCampaignPanel accounts={data.ownAccounts} buddyName={buddyName} />
+              <NewAccountPanel buddyName={buddyName} userName={user.name} />
+            </section>
+          )}
         </section>
       ) : null}
 
@@ -637,10 +655,16 @@ function CampaignCard({
   row,
   currentUserId,
   rollStatus = null,
+  openView = false,
+  quoteSnapshot = null,
+  asOf = new Date(),
 }: {
   row: { campaign: CampaignRow; summary: ReturnType<typeof summarizeCampaign>; feesFullyKnown?: boolean };
   currentUserId: string;
   rollStatus?: RollStatus | "UNAVAILABLE" | null;
+  openView?: boolean;
+  quoteSnapshot?: QuoteSnapshot | null;
+  asOf?: Date;
 }) {
   const { campaign, summary } = row;
   const isOwner = campaign.ownerId === currentUserId;
@@ -652,6 +676,7 @@ function CampaignCard({
   // A fee Schwab didn't report (or this code couldn't parse) must never silently present as a
   // confirmed $0 in a "Net P/L"-style figure - see getCampaignIdsWithUnknownFees.
   const netPLExact = row.feesFullyKnown ?? true;
+  const openPut = campaign.status === "OPEN" ? getCurrentOpenPut(campaign.events) : null;
   const returnOnSecuredCapital =
     campaign.status === "CLOSED" && netPLExact && plValue !== null && summary.collateralCommitted
       ? (plValue / summary.collateralCommitted) * 100
@@ -659,8 +684,8 @@ function CampaignCard({
 
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
-      <summary className="grid cursor-pointer list-none gap-4 p-4 transition hover:bg-zinc-900/70 md:grid-cols-[1fr_auto] md:items-center [&::-webkit-details-marker]:hidden">
-        <div className="min-w-0">
+      <summary className="relative grid cursor-pointer list-none gap-3 p-4 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0 pr-5 xl:pr-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-2xl font-semibold text-zinc-50">{campaign.ticker}</span>
             <Badge tone={statusTone(campaign.status, plValue)}>{campaign.status}</Badge>
@@ -670,20 +695,44 @@ function CampaignCard({
                 {outcomeLabel(summary.finalResult)}
               </Badge>
             ) : null}
-            <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} />
+            {!openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
             {rollStatus === "UNAVAILABLE" ? (
-              <RollStatusUnavailableBadge />
+              <Badge tone="neutral">Price unavailable · status pending</Badge>
             ) : rollStatus ? (
               <RollStatusBadge status={rollStatus} />
             ) : null}
           </div>
+          {openView && openPut ? (
+            <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-put-contract">
+              <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>
+              <span className="text-zinc-300">{shortCalendarDate(openPut.expiration)}</span>
+              <span className="font-semibold text-zinc-100">{daysToExpiration(openPut.expiration, asOf)} DTE</span>
+              <span className="text-xs text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
+            </div>
+          ) : null}
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-400">
             <span>{isOwner ? "You" : campaign.owner.name}</span>
             <span>{accountVisibleToViewer ? campaign.account.name : "Private account"}</span>
             <span>{summary.currentStage}</span>
+            {openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
           </div>
         </div>
-        <div className="grid grid-cols-[1fr_auto] items-center gap-3 md:min-w-[600px] md:grid-cols-[1fr_1fr_1fr_1fr_auto]">
+        {openView ? (
+          <div className="grid grid-cols-[1fr_1fr_auto] items-start gap-x-4 gap-y-2 sm:grid-cols-[1fr_1fr_auto_auto]">
+            <div>
+              <SummaryCell label="Stock snapshot" value={quoteSnapshot ? money(quoteSnapshot.price) : "Unavailable"}
+                help="Schwab's latest available stock price; it may be delayed or from the last session. Time is the provider quote/trade time when supplied, otherwise retrieval time. Roll status uses this snapshot and your Roll Buffer setting." />
+              <p className="mt-1 max-w-48 text-xs text-zinc-500">{quoteSnapshot ? snapshotTime(quoteSnapshot.asOf) : summary.currentStage === "Expiration processing" ? "Awaiting brokerage evidence" : openPut ? "Refresh to check prices" : "No active put"}</p>
+            </div>
+            <div>
+              <SummaryCell label="Net premium" value={signedMoney(summary.netOptionPremium)} tone={summary.netOptionPremium}
+                help={HELP.netPremium} helpTestId={`help-summary-premium-${campaign.ticker}`} />
+              <p className="mt-1 text-xs text-zinc-500">Cash flow · not realized{!netPLExact ? " · fees pending" : ""}</p>
+            </div>
+            <SummaryCell label="Days open" value={summary.daysActive ?? "UNKNOWN"} help="Campaign age since the first opening. DTE counts calendar days until the active put expires." />
+            <ChevronDown className="absolute right-3 top-4 size-5 justify-self-end text-zinc-500 transition group-open:rotate-180 sm:static" aria-hidden />
+          </div>
+        ) : <div className="grid grid-cols-2 items-center gap-3 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] xl:min-w-[520px]">
           <SummaryCell
             label="Realized"
             value={
@@ -710,9 +759,9 @@ function CampaignCard({
             tone={returnOnSecuredCapital}
             help="Realized P/L divided by capital committed to secure the put."
           />
-          <SummaryCell label="Days" value={summary.daysActive ?? "UNKNOWN"} />
+          <SummaryCell label="Days open" value={summary.daysActive ?? "UNKNOWN"} />
           <ChevronDown className="size-5 justify-self-end text-zinc-500 transition group-open:rotate-180" aria-hidden />
-        </div>
+        </div>}
       </summary>
 
       <div className="border-t border-zinc-800 p-4">
@@ -1012,37 +1061,36 @@ function AccountsSection({
 
 function SchwabPositionsPanel({
   positions,
-  openCampaignTickers,
-  linkedSymbols,
+  userId,
+  accounts,
+  campaigns,
 }: {
   positions: SchwabPositions;
-  openCampaignTickers: Set<string>;
-  linkedSymbols: Set<string>;
+  userId: string;
+  accounts: TrackerData["ownAccounts"];
+  campaigns: TrackedPut[];
 }) {
   if (positions === null) {
     return null;
   }
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
-      <div className="mb-3 flex items-center justify-between gap-3">
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
         <h2 className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
           <ShieldCheck className="size-4 text-sky-300" aria-hidden />
-          Your Schwab Positions
+          Your Schwab position snapshot ({positions.length})
         </h2>
-        <IntentPrefetchLink href="/account" className="text-xs font-medium text-emerald-300 hover:text-emerald-200">
-          Manage connection
-        </IntentPrefetchLink>
-      </div>
+        <ChevronDown className="size-4 transition group-open:rotate-180" aria-hidden />
+      </summary>
+      <div className="mt-3">
       {positions.length === 0 ? (
         <p className="text-sm text-zinc-400">Schwab reports no open positions right now.</p>
       ) : (
         <div className="space-y-2">
           {positions.map((position) => {
-            const classified = classifyBrokerPosition(position);
             const display = describeBrokerPositionForDisplay(position);
-            const isLinked = linkedSymbols.has(position.symbol);
-            const isMatch = !isLinked && openCampaignTickers.has(classified.underlying.toUpperCase());
+            const match = matchTrackedPut(userId, position, positions, accounts, campaigns);
             return (
               <div
                 key={`${position.accountId}-${position.symbol}`}
@@ -1058,8 +1106,8 @@ function SchwabPositionsPanel({
                   <span className="text-zinc-400">
                     {display.quantityLabel} · {display.valueLabel}: {money(display.value)}
                   </span>
-                  <Badge tone={isLinked ? "good" : isMatch ? "info" : "neutral"}>
-                    {isLinked ? "Linked to Campaign" : isMatch ? "Possible match" : "Unlinked"}
+                  <Badge tone={match === "EXACT" ? "info" : match === "AMBIGUOUS" ? "warn" : "neutral"}>
+                    {match === "EXACT" ? "Matches tracked put" : match === "AMBIGUOUS" ? "Ambiguous match" : "No exact match in this view"}
                   </Badge>
                 </div>
               </div>
@@ -1068,12 +1116,11 @@ function SchwabPositionsPanel({
         </div>
       )}
       <p className="mt-2 text-xs text-zinc-500">
-        Broker positions as Schwab reports them. &quot;Possible match&quot; means an open campaign shares the
-        same underlying ticker - it is not an automatic link. &quot;Linked to Campaign&quot; means you confirmed
-        this position under Accounts -&gt; Broker Activity Awaiting Review; a linked position is counted once
-        (via its Campaign), not twice, on the Dashboard. Unlinked positions still count separately until reviewed.
+        A match requires one of your campaigns in the same account with the same put contract and short quantity.
+        This display hint does not link broker records or change totals. Review activity in the Accounts tab.
       </p>
-    </div>
+      </div>
+    </details>
   );
 }
 
