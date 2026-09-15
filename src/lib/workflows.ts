@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { SchwabReconciliationEvidence, TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
 import { evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
 import type {
   LsegRecommendation,
@@ -173,7 +174,7 @@ function categoryCount(outcome: BrokerTransactionCategoryOutcome): number {
 
 export type SchwabAccountSyncResult = {
   syncedAccounts: number;
-  accounts: { id: string; name: string; accountValue: number; cash: number; freshPositions: BrokerPosition[] }[];
+  accounts: { id: string; name: string; accountValue: number; cash: number; evidence: SchwabReconciliationEvidence }[];
   /** The sync-only portion of SchwabSyncDiagnostics (see broker-connections.ts) - the caller
    * (syncSchwabAccountAction) merges in the campaign-related counts from
    * reconcileSchwabActivityForUser, which runs after this returns, before persisting the full
@@ -183,6 +184,7 @@ export type SchwabAccountSyncResult = {
     positionsSourceStatus: "OK" | "ERROR";
     positionsErrorCode: string | null;
     transactionsReceived: number;
+    transactionsEvidenceStatus: TransactionEvidenceStatus;
     tradeTransactionsReceived: number;
     tradeSourceStatus: "OK" | "ERROR";
     receiveAndDeliverReceived: number;
@@ -234,7 +236,19 @@ export async function fetchSchwabAccountActivity(provider: BrokerReadProvider, a
     transactionsErrorCode = categorizeSchwabSyncError(error);
   }
 
-  return { positions, positionsStatus, positionsErrorCode, transactions, transactionCategories, transactionsErrorCode };
+  const categoryStatuses = ["TRADE", "RECEIVE_AND_DELIVER", "DIVIDEND_OR_INTEREST"].map(
+    (category) => transactionCategories?.[category as BrokerTransactionCategory]?.status,
+  );
+  const transactionsEvidenceStatus: TransactionEvidenceStatus = categoryStatuses.every((status) => status === "OK")
+    ? "COMPLETE"
+    : categoryStatuses.some((status) => status === "OK") ? "PARTIAL" : "FAILED";
+  const evidence: SchwabReconciliationEvidence = {
+    positions: { status: positionsStatus === "OK" ? "COMPLETE" : "FAILED", data: positions },
+    transactions: { status: transactionsEvidenceStatus, from, to },
+    // The caller must mark a persistence failure before handing this evidence to reconciliation.
+    persistenceStatus: "COMPLETE",
+  };
+  return { positions, positionsStatus, positionsErrorCode, transactions, transactionCategories, transactionsErrorCode, evidence };
 }
 
 /**
@@ -261,12 +275,13 @@ export function buildSchwabRecordsToPersist(positions: BrokerPosition[], transac
  * positions and recent transactions and persists them as BrokerRecords (reusing the exact CSV
  * import dedupe scheme via persistNormalizedBrokerRecordsForUser - see broker-import.ts - so a
  * repeated sync can never write a duplicate row), which is what lets campaign reconciliation
- * (reconcileSchwabActivityForUser, called by the syncSchwabAccountAction caller with the fresh
- * positions returned here) turn real Schwab activity into Tracker history automatically.
+ * (reconcileSchwabActivityForUser, called by the syncSchwabAccountAction caller with explicit
+ * per-account evidence completeness) turn real Schwab activity into Tracker history automatically.
  * Never fabricates a value Schwab did not return, and never touches another user's accounts or
  * tokens. A positions/transactions fetch failure never fails the whole sync - the account
  * balance sync (this function's original promise) still succeeds; that account's campaign
- * reconciliation is simply skipped until the next successful sync.
+ * synthetic expiration is deferred until complete evidence is available. Explicit broker
+ * close/roll/assignment evidence can still be reconciled.
  */
 export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAccountSyncResult> {
   clearSchwabBrokerReadCacheForUser(userId);
@@ -297,6 +312,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
     positionsSourceStatus: "OK",
     positionsErrorCode: null,
     transactionsReceived: 0,
+    transactionsEvidenceStatus: "COMPLETE",
     tradeTransactionsReceived: 0,
     tradeSourceStatus: "OK",
     receiveAndDeliverReceived: 0,
@@ -342,7 +358,6 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
     });
 
     const activity = await fetchSchwabAccountActivity(provider, brokerAccount.id, transactionsFrom, syncedAt);
-    const freshPositions = activity.positions;
 
     diagnostics.positionsReceived += activity.positions.length;
     if (activity.positionsStatus === "ERROR") {
@@ -385,13 +400,18 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         // reconciliation catches up on the next successful sync, not a failed sync. Recorded (not
         // silent) so a real persistence failure is distinguishable from an honest 0 inserted.
         diagnostics.persistenceStatus = "ERROR";
+        activity.evidence.persistenceStatus = "FAILED";
         diagnostics.persistenceErrorCode = categorizeSchwabSyncError(error);
         logSchwabSyncFailure("schwab_sync_persistence", userId, error);
       }
     }
 
-    accounts.push({ id: tradingAccount.id, name: tradingAccount.name, accountValue: brokerAccount.accountValue, cash: brokerAccount.cash, freshPositions });
+    accounts.push({ id: tradingAccount.id, name: tradingAccount.name, accountValue: brokerAccount.accountValue, cash: brokerAccount.cash, evidence: activity.evidence });
   }
+
+  diagnostics.transactionsEvidenceStatus = accounts.every((account) => account.evidence.transactions.status === "COMPLETE")
+    ? "COMPLETE"
+    : accounts.every((account) => account.evidence.transactions.status === "FAILED") ? "FAILED" : "PARTIAL";
 
   await recordSchwabAccountSyncResult(userId, { succeededAt: syncedAt });
   clearSchwabBrokerReadCacheForUser(userId);
@@ -647,6 +667,7 @@ export async function expireCampaignPutForUser(
   if (!campaign) {
     return null;
   }
+  if (campaign.status === "CLOSED") return null; // A retry already applied this outcome.
   if (campaign.status !== "OPEN") {
     throw new ValidationError("Only an open put campaign can be marked expired.");
   }
@@ -660,26 +681,30 @@ export async function expireCampaignPutForUser(
   const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
   const notes = trimText(notesInput, 700);
 
-  await prisma.campaignEvent.create({
-    data: {
-      campaignId: campaign.id,
-      type: "PUT_EXPIRED",
-      occurredAt,
-      sortOrder: nextSortOrder(campaign.events),
-      optionType: "PUT",
-      contracts: activePut.contracts,
-      strike: activePut.strike,
-      expiration: activePut.expiration,
-      premium: 0,
-      fees,
-      notes: notes || null,
-    },
-  });
-
-  return prisma.campaign.update({
-    where: { id: campaign.id },
-    data: { status: "CLOSED", closedAt: occurredAt },
-    include: campaignDetailInclude,
+  return prisma.$transaction(async (tx) => {
+    // Claim this exact open campaign version atomically. A retry/concurrent sync cannot
+    // append another expiration, and a changed campaign version is not closed by this read.
+    const claimed = await tx.campaign.updateMany({
+      where: { id: campaign.id, ownerId: userId, status: "OPEN", updatedAt: campaign.updatedAt },
+      data: { status: "CLOSED", closedAt: occurredAt },
+    });
+    if (claimed.count !== 1) return null;
+    await tx.campaignEvent.create({
+      data: {
+        campaignId: campaign.id,
+        type: "PUT_EXPIRED",
+        occurredAt,
+        sortOrder: nextSortOrder(campaign.events),
+        optionType: "PUT",
+        contracts: activePut.contracts,
+        strike: activePut.strike,
+        expiration: activePut.expiration,
+        premium: 0,
+        fees,
+        notes: notes || null,
+      },
+    });
+    return tx.campaign.findUnique({ where: { id: campaign.id }, include: campaignDetailInclude });
   });
 }
 

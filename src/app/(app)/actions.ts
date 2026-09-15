@@ -1029,16 +1029,20 @@ export async function syncSchwabAccountAction() {
   }
 
   const campaignTotals = { campaignsCreated: 0, campaignsClosed: 0, campaignsRolled: 0, campaignsAssigned: 0, campaignsExpired: 0 };
+  let expirationsDeferred = 0;
+  let expirationDeferralReason: "EXPIRATION_EVIDENCE_INCOMPLETE" | null = null;
   let reconciliationStatus: "OK" | "ERROR" = "OK";
   let reconciliationErrorCode: string | null = null;
   for (const account of result.accounts) {
     try {
-      const summary = await reconcileSchwabActivityForUser(user.id, account.id, account.freshPositions);
+      const summary = await reconcileSchwabActivityForUser(user.id, account.id, account.evidence);
       campaignTotals.campaignsCreated += summary.campaignsOpened;
       campaignTotals.campaignsClosed += summary.campaignsClosed;
       campaignTotals.campaignsRolled += summary.campaignsRolled;
       campaignTotals.campaignsAssigned += summary.campaignsAssigned;
       campaignTotals.campaignsExpired += summary.campaignsExpired;
+      expirationsDeferred += summary.expirationsDeferred;
+      expirationDeferralReason = summary.expirationDeferralReason ?? expirationDeferralReason;
     } catch (error) {
       // Balance sync above already succeeded and is durable - a reconciliation hiccup for one
       // account just means it catches up on the next successful sync, not a failed sync.
@@ -1056,6 +1060,8 @@ export async function syncSchwabAccountAction() {
     accountsSynced: result.syncedAccounts,
     ...result.diagnostics,
     ...campaignTotals,
+    expirationsDeferred,
+    expirationDeferralReason,
     reconciliationStatus,
     reconciliationErrorCode,
   });

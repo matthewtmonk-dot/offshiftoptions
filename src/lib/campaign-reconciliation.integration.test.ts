@@ -1,5 +1,15 @@
+import type { SchwabReconciliationEvidence } from "@/domain/finance/schwabReconciliation";
+import type { BrokerPosition } from "@/providers/broker-read/types";
 import { hash } from "bcryptjs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+function completeEvidence(positions: BrokerPosition[]): SchwabReconciliationEvidence {
+  return {
+    positions: { status: "COMPLETE", data: positions },
+    transactions: { status: "COMPLETE", from: new Date("2026-01-01"), to: new Date("2026-09-30") },
+    persistenceStatus: "COMPLETE",
+  };
+}
 
 const runDatabaseTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
 const maybeDescribe = runDatabaseTests ? describe : describe.skip;
@@ -86,7 +96,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
 
     // Sep 4, 2026 is a Friday; this sync happens Saturday, one day after expiration, with the
     // option already gone and no closing evidence - still not confirmed.
-    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T18:00:00Z"));
     expect(summary.campaignsOpened).toBe(1);
     expect(summary.campaignsExpired).toBe(0);
 
@@ -106,16 +116,16 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     });
 
     // Saturday sync: still just processing, no premature close.
-    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T18:00:00Z"));
     expect(saturday.campaignsExpired).toBe(0);
 
     // Monday Sep 7 is Labor Day - NYSE closed - so this sync must NOT confirm expiration yet.
-    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-07T18:00:00Z"));
+    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-07T18:00:00Z"));
     expect(laborDay.campaignsExpired).toBe(0);
 
     // Tuesday Sep 8 (the first NYSE market day after the Labor Day weekend): option still gone,
     // no BTC/assignment/stock evidence -> confirmed.
-    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     expect(tuesday.campaignsExpired).toBe(1);
 
     const campaign = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "APLD" }, include: { events: true } });
@@ -141,7 +151,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     const summary = await reconcileSchwabActivityForUser(
       userA.id,
       account.id,
-      [{ accountId: account.id, symbol: "STIL 260904P00010000", quantity: -1, marketValue: -5 }],
+      completeEvidence([{ accountId: account.id, symbol: "STIL 260904P00010000", quantity: -1, marketValue: -5 }]),
       new Date("2026-09-08T18:00:00Z"),
     );
 
@@ -165,7 +175,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     const summary = await reconcileSchwabActivityForUser(
       userA.id,
       account.id,
-      [{ accountId: account.id, symbol: "STCK", assetType: "EQUITY", quantity: 100, marketValue: 2350 }],
+      completeEvidence([{ accountId: account.id, symbol: "STCK", assetType: "EQUITY", quantity: 100, marketValue: 2350 }]),
       new Date("2026-09-08T18:00:00Z"),
     );
 
@@ -185,8 +195,8 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     });
 
     const saturday = new Date("2026-09-05T18:00:00Z");
-    const first = await reconcileSchwabActivityForUser(userA.id, account.id, [], saturday);
-    const second = await reconcileSchwabActivityForUser(userA.id, account.id, [], saturday);
+    const first = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), saturday);
+    const second = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), saturday);
 
     expect(first.campaignsOpened).toBe(1);
     expect(second.campaignsOpened).toBe(0); // already linked, not reopened
@@ -208,7 +218,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     });
 
     // Saturday: no evidence yet, option already gone from the positions feed - stays processing.
-    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T18:00:00Z"));
     expect(saturday.campaignsExpired).toBe(0);
     expect(saturday.campaignsAssigned).toBe(0);
 
@@ -221,7 +231,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       occurredAt: new Date("2026-09-04T21:00:00Z"),
       price: null,
     });
-    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     expect(tuesday.campaignsAssigned).toBe(1);
     expect(tuesday.campaignsExpired).toBe(0);
 
@@ -246,7 +256,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       price: 0.1,
     });
 
-    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T13:00:00Z"));
+    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T13:00:00Z"));
     expect(summary.campaignsClosed).toBe(1);
     expect(summary.campaignsExpired).toBe(0);
 
@@ -273,7 +283,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       price: null,
     });
 
-    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T13:00:00Z"));
+    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T13:00:00Z"));
     expect(summary.campaignsAssigned).toBe(1);
     expect(summary.campaignsExpired).toBe(0);
 
@@ -292,8 +302,8 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     });
 
     const tuesday = new Date("2026-09-08T18:00:00Z"); // first NYSE market day after the Labor Day weekend
-    await reconcileSchwabActivityForUser(userA.id, account.id, [], tuesday);
-    const secondRun = await reconcileSchwabActivityForUser(userA.id, account.id, [], tuesday);
+    await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), tuesday);
+    const secondRun = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), tuesday);
 
     expect(secondRun.campaignsOpened).toBe(0);
     expect(secondRun.campaignsExpired).toBe(0);
@@ -313,7 +323,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       price: null, // missing price - can't confidently open a campaign from this
     });
 
-    await expect(reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"))).resolves.toMatchObject({
+    await expect(reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"))).resolves.toMatchObject({
       campaignsOpened: 0,
     });
 
@@ -331,17 +341,17 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     await createTransaction(userA.id, account.id, { symbol: "RIOT 260904P00017500", underlyingSymbol: "RIOT", action: "Sell to Open", occurredAt: new Date("2026-08-28T14:10:00Z"), price: 0.28 });
 
     // Saturday: three campaigns open automatically, but expiration confirmation waits.
-    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T18:00:00Z"));
     expect(saturday.campaignsOpened).toBe(3);
     expect(saturday.campaignsExpired).toBe(0);
 
     // Monday Sep 7 is Labor Day - must NOT confirm yet even though it's a weekday.
-    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-07T18:00:00Z"));
+    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-07T18:00:00Z"));
     expect(laborDay.campaignsExpired).toBe(0);
 
     // Tuesday Sep 8 (the first NYSE market day after the Labor Day weekend): confirmed sync
     // closes all three as expired worthless.
-    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     expect(tuesday.campaignsExpired).toBe(3);
 
     const campaigns = await prisma.campaign.findMany({ where: { ownerId: userA.id, accountId: account.id, ticker: { in: ["APLD", "CORZ", "RIOT"] } } });
@@ -360,7 +370,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       fees: 0,
     });
 
-    await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     const campaign = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "FEEZ" } });
     const unknown = await getCampaignIdsWithUnknownFees([campaign!.id]);
     expect(unknown.has(campaign!.id)).toBe(false);
@@ -377,7 +387,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       fees: 0.65,
     });
 
-    await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     const campaign = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "FEEK" }, include: { events: true } });
     const opening = campaign?.events.find((event) => event.type === "SELL_PUT");
     expect(Number(opening?.fees)).toBe(0.65);
@@ -396,7 +406,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       fees: null,
     });
 
-    await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     const campaign = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "FEEU" } });
     const unknown = await getCampaignIdsWithUnknownFees([campaign!.id]);
     expect(unknown.has(campaign!.id)).toBe(true);
@@ -420,7 +430,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       price: 0.36,
     });
 
-    let summary = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-15T13:00:00Z"));
+    let summary = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-08-15T13:00:00Z"));
     expect(summary.campaignsOpened).toBe(1);
 
     await createTransaction(userA.id, account.id, {
@@ -438,7 +448,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       price: 0.88,
     });
 
-    summary = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-28T13:00:00Z"));
+    summary = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-08-28T13:00:00Z"));
     expect(summary.campaignsRolled).toBe(1);
     expect(summary.campaignsOpened).toBe(0);
 
@@ -459,17 +469,17 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       fees: null,
     });
 
-    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T18:00:00Z"));
     expect(saturday.campaignsClosed).toBe(0);
     expect(saturday.campaignsExpired).toBe(0);
     const stillOpen = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "ROLL" } });
     expect(stillOpen?.status).toBe("OPEN");
 
-    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-07T18:00:00Z"));
+    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-07T18:00:00Z"));
     expect(laborDay.campaignsClosed).toBe(0);
     expect(laborDay.campaignsExpired).toBe(0);
 
-    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     expect(tuesday.campaignsClosed).toBe(0);
     expect(tuesday.campaignsExpired).toBe(1);
 
@@ -493,7 +503,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     });
 
     const accountB = await createTradingAccountForUser(userB.id, "Recon Account PRIVACY B", "Manual", "10000", "10000", "PRIVATE");
-    const summaryForB = await reconcileSchwabActivityForUser(userB.id, accountB.id, [], new Date("2026-09-05T13:00:00Z"));
+    const summaryForB = await reconcileSchwabActivityForUser(userB.id, accountB.id, completeEvidence([]), new Date("2026-09-05T13:00:00Z"));
     expect(summaryForB.campaignsOpened).toBe(0);
 
     const ericCampaigns = await prisma.campaign.count({ where: { ownerId: userB.id, ticker: "PRIV" } });
@@ -501,7 +511,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
 
     // Even calling reconciliation with User A's own account id, scoped to User B, must never
     // touch User A's data - accountId alone (never trusted from a client) is not ownership.
-    const crossAccount = await reconcileSchwabActivityForUser(userB.id, accountA.id, [], new Date("2026-09-05T13:00:00Z"));
+    const crossAccount = await reconcileSchwabActivityForUser(userB.id, accountA.id, completeEvidence([]), new Date("2026-09-05T13:00:00Z"));
     expect(crossAccount.campaignsOpened).toBe(0);
     const stillUnlinked = await prisma.brokerRecord.findFirst({ where: { userId: userA.id, symbol: "PRIV 260904P00012000" } });
     expect(stillUnlinked?.linkedCampaignId).toBeNull();
@@ -547,7 +557,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       price: 0.68,
     });
 
-    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+    const summary = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-08-31T18:00:00Z"));
     expect(summary.campaignsOpened).toBe(3); // APLD, RIOT, and CORZ's original opening leg
     expect(summary.campaignsRolled).toBe(1); // CORZ's BTC+STO pair rolls that same campaign, not a fresh one
 
@@ -576,7 +586,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     expect(unknownFeeCampaigns.has(corz.id)).toBe(false);
 
     // Idempotent: re-running reconciliation against the same synced data creates nothing new.
-    const secondRun = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+    const secondRun = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-08-31T18:00:00Z"));
     expect(secondRun.campaignsOpened).toBe(0);
     expect(secondRun.campaignsRolled).toBe(0);
     const campaignsAfterSecondRun = await prisma.campaign.findMany({
@@ -632,7 +642,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       fees: plausibleFee,
     });
 
-    await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+    await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-08-31T18:00:00Z"));
 
     const campaigns = await prisma.campaign.findMany({
       where: { ownerId: userA.id, accountId: account.id, ticker: { in: ["APLD", "RIOT", "CORZ"] } },
@@ -683,8 +693,8 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
       price: 0.3,
     });
 
-    await reconcileSchwabActivityForUser(userA.id, accountA.id, [], new Date("2026-08-31T18:00:00Z"));
-    await reconcileSchwabActivityForUser(userB.id, accountB.id, [], new Date("2026-08-31T18:00:00Z"));
+    await reconcileSchwabActivityForUser(userA.id, accountA.id, completeEvidence([]), new Date("2026-08-31T18:00:00Z"));
+    await reconcileSchwabActivityForUser(userB.id, accountB.id, completeEvidence([]), new Date("2026-08-31T18:00:00Z"));
 
     const campaignsA = await prisma.campaign.findMany({ where: { ownerId: userA.id, ticker: "ISOR" } });
     const campaignsB = await prisma.campaign.findMany({ where: { ownerId: userB.id, ticker: "ISOR" } });
@@ -749,7 +759,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     const records = transactions.map((transaction) => normalizeSchwabApiTransaction(transaction));
     await persistNormalizedBrokerRecordsForUser(userB.id, account.id, records);
 
-    const summary = await reconcileSchwabActivityForUser(userB.id, account.id, [], new Date("2026-08-31T18:00:00Z"));
+    const summary = await reconcileSchwabActivityForUser(userB.id, account.id, completeEvidence([]), new Date("2026-08-31T18:00:00Z"));
     expect(summary.campaignsOpened).toBe(1);
 
     const campaign = await prisma.campaign.findFirst({
@@ -854,7 +864,7 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
 
     // Saturday sync (before the Sep 8 NYSE confirmation window) - must NOT close or expire.
-    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-05T18:00:00Z"));
+    const saturday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-05T18:00:00Z"));
     expect(saturday.campaignsOpened).toBe(1);
     expect(saturday.campaignsClosed).toBe(0);
     expect(saturday.campaignsExpired).toBe(0);
@@ -863,13 +873,13 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     expect(campaignBefore?.status).toBe("OPEN");
 
     // Monday Sep 7 is Labor Day - still must not confirm.
-    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-07T18:00:00Z"));
+    const laborDay = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-07T18:00:00Z"));
     expect(laborDay.campaignsClosed).toBe(0);
     expect(laborDay.campaignsExpired).toBe(0);
 
     // Tuesday Sep 8 (the first NYSE market day after the Labor Day weekend) - now safe to
     // confirm expired worthless, via PUT_EXPIRED, never via the CLOSE path.
-    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, [], new Date("2026-09-08T18:00:00Z"));
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, completeEvidence([]), new Date("2026-09-08T18:00:00Z"));
     expect(tuesday.campaignsClosed).toBe(0);
     expect(tuesday.campaignsExpired).toBe(1);
 

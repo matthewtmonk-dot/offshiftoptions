@@ -1,6 +1,6 @@
 import { classifyBrokerTransactionAction } from "./brokerTransactionActions";
 import { nextNyseMarketDay } from "./marketCalendar";
-import { parseOccOptionSymbol } from "./occOption";
+import { isSameOccContract, occContractKey, parseOccOptionSymbol } from "./occOption";
 
 export type ReconciliationTransaction = {
   id: string;
@@ -143,7 +143,7 @@ export function findClosingEvidence(
 ): ClosingEvidence {
   const closeTxn = candidates.find(
     (transaction) =>
-      transaction.symbol === leg.symbol &&
+      isSameOccContract(transaction.symbol, leg.symbol) &&
       classifyBrokerTransactionAction(transaction.action) === "BUY_TO_CLOSE" &&
       transaction.occurredAt &&
       transaction.price !== null,
@@ -194,7 +194,7 @@ export function findClosingEvidence(
   }
 
   const assignment = candidates.find(
-    (transaction) => transaction.symbol === leg.symbol && classifyBrokerTransactionAction(transaction.action) === "ASSIGNMENT" && transaction.occurredAt,
+    (transaction) => isSameOccContract(transaction.symbol, leg.symbol) && classifyBrokerTransactionAction(transaction.action) === "ASSIGNMENT" && transaction.occurredAt,
   );
   if (assignment) {
     return { kind: "ASSIGNMENT", transactionId: assignment.id, occurredAt: assignment.occurredAt!, fees: absOrZero(assignment.fees) };
@@ -208,6 +208,22 @@ export type ReconciliationPosition = {
   assetType?: string | null;
   quantity: number;
 };
+
+export type TransactionEvidenceStatus = "COMPLETE" | "PARTIAL" | "FAILED";
+
+/** Server-owned evidence from one account's current sync. No implicit success for an empty array. */
+export type SchwabReconciliationEvidence = {
+  positions: { status: "COMPLETE" | "FAILED"; data: ReconciliationPosition[] };
+  transactions: { status: TransactionEvidenceStatus; from: Date; to: Date };
+  persistenceStatus: "COMPLETE" | "FAILED";
+};
+
+export type ExpirationDecision =
+  | { status: "CONFIRMED" }
+  | {
+      status: "PENDING";
+      reason: "EXPIRATION_EVIDENCE_INCOMPLETE" | "EXPLICIT_ACTIVITY" | "AWAITING_PROCESSING_DATE" | "OPTION_STILL_PRESENT" | "ACQUIRED_SHARES_PRESENT";
+    };
 
 /**
  * Tier-2 expiration evidence, tightened against a real assignment-processing-lag risk: Schwab
@@ -229,27 +245,44 @@ export type ReconciliationPosition = {
  *
  * Anything short of that stays OPEN ("Expiration processing") rather than a guess.
  */
-export function isConfirmedExpiredWorthless(input: {
+export function evaluateWorthlessExpiration(input: {
   expiration: Date;
   symbol: string;
   underlying: string;
-  freshPositions: ReconciliationPosition[];
+  evidence: SchwabReconciliationEvidence;
   hasClosingEvidence: boolean;
   asOf: Date;
-}): boolean {
+}): ExpirationDecision {
   if (input.hasClosingEvidence) {
-    return false;
+    return { status: "PENDING", reason: "EXPLICIT_ACTIVITY" };
   }
   if (!isOnOrAfterNextBusinessDay(input.expiration, input.asOf)) {
-    return false;
+    return { status: "PENDING", reason: "AWAITING_PROCESSING_DATE" };
   }
-  if (input.freshPositions.some((position) => position.symbol === input.symbol)) {
-    return false;
+  const { positions, transactions, persistenceStatus } = input.evidence;
+  if (
+    positions.status !== "COMPLETE" || transactions.status !== "COMPLETE" || persistenceStatus !== "COMPLETE" ||
+    !Number.isFinite(transactions.from.getTime()) || !Number.isFinite(transactions.to.getTime()) ||
+    transactions.from > input.expiration || !isOnOrAfterNextBusinessDay(input.expiration, transactions.to) ||
+    !occContractKey(input.symbol) ||
+    positions.data.some((position) =>
+      !Number.isFinite(position.quantity) ||
+      ((position.assetType === "OPTION" || !position.assetType) && !occContractKey(position.symbol)),
+    )
+  ) {
+    return { status: "PENDING", reason: "EXPIRATION_EVIDENCE_INCOMPLETE" };
   }
-  const acquiredStock = input.freshPositions.some(
-    (position) => position.assetType === "EQUITY" && position.symbol === input.underlying && position.quantity > 0,
+  if (positions.data.some((position) => isSameOccContract(position.symbol, input.symbol))) {
+    return { status: "PENDING", reason: "OPTION_STILL_PRESENT" };
+  }
+  const acquiredStock = positions.data.some(
+    (position) => position.assetType === "EQUITY" && position.symbol.trim().toUpperCase() === input.underlying.toUpperCase() && position.quantity > 0,
   );
-  return !acquiredStock;
+  return acquiredStock ? { status: "PENDING", reason: "ACQUIRED_SHARES_PRESENT" } : { status: "CONFIRMED" };
+}
+
+export function isConfirmedExpiredWorthless(input: Parameters<typeof evaluateWorthlessExpiration>[0]): boolean {
+  return evaluateWorthlessExpiration(input).status === "CONFIRMED";
 }
 
 /**

@@ -43,6 +43,19 @@ export function parseOccOptionSymbol(rawSymbol: string): ParsedOccOptionSymbol |
   };
 }
 
+/** Economic contract identity, independent of OCC padding/case. Invalid symbols never match. */
+export function occContractKey(rawSymbol: string | null): string | null {
+  const option = rawSymbol ? parseOccOptionSymbol(rawSymbol) : null;
+  return option
+    ? `${option.underlying}|${option.expiration.toISOString().slice(0, 10)}|${option.optionType}|${Math.round(option.strike * 1000)}`
+    : null;
+}
+
+export function isSameOccContract(left: string | null, right: string | null): boolean {
+  const key = occContractKey(left);
+  return key !== null && key === occContractKey(right);
+}
+
 export function formatOccExpiration(expiration: Date): string {
   return expiration.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }

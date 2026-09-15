@@ -1,14 +1,16 @@
 import "server-only";
 
 import { getCurrentOpenPut } from "@/domain/finance/campaigns";
+import { classifyBrokerTransactionActivity } from "@/domain/finance/brokerTransactionActions";
+import { isSameOccContract, occContractKey } from "@/domain/finance/occOption";
 import {
   findClosingEvidence,
   findRollPairedOpeningTransactionIds,
-  isConfirmedExpiredWorthless,
+  evaluateWorthlessExpiration,
   parseOpeningPutTransaction,
   type ReconciliationTransaction,
+  type SchwabReconciliationEvidence,
 } from "@/domain/finance/schwabReconciliation";
-import type { BrokerPosition } from "@/providers/broker-read/types";
 import { prisma } from "./prisma";
 import {
   assignCampaignPutForUser,
@@ -24,6 +26,8 @@ export type SchwabReconciliationSummary = {
   campaignsRolled: number;
   campaignsAssigned: number;
   campaignsExpired: number;
+  expirationsDeferred: number;
+  expirationDeferralReason: "EXPIRATION_EVIDENCE_INCOMPLETE" | null;
 };
 
 /**
@@ -64,7 +68,7 @@ export async function getCampaignIdsWithUnknownFees(campaignIds: string[]): Prom
 export async function reconcileSchwabActivityForUser(
   userId: string,
   accountId: string,
-  freshPositions: BrokerPosition[],
+  evidence: SchwabReconciliationEvidence,
   asOf: Date = new Date(),
 ): Promise<SchwabReconciliationSummary> {
   const summary: SchwabReconciliationSummary = {
@@ -73,6 +77,8 @@ export async function reconcileSchwabActivityForUser(
     campaignsRolled: 0,
     campaignsAssigned: 0,
     campaignsExpired: 0,
+    expirationsDeferred: 0,
+    expirationDeferralReason: null,
   };
 
   const unlinked = await prisma.brokerRecord.findMany({
@@ -83,6 +89,10 @@ export async function reconcileSchwabActivityForUser(
   });
   const candidates: ReconciliationTransaction[] = unlinked.map(toReconciliationTransaction);
   const rollPairedIds = findRollPairedOpeningTransactionIds(candidates);
+  const unresolvedRecords = await prisma.brokerRecord.findMany({
+    where: { userId, accountId, provider: "SCHWAB", kind: "TRANSACTION", status: { not: "CONFIRMED" } },
+    select: { symbol: true, underlyingSymbol: true },
+  });
 
   // 1. Open new campaigns from unlinked "Sell to Open" put transactions (or link to an
   // already-tracked campaign for the exact same contract, e.g. one a CSV import created).
@@ -142,55 +152,74 @@ export async function reconcileSchwabActivityForUser(
     }
 
     const symbol = formatOccPutSymbol(campaign.ticker, openPut.expiration, openPut.strike);
-    const evidence = findClosingEvidence({ symbol, underlying: campaign.ticker, strike: openPut.strike, expiration: openPut.expiration }, candidates);
+    const closing = findClosingEvidence({ symbol, underlying: campaign.ticker, strike: openPut.strike, expiration: openPut.expiration }, candidates);
 
-    if (evidence.kind === "CLOSE") {
-      await closeCampaignPutForUser(userId, campaign.id, evidence.occurredAt.toISOString().slice(0, 10), evidence.premium, evidence.fees, null);
-      await prisma.brokerRecord.update({ where: { id: evidence.transactionId }, data: { linkedCampaignId: campaign.id } });
+    if (closing.kind === "CLOSE") {
+      await closeCampaignPutForUser(userId, campaign.id, closing.occurredAt.toISOString().slice(0, 10), closing.premium, closing.fees, null);
+      await prisma.brokerRecord.update({ where: { id: closing.transactionId }, data: { linkedCampaignId: campaign.id } });
       summary.campaignsClosed += 1;
       continue;
     }
 
-    if (evidence.kind === "ROLL") {
+    if (closing.kind === "ROLL") {
       await rollCampaignPutForUser(
         userId,
         campaign.id,
-        evidence.occurredAt.toISOString().slice(0, 10),
-        evidence.closePremium,
-        evidence.newExpiration.toISOString().slice(0, 10),
-        evidence.newStrike,
-        evidence.newPremium,
-        evidence.closeFees,
+        closing.occurredAt.toISOString().slice(0, 10),
+        closing.closePremium,
+        closing.newExpiration.toISOString().slice(0, 10),
+        closing.newStrike,
+        closing.newPremium,
+        closing.closeFees,
         null,
-        evidence.openFees,
+        closing.openFees,
       );
       await prisma.brokerRecord.updateMany({
-        where: { id: { in: [evidence.closeTransactionId, evidence.openTransactionId] } },
+        where: { id: { in: [closing.closeTransactionId, closing.openTransactionId] } },
         data: { linkedCampaignId: campaign.id },
       });
       summary.campaignsRolled += 1;
       continue;
     }
 
-    if (evidence.kind === "ASSIGNMENT") {
-      await assignCampaignPutForUser(userId, campaign.id, evidence.occurredAt.toISOString().slice(0, 10), undefined, evidence.fees, null);
-      await prisma.brokerRecord.update({ where: { id: evidence.transactionId }, data: { linkedCampaignId: campaign.id } });
+    if (closing.kind === "ASSIGNMENT") {
+      await assignCampaignPutForUser(userId, campaign.id, closing.occurredAt.toISOString().slice(0, 10), undefined, closing.fees, null);
+      await prisma.brokerRecord.update({ where: { id: closing.transactionId }, data: { linkedCampaignId: campaign.id } });
       summary.campaignsAssigned += 1;
       continue;
     }
 
-    if (
-      isConfirmedExpiredWorthless({
-        expiration: openPut.expiration,
-        symbol,
-        underlying: campaign.ticker,
-        freshPositions,
-        hasClosingEvidence: false,
-        asOf,
-      })
-    ) {
-      await expireCampaignPutForUser(userId, campaign.id, asOf.toISOString().slice(0, 10), 0, null);
-      summary.campaignsExpired += 1;
+    // Even an incomplete explicit close/exercise row is contrary evidence, never a synthetic
+    // zero-cost expiration. Opening and administrative expiration-removal rows are not closes.
+    const hasUnresolvedActivity = unlinked.some((transaction) => {
+      const action = classifyBrokerTransactionActivity(transaction);
+      if (isSameOccContract(transaction.symbol, symbol)) {
+        return action !== "SELL_TO_OPEN" && action !== "OPTION_REMOVED_EXPIRATION";
+      }
+      // An unidentifiable close/assignment cannot establish absence for an affected account.
+      return !occContractKey(transaction.symbol) &&
+        ["BUY_TO_CLOSE", "ASSIGNMENT", "EXERCISE", "UNKNOWN"].includes(action) &&
+        (!transaction.underlyingSymbol || transaction.underlyingSymbol.toUpperCase() === campaign.ticker.toUpperCase());
+    }) || unresolvedRecords.some((record) =>
+      isSameOccContract(record.symbol, symbol) || record.underlyingSymbol?.toUpperCase() === campaign.ticker.toUpperCase() ||
+      (!record.symbol && !record.underlyingSymbol),
+    );
+    const expiration = evaluateWorthlessExpiration({
+      expiration: openPut.expiration,
+      symbol,
+      underlying: campaign.ticker,
+      evidence: hasUnresolvedActivity
+        ? { ...evidence, transactions: { ...evidence.transactions, status: "PARTIAL" } }
+        : evidence,
+      hasClosingEvidence: false, // All actionable explicit evidence took precedence above.
+      asOf,
+    });
+    if (expiration.status === "CONFIRMED") {
+      const expired = await expireCampaignPutForUser(userId, campaign.id, asOf.toISOString().slice(0, 10), 0, null);
+      if (expired) summary.campaignsExpired += 1;
+    } else if (expiration.reason === "EXPIRATION_EVIDENCE_INCOMPLETE") {
+      summary.expirationsDeferred += 1;
+      summary.expirationDeferralReason = expiration.reason;
     }
   }
 

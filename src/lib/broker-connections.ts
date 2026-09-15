@@ -1,4 +1,5 @@
 import "server-only";
+import type { TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
 
 import type { BrokerReadProvider } from "@/providers/broker-read/types";
 import { clearBrokerReadCacheForUser, withBrokerReadCache } from "@/providers/broker-read/cache";
@@ -50,6 +51,8 @@ export type SchwabSyncDiagnostics = {
    * never a raw provider message. Null when the last attempt succeeded. */
   positionsErrorCode: string | null;
   transactionsReceived: number;
+  /** Absent only in diagnostics recorded before completeness was tracked. */
+  transactionsEvidenceStatus?: TransactionEvidenceStatus;
   tradeTransactionsReceived: number;
   tradeSourceStatus: "OK" | "ERROR";
   receiveAndDeliverReceived: number;
@@ -73,6 +76,8 @@ export type SchwabSyncDiagnostics = {
   campaignsRolled: number;
   campaignsAssigned: number;
   campaignsExpired: number;
+  expirationsDeferred?: number;
+  expirationDeferralReason?: "EXPIRATION_EVIDENCE_INCOMPLETE" | null;
   /** Whether campaign reconciliation ran to completion for every synced account - distinct from
    * the campaign counts above legitimately all being 0. */
   reconciliationStatus: "OK" | "ERROR";
@@ -462,6 +467,16 @@ function syncDiagnosticsValue(value: unknown): SchwabSyncDiagnostics | null {
   ];
   for (const field of errorCodeFields) {
     result[field] = stringValue(record[field]);
+  }
+
+  // Legacy diagnostics must not imply verified completeness. Only fixed enum values escape.
+  if (["COMPLETE", "PARTIAL", "FAILED"].includes(String(record.transactionsEvidenceStatus))) {
+    result.transactionsEvidenceStatus = record.transactionsEvidenceStatus;
+  }
+  if (record.expirationsDeferred !== undefined) {
+    result.expirationsDeferred = numberValue(record.expirationsDeferred) ?? 0;
+    result.expirationDeferralReason = record.expirationDeferralReason === "EXPIRATION_EVIDENCE_INCOMPLETE"
+      ? "EXPIRATION_EVIDENCE_INCOMPLETE" : null;
   }
 
   return result as SchwabSyncDiagnostics;

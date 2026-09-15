@@ -89,17 +89,23 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
       fields: "positions",
     });
     const account = objectValue(objectValue(payload)?.securitiesAccount);
-    const positions = arrayValue(account?.positions);
+    if (!account || !Array.isArray(account.positions)) {
+      throw new Error("Schwab position evidence is incomplete.");
+    }
+    const positions = account.positions;
 
     return positions.flatMap((positionValue) => {
       const position = objectValue(positionValue);
       if (!position) {
-        return [];
+        throw new Error("Schwab position evidence is incomplete.");
       }
       const instrument = objectValue(position?.instrument);
       const symbol = stringValue(instrument?.symbol);
-      if (!symbol) {
-        return [];
+      const hasQuantity = [position.longQuantity, position.shortQuantity].some(
+        (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)),
+      );
+      if (!symbol || !hasQuantity) {
+        throw new Error("Schwab position evidence is incomplete.");
       }
 
       const putCallRaw = stringValue(instrument?.putCall);
@@ -142,9 +148,14 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
     settled.forEach((outcome, index) => {
       const category = TRANSACTION_CATEGORIES[index];
       if (outcome.status === "fulfilled") {
-        const parsed = this.mapTransactionsPayload(outcome.value, accountId);
-        transactions.push(...parsed);
-        categories[category] = { status: "OK", count: parsed.length };
+        try {
+          const parsed = this.mapTransactionsPayload(outcome.value, accountId);
+          transactions.push(...parsed);
+          categories[category] = { status: "OK", count: parsed.length };
+        } catch {
+          // A malformed/skipped response is not proof that this category contained no activity.
+          categories[category] = { status: "ERROR" };
+        }
       } else {
         categories[category] = { status: "ERROR" };
       }
@@ -154,16 +165,17 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
   }
 
   private mapTransactionsPayload(payload: unknown, accountId: string): BrokerTransaction[] {
-    const transactions = Array.isArray(payload) ? payload : [];
+    if (!Array.isArray(payload)) throw new Error("Schwab transaction evidence is incomplete.");
+    const transactions = payload;
 
     return transactions.flatMap((transactionValue) => {
       const transaction = objectValue(transactionValue);
       if (!transaction) {
-        return [];
+        throw new Error("Schwab transaction evidence is incomplete.");
       }
       const id = stringValue(transaction?.activityId) ?? stringValue(transaction?.transactionId);
       if (!id) {
-        return [];
+        throw new Error("Schwab transaction evidence is incomplete.");
       }
 
       const item = selectTradedSecurityTransferItem(transaction);

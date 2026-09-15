@@ -81,9 +81,11 @@ describe("SchwabBrokerReadProvider.getPositions", () => {
     expect(positions[0]).toMatchObject({ symbol: "RIOT", quantity: 100, assetType: "EQUITY", putCall: null, strikePrice: null });
   });
 
-  it("skips a position with no instrument symbol", async () => {
+  it("rejects incomplete positions instead of manufacturing an empty successful read", async () => {
     const provider = stubProvider({ positions: [{ shortQuantity: 1, instrument: {} }] });
-    expect(await provider.getPositions("acct-hash-1")).toHaveLength(0);
+    await expect(provider.getPositions("acct-hash-1")).rejects.toThrow("position evidence is incomplete");
+    await expect(stubProvider({}).getPositions("acct-hash-1")).rejects.toThrow("position evidence is incomplete");
+    await expect(stubProvider({ positions: [] }).getPositions("acct-hash-1")).resolves.toEqual([]);
   });
 });
 
@@ -106,6 +108,21 @@ function transactionsProvider(transactions: Record<string, unknown>[], options: 
 }
 
 describe("SchwabBrokerReadProvider.getTransactions", () => {
+  it("marks malformed successful responses incomplete instead of reporting an empty complete category", async () => {
+    const provider = new SchwabBrokerReadProvider({
+      accessToken: "test-token", accountNumbers: [],
+      fetchFn: (async (input: URL | string) => {
+        const category = new URL(input.toString()).searchParams.get("types");
+        const payload = category === "TRADE" ? { unexpected: true } : category === "RECEIVE_AND_DELIVER" ? [{}] : [];
+        return new Response(JSON.stringify(payload), { status: 200 });
+      }) as typeof fetch,
+    });
+    const result = await provider.getTransactions("fixture-account", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(result.transactions).toEqual([]);
+    expect(result.categories).toEqual({
+      TRADE: { status: "ERROR" }, RECEIVE_AND_DELIVER: { status: "ERROR" }, DIVIDEND_OR_INTEREST: { status: "OK", count: 0 },
+    });
+  });
   it("extracts the opening option leg's action, strike, expiration, and quantity from a Sell to Open", async () => {
     const provider = transactionsProvider([
       {

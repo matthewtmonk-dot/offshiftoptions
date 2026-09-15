@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatOccExpiration, formatOccOptionSymbol, formatOccStrike, parseOccOptionSymbol } from "./occOption";
+import { formatOccExpiration, formatOccOptionSymbol, formatOccStrike, isSameOccContract, occContractKey, parseOccOptionSymbol } from "./occOption";
 
 describe("parseOccOptionSymbol", () => {
   it("parses a single-space short-put OCC symbol", () => {
@@ -44,5 +44,23 @@ describe("parseOccOptionSymbol", () => {
     expect(formatOccExpiration(parsed.expiration)).toBe("Sep 4, 2026");
     expect(formatOccStrike(parsed.strike)).toBe("$17.50");
     expect(formatOccOptionSymbol(parsed)).toBe("RIOT · Sep 4, 2026 · $17.50 Put");
+  });
+});
+
+describe("OCC contract identity", () => {
+  it.each(["CORZ 260918P00016500", "CORZ  260918P00016500", "CORZ260918P00016500", "  corz   260918p00016500  "])(
+    "matches equivalent padding/case: %s", (symbol) => {
+      expect(isSameOccContract(symbol, "CORZ 260918P00016500")).toBe(true);
+      expect(occContractKey(symbol)).toBe("CORZ|2026-09-18|PUT|16500");
+    },
+  );
+  it.each(["CORZ 260925P00016500", "CORZ 260918C00016500", "CORZ 260918P00016000", "PATH 260918P00016500", "CORZ", "invalid"])(
+    "does not match a different or invalid contract: %s", (symbol) => {
+      expect(isSameOccContract(symbol, "CORZ 260918P00016500")).toBe(false);
+    },
+  );
+  it("never equates two failed parses", () => {
+    expect(isSameOccContract(null, null)).toBe(false);
+    expect(isSameOccContract("invalid", "invalid")).toBe(false);
   });
 });

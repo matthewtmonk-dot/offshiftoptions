@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
+  evaluateWorthlessExpiration,
+  type SchwabReconciliationEvidence,
+  type ReconciliationPosition,
   findClosingEvidence,
   findRollPairedOpeningTransactionIds,
   isConfirmedExpiredWorthless,
   parseOpeningPutTransaction,
   type ReconciliationTransaction,
 } from "./schwabReconciliation";
+
+function completeEvidence(positions: ReconciliationPosition[]): SchwabReconciliationEvidence {
+  return {
+    positions: { status: "COMPLETE", data: positions },
+    transactions: { status: "COMPLETE", from: new Date("2026-01-01"), to: new Date("2026-09-30") },
+    persistenceStatus: "COMPLETE",
+  };
+}
 
 function transaction(overrides: Partial<ReconciliationTransaction> = {}): ReconciliationTransaction {
   return {
@@ -58,6 +69,15 @@ describe("parseOpeningPutTransaction", () => {
 
 describe("findClosingEvidence", () => {
   const leg = { symbol: "APLD 260904P00023500", underlying: "APLD", strike: 23.5, expiration: new Date(Date.UTC(2026, 8, 4)) };
+
+  it.each(["APLD  260904P00023500", "apld260904p00023500"])("recognizes padded/canonical close and assignment evidence: %s", (symbol) => {
+    expect(findClosingEvidence(leg, [transaction({ symbol, action: "Buy to Close", price: 0.1 })]).kind).toBe("CLOSE");
+    expect(findClosingEvidence(leg, [transaction({ symbol, action: "Assignment", price: null })]).kind).toBe("ASSIGNMENT");
+    expect(findClosingEvidence(leg, [
+      transaction({ symbol, action: "Buy to Close", price: 0.1 }),
+      transaction({ id: "roll-open", symbol: "APLD  260918P00022000" }),
+    ]).kind).toBe("ROLL");
+  });
 
   it("returns NONE when nothing in this sync touches the leg", () => {
     expect(findClosingEvidence(leg, [transaction({ symbol: "RIOT 260904P00017500" })])).toEqual({ kind: "NONE" });
@@ -155,7 +175,7 @@ describe("findRollPairedOpeningTransactionIds", () => {
 });
 
 describe("isConfirmedExpiredWorthless", () => {
-  // Sep 4, 2026 is a Friday - the next NY business day is Monday Sep 7.
+  // Sep 4, 2026 is a Friday; Labor Day makes Tuesday Sep 8 the next NYSE business day.
   const expiration = new Date(Date.UTC(2026, 8, 4));
   const symbol = "APLD 260904P00023500";
   const underlying = "APLD";
@@ -166,7 +186,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [{ symbol, quantity: -1 }],
+        evidence: completeEvidence([{ symbol, quantity: -1 }]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-04T20:00:00Z"),
       }),
@@ -179,7 +199,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [],
+        evidence: completeEvidence([]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-05T18:00:00Z"),
       }),
@@ -192,7 +212,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [],
+        evidence: completeEvidence([]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-06T18:00:00Z"),
       }),
@@ -205,7 +225,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [],
+        evidence: completeEvidence([]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-07T18:00:00Z"),
       }),
@@ -218,7 +238,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [],
+        evidence: completeEvidence([]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-08T02:00:00Z"),
       }),
@@ -231,7 +251,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [],
+        evidence: completeEvidence([]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-08T18:00:00Z"),
       }),
@@ -244,7 +264,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [{ symbol, quantity: -1 }],
+        evidence: completeEvidence([{ symbol, quantity: -1 }]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-08T18:00:00Z"),
       }),
@@ -257,7 +277,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [],
+        evidence: completeEvidence([]),
         hasClosingEvidence: true,
         asOf: new Date("2026-09-08T18:00:00Z"),
       }),
@@ -270,7 +290,7 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [{ symbol: underlying, assetType: "EQUITY", quantity: 100 }],
+        evidence: completeEvidence([{ symbol: underlying, assetType: "EQUITY", quantity: 100 }]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-08T18:00:00Z"),
       }),
@@ -283,10 +303,51 @@ describe("isConfirmedExpiredWorthless", () => {
         expiration,
         symbol,
         underlying,
-        freshPositions: [{ symbol: "OTHER", assetType: "EQUITY", quantity: 100 }],
+        evidence: completeEvidence([{ symbol: "OTHER", assetType: "EQUITY", quantity: 100 }]),
         hasClosingEvidence: false,
         asOf: new Date("2026-09-08T18:00:00Z"),
       }),
     ).toBe(true);
+  });
+});
+
+describe("expiration evidence completeness", () => {
+  const input = {
+    expiration: new Date("2026-09-04"), symbol: "APLD 260904P00023500", underlying: "APLD",
+    hasClosingEvidence: false, asOf: new Date("2026-09-08T18:00:00Z"),
+  };
+  const incomplete = { status: "PENDING", reason: "EXPIRATION_EVIDENCE_INCOMPLETE" };
+
+  it("distinguishes an empty successful positions response from an empty failed response", () => {
+    const evidence = completeEvidence([]);
+    expect(evaluateWorthlessExpiration({ ...input, evidence })).toEqual({ status: "CONFIRMED" });
+    evidence.positions.status = "FAILED";
+    expect(evaluateWorthlessExpiration({ ...input, evidence })).toEqual(incomplete);
+  });
+  it.each(["PARTIAL", "FAILED"] as const)("blocks synthetic expiration for %s transaction evidence", (status) => {
+    const evidence = completeEvidence([]);
+    evidence.transactions.status = status;
+    expect(evaluateWorthlessExpiration({ ...input, evidence })).toEqual(incomplete);
+  });
+  it("blocks expiration after persistence failure", () => {
+    const evidence = completeEvidence([]);
+    evidence.persistenceStatus = "FAILED";
+    expect(evaluateWorthlessExpiration({ ...input, evidence })).toEqual(incomplete);
+  });
+  it.each(["APLD  260904P00023500", "APLD260904P00023500", " apld 260904p00023500 "])("never treats a present equivalent contract as absent: %s", (symbol) => {
+    expect(evaluateWorthlessExpiration({ ...input, evidence: completeEvidence([{ symbol, quantity: -1 }]) }))
+      .toEqual({ status: "PENDING", reason: "OPTION_STILL_PRESENT" });
+  });
+  it("does not infer absence when an option instrument cannot be parsed", () => {
+    expect(evaluateWorthlessExpiration({ ...input, evidence: completeEvidence([{ symbol: "unparsed", assetType: "OPTION", quantity: -1 }]) }))
+      .toEqual(incomplete);
+  });
+  it("requires the successful transaction window to cover expiration and its processing date", () => {
+    const evidence = completeEvidence([]);
+    evidence.transactions.from = new Date("2026-09-05");
+    expect(evaluateWorthlessExpiration({ ...input, evidence })).toEqual(incomplete);
+    evidence.transactions.from = new Date("2026-08-01");
+    evidence.transactions.to = new Date("2026-09-05");
+    expect(evaluateWorthlessExpiration({ ...input, evidence })).toEqual(incomplete);
   });
 });

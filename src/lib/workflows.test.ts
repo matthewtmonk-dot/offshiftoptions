@@ -66,6 +66,8 @@ describe("fetchSchwabAccountActivity", () => {
     expect(result.positions).toHaveLength(1);
     expect(result.transactions).toEqual([]);
     expect(result.transactionCategories).toBeNull();
+    expect(result.evidence.transactions.status).toBe("FAILED");
+    expect(result.evidence.positions.status).toBe("COMPLETE");
   });
 
   it("a positions failure does not erase successfully fetched transactions", async () => {
@@ -112,6 +114,7 @@ describe("fetchSchwabAccountActivity", () => {
     expect(result.transactions).toHaveLength(1);
     expect(result.transactionCategories?.TRADE).toEqual({ status: "OK", count: 1 });
     expect(result.transactionCategories?.DIVIDEND_OR_INTEREST).toEqual({ status: "ERROR" });
+    expect(result.evidence.transactions.status).toBe("PARTIAL");
   });
 
   it("records a safe, sanitized error category for a positions failure - never a raw provider message", async () => {
@@ -172,6 +175,8 @@ describe("fetchSchwabAccountActivity", () => {
     expect(emptySuccess.positions).toHaveLength(0);
     expect(emptySuccess.positionsStatus).toBe("OK");
     expect(emptySuccess.positionsErrorCode).toBeNull();
+    expect(emptySuccess.evidence.positions).toEqual({ status: "COMPLETE", data: [] });
+    expect(emptySuccess.evidence.transactions.status).toBe("COMPLETE");
 
     const failedProvider = fakeProvider({
       getPositions: async () => {
@@ -182,6 +187,7 @@ describe("fetchSchwabAccountActivity", () => {
     expect(failed.positions).toHaveLength(0); // same observable count as the honest empty success above
     expect(failed.positionsStatus).toBe("ERROR"); // but the status makes the difference explicit
     expect(failed.positionsErrorCode).toBe("provider_unavailable");
+    expect(failed.evidence.positions).toEqual({ status: "FAILED", data: [] });
   });
 
   it("never calls getOrders() - Orders stays diagnostic-only, not part of the sync path", async () => {

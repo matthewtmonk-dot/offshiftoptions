@@ -569,6 +569,7 @@ function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagno
     { label: "Campaigns rolled", value: diagnostics.campaignsRolled },
     { label: "Campaigns assigned", value: diagnostics.campaignsAssigned },
     { label: "Campaigns expired", value: diagnostics.campaignsExpired },
+    { label: "Expirations deferred", value: diagnostics.expirationsDeferred ?? 0 },
   ];
 
   return (
@@ -585,6 +586,15 @@ function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagno
           </div>
         ))}
       </dl>
+      <p className="mt-3 text-xs text-zinc-400">
+        Transaction evidence: {diagnostics.transactionsEvidenceStatus ?? "Not recorded by this sync"}.
+      </p>
+      {diagnostics.expirationDeferralReason === "EXPIRATION_EVIDENCE_INCOMPLETE" ? (
+        <p className="mt-3 text-xs text-amber-200">
+          Expiration evidence incomplete: {diagnostics.expirationsDeferred ?? 0} campaign(s) remain open.
+          A successful sync with complete evidence will retry expiration reconciliation.
+        </p>
+      ) : null}
       {diagnostics.feeUnknownCount > 0 ? (
         <p className="mt-3 text-xs text-amber-200">
           {diagnostics.feeUnknownCount} imported transaction{diagnostics.feeUnknownCount === 1 ? "" : "s"} had no resolvable fee - affected

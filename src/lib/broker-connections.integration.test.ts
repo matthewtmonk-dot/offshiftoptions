@@ -140,6 +140,9 @@ maybeDescribe("broker connection ownership and provider routing", () => {
       campaignsRolled: 0,
       campaignsAssigned: 0,
       campaignsExpired: 3,
+      transactionsEvidenceStatus: "PARTIAL",
+      expirationsDeferred: 2,
+      expirationDeferralReason: "EXPIRATION_EVIDENCE_INCOMPLETE",
       reconciliationStatus: "OK",
       reconciliationErrorCode: null,
     });
@@ -170,6 +173,9 @@ maybeDescribe("broker connection ownership and provider routing", () => {
       campaignsRolled: 0,
       campaignsAssigned: 0,
       campaignsExpired: 3,
+      transactionsEvidenceStatus: "PARTIAL",
+      expirationsDeferred: 2,
+      expirationDeferralReason: "EXPIRATION_EVIDENCE_INCOMPLETE",
       reconciliationStatus: "OK",
       reconciliationErrorCode: null,
     });
