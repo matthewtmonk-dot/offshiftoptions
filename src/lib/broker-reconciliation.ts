@@ -277,7 +277,7 @@ export async function splitBrokerPositionsByCampaignLink(userId: string, positio
   return { unlinked, linked };
 }
 
-function normalizeSymbolForLinking(rawSymbol: string): string | null {
+export function normalizeSymbolForLinking(rawSymbol: string): string | null {
   const parsed = parseOccOptionSymbol(rawSymbol);
   if (!parsed) {
     return null;

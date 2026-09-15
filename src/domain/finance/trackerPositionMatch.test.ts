@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchTrackedPut, type TrackedPut } from "./trackerPositionMatch";
+import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "./trackerPositionMatch";
 
 const account = { id: "account-a", userId: "matt", externalAccountId: "broker-a" };
 const position = { accountId: "broker-a", symbol: "CORZ  260918P00016500", quantity: -1 };
@@ -36,5 +36,30 @@ describe("Tracker display-only put matching", () => {
   it("rejects duplicate provider rows and ambiguous account mappings", () => {
     expect(matchTrackedPut("matt", position, [position, { ...position, symbol: "CORZ260918P00016500" }], [account], [campaign])).toBe("AMBIGUOUS");
     expect(matchTrackedPut("matt", position, [position], [account, { ...account, id: "duplicate" }], [campaign])).toBe("AMBIGUOUS");
+  });
+});
+
+describe("Persisted-link precedence over inferred matching", () => {
+  it("shows LINKED even when the persisted campaign is no longer OPEN (matchTrackedPut alone would say NONE)", () => {
+    const inferred = matchTrackedPut("matt", position, [position], [account], [{ ...campaign, status: "CLOSED" }]);
+    expect(inferred).toBe("NONE");
+    expect(resolveTrackerPositionMatchState(true, inferred)).toBe("LINKED");
+  });
+  it("prefers a persisted link over an inferred EXACT match", () => {
+    const inferred = matchTrackedPut("matt", position, [position], [account], [campaign]);
+    expect(inferred).toBe("EXACT");
+    expect(resolveTrackerPositionMatchState(true, inferred)).toBe("LINKED");
+  });
+  it("still surfaces inferred EXACT when there is no persisted link", () => {
+    const inferred = matchTrackedPut("matt", position, [position], [account], [campaign]);
+    expect(resolveTrackerPositionMatchState(false, inferred)).toBe("EXACT");
+  });
+  it("does not let a persisted link for one user override another user's isolated (NONE) result", () => {
+    const inferred = matchTrackedPut("eric", position, [position], [account], [campaign]);
+    expect(inferred).toBe("NONE");
+    expect(resolveTrackerPositionMatchState(false, inferred)).toBe("NONE");
+  });
+  it.each(["AMBIGUOUS", "NONE"] as const)("passes through inferred %s untouched when unlinked", (state) => {
+    expect(resolveTrackerPositionMatchState(false, state)).toBe(state);
   });
 });

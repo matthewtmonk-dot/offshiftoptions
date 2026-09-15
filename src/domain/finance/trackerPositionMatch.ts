@@ -41,3 +41,17 @@ export function matchTrackedPut(
   if (candidates.length > 1 || (candidates.length && samePositions.length !== 1)) return "AMBIGUOUS";
   return candidates.length === 1 && candidates[0].contracts === -position.quantity ? "EXACT" : "NONE";
 }
+
+export type TrackerPositionMatchState = "LINKED" | "EXACT" | "AMBIGUOUS" | "NONE";
+
+/**
+ * A persisted BrokerRecord link (confirmed under Accounts -> Broker Activity Awaiting Review)
+ * always takes precedence over this file's display-only inference - including when the linked
+ * campaign is no longer OPEN, since matchTrackedPut would otherwise return NONE for it.
+ */
+export function resolveTrackerPositionMatchState(
+  isLinked: boolean,
+  inferredMatch: "EXACT" | "AMBIGUOUS" | "NONE",
+): TrackerPositionMatchState {
+  return isLinked ? "LINKED" : inferredMatch;
+}

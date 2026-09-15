@@ -31,8 +31,8 @@ import {
 } from "@/domain/finance/accountLedger";
 import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenPut, optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
-import { daysToExpiration } from "@/domain/finance/calculations";
-import { matchTrackedPut, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
+import { daysToExpiration, distanceToStrikeDollars } from "@/domain/finance/calculations";
+import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import {
   summarizeCampaignProgress,
   summarizeContributionAdjustedGoal,
@@ -55,6 +55,8 @@ import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { NewAccountNameAndTypeFields } from "./new-account-name-field";
 import {
   getBrokerActivityAwaitingReviewForUser,
+  getLinkedCampaignSymbolsForUser,
+  normalizeSymbolForLinking,
   type BrokerActivityAwaitingReview,
 } from "@/lib/broker-reconciliation";
 import {
@@ -188,6 +190,11 @@ export default async function PositionsPage({
     needsAccountsImportData && previewBatchId ? getPendingBrokerImportBatchForUser(user.id, previewBatchId) : Promise.resolve(null),
     needsOpenBrokerData ? getSchwabConnectionSummaryForUser(user.id) : Promise.resolve(null),
   ]);
+  // A persisted BrokerRecord link (confirmed under Accounts -> Broker Activity Awaiting Review)
+  // must outrank the display-only matchTrackedPut inference below - see resolveTrackerPositionMatchState.
+  const linkedCampaignSymbols = needsOpenBrokerData
+    ? await getLinkedCampaignSymbolsForUser(user.id, schwabPositions ?? [])
+    : new Set<string>();
   const buddyName = data.users[0]?.name ?? "Buddy";
   // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
   // confirmed $0 in a "Net P/L" figure - see getCampaignIdsWithUnknownFees. Checked across
@@ -435,7 +442,7 @@ export default async function PositionsPage({
             ) : null}
             {data.legacyTrades.length ? <LegacySnapshots trades={data.legacyTrades} /> : null}
           </div>
-          <SchwabPositionsPanel positions={schwabPositions} userId={user.id} accounts={data.ownAccounts} campaigns={trackedPuts} />
+          <SchwabPositionsPanel positions={schwabPositions} userId={user.id} accounts={data.ownAccounts} campaigns={trackedPuts} linkedSymbols={linkedCampaignSymbols} />
           {data.ownAccounts.length === 0 ? (
             <NewAccountPanel buddyName={buddyName} userName={user.name} defaultOpen />
           ) : (
@@ -677,6 +684,11 @@ function CampaignCard({
   // confirmed $0 in a "Net P/L"-style figure - see getCampaignIdsWithUnknownFees.
   const netPLExact = row.feesFullyKnown ?? true;
   const openPut = campaign.status === "OPEN" ? getCurrentOpenPut(campaign.events) : null;
+  // Roll Status's own distancePct (currentPrice - strike) / strike * 100) is reused as-is so this
+  // never disagrees with the HOLD/NEAR STRIKE/ROLL guidance shown next to it; only the dollar
+  // figure is new math here.
+  const distanceDollars = quoteSnapshot && openPut ? distanceToStrikeDollars(quoteSnapshot.price, openPut.strike) : null;
+  const distancePct = rollStatus && rollStatus !== "UNAVAILABLE" ? rollStatus.distancePct : null;
   const returnOnSecuredCapital =
     campaign.status === "CLOSED" && netPLExact && plValue !== null && summary.collateralCommitted
       ? (plValue / summary.collateralCommitted) * 100
@@ -720,8 +732,24 @@ function CampaignCard({
         {openView ? (
           <div className="grid grid-cols-[1fr_1fr_auto] items-start gap-x-4 gap-y-2 sm:grid-cols-[1fr_1fr_auto_auto]">
             <div>
-              <SummaryCell label="Stock snapshot" value={quoteSnapshot ? money(quoteSnapshot.price) : "Unavailable"}
-                help="Schwab's latest available stock price; it may be delayed or from the last session. Time is the provider quote/trade time when supplied, otherwise retrieval time. Roll status uses this snapshot and your Roll Buffer setting." />
+              <SummaryCell
+                label="Stock snapshot"
+                value={
+                  quoteSnapshot ? (
+                    <>
+                      {money(quoteSnapshot.price)}
+                      {distanceDollars !== null ? (
+                        <span className="ml-1 font-normal text-zinc-400">
+                          · {signedMoney(distanceDollars)}
+                          {distancePct !== null ? ` / ${distancePct >= 0 ? "+" : ""}${percent(distancePct)}` : ""}
+                        </span>
+                      ) : null}
+                    </>
+                  ) : (
+                    "Unavailable"
+                  )
+                }
+                help="Schwab's latest available stock price; it may be delayed or from the last session. Time is the provider quote/trade time when supplied, otherwise retrieval time. Distance from strike and Roll status both use this snapshot." />
               <p className="mt-1 max-w-48 text-xs text-zinc-500">{quoteSnapshot ? snapshotTime(quoteSnapshot.asOf) : summary.currentStage === "Expiration processing" ? "Awaiting brokerage evidence" : openPut ? "Refresh to check prices" : "No active put"}</p>
             </div>
             <div>
@@ -1064,11 +1092,13 @@ function SchwabPositionsPanel({
   userId,
   accounts,
   campaigns,
+  linkedSymbols,
 }: {
   positions: SchwabPositions;
   userId: string;
   accounts: TrackerData["ownAccounts"];
   campaigns: TrackedPut[];
+  linkedSymbols: Set<string>;
 }) {
   if (positions === null) {
     return null;
@@ -1090,7 +1120,10 @@ function SchwabPositionsPanel({
         <div className="space-y-2">
           {positions.map((position) => {
             const display = describeBrokerPositionForDisplay(position);
-            const match = matchTrackedPut(userId, position, positions, accounts, campaigns);
+            const normalizedSymbol = normalizeSymbolForLinking(position.symbol);
+            const isLinked = Boolean(normalizedSymbol && linkedSymbols.has(normalizedSymbol));
+            const inferredMatch = matchTrackedPut(userId, position, positions, accounts, campaigns);
+            const match = resolveTrackerPositionMatchState(isLinked, inferredMatch);
             return (
               <div
                 key={`${position.accountId}-${position.symbol}`}
@@ -1106,8 +1139,14 @@ function SchwabPositionsPanel({
                   <span className="text-zinc-400">
                     {display.quantityLabel} · {display.valueLabel}: {money(display.value)}
                   </span>
-                  <Badge tone={match === "EXACT" ? "info" : match === "AMBIGUOUS" ? "warn" : "neutral"}>
-                    {match === "EXACT" ? "Matches tracked put" : match === "AMBIGUOUS" ? "Ambiguous match" : "No exact match in this view"}
+                  <Badge tone={match === "LINKED" ? "good" : match === "EXACT" ? "info" : match === "AMBIGUOUS" ? "warn" : "neutral"}>
+                    {match === "LINKED"
+                      ? "Linked to campaign"
+                      : match === "EXACT"
+                        ? "Exact match"
+                        : match === "AMBIGUOUS"
+                          ? "Ambiguous match"
+                          : "No exact match in this view"}
                   </Badge>
                 </div>
               </div>
@@ -1116,8 +1155,9 @@ function SchwabPositionsPanel({
         </div>
       )}
       <p className="mt-2 text-xs text-zinc-500">
-        A match requires one of your campaigns in the same account with the same put contract and short quantity.
-        This display hint does not link broker records or change totals. Review activity in the Accounts tab.
+        Linked to campaign means you already confirmed this position under Accounts -&gt; Broker Activity Awaiting
+        Review. Exact match is a display-only hint requiring one of your campaigns in the same account with the
+        same put contract and short quantity; it does not link broker records or change totals.
       </p>
       </div>
     </details>

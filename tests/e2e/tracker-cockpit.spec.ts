@@ -23,8 +23,18 @@ test("open cards expose the active contract and distinguish DTE, campaign age an
   await expect(summary.getByText("Realized", { exact: true })).toHaveCount(0);
   await expect(summary.getByText("Return", { exact: true })).toHaveCount(0);
   await expect(summary.getByText("Stock snapshot", { exact: true })).toBeVisible();
+  await expect(summary.getByText(/[+-]\$[\d,.]+ \/ [+-][\d.]+%/)).toBeVisible();
   await summary.click();
   await expect(card.getByText("Roll net")).toBeVisible();
+});
+
+test("Schwab position snapshot distinguishes a persisted link from an inferred exact match", async ({ page }) => {
+  await login(page);
+  await page.goto("/positions");
+  const panel = page.getByText(/Your Schwab position snapshot/);
+  await panel.click();
+  const badges = page.getByText(/^(Linked to campaign|Exact match|Ambiguous match|No exact match in this view)$/);
+  await expect(badges.first()).toBeVisible();
 });
 
 test("Refresh preserves scope and expanded history and sends no mutation request", async ({ page }) => {
