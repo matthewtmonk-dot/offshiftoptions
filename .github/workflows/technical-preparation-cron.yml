@@ -44,23 +44,66 @@ jobs:
           ENDPOINT="https://offshiftoptions.com/api/internal/scanner-technical/process"
           CONNECT_TIMEOUT_SECONDS=20
           TOTAL_TIMEOUT_SECONDS=90
+          MAX_RESPONSE_BODY_BYTES=4096
 
           run_cycle() {
             local cycle="$1"
             local response_file
+            local curl_exit
+            local http_status
             response_file="$(mktemp)"
 
             echo "Technical preparation cycle ${cycle}"
-            curl --fail-with-body --silent --show-error \
+            # Keep curl's HTTP failure exit code, but collect its bounded, redacted response
+            # before returning nonzero. Never print request headers or environment values.
+            set +e
+            http_status="$(curl --fail-with-body --silent --show-error \
               --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" \
               --max-time "${TOTAL_TIMEOUT_SECONDS}" \
               -X POST \
               -H "Authorization: Bearer ${CRON_SECRET}" \
               -o "${response_file}" \
-              "${ENDPOINT}"
+              -w "%{http_code}" \
+              "${ENDPOINT}")"
+            curl_exit=$?
+            set -e
 
-            cat "${response_file}"
-            echo
+            echo "HTTP_STATUS=${http_status:-000}"
+            echo "CURL_EXIT=${curl_exit}"
+            echo "RESPONSE_BODY_BEGIN"
+            CRON_SECRET="${CRON_SECRET}" RESPONSE_FILE="${response_file}" MAX_RESPONSE_BODY_BYTES="${MAX_RESPONSE_BODY_BYTES}" python3 - <<'PY'
+          import os
+          import re
+
+          limit = int(os.environ["MAX_RESPONSE_BODY_BYTES"])
+          with open(os.environ["RESPONSE_FILE"], "rb") as response_file:
+              body = response_file.read(limit + 1)
+          truncated = len(body) > limit
+          text = body[:limit].decode("utf-8", errors="replace")
+          secret = os.environ["CRON_SECRET"]
+          if secret:
+              text = text.replace(secret, "[REDACTED]")
+          text = re.sub(r"(?im)^(authorization\s*:\s*).*?$", r"\1[REDACTED]", text)
+          text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}", "Bearer [REDACTED]", text)
+          text = re.sub(
+              r'''(?i)(["']?(?:access[_ -]?token|refresh[_ -]?token|api[_ -]?key|secret|password|client[_ -]?secret)["']?\s*[:=]\s*["']?)[^\s"'<>&,}]+''',
+              r"\1[REDACTED]",
+              text,
+          )
+          text = re.sub(r"(?i)([?&](?:token|secret|api_key|password)=)[^&\s]+", r"\1[REDACTED]", text)
+          text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "[REDACTED_TOKEN]", text)
+          text = re.sub(r"(?m)^::", ": :", text)
+          print(text)
+          if truncated:
+              print("[RESPONSE_BODY_TRUNCATED]")
+          PY
+            echo "RESPONSE_BODY_END"
+
+            if [ "${curl_exit}" -ne 0 ]; then
+              rm -f "${response_file}"
+              return "${curl_exit}"
+            fi
+
             CYCLE_RESPONSE="$(cat "${response_file}")"
             rm -f "${response_file}"
           }
