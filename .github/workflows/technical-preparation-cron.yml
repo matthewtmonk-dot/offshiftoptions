@@ -64,7 +64,7 @@ jobs:
               -H "Authorization: Bearer ${CRON_SECRET}" \
               -o "${response_file}" \
               -w "%{http_code}" \
-              "${ENDPOINT}")"
+              "${ENDPOINT}" 2>/dev/null)"
             curl_exit=$?
             set -e
 
@@ -79,21 +79,23 @@ jobs:
           with open(os.environ["RESPONSE_FILE"], "rb") as response_file:
               body = response_file.read(limit + 1)
           truncated = len(body) > limit
-          text = body[:limit].decode("utf-8", errors="replace")
-          secret = os.environ["CRON_SECRET"]
-          if secret:
-              text = text.replace(secret, "[REDACTED]")
-          text = re.sub(r"(?im)^(authorization\s*:\s*).*?$", r"\1[REDACTED]", text)
-          text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}", "Bearer [REDACTED]", text)
-          text = re.sub(
-              r'''(?i)(["']?(?:access[_ -]?token|refresh[_ -]?token|api[_ -]?key|secret|password|client[_ -]?secret)["']?\s*[:=]\s*["']?)[^\s"'<>&,}]+''',
-              r"\1[REDACTED]",
-              text,
-          )
-          text = re.sub(r"(?i)([?&](?:token|secret|api_key|password)=)[^&\s]+", r"\1[REDACTED]", text)
-          text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "[REDACTED_TOKEN]", text)
-          text = re.sub(r"(?m)^::", ": :", text)
-          print(text)
+          # Drop a truncated final line entirely: it might contain only part of a secret.
+          body = body[:limit]
+          if truncated:
+              body = body.rsplit(b"\n", 1)[0] if b"\n" in body else b""
+          text = body.decode("utf-8", errors="replace")
+          sensitive_name = re.compile(r"secret|token|password|credential|authorization|api.?key|private.?key|database.?url", re.I)
+          sensitive_values = [value for key, value in os.environ.items() if value and sensitive_name.search(key)]
+          safe_lines = []
+          for line in text.splitlines():
+              # Withhold the entire suspect line, including quoted/HTML/JSON values.
+              if (sensitive_name.search(line) or re.search(r"\bbearer\b|\b[A-Za-z0-9_+/=-]{32,}\b|\w+://[^\s/]+:[^\s/]+@", line, re.I)
+                      or any(value in line for value in sensitive_values)):
+                  line = "[REDACTED]"
+              line = "".join(char for char in line if char.isprintable() or char == "\t")
+              safe_lines.append(line.replace("::", ": :"))
+          # Reapply the byte cap after decoding and redaction (which can expand the text).
+          print("\n".join(safe_lines).encode("utf-8")[:limit].decode("utf-8", errors="ignore"))
           if truncated:
               print("[RESPONSE_BODY_TRUNCATED]")
           PY
@@ -102,6 +104,11 @@ jobs:
             if [ "${curl_exit}" -ne 0 ]; then
               rm -f "${response_file}"
               return "${curl_exit}"
+            fi
+            # curl --fail-with-body rejects 4xx/5xx, but treats redirects as success.
+            if [[ ! "${http_status}" =~ ^2[0-9][0-9]$ ]]; then
+              rm -f "${response_file}"
+              return 22
             fi
 
             CYCLE_RESPONSE="$(cat "${response_file}")"
@@ -121,9 +128,10 @@ jobs:
               sys.exit(0)
 
           should_continue = (
-              payload.get("status") == "OK"
+              isinstance(payload, dict)
+              and payload.get("status") == "OK"
               and payload.get("generationStatus") == "IN_PROGRESS"
-              and isinstance(payload.get("remainingEligibleCount"), int)
+              and type(payload.get("remainingEligibleCount")) is int
               and payload["remainingEligibleCount"] > 0
           )
           print("yes" if should_continue else "no")

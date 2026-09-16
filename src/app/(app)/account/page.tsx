@@ -65,9 +65,9 @@ export default async function AccountPage({
   const transactionsEvidenceStatus = schwabConnection?.lastSyncDiagnostics?.transactionsEvidenceStatus;
   const syncWarning =
     needsReviewCount > 0
-      ? `${needsReviewCount} unlinked transaction record${needsReviewCount === 1 ? "" : "s"} need${needsReviewCount === 1 ? "s" : ""} manual review. Review Diagnostic D (Transfer Item Shapes, on the Schwab Transaction & Order Diagnostic page) and approve the repair step before syncing again - syncing again will not fix them and may add more unresolved rows in the meantime.`
+      ? `${needsReviewCount} unlinked transaction record${needsReviewCount === 1 ? "" : "s"} need${needsReviewCount === 1 ? "s" : ""} review. Check the broker activity in Tracker's Accounts tab. Syncing can import newer activity, but these records may still need review.`
       : transactionsEvidenceStatus === "PARTIAL" || transactionsEvidenceStatus === "FAILED"
-        ? `The last sync's transaction evidence was ${transactionsEvidenceStatus.toLowerCase()} - some activity may be missing or expiration confirmation may be deferred. Review Diagnostic D on the Schwab Transaction & Order Diagnostic page before syncing again.`
+        ? `The last sync's transaction evidence was ${transactionsEvidenceStatus.toLowerCase()}. Some activity may be missing and expiration confirmation may be deferred. Retry Brokerage Sync once your connection is available; a successful sync can supply the missing evidence.`
         : null;
 
   const realizedPLByAccount = new Map<string, number>();
