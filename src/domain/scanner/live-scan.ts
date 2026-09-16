@@ -606,8 +606,11 @@ function compareText(left: string, right: string) {
  *     every surviving contract fails).
  *
  * Choose the surviving expiration closest to seven calendar days first (later DTE on a tie).
- * Only its strikes compete by setupScore(), then annualized ROR, then strike ascending and
- * contract symbol ascending for determinism. Missing the ROR target never triggers a move to
+ * Only its strikes compete by setupScore(), then annualized ROR, then strike ascending.
+ * Matt's accepted LST cushion preference intentionally chooses the lower strike only when
+ * score and annualized ROR tie; symbol ascending is the final deterministic tie-break.
+ * This preference never overrides expiration selection or enabled gates.
+ * Missing the ROR target never triggers a move to
  * a longer expiration. optionVolume is intentionally never a hard gate here (it is not in
  * profile.ts's GATING_RULE_KEYS) - a FAIL there only affects score/label, never eliminates a
  * contract from being selectable.

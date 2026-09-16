@@ -117,13 +117,16 @@ describe("weekly expiration before strike scoring", () => {
     expect(row.values.optionSymbol).toBe("WINNER");
   });
 
-  it("breaks equal score/annualized returns by strike then symbol independent of provider ordering", async () => {
+  it("intentionally prefers lower strike for LST cushion when score and annualized return tie, then symbol regardless of provider order", async () => {
+    // Matt's accepted preference: at a $20 stock price both puts return 2%, but $18
+    // supplies more downside cushion and requires less collateral than $19.
     const options = [put(7, { symbol: "Z", strike: 18, bid: 0.36 }), put(7, { symbol: "HIGHER-STRIKE", strike: 19, bid: 0.38 }), put(7, { symbol: "A", strike: 18, bid: 0.36 })];
     const results = [];
     for (const chain of [options, [...options].reverse(), [options[1], options[0], options[2]]]) {
       results.push((await evaluateLiveMarketScan(fixture(chain)))[0]);
     }
     expect(results[0].values.optionSymbol).toBe("A");
+    expect(results[0].values).toMatchObject({ strike: 18, ror: 2, dte: 7 });
     expect(results[1]).toEqual(results[0]);
     expect(results[2]).toEqual(results[0]);
   });
