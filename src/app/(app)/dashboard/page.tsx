@@ -2,6 +2,7 @@ import { cache, Suspense, type ReactNode } from "react";
 import { ThumbsUp } from "lucide-react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
+import { EventTime } from "@/components/event-time";
 import { RollStatusBadge, RollStatusUnavailableBadge } from "@/components/roll-status-badge";
 import { getDashboardData } from "@/lib/app-data";
 import { money, percent } from "@/lib/format";
@@ -34,6 +35,7 @@ const loadDashboardBrokerData = cache(async (userId: string) => {
 export default async function DashboardPage() {
   const user = await requireCurrentUser();
   const data = await getDashboardData(user.id);
+  const renderedAt = new Date();
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
 
   // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
@@ -96,10 +98,10 @@ export default async function DashboardPage() {
 
   const hasManualAccountData = accountRows.some((row) => row.performance.currentValueSource === "MANUAL");
   const hasSchwabAccountData = accountRows.some((row) => row.account.source === "SCHWAB" || row.performance.currentValueSource === "SCHWAB");
-  const accountDataSource: "LIVE SCHWAB" | "MANUAL" | "MIXED" | null = hasSchwabAccountData
+  const accountDataSource: "SCHWAB" | "MANUAL" | "MIXED" | null = hasSchwabAccountData
     ? hasManualAccountData
       ? "MIXED"
-      : "LIVE SCHWAB"
+      : "SCHWAB"
     : hasManualAccountData
       ? "MANUAL"
       : null;
@@ -119,8 +121,8 @@ export default async function DashboardPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-400">
         <span>
-          <h1 className="inline text-sm font-semibold text-zinc-100">Hey {user.name}</h1> -{" "}
-          <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "LIVE SCHWAB" : "DEMO SCANNER"}</Badge>{" "}
+          <h1 className="inline text-lg font-semibold text-zinc-100">Hey {user.name}</h1> -{" "}
+          <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "SCHWAB SCAN" : "DEMO SCANNER"}</Badge>{" "}
           {openCampaignCount} campaign{openCampaignCount === 1 ? "" : "s"} open
           {awaitingExpirationCount > 0 ? ` (${awaitingExpirationCount} awaiting expiration)` : ""} - win rate{" "}
           {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
@@ -133,7 +135,7 @@ export default async function DashboardPage() {
         </span>
       </div>
 
-      <section className="grid gap-3 sm:grid-cols-3 xl:grid-cols-5">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <Stat
           label="Account value"
           value={hasAnyAccountValue ? money(totalValue) : "No data"}
@@ -230,7 +232,7 @@ export default async function DashboardPage() {
             {topSetups.map(({ result, score, label }) => (
               <div key={result.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3">
                 <div>
-                  <div className="font-semibold">{result.ticker}</div>
+                  <div className="text-lg font-semibold">{result.ticker}</div>
                   <div className="text-sm text-zinc-400">
                     {result.passedCriteria} / {result.totalCriteria} criteria
                   </div>
@@ -240,6 +242,7 @@ export default async function DashboardPage() {
                 </Badge>
               </div>
             ))}
+            {data.latestScanRun ? <p className="text-sm text-zinc-400" data-testid="dashboard-scan-time">Scan run: <EventTime value={data.latestScanRun.createdAt} asOf={renderedAt} />. Saved results; check Scanner for current readiness.</p> : null}
             {topSetups.length === 0 ? <EmptyState>No scan results yet.</EmptyState> : null}
           </div>
         </Panel>
@@ -258,8 +261,9 @@ export default async function DashboardPage() {
                 <div className="flex items-start gap-3">
                   <Initials name={activity.actor.name} />
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-zinc-100">{activity.title}</div>
-                    {activity.body ? <div className="mt-1 text-sm text-zinc-400">{activity.body}</div> : null}
+                    <div className="text-base font-medium text-zinc-100">{activity.title}</div>
+                    <EventTime value={activity.createdAt} asOf={renderedAt} />
+                    {activity.body ? <div className="mt-1 text-sm leading-relaxed text-zinc-300">{activity.body}</div> : null}
                     {activity.actorId !== user.id ? (
                       <form action={addReactionAction} className="mt-2">
                         <input type="hidden" name="targetType" value="ACTIVITY" />
@@ -295,11 +299,12 @@ export default async function DashboardPage() {
             {data.recentMessages.map((message) => (
               <div key={message.id} className="flex gap-3">
                 <Initials name={message.sender.name} />
-                <div>
-                  <div className="text-sm font-medium text-zinc-200">
+                <div className="min-w-0">
+                  <div className="text-base font-medium text-zinc-100">
                     {message.sender.name} {message.ticker ? <span className="text-emerald-300">${message.ticker}</span> : null}
                   </div>
-                  <div className="text-sm text-zinc-400">{message.body}</div>
+                  <EventTime value={message.createdAt} asOf={renderedAt} />
+                  <div className="break-words whitespace-pre-wrap text-base leading-relaxed text-zinc-300">{message.body || "Shared an image — open Chat to view."}</div>
                 </div>
               </div>
             ))}
@@ -321,7 +326,8 @@ export default async function DashboardPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="font-semibold text-zinc-50">{recommendation.sender.name} recommended {recommendation.ticker}</div>
-                    <div className="mt-1 text-sm text-zinc-400">&quot;{recommendation.message}&quot;</div>
+                    <EventTime value={recommendation.createdAt} asOf={renderedAt} />
+                    <div className="mt-1 text-base leading-relaxed text-zinc-300">&quot;{recommendation.message}&quot;</div>
                   </div>
                   <Badge tone={recommendation.status === "NEW" ? "info" : "good"}>{recommendation.status}</Badge>
                 </div>
@@ -350,11 +356,9 @@ function DashboardOpenPositionRow({
   return (
     <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3">
       <div>
-        <div className="font-semibold">{campaign.ticker}</div>
-        <div className="text-sm text-zinc-400">
-          {summary.currentStage}
-          {openPut ? ` · ${money(openPut.strike)} Put` : ""}
-        </div>
+        <div className="text-lg font-semibold">{campaign.ticker}</div>
+        {openPut ? <div className="text-base font-medium text-zinc-100">{money(openPut.strike)} Put</div> : null}
+        <div className="text-sm text-zinc-400">{summary.currentStage}</div>
       </div>
       <div className="flex items-center gap-3">
         {rollStatusSlot}
@@ -564,18 +568,18 @@ function Stat({
   label: string;
   value: string;
   tone?: number;
-  badge?: "LIVE SCHWAB" | "MANUAL" | "MIXED" | null;
+  badge?: "SCHWAB" | "MANUAL" | "MIXED" | null;
   detail?: string;
 }) {
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</div>
+        <div className="text-sm font-medium text-zinc-300">{label}</div>
         {badge ? (
           <span
-            className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-normal ${
-              badge === "LIVE SCHWAB"
+            className={`rounded px-1.5 py-0.5 text-xs font-semibold uppercase tracking-normal ${
+              badge === "SCHWAB"
                 ? "bg-sky-400/15 text-sky-300"
                 : badge === "MIXED"
                   ? "bg-amber-400/15 text-amber-300"

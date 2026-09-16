@@ -46,7 +46,7 @@ export default async function ChatPage() {
                   .filter((member) => message.reads.some((read) => read.userId === member.userId))
                   .map((member) => member.user.name);
                 return (
-                  <div key={message.id} className={`flex gap-3 ${own ? "justify-end" : "justify-start"}`}>
+                  <div key={message.id} id={`message-${message.id}`} className={`scroll-mt-4 flex gap-3 ${own ? "justify-end" : "justify-start"}`}>
                     {!own ? <Initials name={message.sender.name} /> : null}
                     <div className={`max-w-[82%] rounded-lg border p-3 ${own ? "border-emerald-400/30 bg-emerald-400/15" : "border-zinc-800 bg-zinc-900"}`}>
                       <div className="mb-1 flex items-center gap-2 text-xs text-zinc-400">
@@ -83,6 +83,7 @@ export default async function ChatPage() {
               </form>
             </div>
 
+            <p className="text-sm text-zinc-400">Marking messages read also clears their message notifications.</p>
             <ChatComposer conversationId={conversation.id} />
           </div>
         ) : (

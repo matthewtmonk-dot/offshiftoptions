@@ -265,6 +265,16 @@ export async function getChatPageData(userId: string) {
   });
 }
 
+export function getUnreadChatCount(userId: string) {
+  return prisma.chatMessage.count({
+    where: {
+      conversation: { members: { some: { userId } } },
+      senderId: { not: userId },
+      reads: { none: { userId } },
+    },
+  });
+}
+
 export async function getNotificationsPageData(userId: string) {
   return prisma.notification.findMany({
     where: { recipientId: userId },

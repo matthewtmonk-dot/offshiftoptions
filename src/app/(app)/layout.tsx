@@ -1,11 +1,11 @@
 import { cookies } from "next/headers";
 import { requireCurrentUser } from "@/lib/auth";
-import { getUnreadNotificationCount } from "@/lib/app-data";
+import { getUnreadChatCount, getUnreadNotificationCount } from "@/lib/app-data";
 import { AppSidebar } from "./app-sidebar";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireCurrentUser();
-  const unread = await getUnreadNotificationCount(user.id);
+  const [unread, unreadChat] = await Promise.all([getUnreadNotificationCount(user.id), getUnreadChatCount(user.id)]);
   const sidebarCookie = (await cookies()).get("oso-sidebar-collapsed")?.value;
 
   return (
@@ -16,6 +16,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           userEmail={user.email}
           appearance={user.settings?.appearance ?? "SYSTEM"}
           unread={unread}
+          unreadChat={unreadChat}
           initialCollapsed={sidebarCookie === "1"}
         />
         <div className="flex min-w-0 flex-1 flex-col">

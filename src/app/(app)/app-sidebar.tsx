@@ -33,7 +33,7 @@ const navItems = [
   { href: "/research", label: "Research", icon: ListChecks },
   { href: "/recommendations", label: "Recs", icon: Send },
   { href: "/chat", label: "Chat", icon: MessageSquareText },
-  { href: "/notifications", label: "Alerts", icon: Bell },
+  { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/account", label: "Account", icon: KeyRound },
   { href: "/install", label: "Install", icon: Download },
 ];
@@ -58,12 +58,14 @@ export function AppSidebar({
   userEmail,
   appearance,
   unread,
+  unreadChat,
   initialCollapsed,
 }: {
   userName: string;
   userEmail: string;
   appearance: Appearance;
   unread: number;
+  unreadChat: number;
   initialCollapsed: boolean;
 }) {
   const pathname = usePathname();
@@ -115,6 +117,7 @@ export function AppSidebar({
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = isActiveRoute(pathname, item.href);
+            const unreadCount = item.href === "/chat" ? unreadChat : item.href === "/notifications" ? unread : 0;
             return (
               <IntentPrefetchLink
                 key={item.href}
@@ -127,13 +130,14 @@ export function AppSidebar({
               >
                 <Icon className="size-4 shrink-0" aria-hidden />
                 {!collapsed ? <span>{item.label}</span> : null}
-                {item.href === "/notifications" && unread > 0 ? (
+                {unreadCount > 0 ? (
                   <span
+                    aria-label={`${unreadCount} unread`}
                     className={`rounded-md bg-emerald-400 px-1.5 py-0.5 text-xs font-bold text-black ${
                       collapsed ? "absolute -right-1 -top-1" : "ml-auto"
                     }`}
                   >
-                    {unread}
+                    {unreadCount}
                   </span>
                 ) : null}
                 {collapsed ? (
@@ -190,24 +194,25 @@ export function AppSidebar({
           </div>
           <div className="flex items-center gap-2 text-sm text-zinc-300">
             <Initials name={userName} />
-            {unread > 0 ? <span className="rounded-md bg-emerald-400 px-2 py-1 text-xs font-bold text-black">{unread}</span> : null}
           </div>
         </div>
         <nav className="grid grid-cols-4 gap-2">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = isActiveRoute(pathname, item.href);
+            const unreadCount = item.href === "/chat" ? unreadChat : item.href === "/notifications" ? unread : 0;
             return (
               <IntentPrefetchLink
                 key={item.href}
                 href={item.href}
                 aria-current={active ? "page" : undefined}
-                className={`flex min-h-12 flex-col items-center justify-center gap-1 rounded-md text-[11px] transition ${
+                className={`relative flex min-h-12 flex-col items-center justify-center gap-1 rounded-md text-xs transition ${
                   active ? "bg-zinc-800 text-zinc-50" : "bg-zinc-900 text-zinc-300"
                 }`}
               >
                 <Icon className="size-4" aria-hidden />
                 {item.label}
+                {unreadCount > 0 ? <span aria-label={`${unreadCount} unread`} className="absolute right-1 top-1 rounded bg-emerald-400 px-1 text-xs font-bold text-black">{unreadCount}</span> : null}
               </IntentPrefetchLink>
             );
           })}

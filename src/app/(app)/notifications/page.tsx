@@ -3,7 +3,7 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { requireCurrentUser } from "@/lib/auth";
 import { getNotificationsPageData } from "@/lib/app-data";
-import { shortDate } from "@/lib/format";
+import { EventTime } from "@/components/event-time";
 import { markAllNotificationsReadAction, markNotificationReadAction } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -41,7 +41,7 @@ export default async function NotificationsPage() {
                       <Badge tone={notification.readAt ? "neutral" : "info"}>{notification.readAt ? "READ" : "UNREAD"}</Badge>
                     </div>
                     <p className="mt-1 text-sm text-zinc-400">{notification.body}</p>
-                    <p className="mt-2 text-xs text-zinc-500">{shortDate(notification.createdAt)}</p>
+                    <div className="mt-2"><EventTime value={notification.createdAt} /></div>
                   </div>
                 </div>
                 <div className="flex gap-2">

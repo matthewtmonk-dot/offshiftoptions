@@ -1394,6 +1394,7 @@ export async function sendChatMessageForUser(
   if (!message) {
     throw new ValidationError("Message could not be sent.");
   }
+  const messageHref = `/chat#message-${message.id}`;
 
   await prisma.conversationMember.update({
     where: {
@@ -1415,7 +1416,7 @@ export async function sendChatMessageForUser(
           type: "MESSAGE",
           title: `${user.name} sent you a message`,
           body: body || (uploadedAttachments.length === 1 ? "Sent an image." : `Sent ${uploadedAttachments.length} images.`),
-          href: "/chat",
+          href: messageHref,
         }),
       ),
   );
@@ -1424,42 +1425,55 @@ export async function sendChatMessageForUser(
 }
 
 export async function markConversationReadForUser(userId: string, conversationId: string) {
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      members: { some: { userId } },
-    },
-    select: { id: true },
-  });
-
-  if (!conversation) {
-    throw new ValidationError("You are not a member of that conversation.");
-  }
-
-  const unreadMessages = await prisma.chatMessage.findMany({
-    where: {
-      conversationId,
-      senderId: { not: userId },
-      reads: { none: { userId } },
-    },
-    select: { id: true },
-  });
-
-  if (unreadMessages.length) {
-    await prisma.chatMessageRead.createMany({
-      data: unreadMessages.map((message) => ({ messageId: message.id, userId })),
-      skipDuplicates: true,
+  const readAt = new Date();
+  await prisma.$transaction(async (tx) => {
+    const conversation = await tx.conversation.findFirst({
+      where: { id: conversationId, members: { some: { userId } } },
+      select: { id: true },
     });
-  }
 
-  await prisma.conversationMember.update({
-    where: {
-      conversationId_userId: {
+    if (!conversation) {
+      throw new ValidationError("You are not a member of that conversation.");
+    }
+
+    const messages = await tx.chatMessage.findMany({
+      where: {
         conversationId,
-        userId,
+        senderId: { not: userId },
+        createdAt: { lte: readAt },
       },
-    },
-    data: { lastReadAt: new Date() },
+      select: { id: true, senderId: true },
+    });
+
+    if (messages.length) {
+      await tx.chatMessageRead.createMany({
+        data: messages.map((message) => ({ messageId: message.id, userId })),
+        skipDuplicates: true,
+      });
+      // New notifications identify the exact message. Legacy /chat notifications have no
+      // conversation key: clear them only when this user has exactly one conversation.
+      const singleConversation = await tx.conversationMember.count({ where: { userId } }) === 1;
+      await tx.notification.updateMany({
+        where: {
+          recipientId: userId,
+          type: "MESSAGE",
+          readAt: null,
+          createdAt: { lte: readAt },
+          OR: [
+            { href: { in: messages.map((message) => `/chat#message-${message.id}`) } },
+            ...(singleConversation ? [{ href: "/chat", actorId: { in: [...new Set(messages.map((message) => message.senderId))] } }] : []),
+          ],
+        },
+        data: { readAt },
+      });
+    }
+
+    await tx.conversationMember.update({
+      where: {
+        conversationId_userId: { conversationId, userId },
+      },
+      data: { lastReadAt: readAt },
+    });
   });
 }
 

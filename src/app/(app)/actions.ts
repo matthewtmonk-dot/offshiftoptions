@@ -350,6 +350,8 @@ export async function markConversationReadAction(formData: FormData) {
 
   revalidatePath("/chat");
   revalidatePath("/dashboard");
+  revalidatePath("/notifications");
+  revalidatePath("/", "layout");
 }
 
 export async function markNotificationReadAction(formData: FormData) {

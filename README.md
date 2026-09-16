@@ -8,6 +8,8 @@ This app does not place trades. Trades stay in Schwab/Thinkorswim or another bro
 
 Read [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) and [AGENTS.md](AGENTS.md) first. The handoff records the active checkpoint, validation, deployment state, and next task. Keep work in small, reviewable slices and update that checkpoint after each meaningful change so a restart does not lose progress.
 
+Latest completed local slice: dashboard timestamps/readability and Chat/Notifications consistency. Dashboard previews show Eastern event times; Chat's **Mark read** also clears matching message notifications. No migration is required for this slice. See the handoff for tests, pending local commits, and the next scheduled scanner diagnostic to review. These changes have not been pushed or deployed.
+
 ## Quick Start With Docker
 
 1. Create local environment values:
