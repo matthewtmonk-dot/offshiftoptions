@@ -31,14 +31,24 @@ const maybeDescribe = runDatabaseTests ? describe : describe.skip;
 
 const TEST_SOURCE = "TEST_FIXTURE_BROAD_SCAN";
 
+// Computed relative to the real clock (rerunLiveSchwabScannerForUser exposes no controllable
+// `asOf`) rather than a fixed calendar date, so it always lands inside the live scan's default
+// weekly horizon (DEFAULT_WEEKLY_DTE_RANGE, 1-13 DTE) no matter what day this suite runs on.
+function defaultWeeklyExpiration(): Date {
+  const expiration = new Date();
+  expiration.setUTCDate(expiration.getUTCDate() + 7);
+  expiration.setUTCHours(20, 0, 0, 0);
+  return expiration;
+}
+
 function defaultPut(symbol: string, strike: number, bid = 0.3): OptionContractSnapshot[] {
   return [
     {
-      symbol: `${symbol} 260918P${strike}`,
+      symbol: `${symbol} WEEKLYP${strike}`,
       underlyingSymbol: symbol,
       optionType: "PUT",
       strike,
-      expiration: new Date("2026-09-18T20:00:00Z"),
+      expiration: defaultWeeklyExpiration(),
       bid,
       ask: bid + 0.06,
       mark: bid + 0.03,
@@ -499,13 +509,9 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     await Promise.all(tickers.map((ticker) => seedReadySnapshot(matt.id, ticker, {
       rsi: ticker === known ? 30 : 10, bbLower: 15, bbMiddle: 20, bbUpper: 45,
     })));
-    const weeklyExpiration = new Date();
-    weeklyExpiration.setUTCDate(weeklyExpiration.getUTCDate() + 7);
-    weeklyExpiration.setUTCHours(20, 0, 0, 0);
-    const chain = defaultPut(known, 18).map((option) => ({ ...option, expiration: weeklyExpiration }));
     const provider = fakeProvider(
       Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 100_000 }])),
-      { [known]: chain },
+      { [known]: defaultPut(known, 18) },
     );
     const getQuotes = provider.getQuotes!;
     provider.getQuotes = async (symbols) => {

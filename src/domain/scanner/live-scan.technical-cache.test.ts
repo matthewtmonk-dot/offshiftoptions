@@ -18,6 +18,12 @@ const rules: ScannerRule[] = [
   { key: "earningsDistance", name: "Earnings distance", operator: "GTE", desired: 10 },
 ];
 
+// Pinned rather than left to the real wall clock: the scanner's default weekly horizon
+// (DEFAULT_WEEKLY_DTE_RANGE, 1-13 DTE) now hard-filters expirations when the `dte` rule is
+// disabled (as it is throughout this file), so a fixture's DTE must stay correct relative to a
+// fixed `asOf`, not silently drift with whatever day the suite happens to run on.
+const SCAN_AS_OF = new Date("2026-09-08T20:00:00Z");
+
 function buildProvider(overrides: Partial<MarketDataProvider> = {}): MarketDataProvider {
   return {
     async getQuote(symbol) {
@@ -31,11 +37,11 @@ function buildProvider(overrides: Partial<MarketDataProvider> = {}): MarketDataP
     async getOptionChain(symbol) {
       return [
         {
-          symbol: `${symbol} 260918P00018000`,
+          symbol: `${symbol} 260913P00018000`,
           underlyingSymbol: symbol,
           optionType: "PUT",
           strike: 18,
-          expiration: new Date("2026-09-18T20:00:00Z"),
+          expiration: new Date("2026-09-13T20:00:00Z"), // 5 DTE from SCAN_AS_OF
           bid: 0.3,
           ask: 0.36,
           mark: 0.33,
@@ -66,6 +72,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       rules,
       universe: ["AAA"],
       technicalCache,
+      asOf: SCAN_AS_OF,
     });
 
     expect(results.find((result) => result.ticker === "AAA")?.values.rsi).toBe(25);
@@ -76,7 +83,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       ["AAA", { state: "READY", rsi: 22.5, bbLower: 15, bbMiddle: 20, bbUpper: 25 }],
     ]);
 
-    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache });
+    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache, asOf: SCAN_AS_OF });
     const aaa = results.find((result) => result.ticker === "AAA");
 
     expect(aaa?.values.rsi).toBe(22.5);
@@ -105,8 +112,8 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       },
     });
 
-    const lowResults = await evaluateLiveMarketScan({ provider: lowPriceProvider, rules, universe: ["LOW"], technicalCache });
-    const highResults = await evaluateLiveMarketScan({ provider: highPriceProvider, rules, universe: ["HIGH"], technicalCache: technicalCacheHigh });
+    const lowResults = await evaluateLiveMarketScan({ provider: lowPriceProvider, rules, universe: ["LOW"], technicalCache, asOf: SCAN_AS_OF });
+    const highResults = await evaluateLiveMarketScan({ provider: highPriceProvider, rules, universe: ["HIGH"], technicalCache: technicalCacheHigh, asOf: SCAN_AS_OF });
 
     const lowBbPercent = lowResults.find((result) => result.ticker === "LOW")?.values.bbPercent;
     const highBbPercent = highResults.find((result) => result.ticker === "HIGH")?.values.bbPercent;
@@ -121,7 +128,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       ["AAA", { state: "TECHNICAL_DATA_STALE", rsi: 5, bbLower: 15, bbMiddle: 20, bbUpper: 25 }], // rsi=5 would PASS if used
     ]);
 
-    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache });
+    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache, asOf: SCAN_AS_OF });
     const aaa = results.find((result) => result.ticker === "AAA");
 
     expect(aaa?.values.rsi).toBeNull();
@@ -134,7 +141,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
   it("a PENDING (missing) technical entry never contributes rsi/bbPercent - cannot fake a PASS", async () => {
     const technicalCache = new Map<string, LiveScanTechnicalLookup>(); // AAA absent entirely
 
-    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache });
+    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache, asOf: SCAN_AS_OF });
     const aaa = results.find((result) => result.ticker === "AAA");
 
     expect(aaa?.values.rsi).toBeNull();
@@ -147,7 +154,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
   it("a FAILED (HISTORY_UNAVAILABLE) technical entry never contributes rsi/bbPercent - cannot fake a PASS", async () => {
     const technicalCache = new Map<string, LiveScanTechnicalLookup>([["AAA", { state: "HISTORY_UNAVAILABLE" }]]);
 
-    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache });
+    const results = await evaluateLiveMarketScan({ provider: buildProvider(), rules, universe: ["AAA"], technicalCache, asOf: SCAN_AS_OF });
     const aaa = results.find((result) => result.ticker === "AAA");
 
     expect(aaa?.values.rsi).toBeNull();
@@ -166,6 +173,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       universe: ["AAA"],
       technicalCache,
       maxOptionChainLookups: 8,
+      asOf: SCAN_AS_OF,
     });
 
     const aaa = results.find((result) => result.ticker === "AAA");
@@ -188,6 +196,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       universe: ["KNOWN", "UNKNOWNTICKER"],
       technicalCache,
       earningsLookup,
+      asOf: SCAN_AS_OF,
     });
 
     const known = results.find((result) => result.ticker === "KNOWN");
@@ -216,7 +225,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       ["THICK", { state: "READY", rsi: 25, bbLower: 15, bbMiddle: 20, bbUpper: 25 }],
     ]);
 
-    const results = await evaluateLiveMarketScan({ provider, rules, universe: ["THIN", "THICK"], technicalCache });
+    const results = await evaluateLiveMarketScan({ provider, rules, universe: ["THIN", "THICK"], technicalCache, asOf: SCAN_AS_OF });
     const thin = results.find((result) => result.ticker === "THIN");
     const thick = results.find((result) => result.ticker === "THICK");
 
@@ -250,8 +259,8 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
         ),
     });
 
-    const earlyResults = await evaluateLiveMarketScan({ provider: lowVolumeProvider, rules, universe: ["THIN"], technicalCache });
-    const laterResults = await evaluateLiveMarketScan({ provider: higherVolumeProvider, rules, universe: ["THIN"], technicalCache });
+    const earlyResults = await evaluateLiveMarketScan({ provider: lowVolumeProvider, rules, universe: ["THIN"], technicalCache, asOf: SCAN_AS_OF });
+    const laterResults = await evaluateLiveMarketScan({ provider: higherVolumeProvider, rules, universe: ["THIN"], technicalCache, asOf: SCAN_AS_OF });
     const earlyThin = earlyResults.find((result) => result.ticker === "THIN");
     const laterThin = laterResults.find((result) => result.ticker === "THIN");
 
@@ -283,6 +292,7 @@ describe("evaluateLiveMarketScan - technical cache mode (broad scanner)", () => 
       universe: ["GOOD", "TOOEXPENSIVE", "NOQUOTE"],
       technicalCache,
       maxOptionChainLookups: 8,
+      asOf: SCAN_AS_OF,
     });
 
     expect(results.find((r) => r.ticker === "GOOD")?.funnelStage).toBe("STOCK_STAGE");

@@ -58,11 +58,21 @@ describe("weekly expiration before strike scoring", () => {
   it.each([
     ["OTM", { strike: 20 }],
     ["positive bid", { bid: 0 }],
-    ["minimum bid", { bid: 0.09 }],
-    ["OI", { openInterest: 99 }],
-  ] as const)("falls back only when all preferred-date contracts fail %s eligibility", async (_name, overrides) => {
+  ] as const)("falls back only when the preferred date has no STRUCTURALLY valid contract (%s)", async (_name, overrides) => {
     const [row] = await evaluateLiveMarketScan(fixture([put(21), put(7, overrides), put(9)]));
     expect(row.values).toMatchObject({ dte: 9, optionSelectionFallback: true, optionSelectionPreferredExpiration: "2026-09-23" });
+  });
+
+  it.each([
+    ["minimum bid", { bid: 0.09 }, "optionBid"],
+    ["OI", { openInterest: 99 }, "openInterest"],
+  ] as const)("keeps the weekly expiration selected when its only structural contract fails a STRATEGY-quality gate (%s) - never falls back to a different date", async (_name, overrides, ruleKey) => {
+    const [row] = await evaluateLiveMarketScan(fixture([put(21), put(7, overrides), put(9)]));
+    // Structurally valid (positive bid, OTM) and within the default weekly horizon, so it stays
+    // the selected expiration; the enabled rule's own FAIL is reported honestly instead of
+    // silently promoting the 9 DTE or 21 DTE contract.
+    expect(row.values).toMatchObject({ dte: 7, optionSelectionFallback: false });
+    expect(row.summary.results.find((result) => result.key === ruleKey)?.status).toBe("FAIL");
   });
 
   it("keeps a date if even one of its strikes survives structural gates", async () => {
@@ -70,9 +80,16 @@ describe("weekly expiration before strike scoring", () => {
     expect(row.values).toMatchObject({ dte: 7, optionSymbol: "USABLE", optionSelectionFallback: false });
   });
 
-  it("does not count absent weekly listings or call-only dates as rejected put expirations", async () => {
-    const [row] = await evaluateLiveMarketScan(fixture([put(7, { optionType: "CALL" }), put(21)]));
-    expect(row.values).toMatchObject({ dte: 21, optionSelectionFallback: false });
+  it("does not count a call-only date as a rejected put expiration", async () => {
+    const [row] = await evaluateLiveMarketScan(fixture([put(7, { optionType: "CALL" }), put(9)]));
+    expect(row.values).toMatchObject({ dte: 9, optionSelectionFallback: false });
+  });
+
+  it("reports NO_WEEKLY_EXPIRATION rather than a months-long fallback when nothing structurally valid exists in the default 1-13 DTE horizon", async () => {
+    const [row] = await evaluateLiveMarketScan(fixture([put(30), put(93), put(121)]));
+    expect(row.values.strike).toBeNull();
+    expect(row.values.contractReasonCode).toBe("NO_WEEKLY_EXPIRATION");
+    expect(row.values.scanNote).toBe("No suitable weekly expiration available.");
   });
 
   it("honors enabled hard DTE bounds before preferring the closest remaining expiration", async () => {
@@ -83,14 +100,14 @@ describe("weekly expiration before strike scoring", () => {
     expect(none.values.contractReasonCode).toBe("NO_EXPIRATIONS_IN_CONFIGURED_RANGE");
   });
 
-  it.each([[5, 9, 9], [2, 12, 12], [2, 9, 9], [0, 7, 7]])("%i vs %i DTE selects %i", async (first, second, expected) => {
+  it.each([[5, 9, 9], [2, 12, 12], [2, 9, 9], [0, 7, 7], [6, 8, 8]])("%i vs %i DTE selects %i", async (first, second, expected) => {
     for (const chain of [[put(first), put(second)], [put(second), put(first)]]) {
       const [row] = await evaluateLiveMarketScan(fixture(chain));
       expect(row.values.dte).toBe(expected);
     }
   });
 
-  it("preserves enabled spread/delta gates and ignores them when disabled", async () => {
+  it("keeps the weekly expiration selected when spread/delta gates are enabled and fail, ignores them entirely when disabled", async () => {
     const input = fixture([put(7, { ask: 2, delta: -0.9 }), put(9)]);
     expect((await evaluateLiveMarketScan(input))[0].values.dte).toBe(7);
     for (const extra of [
@@ -98,7 +115,11 @@ describe("weekly expiration before strike scoring", () => {
       { key: "delta", name: "Delta", operator: "BETWEEN", desired: [0.12, 0.30] },
     ] satisfies ScannerRule[]) {
       const [row] = await evaluateLiveMarketScan({ ...input, rules: [...rules, extra] });
-      expect(row.values).toMatchObject({ dte: 9, optionSelectionFallback: true });
+      // Still the weekly (7 DTE) contract - a quality-gate FAIL is never a reason to prefer the
+      // 9 DTE contract instead; only structural absence would do that (see the OTM/positive-bid
+      // cases above).
+      expect(row.values).toMatchObject({ dte: 7, optionSelectionFallback: false });
+      expect(row.summary.results.find((result) => result.key === extra.key)?.status).toBe("FAIL");
     }
   });
 

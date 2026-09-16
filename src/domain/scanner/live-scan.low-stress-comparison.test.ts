@@ -84,11 +84,14 @@ function buildFixtureProvider(fixture: Fixture): MarketDataProvider {
     async getOptionChain(symbol) {
       return [
         {
-          symbol: `${symbol} 260918P${strike}`,
+          symbol: `${symbol} 260907P${strike}`,
           underlyingSymbol: symbol,
           optionType: "PUT",
           strike,
-          expiration: new Date("2026-09-18T20:00:00Z"),
+          // 7 DTE from the fixture's pinned asOf (2026-08-31) - within the default weekly
+          // horizon (see DEFAULT_WEEKLY_DTE_RANGE), so this comparison exercises the same
+          // selection path a real weekly scan uses instead of tripping NO_WEEKLY_EXPIRATION.
+          expiration: new Date("2026-09-07T20:00:00Z"),
           bid,
           ask: Math.round((bid + 0.06) * 100) / 100,
           mark: Math.round((bid + 0.03) * 100) / 100,

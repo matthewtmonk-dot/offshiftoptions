@@ -549,8 +549,7 @@ export type OptionScanReasonCode =
   | "NO_ACCEPTABLE_STRIKE"
   | "NO_CONTRACT_WITH_POSITIVE_BID"
   | "NO_EXPIRATIONS_IN_CONFIGURED_RANGE"
-  | "OPTION_LIQUIDITY_FAILED"
-  | "OPTION_RULES_FAILED";
+  | "NO_WEEKLY_EXPIRATION";
 
 const OPTION_REASON_MESSAGES: Record<OptionScanReasonCode, string> = {
   CHAIN_UNAVAILABLE: "Option-chain data was unavailable for this ticker; result marked UNKNOWN.",
@@ -558,16 +557,26 @@ const OPTION_REASON_MESSAGES: Record<OptionScanReasonCode, string> = {
   NO_ACCEPTABLE_STRIKE: "Contracts were found, but none had a strike below the current stock price.",
   NO_CONTRACT_WITH_POSITIVE_BID: "Option chain returned, but no contract had a positive bid.",
   NO_EXPIRATIONS_IN_CONFIGURED_RANGE: "No put matched your configured DTE range.",
-  OPTION_LIQUIDITY_FAILED: "Contracts found, but open interest, volume, or spread was below your rule.",
-  OPTION_RULES_FAILED: "Contracts found, but none matched your other configured option rules (e.g. delta).",
+  NO_WEEKLY_EXPIRATION: "No suitable weekly expiration available.",
 };
 
 /**
- * Option-level rules that gate contract DISCOVERY (never merely score it) when the user has
- * them enabled - matches profile.ts's own GATING_RULE_KEYS classification for these keys.
- * DTE is handled separately: it is NOT a gating rule (see profile.ts's GATING_RULE_KEYS
- * comment), so it must never hard-filter contracts unless the user has explicitly enabled it -
- * see the dteEligible filter below.
+ * Default weekly horizon used to pick WHICH expiration to assess when the user has not enabled
+ * the hard `dte` rule - a scanner built around a ~7-DTE weekly CSP must not silently wander into
+ * a monthly/LEAPS contract just because no listing sits exactly at the target. This is a
+ * selection PREFERENCE window, never a substitute for the user's own hard DTE rule: when that
+ * rule is enabled, its own configured range is authoritative instead (see bestPutValues).
+ */
+const DEFAULT_WEEKLY_DTE_RANGE: readonly [number, number] = [1, 13];
+
+/**
+ * Option-level rules that influence STRIKE preference within an already-chosen expiration when
+ * the user has them enabled - matches profile.ts's own GATING_RULE_KEYS classification for these
+ * keys. They no longer decide whether an expiration exists (see bestPutValues) - a weekly
+ * contract that fails one of these stays selected and reports its real FAIL, rather than being
+ * discarded in favor of a longer-dated PASS. DTE is handled separately: it is NOT a gating rule
+ * (see profile.ts's GATING_RULE_KEYS comment), so it must never hard-filter contracts unless the
+ * user has explicitly enabled it - see the dteRule handling below.
  */
 const LIQUIDITY_GATE_KEYS = ["optionBid", "openInterest", "spreadPercent"] as const;
 const OTHER_OPTION_GATE_KEYS = ["delta"] as const;
@@ -586,34 +595,45 @@ function compareText(left: string, right: string) {
 /**
  * Deterministically selects the single put contract a scanner row represents, for the given
  * ticker's stock-stage candidate and its full raw option chain. Never "grabs the first
- * contract" - runs a staged funnel, each stage eliminating on one specific, honestly-named
- * reason (see OptionScanReasonCode) so a blank row always has a knowable cause:
+ * contract", and never lets a strategy-quality gate decide which EXPIRATION exists - a normal
+ * weekly expiration must not disappear merely because its bid/OI/spread/delta/ROR is bad; that
+ * is an honest strategy result on the weekly contract, not a reason to jump months out to
+ * manufacture a green PASS. Each elimination has one specific, honestly-named reason (see
+ * OptionScanReasonCode) so a blank row always has a knowable cause:
  *
- *  1. PUT contracts only (NO_PUT_CONTRACTS if none).
- *  2. Strike below the current stock price - the existing OTM definition
- *     (NO_ACCEPTABLE_STRIKE if none).
- *  3. A positive bid and a real ask - a $0-bid contract cannot be sold; this is a structural
- *     floor distinct from the user's own configurable `optionBid` minimum, applied even when
- *     that rule is disabled (NO_CONTRACT_WITH_POSITIVE_BID if none).
- *  4. DTE, ONLY when the user has enabled the `dte` rule - using their own configured range,
- *     never a hardcoded window (NO_EXPIRATIONS_IN_CONFIGURED_RANGE if none). Left untouched
- *     entirely when the rule is disabled, matching its documented non-gating classification
- *     (see profile.ts's GATING_RULE_KEYS comment) - DTE must never silently exclude a contract.
- *  5. Liquidity gates - optionBid/openInterest/spreadPercent - each applied only when the user
- *     has that specific rule enabled, using its own configured threshold
- *     (OPTION_LIQUIDITY_FAILED if every surviving contract fails).
- *  6. Other option-level gates - delta - same enabled-only treatment (OPTION_RULES_FAILED if
- *     every surviving contract fails).
+ *  Structural existence (decides which expirations exist at all - never a quality judgment):
+ *   1. PUT contracts only (NO_PUT_CONTRACTS if none).
+ *   2. Strike below the current stock price - the existing OTM definition
+ *      (NO_ACCEPTABLE_STRIKE if none).
+ *   3. A positive bid and a real ask - a $0-bid contract cannot be sold; this is a structural
+ *      floor distinct from the user's own configurable `optionBid` minimum, applied even when
+ *      that rule is disabled (NO_CONTRACT_WITH_POSITIVE_BID if none).
+ *   4. The expiration's DTE falls inside the applicable horizon: the user's own enabled `dte`
+ *      range when they've turned that rule on (authoritative - NO_EXPIRATIONS_IN_CONFIGURED_RANGE
+ *      if none), otherwise the default weekly horizon DEFAULT_WEEKLY_DTE_RANGE (NO_WEEKLY_EXPIRATION
+ *      if none) - never a silent 1-13 window applied on top of the user's own explicit range.
  *
- * Choose the surviving expiration closest to seven calendar days first (later DTE on a tie).
- * Only its strikes compete by setupScore(), then annualized ROR, then strike ascending.
- * Matt's accepted LST cushion preference intentionally chooses the lower strike only when
- * score and annualized ROR tie; symbol ascending is the final deterministic tie-break.
- * This preference never overrides expiration selection or enabled gates.
- * Missing the ROR target never triggers a move to
- * a longer expiration. optionVolume is intentionally never a hard gate here (it is not in
- * profile.ts's GATING_RULE_KEYS) - a FAIL there only affects score/label, never eliminates a
- * contract from being selectable.
+ *  Expiration selection - among structurally-valid expirations only, BEFORE any quality gate is
+ *  applied: choose the one closest to seven calendar days first (later DTE on a tie, then
+ *  expiration date ascending). This is the fix for the historical bug: gates used to run before
+ *  this step, so a bad-liquidity/low-ROR weekly contract could lose every candidate at its date
+ *  and let a 93/121/156-DTE PASS become "the closest surviving expiration" by default.
+ *
+ *  Strategy quality (STRIKE preference only, inside the already-chosen expiration - never
+ *  decides existence):
+ *   5. Liquidity gates - optionBid/openInterest/spreadPercent - each applied only when the user
+ *      has that specific rule enabled, using its own configured threshold. Prefer a strike that
+ *      passes every enabled gate; if none at this expiration do, fall back to scoring all of its
+ *      strikes anyway rather than returning blank - the resulting row shows an honest FAIL/NEAR.
+ *   6. Other option-level gates - delta - same enabled-only, prefer-then-fall-back treatment.
+ *
+ * Only the chosen expiration's strikes compete by setupScore(), then annualized ROR, then strike
+ * ascending. Matt's accepted LST cushion preference intentionally chooses the lower strike only
+ * when score and annualized ROR tie; symbol ascending is the final deterministic tie-break. This
+ * preference never overrides expiration selection or enabled gates. Missing the ROR target never
+ * triggers a move to a longer expiration. optionVolume is intentionally never a hard gate here (it
+ * is not in profile.ts's GATING_RULE_KEYS) - a FAIL there only affects score/label, never
+ * eliminates a contract from being selectable.
  */
 function bestPutValues(
   candidate: StockStageCandidate,
@@ -649,38 +669,43 @@ function bestPutValues(
     return blank("NO_CONTRACT_WITH_POSITIVE_BID");
   }
 
-  // DTE only ever hard-filters when the user has actually enabled the rule - using their
-  // configured range, never a hardcoded window. When disabled, every DTE stays eligible.
+  // Structural horizon: the user's own enabled hard `dte` range is authoritative when present -
+  // never a silent 1-13 window layered on top of it. Otherwise fall back to the default weekly
+  // horizon (DEFAULT_WEEKLY_DTE_RANGE) so expiration selection below never wanders into a
+  // monthly/LEAPS contract just because no listing sits at the exact target. Either way, this is
+  // still structural existence, not a quality judgment - it only decides which expirations are
+  // even in play before scoring anything.
   const dteRule = rules.find((rule) => rule.key === "dte");
-  let dteEligible = withBid;
-  if (dteRule) {
-    const [low, high] = dteRule.desired as [number, number];
-    dteEligible = withBid.filter((values) => {
-      const dte = numericValue(values.dte);
-      return dte !== null && dte >= low && dte <= high;
-    });
-    if (!dteEligible.length) {
-      return blank("NO_EXPIRATIONS_IN_CONFIGURED_RANGE");
-    }
+  const [horizonLow, horizonHigh] = dteRule ? (dteRule.desired as [number, number]) : DEFAULT_WEEKLY_DTE_RANGE;
+  const withinHorizon = withBid.filter((values) => {
+    const dte = numericValue(values.dte);
+    return dte !== null && dte >= horizonLow && dte <= horizonHigh;
+  });
+  if (!withinHorizon.length) {
+    return blank(dteRule ? "NO_EXPIRATIONS_IN_CONFIGURED_RANGE" : "NO_WEEKLY_EXPIRATION");
   }
 
-  const afterLiquidity = dteEligible.filter((values) => LIQUIDITY_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)));
-  if (!afterLiquidity.length) {
-    return blank("OPTION_LIQUIDITY_FAILED");
-  }
-
-  const afterOtherGates = afterLiquidity.filter((values) => OTHER_OPTION_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)));
-  if (!afterOtherGates.length) {
-    return blank("OPTION_RULES_FAILED");
-  }
-
-  // Compare the surviving date to the closest date in the normalized returned PUT chain.
-  // A fallback means that closer returned date lost every contract to the gates above;
-  // absence of an exact 7-DTE listing alone is not a fallback.
+  // Expiration selection happens BEFORE any strategy-quality gate, among structurally-valid
+  // dates only - a normal weekly expiration must not disappear merely because its bid/OI/spread/
+  // delta is bad; that is an honest strategy result on the weekly contract (see the strike
+  // selection below), never a reason to substitute a longer-dated one. Compare the winning date
+  // to the closest date in the normalized returned PUT chain (before any gate, before the
+  // horizon filter above) - a fallback means that closer returned date had no structurally valid
+  // contract at all; absence of an exact 7-DTE listing alone is not a fallback.
   const preferredReturned = [...puts].sort(compareExpirations)[0];
-  const selectedExpiration = [...afterOtherGates].sort(compareExpirations)[0].expiration;
-  const selected = afterOtherGates
-    .filter((values) => values.expiration === selectedExpiration)
+  const selectedExpiration = [...withinHorizon].sort(compareExpirations)[0].expiration;
+  const contractsAtSelectedExpiration = withinHorizon.filter((values) => values.expiration === selectedExpiration);
+
+  // Strategy quality now only influences WHICH STRIKE at the already-chosen expiration is
+  // preferred - never whether the expiration exists. Prefer a strike passing every enabled gate;
+  // if none of this expiration's strikes do, score all of them anyway so the row still shows an
+  // honest FAIL/NEAR rather than going blank or jumping to a different expiration.
+  const gatePassing = contractsAtSelectedExpiration.filter(
+    (values) => LIQUIDITY_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)) && OTHER_OPTION_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)),
+  );
+  const scoringPool = gatePassing.length ? gatePassing : contractsAtSelectedExpiration;
+
+  const selected = scoringPool
     .map((values) => ({
       values,
       summary: evaluateCandidate(rules, values),

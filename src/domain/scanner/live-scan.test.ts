@@ -58,7 +58,7 @@ describe("live market-data scanner", () => {
             underlyingSymbol: symbol,
             optionType: "PUT",
             strike: 11,
-            expiration: new Date("2026-09-18T20:00:00Z"),
+            expiration: new Date("2026-09-05T20:00:00Z"),
             bid: 0.2,
             ask: 0.26,
             mark: 0.23,
@@ -93,19 +93,21 @@ describe("live market-data scanner", () => {
       optionAsk: 0.26,
       openInterest: 250,
       ror: 1.82,
-      annualizedRor: 36.91,
+      annualizedRor: 132.86, // ror annualized over 5 DTE (see calculations.test.ts for the formula)
     });
     expect(riot?.summary.status).toBe("PASS");
     expect(tooHigh?.summary.status).toBe("FAIL");
     expect(tooHigh?.values.optionBid).toBeNull();
   });
 
-  it("a far-future contract IS selectable when the DTE rule is disabled - no hidden 14-45 gate", async () => {
+  it("a far-future-only contract reports NO_WEEKLY_EXPIRATION when the DTE rule is disabled, never a silent monthly/LEAPS fallback", async () => {
     // `rules` (shared across this describe block) has no `dte` entry - the DTE rule is
     // disabled, exactly like its documented default (SCANNER_RULE_DEFINITIONS: defaultEnabled:
-    // false). A contract nearly a year out must still be selectable; the old hardcoded 14-45
-    // pre-filter in bestPutValues() would have silently discarded it before Scanner Rules ever
-    // ran, regardless of what the user configured.
+    // false). With no hard DTE range, the default weekly horizon (DEFAULT_WEEKLY_DTE_RANGE,
+    // 1-13 DTE) applies instead: a contract nearly a year out is outside it, so this must report
+    // an honest NO_WEEKLY_EXPIRATION rather than silently becoming "the closest surviving
+    // expiration" (see live-scan.weekly.test.ts for the old hardcoded 14-45 gate this replaced,
+    // and for cases where a genuinely weekly contract DOES exist and gets selected).
     const provider: MarketDataProvider = {
       async getQuote(symbol) {
         return { symbol, price: 12, volume: 1_000_000, asOf: new Date("2026-08-31T14:30:00Z") };
@@ -128,7 +130,7 @@ describe("live market-data scanner", () => {
             underlyingSymbol: symbol,
             optionType: "PUT",
             strike: 11,
-            expiration: new Date("2027-01-01T20:00:00Z"), // far beyond the old hardcoded 14-45 window
+            expiration: new Date("2027-01-01T20:00:00Z"), // ~123 DTE - outside the default 1-13 weekly horizon
             bid: 0.2,
             ask: 0.26,
             mark: 0.23,
@@ -155,11 +157,12 @@ describe("live market-data scanner", () => {
     });
 
     const riot = results.find((result) => result.ticker === "RIOT");
-    expect(riot?.values.strike).toBe(11);
-    expect(riot?.values.optionBid).toBe(0.2);
-    expect(riot?.values.dte).toBeGreaterThan(100);
-    expect(riot?.values.scanNote).toBeUndefined();
-    expect(riot?.values.contractReasonCode).toBeUndefined();
+    expect(riot?.values.strike).toBeNull();
+    expect(riot?.values.contractReasonCode).toBe("NO_WEEKLY_EXPIRATION");
+    expect(riot?.values.scanNote).toBe("No suitable weekly expiration available.");
+    // Stock-level values ARE known here (unlike a whole-ticker fetch failure) - only the
+    // option side is blank.
+    expect(riot?.values.price).toBe(12);
   });
 
   it("when the DTE rule IS enabled, contract discovery uses the user's own configured range - not a hidden 14-45 window", async () => {
@@ -399,7 +402,7 @@ describe("live market-data scanner", () => {
     expect(riot?.values.contractReasonCode).toBe("NO_PUT_CONTRACTS");
   });
 
-  it("reports OPTION_LIQUIDITY_FAILED when every put fails an enabled liquidity gate (open interest)", async () => {
+  it("stays selected with an honest FAIL when every strike at the weekly expiration fails an enabled liquidity gate (open interest) - never blanked or moved to a longer expiration", async () => {
     const liquidityRules: ScannerRule[] = [...rules]; // openInterest GTE 100 already enabled
     const provider: MarketDataProvider = {
       async getQuote(symbol) {
@@ -419,11 +422,11 @@ describe("live market-data scanner", () => {
       async getOptionChain(symbol) {
         return [
           {
-            symbol: `${symbol} 260918P00011000`,
+            symbol: `${symbol} 260905P00011000`,
             underlyingSymbol: symbol,
             optionType: "PUT",
             strike: 11,
-            expiration: new Date("2026-09-18T20:00:00Z"),
+            expiration: new Date("2026-09-05T20:00:00Z"), // 5 DTE - the only (weekly) listing
             bid: 0.2,
             ask: 0.26,
             mark: 0.23,
@@ -450,7 +453,13 @@ describe("live market-data scanner", () => {
     });
 
     const riot = results.find((result) => result.ticker === "RIOT");
-    expect(riot?.values.contractReasonCode).toBe("OPTION_LIQUIDITY_FAILED");
+    // Still selected (not blank) - the weekly contract is an honest OI FAIL, not a reason to
+    // treat the expiration as nonexistent or to substitute a different one.
+    expect(riot?.values.strike).toBe(11);
+    expect(riot?.values.dte).toBe(5);
+    expect(riot?.values.contractReasonCode).toBeUndefined();
+    expect(riot?.summary.results.find((result) => result.key === "openInterest")?.status).toBe("FAIL");
+    expect(riot?.summary.status).toBe("FAIL");
   });
 
   it("does not exclude on open interest when the openInterest rule is disabled", async () => {
@@ -477,7 +486,7 @@ describe("live market-data scanner", () => {
             underlyingSymbol: symbol,
             optionType: "PUT",
             strike: 11,
-            expiration: new Date("2026-09-18T20:00:00Z"),
+            expiration: new Date("2026-09-05T20:00:00Z"),
             bid: 0.2,
             ask: 0.26,
             mark: 0.23,
@@ -556,7 +565,7 @@ describe("live market-data scanner", () => {
             underlyingSymbol: symbol,
             optionType: "PUT",
             strike: 11,
-            expiration: new Date("2026-09-18T20:00:00Z"),
+            expiration: new Date("2026-09-05T20:00:00Z"),
             bid: 0.2,
             ask: 0.26,
             mark: 0.23,
@@ -741,7 +750,7 @@ describe("live market-data scanner", () => {
             underlyingSymbol: symbol,
             optionType: "PUT",
             strike: 11,
-            expiration: new Date("2026-09-18T20:00:00Z"),
+            expiration: new Date("2026-09-05T20:00:00Z"),
             bid: 0.2,
             ask: 0.26,
             mark: 0.23,
@@ -797,7 +806,7 @@ describe("live market-data scanner", () => {
             underlyingSymbol: symbol,
             optionType: "PUT",
             strike: 16,
-            expiration: new Date("2026-09-18T20:00:00Z"),
+            expiration: new Date("2026-09-05T20:00:00Z"),
             bid: 0.2,
             ask: 0.26,
             mark: 0.23,
@@ -898,7 +907,7 @@ describe("live market-data scanner", () => {
               underlyingSymbol: symbol,
               optionType: "PUT",
               strike: 9 + seed,
-              expiration: new Date("2026-09-18T20:00:00Z"),
+              expiration: new Date("2026-09-05T20:00:00Z"),
               bid: 0.2 + seed * 0.01,
               ask: 0.26 + seed * 0.01,
               mark: 0.23 + seed * 0.01,
