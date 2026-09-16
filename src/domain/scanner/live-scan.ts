@@ -10,7 +10,7 @@ import {
 } from "@/domain/finance/calculations";
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
-import { DEMO_SCAN_CANDIDATES, SCANNER_RULE_DEFINITIONS } from "./profile";
+import { DEMO_SCAN_CANDIDATES } from "./profile";
 import { evaluateCandidate, evaluateCriterion, setupScore, type ScannerRule } from "./scanner";
 
 /**
@@ -50,10 +50,10 @@ export type LiveScanCandidate = {
    * option-chain request this scan - independent of whether that lookup then succeeded. Optional
    * for the same reason as funnelStage. */
   reachedOptionChainLookup?: boolean;
-  /** Only present for STOCK_STAGE candidates - the same rank used to choose the option-chain
-   * shortlist (lower = stronger). Exposed so a caller persisting a bounded, ranked subset of a
-   * broad-universe scan never has to reimplement the ranking formula (see
-   * rerunLiveSchwabScannerForUser's own result cap). */
+  /** Stock evidence tier: all enabled stock criteria PASS, some UNKNOWN, or known FAIL.
+   * The persistence cap must use this tier too, so enriched rows cannot be dropped. */
+  stockStagePriority?: 0 | 1 | 2;
+  /** RSI/BB attractiveness within the evidence tier (lower = stronger). */
   stockStageRank?: number;
 };
 
@@ -104,7 +104,8 @@ type StockStageCandidate = {
 };
 
 export const STARTER_LIVE_SCAN_UNIVERSE = [...new Set(DEMO_SCAN_CANDIDATES.map((candidate) => candidate.ticker))];
-const SCANNER_RULE_DEFAULTS_BY_KEY = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.key, definition]));
+export const OPTION_CHAIN_ENRICHMENT_LIMIT = 8;
+export const WEEKLY_TARGET_DTE = 7;
 const STOCK_STAGE_RULE_KEYS = new Set(["price", "stockVolume", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
 /** Stage 1 of the stock-level funnel: rules answerable from a quote alone, with no history
  * fetch or technical-cache read. Kept as a subset of STOCK_STAGE_RULE_KEYS, never a separate rule
@@ -157,7 +158,7 @@ export async function evaluateLiveMarketScan({
   rules,
   universe = STARTER_LIVE_SCAN_UNIVERSE,
   asOf = new Date(),
-  maxOptionChainLookups = 8,
+  maxOptionChainLookups = OPTION_CHAIN_ENRICHMENT_LIMIT,
   technicalCache,
   earningsLookup,
 }: LiveScanOptions): Promise<LiveScanCandidate[]> {
@@ -243,9 +244,14 @@ export async function evaluateLiveMarketScan({
     );
   }
 
-  const shortlist = stockStage
-    .filter((candidate) => stockStageIsEligible(candidate, rules))
-    .sort((left, right) => stockStageRank(left) - stockStageRank(right))
+  const rankedStockStage = stockStage.map((candidate) => ({
+    ...candidate,
+    stockStagePriority: stockStagePriority(candidate, rules),
+    stockStageRank: stockStageRank(candidate),
+  }));
+  const shortlist = rankedStockStage
+    .filter((candidate) => candidate.stockStagePriority !== 2)
+    .sort(compareStockStageCandidates)
     .slice(0, maxOptionChainLookups);
   const shortlistTickers = new Set(shortlist.map((candidate) => candidate.ticker));
 
@@ -265,7 +271,7 @@ export async function evaluateLiveMarketScan({
     }
   }
 
-  const evaluated = stockStage.map((candidate) => {
+  const evaluated = rankedStockStage.map((candidate) => {
     const reachedOptionChainLookup = shortlistTickers.has(candidate.ticker);
     const values = reachedOptionChainLookup
       ? optionChainFailedTickers.has(candidate.ticker)
@@ -292,12 +298,8 @@ export async function evaluateLiveMarketScan({
       verifiedFundamentals: candidate.verifiedFundamentals ?? null,
       funnelStage: "STOCK_STAGE" as const,
       reachedOptionChainLookup,
-      // The exact same rank used for shortlist selection above (lower = stronger; a real READY
-      // technical value always ranks better than a pending/stale/failed one, which is pinned at
-      // the maximum possible score - see stockStageRank's own doc comment) - exposed so a caller
-      // persisting a bounded, ranked subset of a broad-universe scan (see
-      // rerunLiveSchwabScannerForUser) never has to reimplement this formula.
-      stockStageRank: stockStageRank(candidate),
+      stockStagePriority: candidate.stockStagePriority,
+      stockStageRank: candidate.stockStageRank,
     };
   });
 
@@ -514,21 +516,23 @@ function mergeTechnicalCacheValues(
   };
 }
 
-function stockStageIsEligible(candidate: StockStageCandidate, rules: ScannerRule[]) {
+function stockStagePriority(candidate: StockStageCandidate, rules: ScannerRule[]): 0 | 1 | 2 {
   const stockRules = rules.filter((rule) => STOCK_STAGE_RULE_KEYS.has(rule.key));
   const summary = evaluateCandidate(stockRules, candidate.values);
-  return !summary.results.some((result) => result.status === "FAIL");
+  return summary.status === "FAIL" ? 2 : summary.status === "UNKNOWN" ? 1 : 0;
 }
 
-/**
- * Lower is stronger. A real RSI is 0-100 and a real bbPercent is typically 0-100, so a genuinely
- * READY candidate's rank is always <= 100 + 100/10 = 110 - a missing value (pending/stale/failed
- * technical data, via `?? 100`) is PINNED AT EXACTLY that same worst-case ceiling. This
- * structurally guarantees a READY candidate never ranks worse than a non-READY one for any real
- * (finite, in-range) RSI/BB combination, so the scarce option-chain shortlist below can never
- * systematically prefer pending/stale/failed technicals over technically-qualified ones - verified
- * directly by live-scan.technical-cache.test.ts.
- */
+/** Shared by chain allocation and the saved-result cap. No personal Research preference. */
+export function compareStockStageCandidates(
+  left: Pick<LiveScanCandidate, "ticker" | "stockStagePriority" | "stockStageRank">,
+  right: Pick<LiveScanCandidate, "ticker" | "stockStagePriority" | "stockStageRank">,
+) {
+  return (left.stockStagePriority ?? 2) - (right.stockStagePriority ?? 2)
+    || (left.stockStageRank ?? Infinity) - (right.stockStageRank ?? Infinity)
+    || compareText(left.ticker, right.ticker);
+}
+
+/** Existing RSI/BB attractiveness; missing inputs use 100, within their evidence tier. */
 function stockStageRank(candidate: StockStageCandidate) {
   return (numericValue(candidate.values.rsi) ?? 100) + (numericValue(candidate.values.bbPercent) ?? 100) / 10;
 }
@@ -563,17 +567,20 @@ const OPTION_REASON_MESSAGES: Record<OptionScanReasonCode, string> = {
  * them enabled - matches profile.ts's own GATING_RULE_KEYS classification for these keys.
  * DTE is handled separately: it is NOT a gating rule (see profile.ts's GATING_RULE_KEYS
  * comment), so it must never hard-filter contracts unless the user has explicitly enabled it -
- * see selectDteEligible below.
+ * see the dteEligible filter below.
  */
 const LIQUIDITY_GATE_KEYS = ["optionBid", "openInterest", "spreadPercent"] as const;
 const OTHER_OPTION_GATE_KEYS = ["delta"] as const;
 
-/** The LST-documented "typical" DTE window (docs/SCANNER_RULES.md's seeded default range for
- * the dte rule itself) - reused ONLY as a tiebreak preference when the user has left the dte
- * rule disabled, never as a hidden exclusion. */
-function dtePreferenceRange(): [number, number] {
-  const definition = SCANNER_RULE_DEFAULTS_BY_KEY.get("dte");
-  return (definition?.defaultDesired as [number, number] | undefined) ?? [14, 45];
+/** Expiration preference is independent of rule scoring and hard DTE eligibility. */
+function compareExpirations(left: { dte: number; expiration: string }, right: { dte: number; expiration: string }) {
+  return Math.abs(left.dte - WEEKLY_TARGET_DTE) - Math.abs(right.dte - WEEKLY_TARGET_DTE)
+    || right.dte - left.dte
+    || compareText(left.expiration, right.expiration);
+}
+
+function compareText(left: string, right: string) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 /**
@@ -583,8 +590,8 @@ function dtePreferenceRange(): [number, number] {
  * reason (see OptionScanReasonCode) so a blank row always has a knowable cause:
  *
  *  1. PUT contracts only (NO_PUT_CONTRACTS if none).
- *  2. Strike below the current stock price - what "cash-secured put" means, not a configurable
- *     rule (NO_ACCEPTABLE_STRIKE if none).
+ *  2. Strike below the current stock price - the existing OTM definition
+ *     (NO_ACCEPTABLE_STRIKE if none).
  *  3. A positive bid and a real ask - a $0-bid contract cannot be sold; this is a structural
  *     floor distinct from the user's own configurable `optionBid` minimum, applied even when
  *     that rule is disabled (NO_CONTRACT_WITH_POSITIVE_BID if none).
@@ -598,10 +605,10 @@ function dtePreferenceRange(): [number, number] {
  *  6. Other option-level gates - delta - same enabled-only treatment (OPTION_RULES_FAILED if
  *     every surviving contract fails).
  *
- * Whatever survives every enabled gate is ranked by setupScore() (which already reflects every
- * enabled preference rule - RSI, BB%, ROR, annualizedRor, etc.), then by the DTE preference
- * tiebreak (only when DTE isn't an active gate), then by annualized ROR - and the top contract
- * is the row's selected put. optionVolume is intentionally never a hard gate here (it is not in
+ * Choose the surviving expiration closest to seven calendar days first (later DTE on a tie).
+ * Only its strikes compete by setupScore(), then annualized ROR, then strike ascending and
+ * contract symbol ascending for determinism. Missing the ROR target never triggers a move to
+ * a longer expiration. optionVolume is intentionally never a hard gate here (it is not in
  * profile.ts's GATING_RULE_KEYS) - a FAIL there only affects score/label, never eliminates a
  * contract from being selectable.
  */
@@ -640,8 +647,7 @@ function bestPutValues(
   }
 
   // DTE only ever hard-filters when the user has actually enabled the rule - using their
-  // configured range, never a hardcoded window. When disabled, every DTE stays eligible; see
-  // the tiebreak preference applied at selection time below instead.
+  // configured range, never a hardcoded window. When disabled, every DTE stays eligible.
   const dteRule = rules.find((rule) => rule.key === "dte");
   let dteEligible = withBid;
   if (dteRule) {
@@ -665,10 +671,13 @@ function bestPutValues(
     return blank("OPTION_RULES_FAILED");
   }
 
-  const dteHardFiltered = Boolean(dteRule);
-  const [preferLow, preferHigh] = dtePreferenceRange();
-
-  return afterOtherGates
+  // Compare the surviving date to the closest date in the normalized returned PUT chain.
+  // A fallback means that closer returned date lost every contract to the gates above;
+  // absence of an exact 7-DTE listing alone is not a fallback.
+  const preferredReturned = [...puts].sort(compareExpirations)[0];
+  const selectedExpiration = [...afterOtherGates].sort(compareExpirations)[0].expiration;
+  const selected = afterOtherGates
+    .filter((values) => values.expiration === selectedExpiration)
     .map((values) => ({
       values,
       summary: evaluateCandidate(rules, values),
@@ -678,17 +687,17 @@ function bestPutValues(
       if (scoreDiff) {
         return scoreDiff;
       }
-      if (!dteHardFiltered) {
-        // Selection preference only (see dtePreferenceRange) - never an exclusion, and never
-        // affects PASS/FAIL/score, only which equally-scored contract is chosen.
-        const leftPreferred = isWithinRange(numericValue(left.values.dte), preferLow, preferHigh) ? 1 : 0;
-        const rightPreferred = isWithinRange(numericValue(right.values.dte), preferLow, preferHigh) ? 1 : 0;
-        if (leftPreferred !== rightPreferred) {
-          return rightPreferred - leftPreferred;
-        }
-      }
-      return (numericValue(right.values.annualizedRor) ?? 0) - (numericValue(left.values.annualizedRor) ?? 0);
+      return (numericValue(right.values.annualizedRor) ?? 0) - (numericValue(left.values.annualizedRor) ?? 0)
+        || left.values.strike - right.values.strike
+        || compareText(left.values.optionSymbol, right.values.optionSymbol);
     })[0].values;
+  return {
+    ...selected,
+    optionSelectionTargetDte: WEEKLY_TARGET_DTE,
+    optionSelectionReason: "CLOSEST_USABLE_EXPIRATION_TO_WEEKLY_TARGET",
+    optionSelectionPreferredExpiration: preferredReturned.expiration,
+    optionSelectionFallback: selectedExpiration !== preferredReturned.expiration,
+  };
 }
 
 function passesEnabledGate(values: Record<string, number | string | boolean | null | undefined>, rules: ScannerRule[], key: string): boolean {
@@ -700,10 +709,6 @@ function passesEnabledGate(values: Record<string, number | string | boolean | nu
   return evaluateCriterion(rule, values[key]).status !== "FAIL";
 }
 
-function isWithinRange(value: number | null, low: number, high: number): boolean {
-  return value !== null && value >= low && value <= high;
-}
-
 function candidateValues(candidate: StockStageCandidate, option: OptionContractSnapshot, asOf: Date) {
   const dte = daysToExpiration(option.expiration, asOf);
   const premium = option.mark || midpoint(option.bid, option.ask);
@@ -711,6 +716,7 @@ function candidateValues(candidate: StockStageCandidate, option: OptionContractS
 
   return {
     ...candidate.values,
+    optionSymbol: option.symbol,
     strike: option.strike,
     expiration: option.expiration.toISOString().slice(0, 10),
     dte,

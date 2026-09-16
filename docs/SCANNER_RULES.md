@@ -17,7 +17,22 @@ The overall result is derived from criterion results:
 - `UNKNOWN` if none fail and at least one is unknown.
 - `PASS` only if all enabled criteria pass.
 
-## Seeded Phase 1 Rules
+## Current live selection (September 16, 2026)
+
+Contract selection is separate from criterion scoring. The confirmed LST Core thresholds remain price $10–$50, RSI <=40, BB <=33%, Put ROR >=1%, earnings >=10 days, stock volume >=40,000, OI >=100, and option bid >=$0.10. No calculation or PASS/FAIL/UNKNOWN/NEAR/VERIFY semantics changed.
+
+1. Preserve structural PUT/OTM/positive-bid/available-ask eligibility and enabled hard DTE, bid/OI/spread/delta gates. UNKNOWN gates remain eligible; they never become a fabricated PASS.
+2. Among surviving expiration dates, choose smallest `abs(DTE - 7)`, then greater DTE, then expiration date ascending. The target is a selection preference, separate from hard DTE eligibility. With DTE disabled, its stored/default 14–45 range has no effect. With DTE enabled, only dates in the user's inclusive range compete. No exchange weekly/monthly label is required.
+3. Within that one date, choose highest existing setup score, then highest annualized ROR, then strike ascending, then provider symbol ascending. The last two are deterministic ordering only, not a claim that a strike is safer. Annualized ROR remains a quantitative tie-break even if its criterion is disabled.
+4. A weekly strike missing the 1% ROR target remains selected with its actual rule result. A different date can win only when the closer date has no contract surviving the existing structural/hard gates. UNKNOWN OI alone does not force a fallback. A chain with no eligible contracts retains the existing reason code and blank option fields.
+
+Option enrichment stays capped at eight in production. Known stock FAILs are excluded. First priority is all enabled stock criteria known and PASS; second is no FAIL with one or more UNKNOWN. Within each priority group sort `(RSI ?? 100) + (BB% ?? 100)/10` ascending, then ticker ascending. Disabled criteria do not reduce priority; personal Research state never improves it. The bounded persisted-result list uses this same comparator so enriched rows remain visible.
+
+Engineering diagnostics are stored in the existing `ScanResult.snapshotJson`, without new UI or migration: selected `expiration`/`dte`/`optionSymbol`, `optionSelectionTargetDte`, `optionSelectionReason`, `optionSelectionPreferredExpiration`, and `optionSelectionFallback`. Preferred expiration means closest to seven in the **normalized returned PUT chain before eligibility gates**. Fallback means that date was fully eliminated; having no exact seven-day listing alone is not fallback. These fields describe new runs only, not historical chains or raw contracts discarded by the provider normalizer. Full rejected chains and shortlist ordinals are not retained.
+
+**Separate follow-up:** earnings distance still means days from today, not earnings after expiration. Matt's September 16 NKE observation (16 DTE / earnings in 15 days) requires a separate product decision; this slice does not change that rule.
+
+## Historical seeded Phase 1 Rules
 
 Matt and Eric each receive their own `My LST` profile (`ScannerProfile`, `PRIVATE` visibility) seeded with demo thresholds:
 

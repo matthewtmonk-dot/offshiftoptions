@@ -8,7 +8,7 @@ This app does not place trades. Trades stay in Schwab/Thinkorswim or another bro
 
 Read [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) and [AGENTS.md](AGENTS.md) first. The handoff records the active checkpoint, validation, deployment state, and next task. Keep work in small, reviewable slices and update that checkpoint after each meaningful change so a restart does not lose progress.
 
-Latest completed local slice: dashboard timestamps/readability and Chat/Notifications consistency. Dashboard previews show Eastern event times; Chat's **Mark read** also clears matching message notifications. No migration is required for this slice. See the handoff for tests, pending local commits, and the next scheduled scanner diagnostic to review. These changes have not been pushed or deployed.
+Latest local slice: weekly CSP selection chooses the usable expiration closest to seven days before scoring strikes, while enabled hard DTE limits remain authoritative. Fully known passing stock inputs get priority for the unchanged eight chain slots. All financial thresholds are unchanged; no migration is required. The earlier dashboard/chat and cron commits remain separate and unpushed. See [scanner selection details](docs/SCANNER_RULES.md) and the handoff for validation, diagnostics, production evidence limits, and the separate earnings-versus-expiration follow-up. Stop before push.
 
 ## Quick Start With Docker
 

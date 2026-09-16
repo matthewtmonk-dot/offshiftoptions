@@ -491,6 +491,44 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     await prisma.watchlistItem.delete({ where: { id: item.id } }).catch(() => {});
   });
 
+  it("persists known-PASS enrichment and weekly diagnostics ahead of over 100 stronger-RSI unknown-volume rows", async () => {
+    const known = "WEEKLYKNOWN";
+    const unknown = Array.from({ length: 110 }, (_, i) => `WEEKLYUNKNOWN${i}`);
+    const tickers = [known, ...unknown];
+    await seedOccUniverse(tickers);
+    await Promise.all(tickers.map((ticker) => seedReadySnapshot(matt.id, ticker, {
+      rsi: ticker === known ? 30 : 10, bbLower: 15, bbMiddle: 20, bbUpper: 45,
+    })));
+    const weeklyExpiration = new Date();
+    weeklyExpiration.setUTCDate(weeklyExpiration.getUTCDate() + 7);
+    weeklyExpiration.setUTCHours(20, 0, 0, 0);
+    const chain = defaultPut(known, 18).map((option) => ({ ...option, expiration: weeklyExpiration }));
+    const provider = fakeProvider(
+      Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 100_000 }])),
+      { [known]: chain },
+    );
+    const getQuotes = provider.getQuotes!;
+    provider.getQuotes = async (symbols) => {
+      const quotes = await getQuotes(symbols);
+      for (const ticker of unknown) {
+        const quote = quotes.get(ticker);
+        if (quote) quote.volume = undefined;
+      }
+      return quotes;
+    };
+    providerByUserId.set(matt.id, provider);
+    const summary = await workflows.rerunLiveSchwabScannerForUser(matt.id, { occSource: TEST_SOURCE });
+    expect(summary.optionChainsChecked).toBe(8);
+    const run = await prisma.scanRun.findFirstOrThrow({ where: { ownerId: matt.id, source: "LIVE:SCHWAB" }, orderBy: { createdAt: "desc" }, include: { results: true } });
+    const result = run.results.find((row) => row.ticker === known);
+    expect(result?.snapshotJson).toMatchObject({
+      strike: 18, dte: 7, optionSelectionTargetDte: 7,
+      optionSelectionReason: "CLOSEST_USABLE_EXPIRATION_TO_WEEKLY_TARGET",
+      optionSelectionFallback: false,
+    });
+    expect(run.results.filter((row) => unknown.includes(row.ticker))).toHaveLength(99);
+  });
+
   it("READY technical candidates always win the scarce option-chain shortlist over PENDING ones, even in a larger mixed pool", async () => {
     const readyTickers = ["RDY001", "RDY002", "RDY003"];
     const pendingTickers = Array.from({ length: 17 }, (_, index) => `PEND${String(index).padStart(3, "0")}`);

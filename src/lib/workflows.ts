@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SchwabReconciliationEvidence, TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
-import { evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
+import { compareStockStageCandidates, evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
 import type {
   LsegRecommendation,
   NoteCategory,
@@ -1742,8 +1742,8 @@ const SCAN_PERSIST_CONCURRENCY = 6;
  * re-rendering, via getScannerPageData's own no-`take`-limit query) a full row for every one of
  * them is unbounded growth that real production evidence linked to a scan-completion failure,
  * even though the underlying funnel work itself (quotes, technical join, earnings join, bounded
- * option-chain enrichment) all completed correctly. Ranked by the exact same stockStageRank the
- * option-chain shortlist itself uses (see live-scan.ts), so every genuinely option-chain-enriched
+ * option-chain enrichment) all completed correctly. Ranked by the same evidence tier, RSI/BB
+ * rank and ticker comparator as the option-chain shortlist (see live-scan.ts), so every enriched
  * candidate (already the best maxOptionChainLookups=8 by that same rank) is always included,
  * plus a real band of next-best near-misses for context - never arbitrary. This user's own
  * Research/Watchlist/traded tickers are NEVER subject to this cap.
@@ -1871,7 +1871,7 @@ export async function rerunLiveSchwabScannerForUser(
     const tier1Persisted = candidates.filter((candidate) => researchTickerSet.has(candidate.ticker));
     const rankedNonTier1StockStage = candidates
       .filter((candidate) => candidate.funnelStage === "STOCK_STAGE" && !researchTickerSet.has(candidate.ticker))
-      .sort((left, right) => (left.stockStageRank ?? Infinity) - (right.stockStageRank ?? Infinity))
+      .sort(compareStockStageCandidates)
       .slice(0, MAX_DISPLAYED_STOCK_STAGE_RESULTS);
     const toPersist = [...tier1Persisted, ...rankedNonTier1StockStage];
 
