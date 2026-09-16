@@ -102,7 +102,7 @@ const HELP = {
   otherIncome:
     "Confirmed interest, dividends, and standalone account/service fees from Schwab. Option trade fees stay inside the net option trade cashflow.",
   tradingPLNow:
-    "Confirmed net option trade cashflow from Schwab when available, including trade-attached fees; otherwise completed campaign P/L. Deposits, withdrawals, interest, standalone fees, and broker snapshots are excluded.",
+    "Confirmed net option trade cashflow from Schwab when available - premium collected minus premium paid, across both still-open and already-closed positions, including trade-attached fees - otherwise completed campaign P/L. This is cash flow, not a completed profit/loss: an open position's collected premium is included here even though it can still move before expiration. Deposits, withdrawals, interest, standalone fees, and broker snapshots are excluded.",
   realizedPL:
     "Final profit or loss from completed campaigns only. Open and assigned campaigns do not become realized results until they are closed.",
   currentMtm:
@@ -1039,7 +1039,7 @@ function AccountsSection({
                   help={HELP.totalGain}
                 />
                 <ResultItem
-                  label="Trading P/L"
+                  label="Trading Cash Flow"
                   value={performance.tradingPL === null ? "Unavailable" : signedMoney(performance.tradingPL)}
                   tone={performance.tradingPL}
                   help={HELP.tradingPLNow}
@@ -1601,7 +1601,7 @@ function PerformanceSection({
             />
             <PerformanceMetric
               icon={<CircleDollarSign className="size-4" aria-hidden />}
-              label="Trading P/L"
+              label="Trading Cash Flow"
               value={accounting.tradingPL === null ? "Unavailable" : signedMoney(accounting.tradingPL)}
               detail={tradingPLDetail(accounting.tradingPLSource, winLoss.realizedTradingPLExact)}
               tone={accounting.tradingPL}
@@ -1793,10 +1793,10 @@ function startingCapitalDetail(source: AccountPerformanceSummary["startingCapita
 
 function tradingPLDetail(source: AccountPerformanceSummary["tradingPLSource"], exact: boolean) {
   if (source === "BROKER_TRANSACTIONS") {
-    return "Confirmed Schwab option trades";
+    return "Schwab option cash flow (open + closed)";
   }
   if (source === "MIXED") {
-    return exact ? "Schwab option trades + campaigns" : "Schwab option trades + campaigns with a pending fee";
+    return exact ? "Schwab cash flow + campaigns" : "Schwab cash flow + campaigns with a pending fee";
   }
   if (source === "CAMPAIGNS") {
     return exact ? "Closed campaigns only" : "Closed campaigns only - pending a fee";

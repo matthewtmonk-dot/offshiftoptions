@@ -20,7 +20,7 @@ test.describe("Performance cockpit and campaign history", () => {
     await expect(cockpit.getByText("Starting Capital", { exact: true })).toBeVisible();
     await expect(cockpit.getByText("Total Gain", { exact: true })).toBeVisible();
     await expect(cockpit.getByText("Total Return", { exact: true })).toBeVisible();
-    await expect(cockpit.getByText("Trading P/L", { exact: true })).toBeVisible();
+    await expect(cockpit.getByText("Trading Cash Flow", { exact: true })).toBeVisible();
     await expect(cockpit.getByText("Other Income/Expense", { exact: true })).toBeVisible();
     await expect(cockpit.getByText("Net Contributions", { exact: true })).toBeVisible();
     await expect(cockpit.getByText("Closed Record", { exact: true })).toBeVisible();

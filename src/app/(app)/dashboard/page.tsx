@@ -158,7 +158,7 @@ export default async function DashboardPage() {
           />
         </Suspense>
         <Stat
-          label="Trading P/L"
+          label="Trading Cash Flow"
           value={accountPerformance.tradingPL === null ? "No data" : money(accountPerformance.tradingPL)}
           tone={accountPerformance.tradingPL ?? undefined}
           detail={dashboardTradingDetail(accountPerformance.tradingPLSource, winLoss.realizedTradingPLExact)}

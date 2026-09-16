@@ -14,6 +14,7 @@ import {
 } from "@/lib/broker-connections";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { summarizeCampaign } from "@/domain/finance/campaigns";
+import { getSanitizedBrokerRecordClassificationForUser } from "@/lib/broker-record-classification-diagnostic";
 import { money, shortDateTime } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
 import { getAlphaVantageConfigStatus } from "@/providers/alpha-vantage/config";
@@ -55,6 +56,19 @@ export default async function AccountPage({
   // reconnect required" health label, never re-derived independently in this component.
   const schwabPrimaryAction = schwabPrimaryConnectionAction(schwabHealth.oauthStatus);
   const alphaVantageConfig = getAlphaVantageConfigStatus();
+  // Pure DB read (see getSanitizedBrokerRecordClassificationForUser's own docstring) - lets the
+  // Sync warning below reflect actual current evidence instead of a fact frozen at write time.
+  const brokerRecordClassification = schwabConnection?.connected
+    ? await getSanitizedBrokerRecordClassificationForUser(user.id)
+    : null;
+  const needsReviewCount = brokerRecordClassification?.countsByCategory.NEEDS_REVIEW ?? 0;
+  const transactionsEvidenceStatus = schwabConnection?.lastSyncDiagnostics?.transactionsEvidenceStatus;
+  const syncWarning =
+    needsReviewCount > 0
+      ? `${needsReviewCount} unlinked transaction record${needsReviewCount === 1 ? "" : "s"} need${needsReviewCount === 1 ? "s" : ""} manual review. Review Diagnostic D (Transfer Item Shapes, on the Schwab Transaction & Order Diagnostic page) and approve the repair step before syncing again - syncing again will not fix them and may add more unresolved rows in the meantime.`
+      : transactionsEvidenceStatus === "PARTIAL" || transactionsEvidenceStatus === "FAILED"
+        ? `The last sync's transaction evidence was ${transactionsEvidenceStatus.toLowerCase()} - some activity may be missing or expiration confirmation may be deferred. Review Diagnostic D on the Schwab Transaction & Order Diagnostic page before syncing again.`
+        : null;
 
   const realizedPLByAccount = new Map<string, number>();
   for (const campaign of accountData.completedCampaigns) {
@@ -126,7 +140,7 @@ export default async function AccountPage({
                 <div className="mt-2 grid grid-cols-2 gap-3 text-sm text-zinc-400 sm:grid-cols-4">
                   <div>Starting: {performance.startingCapital === null ? "UNKNOWN" : money(performance.startingCapital)}</div>
                   <div>Contributions: {performance.netContributions === null ? "UNKNOWN" : signedMoney(performance.netContributions)}</div>
-                  <div>Trading P/L: {performance.tradingPL === null ? "UNKNOWN" : signedMoney(performance.tradingPL)}</div>
+                  <div>Trading Cash Flow: {performance.tradingPL === null ? "UNKNOWN" : signedMoney(performance.tradingPL)}</div>
                   <div>Other income/expense: {performance.otherIncome === null ? "UNKNOWN" : signedMoney(performance.otherIncome)}</div>
                   <div>Total gain: {performance.totalGain === null ? "UNKNOWN" : signedMoney(performance.totalGain)}</div>
                   <div>Total return: {performance.totalReturnPercent === null ? "N/A" : `${performance.totalReturnPercent.toFixed(2)}%`}</div>
@@ -198,12 +212,16 @@ export default async function AccountPage({
                       {shortDateTime(schwabConnection.lastAccountSyncFailureAt)}.
                     </p>
                   ) : null}
-                  <p className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
-                    Do not click Sync again until Diagnostic D (Transfer Item Shapes, on the Schwab Transaction &amp;
-                    Order Diagnostic page) has been reviewed and the repair step for the 8 existing malformed,
-                    unlinked transaction records has been approved. Syncing again will not fix them and may add more
-                    unresolved rows in the meantime.
-                  </p>
+                  {syncWarning ? (
+                    <p data-testid="sync-warning" className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                      {syncWarning}
+                    </p>
+                  ) : (
+                    <p data-testid="sync-warning" className="rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-400">
+                      No pending manual-review items from the last known evidence. Syncing imports new activity and
+                      continues automatic reconciliation.
+                    </p>
+                  )}
                   <form action={syncSchwabAccountAction}>
                     <button
                       type="submit"
