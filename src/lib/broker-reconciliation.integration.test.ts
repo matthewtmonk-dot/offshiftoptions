@@ -12,6 +12,7 @@ maybeDescribe("Schwab broker reconciliation (linking, dashboard dedupe, privacy)
   let confirmBrokerPositionAsCampaignForUser: typeof import("./broker-reconciliation").confirmBrokerPositionAsCampaignForUser;
   let skipBrokerReconciliationForUser: typeof import("./broker-reconciliation").skipBrokerReconciliationForUser;
   let splitBrokerPositionsByCampaignLink: typeof import("./broker-reconciliation").splitBrokerPositionsByCampaignLink;
+  let getLinkedCampaignIdsBySymbolForUser: typeof import("./broker-reconciliation").getLinkedCampaignIdsBySymbolForUser;
   let userA: { id: string };
   let userB: { id: string };
   const userIds: string[] = [];
@@ -24,6 +25,7 @@ maybeDescribe("Schwab broker reconciliation (linking, dashboard dedupe, privacy)
       confirmBrokerPositionAsCampaignForUser,
       skipBrokerReconciliationForUser,
       splitBrokerPositionsByCampaignLink,
+      getLinkedCampaignIdsBySymbolForUser,
     } = await import("./broker-reconciliation"));
 
     const passwordHash = await hash("not-used", 4);
@@ -97,11 +99,29 @@ maybeDescribe("Schwab broker reconciliation (linking, dashboard dedupe, privacy)
     expect(stillAwaiting.some((entry) => entry.brokerRecordId === position.id)).toBe(false);
 
     // The live-position dedupe split must now classify this exact symbol as "linked."
-    const { unlinked, linked: linkedPositions } = await splitBrokerPositionsByCampaignLink(userA.id, [
-      { accountId: "live-account", symbol: "WORK 260904P00023500", quantity: -1, marketValue: -19 },
-    ]);
+    const livePosition = { accountId: "live-account", symbol: "WORK 260904P00023500", quantity: -1, marketValue: -19 };
+    const { unlinked, linked: linkedPositions } = await splitBrokerPositionsByCampaignLink(userA.id, [livePosition]);
     expect(linkedPositions).toHaveLength(1);
     expect(unlinked).toHaveLength(0);
+
+    // The Dashboard's per-campaign attribution needs the SPECIFIC campaign id, not just "linked."
+    const campaignIdsBySymbol = await getLinkedCampaignIdsBySymbolForUser(userA.id, [livePosition]);
+    expect(campaignIdsBySymbol.get("WORK 260904P00023500")).toBe(campaign.id);
+  });
+
+  it("getLinkedCampaignIdsBySymbolForUser returns nothing for a User A symbol when queried as User B", async () => {
+    const account = await createTradingAccountForUser(userA.id, "Reconcile Attribution Account", "Manual", "10000", "10000", "PRIVATE");
+    const position = await createOpenShortPutPosition(userA.id, "ATTR 260904P00015000", "ATTR");
+    const campaign = await confirmBrokerPositionAsCampaignForUser(
+      userA.id, position.id, account.id, "ATTR", "2026-08-31", "2026-09-04", "15", "1", "0.3", "0", "", "PRIVATE",
+    );
+    const livePosition = { accountId: "live-account", symbol: "ATTR 260904P00015000", quantity: -1, marketValue: -14 };
+
+    const asOwner = await getLinkedCampaignIdsBySymbolForUser(userA.id, [livePosition]);
+    expect(asOwner.get("ATTR 260904P00015000")).toBe(campaign.id);
+
+    const asOtherUser = await getLinkedCampaignIdsBySymbolForUser(userB.id, [livePosition]);
+    expect(asOtherUser.has("ATTR 260904P00015000")).toBe(false);
   });
 
   it("cannot be confirmed twice - a second confirm attempt is rejected", async () => {

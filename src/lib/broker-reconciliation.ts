@@ -251,6 +251,41 @@ export async function getLinkedCampaignSymbolsForUser(userId: string, positions:
   return new Set(linked.flatMap((row) => (row.symbol ? [row.symbol] : [])));
 }
 
+/**
+ * Same persisted-link query as getLinkedCampaignSymbolsForUser, but keyed to the specific
+ * campaign each symbol is linked to - for a caller that must attribute a persisted link to one
+ * particular campaign (e.g. the Dashboard's "Schwab confirmed" indicator), not merely know that
+ * some link exists. A symbol linked to more than one campaign (should not happen, but never
+ * trusted blindly) is excluded rather than picking one arbitrarily.
+ */
+export async function getLinkedCampaignIdsBySymbolForUser(userId: string, positions: BrokerPosition[]): Promise<Map<string, string>> {
+  const symbols = positions
+    .map((position) => normalizeSymbolForLinking(position.symbol))
+    .filter((symbol): symbol is string => Boolean(symbol));
+  if (symbols.length === 0) {
+    return new Map();
+  }
+
+  const linked = await prisma.brokerRecord.findMany({
+    where: { userId, provider: "SCHWAB", kind: "POSITION", symbol: { in: symbols }, linkedCampaignId: { not: null } },
+    select: { symbol: true, linkedCampaignId: true },
+  });
+
+  const bySymbol = new Map<string, Set<string>>();
+  for (const row of linked) {
+    if (!row.symbol || !row.linkedCampaignId) {
+      continue;
+    }
+    const campaignIds = bySymbol.get(row.symbol) ?? new Set<string>();
+    campaignIds.add(row.linkedCampaignId);
+    bySymbol.set(row.symbol, campaignIds);
+  }
+
+  return new Map(
+    [...bySymbol.entries()].flatMap(([symbol, campaignIds]) => (campaignIds.size === 1 ? [[symbol, [...campaignIds][0]] as const] : [])),
+  );
+}
+
 export type BrokerPositionDedupeResult = {
   unlinked: BrokerPosition[];
   linked: BrokerPosition[];

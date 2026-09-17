@@ -9,11 +9,12 @@ import { money, percent } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
 import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
-import { splitBrokerPositionsByCampaignLink } from "@/lib/broker-reconciliation";
+import { getLinkedCampaignIdsBySymbolForUser, normalizeSymbolForLinking } from "@/lib/broker-reconciliation";
 import { summarizeAccountPerformance, summarizeAccountsPerformance } from "@/domain/finance/accountLedger";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
+import { matchDashboardPositions, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isRollGuidanceApplicable } from "@/domain/finance/rollStatus";
@@ -26,10 +27,57 @@ export const dynamic = "force-dynamic";
 const WEEKLY_TARGET_PERCENT = 1;
 const ruleKeyByName = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.name, definition.key]));
 
-const loadDashboardBrokerData = cache(async (userId: string) => {
+type DashboardAccount = Awaited<ReturnType<typeof getDashboardData>>["ownAccounts"][number];
+type DashboardSchwabPosition = NonNullable<Awaited<ReturnType<typeof getSchwabOpenPositionsForUser>>>[number];
+
+/** Builds the same TrackedPut shape the Tracker's own matchTrackedPut/exactMatchedCampaignId
+ * expect, from this page's already-loaded open campaigns - mirrors positions/page.tsx's
+ * identical construction so the two pages can never define "current open put" differently. */
+function buildTrackedPuts(campaigns: DashboardOpenCampaign[]): TrackedPut[] {
+  return campaigns.flatMap((campaign) => {
+    const openPut = getCurrentOpenPut(campaign.events);
+    return openPut
+      ? [{ id: campaign.id, ownerId: campaign.ownerId, accountId: campaign.accountId, ticker: campaign.ticker, status: campaign.status, ...openPut }]
+      : [];
+  });
+}
+
+/**
+ * Resolves, once per request (cache() dedupes by argument identity, and ownAccounts/openCampaigns
+ * are the same object references across this request's Suspense boundaries), which Schwab
+ * positions are already represented by a tracked campaign and must never be shown or counted a
+ * second time. Precedence exactly matches the Tracker's own position badge:
+ *   1. A persisted BrokerRecord.linkedCampaignId (see getLinkedCampaignIdsBySymbolForUser).
+ *   2. Otherwise a unique, user/account/contract/quantity-exact matchTrackedPut result.
+ * Both are display/calculation inference only - neither ever creates or persists a new link.
+ * Anything AMBIGUOUS or NONE remains a genuinely separate, additive Schwab position: OSO does not
+ * guess at collapsing two records it cannot uniquely prove are the same real-world trade.
+ */
+const loadDashboardBrokerData = cache(async (userId: string, ownAccounts: DashboardAccount[], openCampaigns: DashboardOpenCampaign[]) => {
   const schwabPositions = await getSchwabOpenPositionsForUser(userId);
-  const { unlinked: brokerPositions } = await splitBrokerPositionsByCampaignLink(userId, schwabPositions ?? []);
-  return { schwabPositions, brokerPositions };
+  if (schwabPositions === null) {
+    return {
+      schwabPositions: null as DashboardSchwabPosition[] | null,
+      additivePositions: [] as { position: DashboardSchwabPosition; disposition: "AMBIGUOUS" | "NONE" }[],
+      confirmedCampaignIds: new Set<string>(),
+    };
+  }
+
+  const linkedCampaignIdBySymbol = await getLinkedCampaignIdsBySymbolForUser(userId, schwabPositions);
+  const positionsWithLink = schwabPositions.map((position) => {
+    const normalizedSymbol = normalizeSymbolForLinking(position.symbol);
+    return { ...position, linkedCampaignId: (normalizedSymbol && linkedCampaignIdBySymbol.get(normalizedSymbol)) || null };
+  });
+  const trackedPuts = buildTrackedPuts(openCampaigns);
+  const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId }));
+
+  const matches = matchDashboardPositions(userId, positionsWithLink, accounts, trackedPuts);
+  const confirmedCampaignIds = new Set(matches.flatMap((match) => (match.confirmedCampaignId ? [match.confirmedCampaignId] : [])));
+  const additivePositions = matches
+    .filter((match): match is typeof match & { disposition: "AMBIGUOUS" | "NONE" } => match.disposition === "AMBIGUOUS" || match.disposition === "NONE")
+    .map((match) => ({ position: match.position, disposition: match.disposition }));
+
+  return { schwabPositions, additivePositions, confirmedCampaignIds };
 });
 
 export default async function DashboardPage() {
@@ -135,6 +183,31 @@ export default async function DashboardPage() {
         </span>
       </div>
 
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500" data-testid="dashboard-freshness">
+        <Suspense fallback={<span>Market snapshot: checking…</span>}>
+          <DashboardMarketSnapshotFreshness
+            userId={user.id}
+            ownAccounts={data.ownAccounts}
+            openCampaigns={data.openCampaigns}
+            renderedAt={renderedAt}
+          />
+        </Suspense>
+        {data.latestScanRun ? (
+          <span>
+            Scanner run: <EventTime value={data.latestScanRun.createdAt} asOf={renderedAt} />
+          </span>
+        ) : (
+          <span>Scanner run: never</span>
+        )}
+        {latestBrokerSnapshotAt ? (
+          <span>
+            Brokerage synced: <EventTime value={latestBrokerSnapshotAt} asOf={renderedAt} />
+          </span>
+        ) : (
+          <span>Brokerage synced: never</span>
+        )}
+      </div>
+
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <Stat
           label="Account value"
@@ -155,6 +228,8 @@ export default async function DashboardPage() {
         <Suspense fallback={<DashboardBrokerStatsFallback openCampaignCount={openCampaignCount} securedCapital={campaignSecuredCapital} />}>
           <DashboardBrokerStats
             userId={user.id}
+            ownAccounts={data.ownAccounts}
+            openCampaigns={data.openCampaigns}
             openCampaignCount={openCampaignCount}
             campaignSecuredCapital={campaignSecuredCapital}
           />
@@ -210,12 +285,19 @@ export default async function DashboardPage() {
             >
               <DashboardOpenPositionsWithRollStatus
                 userId={user.id}
+                ownAccounts={data.ownAccounts}
+                allOpenCampaigns={data.openCampaigns}
                 campaigns={data.openCampaigns.slice(0, 4)}
                 rollBufferPercent={Number(data.settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT)}
               />
             </Suspense>
             <Suspense fallback={<DashboardBrokerPositionsFallback openCampaignCount={openCampaignCount} />}>
-              <DashboardBrokerPositions userId={user.id} openCampaignCount={openCampaignCount} />
+              <DashboardBrokerPositions
+                userId={user.id}
+                ownAccounts={data.ownAccounts}
+                openCampaigns={data.openCampaigns}
+                openCampaignCount={openCampaignCount}
+              />
             </Suspense>
           </div>
         </Panel>
@@ -346,9 +428,13 @@ type DashboardOpenCampaign = Awaited<ReturnType<typeof getDashboardData>>["openC
 function DashboardOpenPositionRow({
   campaign,
   rollStatusSlot,
+  confirmed = false,
 }: {
   campaign: DashboardOpenCampaign;
   rollStatusSlot: ReactNode;
+  /** True only when this campaign's current put is either persisted-linked to a Schwab position
+   * or a unique, safe matchTrackedPut EXACT match (see loadDashboardBrokerData) - never a guess. */
+  confirmed?: boolean;
 }) {
   const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
   const openPut = getCurrentOpenPut(campaign.events);
@@ -356,7 +442,17 @@ function DashboardOpenPositionRow({
   return (
     <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-3">
       <div>
-        <div className="text-lg font-semibold">{campaign.ticker}</div>
+        <div className="flex items-center gap-2">
+          <span className="text-lg font-semibold">{campaign.ticker}</span>
+          {confirmed ? (
+            <span
+              className="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-normal text-sky-300 bg-sky-400/15"
+              title="This position is also visible in your Schwab account - shown once here rather than as a separate broker card."
+            >
+              Schwab confirmed
+            </span>
+          ) : null}
+        </div>
         {openPut ? <div className="text-base font-medium text-zinc-100">{money(openPut.strike)} Put</div> : null}
         <div className="text-sm text-zinc-400">{summary.currentStage}</div>
       </div>
@@ -379,10 +475,16 @@ function DashboardOpenPositionRow({
  */
 async function DashboardOpenPositionsWithRollStatus({
   userId,
+  ownAccounts,
+  allOpenCampaigns,
   campaigns,
   rollBufferPercent,
 }: {
   userId: string;
+  ownAccounts: DashboardAccount[];
+  /** Every open campaign, for correct broker-position matching - a position can match a campaign
+   * outside the first four actually rendered below. */
+  allOpenCampaigns: DashboardOpenCampaign[];
   campaigns: DashboardOpenCampaign[];
   rollBufferPercent: number;
 }) {
@@ -398,7 +500,10 @@ async function DashboardOpenPositionsWithRollStatus({
   const tickersNeedingQuotes = campaigns
     .filter((campaign) => rollEligibleCampaignIds.has(campaign.id) && openPutsByCampaignId.get(campaign.id))
     .map((campaign) => campaign.ticker);
-  const prices = await getLiveQuotePricesForUser(userId, tickersNeedingQuotes);
+  const [prices, { confirmedCampaignIds }] = await Promise.all([
+    getLiveQuotePricesForUser(userId, tickersNeedingQuotes),
+    loadDashboardBrokerData(userId, ownAccounts, allOpenCampaigns),
+  ]);
 
   return (
     <>
@@ -411,7 +516,14 @@ async function DashboardOpenPositionsWithRollStatus({
             ? computeRollStatus({ currentPrice: price, strike: openPut.strike, rollBufferPercent })
             : null;
         const rollStatusSlot = openPut ? rollStatus ? <RollStatusBadge status={rollStatus} /> : <RollStatusUnavailableBadge /> : null;
-        return <DashboardOpenPositionRow key={campaign.id} campaign={campaign} rollStatusSlot={rollStatusSlot} />;
+        return (
+          <DashboardOpenPositionRow
+            key={campaign.id}
+            campaign={campaign}
+            rollStatusSlot={rollStatusSlot}
+            confirmed={confirmedCampaignIds.has(campaign.id)}
+          />
+        );
       })}
     </>
   );
@@ -438,14 +550,18 @@ function DashboardBrokerStatsFallback({
 
 async function DashboardBrokerStats({
   userId,
+  ownAccounts,
+  openCampaigns,
   openCampaignCount,
   campaignSecuredCapital,
 }: {
   userId: string;
+  ownAccounts: DashboardAccount[];
+  openCampaigns: DashboardOpenCampaign[];
   openCampaignCount: number;
   campaignSecuredCapital: number;
 }) {
-  const { schwabPositions, brokerPositions } = await loadDashboardBrokerData(userId);
+  const { schwabPositions, additivePositions } = await loadDashboardBrokerData(userId, ownAccounts, openCampaigns);
 
   if (schwabPositions === null) {
     return (
@@ -460,12 +576,13 @@ async function DashboardBrokerStats({
     );
   }
 
-  // Additive, not guessed: reconciled Schwab positions are represented by their
-  // Campaigns, while unlinked live positions remain separate until the user links them. This
-  // is dollar-collateral math only - it never implies an unlinked position and a campaign are
-  // the same real-world trade counted once; see "Broker positions" below for the actual,
-  // un-conflated Schwab position count.
-  const brokerCsp = summarizeCspSecuredCapital(brokerPositions);
+  // Additive, not guessed: a Schwab position already confirmed by a tracked campaign (persisted
+  // link, or a unique matchTrackedPut EXACT match) contributes zero collateral here - it is
+  // already inside campaignSecuredCapital. Only genuinely AMBIGUOUS/NONE positions (see
+  // loadDashboardBrokerData) still add - this is dollar-collateral math only, it never implies an
+  // additive position and a campaign are secretly the same trade. "Broker positions" below stays
+  // the true, un-deduped Schwab position count regardless of how this sum is computed.
+  const brokerCsp = summarizeCspSecuredCapital(additivePositions.map((row) => row.position));
   const securedCapital = campaignSecuredCapital + brokerCsp.total;
 
   return (
@@ -473,11 +590,11 @@ async function DashboardBrokerStats({
       <Stat
         label="Secured (CSP)"
         value={brokerCsp.hasUnknown ? `${money(securedCapital)}+` : money(securedCapital)}
-        detail="Campaigns + unlinked Schwab"
+        detail="Campaigns + unmatched Schwab positions"
       />
       <Stat
         label="Broker positions"
-        value={String(brokerPositions.length)}
+        value={String(schwabPositions.length)}
         detail="Actual Schwab positions - separate from campaign count"
       />
     </>
@@ -494,12 +611,16 @@ function DashboardBrokerPositionsFallback({ openCampaignCount }: { openCampaignC
 
 async function DashboardBrokerPositions({
   userId,
+  ownAccounts,
+  openCampaigns,
   openCampaignCount,
 }: {
   userId: string;
+  ownAccounts: DashboardAccount[];
+  openCampaigns: DashboardOpenCampaign[];
   openCampaignCount: number;
 }) {
-  const { schwabPositions, brokerPositions } = await loadDashboardBrokerData(userId);
+  const { schwabPositions, additivePositions } = await loadDashboardBrokerData(userId, ownAccounts, openCampaigns);
 
   if (schwabPositions === null) {
     if (openCampaignCount > 0) {
@@ -516,7 +637,7 @@ async function DashboardBrokerPositions({
     );
   }
 
-  if (brokerPositions.length === 0) {
+  if (additivePositions.length === 0) {
     if (openCampaignCount > 0) {
       return null;
     }
@@ -533,8 +654,9 @@ async function DashboardBrokerPositions({
 
   return (
     <>
-      {brokerPositions.slice(0, 4).map((position) => {
+      {additivePositions.slice(0, 4).map(({ position, disposition }) => {
         const display = describeBrokerPositionForDisplay(position);
+        const isAmbiguous = disposition === "AMBIGUOUS";
         return (
           <div
             key={`${position.accountId}-${position.symbol}`}
@@ -543,18 +665,52 @@ async function DashboardBrokerPositions({
             <div>
               <div className="font-semibold">{display.title}</div>
               <div className="text-sm text-zinc-400">{display.detailLine ?? display.quantityLabel}</div>
+              <div className="text-xs text-zinc-500">
+                {isAmbiguous ? "Ambiguous match - review in Tracker" : "Untracked Schwab position"}
+              </div>
             </div>
             <div className="text-right">
               <div className="text-zinc-200">{display.quantityLabel}</div>
               <div className="text-xs text-zinc-500">
                 {display.valueLabel}: {money(display.value)}
               </div>
-              <Badge tone="info">SCHWAB</Badge>
+              <Badge tone={isAmbiguous ? "warn" : "info"}>{isAmbiguous ? "AMBIGUOUS" : "SCHWAB"}</Badge>
             </div>
           </div>
         );
       })}
     </>
+  );
+}
+
+/**
+ * The one true-provenance timestamp this page can honestly claim: the moment it actually checked
+ * current Schwab positions/quotes, shown only when that check succeeded this load (never claimed
+ * as "live" when Schwab is disconnected or unreachable - see loadDashboardBrokerData). Reuses the
+ * same cached broker-data load every other broker-facing section on this page already makes, so
+ * this never triggers an extra Schwab request.
+ */
+async function DashboardMarketSnapshotFreshness({
+  userId,
+  ownAccounts,
+  openCampaigns,
+  renderedAt,
+}: {
+  userId: string;
+  ownAccounts: DashboardAccount[];
+  openCampaigns: DashboardOpenCampaign[];
+  renderedAt: Date;
+}) {
+  const { schwabPositions } = await loadDashboardBrokerData(userId, ownAccounts, openCampaigns);
+
+  if (schwabPositions === null) {
+    return <span>Market snapshot: unavailable (Schwab not connected or unreachable)</span>;
+  }
+
+  return (
+    <span>
+      Market snapshot checked: <EventTime value={renderedAt} asOf={renderedAt} />
+    </span>
   );
 }
 
