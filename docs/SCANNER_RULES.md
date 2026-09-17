@@ -30,9 +30,30 @@ Contract selection is separate from criterion scoring. The confirmed LST Core th
 
 Option enrichment stays capped at eight in production. Known stock FAILs are excluded. First priority is all enabled stock criteria known and PASS; second is no FAIL with one or more UNKNOWN. Within each priority group sort `(RSI ?? 100) + (BB% ?? 100)/10` ascending, then ticker ascending. Disabled criteria do not reduce priority; personal Research state never improves it. The bounded persisted-result list uses this same comparator so enriched rows remain visible.
 
+### Option-chain request narrowing (September 17, 2026)
+
+The scanner asks Schwab only for what it can evaluate: `contractType=PUT` plus a `fromDate`/`toDate` window covering the active DTE horizon (the default 1–13 weekly horizon, or the user's own enabled hard DTE range). `range=OTM`, `strategy=SINGLE` and `includeQuotes=TRUE` are unchanged - the OTM definition and the bid/ask/delta/OI rules all depend on them. Previously every request returned every listed expiration (weeklies through LEAPS) for both contract types, nearly all of which was parsed and discarded.
+
+This is a transport narrowing only: the requested window is the *same* horizon `bestPutValues` already filters on, so an identical set of in-window contracts still produces an identical selection. Two honest consequences: the provider-level cache key now includes the window and contract type (a narrow response must never be served to a wider request), and `optionSelectionPreferredExpiration`/`optionSelectionFallback` are now computed over the returned in-window chain rather than the full chain - "preferred" now means "closest to seven among the weekly window OSO asked for". `toDate` inclusivity has not been verified against live Schwab responses (the API reference is login-gated); the DTE filter still runs on whatever returns, so a boundary contract could only ever be missed, never wrongly selected.
+
+### Option enrichment disposition (September 17, 2026)
+
+`optionEnrichment` (persisted in the existing `ScanResult.snapshotJson`, no migration) records whether a row's options were actually assessed - a different question from `contractReasonCode`, which only describes what a chain OSO *did* fetch contained. Because enrichment is budgeted, most rows in a broad scan are stock-screened only, and their option criteria read UNKNOWN because nobody asked Schwab, not because Schwab had no answer.
+
+| State | Meaning | Scanner badge |
+|---|---|---|
+| `ENRICHED` | A chain request was spent on this ticker, successful or not (a failed request is still an assessment - see `CHAIN_UNAVAILABLE`) | unchanged PASS/NEAR/FAIL/VERIFY |
+| `NOT_ENRICHED_BUDGET` | Shortlist-eligible but ranked outside the cap | `STOCK SCREEN ONLY` - "outside top-8 enrichment budget" |
+| `NOT_ENRICHED_STOCK_FILTER` | A known stock-level FAIL excluded it before options were worth pricing; it never competed for the budget | `STOCK SCREEN ONLY` - "stock screen did not qualify" |
+| `NOT_ENRICHED_DATA_UNAVAILABLE` | The quote/history needed to even run the stock screen failed | `STOCK SCREEN ONLY` - "stock data unavailable" |
+
+A never-assessed row shows exactly one truthful line instead of per-criterion "Option bid unavailable / Open interest unavailable / Put ROR is unknown" phrasing, which would assert a Schwab answer that was never requested. `STOCK SCREEN ONLY` is deliberately an assessment-stage label, not a fifth option-quality verdict, and is styled apart from the four. Rows from runs predating the field keep their previous display rather than being relabelled on a guess. The state is its own field precisely so it survives a more specific technical `scanNote` claiming the note text. Near-match counting is deliberately unchanged (see the open scoring decision below).
+
 Engineering diagnostics are stored in the existing `ScanResult.snapshotJson`, without new UI or migration: selected `expiration`/`dte`/`optionSymbol`, `optionSelectionTargetDte`, `optionSelectionReason`, `optionSelectionPreferredExpiration`, and `optionSelectionFallback`. Preferred expiration means closest to seven in the **normalized returned PUT chain before any structural, horizon, or quality gate**. Fallback means that closer date had no structurally-valid contract at all (never merely a quality-gate loss, since quality gates no longer affect which expiration is chosen); having no exact seven-day listing alone is not fallback. A blank `NO_WEEKLY_EXPIRATION`/`NO_EXPIRATIONS_IN_CONFIGURED_RANGE` row has no selected expiration to report a fallback against. These fields describe new runs only, not historical chains or raw contracts discarded by the provider normalizer. Full rejected chains and shortlist ordinals are not retained.
 
 **Separate follow-up:** earnings distance still means days from today, not earnings after expiration. Matt's September 16 NKE observation (16 DTE / earnings in 15 days) requires a separate product decision; this slice does not change that rule.
+
+**Open decision - UNKNOWN score credit (deliberately not changed):** `setupScore` awards 0.45 (45%) for every UNKNOWN criterion, so a stock-clean row whose options were never requested still scores around 79/100 on three option inputs nobody fetched. That inflates the average score and the near-match counts, which therefore partly measure missing data rather than market quality. Changing it alters scoring semantics for every row, so it needs an explicit product decision - the enrichment-disposition work above deliberately left every score, near-match count and label untouched.
 
 ## Historical seeded Phase 1 Rules
 

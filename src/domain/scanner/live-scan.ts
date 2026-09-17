@@ -11,6 +11,7 @@ import {
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { DEMO_SCAN_CANDIDATES } from "./profile";
+import { notEnrichedScanNote, type NotEnrichedState } from "./option-enrichment";
 import { evaluateCandidate, evaluateCriterion, setupScore, type ScannerRule } from "./scanner";
 
 /**
@@ -255,9 +256,18 @@ export async function evaluateLiveMarketScan({
     .slice(0, maxOptionChainLookups);
   const shortlistTickers = new Set(shortlist.map((candidate) => candidate.ticker));
 
+  // Ask Schwab only for what this scan can actually evaluate: PUTs, inside the same DTE horizon
+  // the structural filter below enforces anyway. An un-narrowed chain returns every expiration
+  // (weeklies through LEAPS) for both contract types, essentially all of which is parsed and then
+  // discarded. Purely a transport narrowing - the horizon is the SAME one bestPutValues applies,
+  // so an identical set of in-window contracts still yields an identical selection.
+  const chainRequest = {
+    ...expirationWindowFor(weeklyHorizonFor(rules), asOf),
+    contractType: "PUT" as const,
+  };
   const optionOutcomes = await mapWithConcurrency(shortlist, SCAN_FETCH_CONCURRENCY, async (candidate) => {
     try {
-      return { ticker: candidate.ticker, ok: true as const, options: await provider.getOptionChain(candidate.ticker) };
+      return { ticker: candidate.ticker, ok: true as const, options: await provider.getOptionChain(candidate.ticker, chainRequest) };
     } catch {
       return { ticker: candidate.ticker, ok: false as const, options: [] as OptionContractSnapshot[] };
     }
@@ -273,22 +283,31 @@ export async function evaluateLiveMarketScan({
 
   const evaluated = rankedStockStage.map((candidate) => {
     const reachedOptionChainLookup = shortlistTickers.has(candidate.ticker);
+    // A known stock-level FAIL (stockStagePriority 2) is excluded from the shortlist outright, so
+    // it was never competing for the budget at all - saying "outside the enrichment budget" about
+    // it would be false. Anything else that missed the shortlist genuinely lost on rank.
+    const notEnrichedState: NotEnrichedState =
+      candidate.stockStagePriority === 2 ? "NOT_ENRICHED_STOCK_FILTER" : "NOT_ENRICHED_BUDGET";
     const values = reachedOptionChainLookup
       ? optionChainFailedTickers.has(candidate.ticker)
         ? {
             ...candidate.values,
             ...unknownOptionValues(),
             contractReasonCode: "CHAIN_UNAVAILABLE" as const,
+            optionEnrichment: "ENRICHED" as const,
             scanNote: OPTION_REASON_MESSAGES.CHAIN_UNAVAILABLE,
           }
-        : bestPutValues(candidate, optionsByTicker.get(candidate.ticker) ?? [], rules, asOf)
+        : { ...bestPutValues(candidate, optionsByTicker.get(candidate.ticker) ?? [], rules, asOf), optionEnrichment: "ENRICHED" as const }
       : {
           ...candidate.values,
           ...unknownOptionValues(),
+          // optionEnrichment is its own field precisely so this stays machine-readable even when
+          // the shared scanNote below is (correctly) taken by a more specific technical reason.
+          optionEnrichment: notEnrichedState,
           // A candidate may already carry a more specific reason (e.g. technicalReasonCode's own
           // scanNote, set in mergeTechnicalCacheValues) - preserved rather than overwritten by
-          // this generic fallback, which only applies when nothing more specific is known.
-          scanNote: candidate.values.scanNote ?? "Stock-stage filter did not reach option-chain lookup in this controlled live scan.",
+          // this fallback, which only applies when nothing more specific is known.
+          scanNote: candidate.values.scanNote ?? notEnrichedScanNote(notEnrichedState, maxOptionChainLookups),
         };
 
     return {
@@ -307,6 +326,9 @@ export async function evaluateLiveMarketScan({
     const values = {
       ...unknownStockValues(),
       ...unknownOptionValues(),
+      // The quote itself failed, so the stock screen never ran - never presented as either a
+      // screening verdict or a budget loss.
+      optionEnrichment: "NOT_ENRICHED_DATA_UNAVAILABLE" as const,
       scanNote: "Live market data was unavailable for this ticker; result marked UNKNOWN.",
     };
     return {
@@ -326,6 +348,8 @@ export async function evaluateLiveMarketScan({
     const values = {
       ...candidate.values,
       ...unknownOptionValues(),
+      // A deliberate stock-screen exclusion, not a budget loss - this ticker never competed.
+      optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" as const,
       scanNote: quoteStageExclusionScanNote(evaluateCandidate(quoteOnlyRules, candidate.values).results),
     };
     return {
@@ -350,6 +374,8 @@ export async function evaluateLiveMarketScan({
         rsi: null,
         bbPercent: null,
         ...unknownOptionValues(),
+        // Never reached a state where enrichment could even be decided - not a screening verdict.
+        optionEnrichment: "NOT_ENRICHED_DATA_UNAVAILABLE" as const,
         scanNote: "Price history was unavailable for this ticker; RSI/BB and option-chain lookups were skipped.",
       };
       return {
@@ -570,6 +596,34 @@ const OPTION_REASON_MESSAGES: Record<OptionScanReasonCode, string> = {
 const DEFAULT_WEEKLY_DTE_RANGE: readonly [number, number] = [1, 13];
 
 /**
+ * The DTE window that decides which expirations are even in play: the user's own enabled hard
+ * `dte` range when present (authoritative), otherwise the default weekly horizon. Shared by the
+ * structural filter in bestPutValues and by the provider request built in evaluateLiveMarketScan,
+ * so the chain OSO asks for and the chain OSO evaluates can never drift apart.
+ */
+export function weeklyHorizonFor(rules: ScannerRule[]): readonly [number, number] {
+  const dteRule = rules.find((rule) => rule.key === "dte");
+  return dteRule ? (dteRule.desired as [number, number]) : DEFAULT_WEEKLY_DTE_RANGE;
+}
+
+/**
+ * Converts that DTE horizon into the inclusive expiration-date window to request from the
+ * provider. Deliberately mirrors daysToExpiration's own UTC-calendar-day math (a contract with
+ * DTE d expires on asOf's UTC date + d days), so the requested window and the DTE filter applied
+ * to the response agree exactly rather than differing by a timezone-shifted day at the edges.
+ */
+export function expirationWindowFor(horizon: readonly [number, number], asOf: Date): { fromDate: Date; toDate: Date } {
+  const [low, high] = horizon;
+  const startOfDayUtc = Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate());
+  return {
+    fromDate: new Date(startOfDayUtc + low * MS_PER_DAY),
+    toDate: new Date(startOfDayUtc + high * MS_PER_DAY),
+  };
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
  * Option-level rules that influence STRIKE preference within an already-chosen expiration when
  * the user has them enabled - matches profile.ts's own GATING_RULE_KEYS classification for these
  * keys. They no longer decide whether an expiration exists (see bestPutValues) - a weekly
@@ -676,7 +730,7 @@ function bestPutValues(
   // still structural existence, not a quality judgment - it only decides which expirations are
   // even in play before scoring anything.
   const dteRule = rules.find((rule) => rule.key === "dte");
-  const [horizonLow, horizonHigh] = dteRule ? (dteRule.desired as [number, number]) : DEFAULT_WEEKLY_DTE_RANGE;
+  const [horizonLow, horizonHigh] = weeklyHorizonFor(rules);
   const withinHorizon = withBid.filter((values) => {
     const dte = numericValue(values.dte);
     return dte !== null && dte >= horizonLow && dte <= horizonHigh;

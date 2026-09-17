@@ -18,6 +18,12 @@ import {
 import { EmptyState, FieldLabel } from "@/components/ui";
 import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
 import { formatCriterionValue, type CriterionResult, type ExclusionDiagnostic } from "@/domain/scanner/scanner";
+import { OPTION_CHAIN_ENRICHMENT_LIMIT } from "@/domain/scanner/live-scan";
+import {
+  isNotOptionAssessed as isNotOptionAssessedState,
+  scannerRowReasons,
+  NOT_OPTION_ASSESSED_BADGE,
+} from "@/domain/scanner/option-enrichment";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
 import { money, percent, shortDate, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
@@ -485,7 +491,7 @@ export function ScannerWorkspace({
                           Technical data pending
                         </span>
                       ) : null}
-                      {status.word === "VERIFY" ? <VerifyReasons result={result} /> : null}
+                      {status.word === "VERIFY" || isNotOptionAssessed(result) ? <VerifyReasons result={result} /> : null}
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
                       {coloredCell(result.values.price, money, ruleSeverityTone(criterionFor(result, "price")))}
@@ -590,7 +596,7 @@ function CandidateCard({
             </span>
           </div>
         </div>
-        {status.word === "VERIFY" ? <VerifyReasons result={result} /> : null}
+        {status.word === "VERIFY" || isNotOptionAssessed(result) ? <VerifyReasons result={result} /> : null}
         <dl className="grid grid-cols-3 gap-x-2 gap-y-1 text-xs">
           <MobileDatum label="Price" value={coloredCell(result.values.price, money, ruleSeverityTone(criterionFor(result, "price")))} />
           <MobileDatum
@@ -905,6 +911,13 @@ function ResearchBadge({ status }: { status: ScannerViewResult["researchStatus"]
   );
 }
 
+/** See option-enrichment.ts: a row OSO never spent a chain request on must not read as though
+ * Schwab was asked and came back empty. Defers to that shared vocabulary so the producer
+ * (evaluateLiveMarketScan) and this UI can never drift apart on what a state means. */
+function isNotOptionAssessed(result: ScannerViewResult): boolean {
+  return isNotOptionAssessedState(result.values.optionEnrichment);
+}
+
 /** Friendlier phrasing for the rules most likely to be VERIFY's cause in practice - falls back
  * to the criterion's own (already correct, just more verbose) `explanation` for anything else,
  * so a row is never left with no reason shown at all. */
@@ -923,10 +936,11 @@ function unknownReasons(result: ScannerViewResult): string[] {
     .map((criterion) => UNKNOWN_REASON_PHRASES[criterion.key] ?? criterion.explanation);
 }
 
-/** Never make the user guess why a row says VERIFY - shown right under the badge, not just
- * buried in the row's full expansion. */
+/** Never make the user guess why a row says VERIFY (or STOCK SCREEN ONLY) - shown right under the
+ * badge, not just buried in the row's full expansion. A never-assessed row shows the single true
+ * reason its options are blank instead of a list of option inputs that were never requested. */
 function VerifyReasons({ result }: { result: ScannerViewResult }) {
-  const reasons = unknownReasons(result);
+  const reasons = scannerRowReasons(result.values.optionEnrichment, unknownReasons(result), OPTION_CHAIN_ENRICHMENT_LIMIT);
   if (reasons.length === 0) {
     return null;
   }
@@ -951,6 +965,11 @@ function isNearMatch(result: ScannerViewResult): boolean {
   if (result.summary.status === "PASS") {
     return false;
   }
+  // Deliberately NOT filtered on option-enrichment state: "near" here means "one criterion from
+  // passing on the evidence OSO has", which is a different question from whether that evidence
+  // includes an option assessment yet (the badge reports that separately). Changing it would also
+  // move the page's own near-match statistic, which is part of the still-open scoring decision
+  // recorded in docs/SCANNER_RULES.md - not this slice.
   if (result.scoreLabel === "Verify" || result.scoreLabel === "Fails" || result.score < 45) {
     return false;
   }
@@ -960,6 +979,11 @@ function isNearMatch(result: ScannerViewResult): boolean {
 function statusInfo(result: ScannerViewResult): { word: string; tone: string } {
   if (result.summary.status === "PASS") {
     return { word: "PASS", tone: "border-emerald-400/40 bg-emerald-400/15 text-emerald-100" };
+  }
+  // An assessment-stage label, deliberately NOT an option-quality verdict: a muted outline that
+  // reads as "not evaluated yet", never as the emerald/amber/red/VERIFY judgments around it.
+  if (isNotOptionAssessed(result)) {
+    return { word: NOT_OPTION_ASSESSED_BADGE, tone: "whitespace-nowrap border-dashed border-zinc-700 bg-transparent text-zinc-400" };
   }
   if (result.scoreLabel === "Verify") {
     return { word: "VERIFY", tone: "border-zinc-600 bg-zinc-800 text-zinc-300" };

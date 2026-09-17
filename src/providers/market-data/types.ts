@@ -50,6 +50,24 @@ export type OptionContractSnapshot = {
   volume?: number;
 };
 
+/**
+ * Narrows what an option-chain request actually asks the provider for. Every field is optional,
+ * so an omitted request means "the whole OTM chain, both contract types" - exactly what callers
+ * got before this type existed. A caller that already knows it will discard most of the response
+ * (the weekly scanner only ever evaluates PUTs inside a bounded DTE horizon - see live-scan.ts)
+ * should narrow here rather than downloading and parsing every expiration and both contract types.
+ * This is a transport-level narrowing only: it must never change which contract a caller would
+ * have selected from an identical set of returned contracts.
+ */
+export type OptionChainRequest = {
+  /** Earliest expiration date to return, inclusive. Omitted means no lower bound. */
+  fromDate?: Date;
+  /** Latest expiration date to return, inclusive. Omitted means no upper bound. */
+  toDate?: Date;
+  /** Defaults to "ALL" - the pre-existing behavior for any caller that doesn't narrow. */
+  contractType?: "PUT" | "CALL" | "ALL";
+};
+
 export interface MarketDataProvider {
   getQuote(symbol: string): Promise<MarketQuote>;
   /**
@@ -64,7 +82,7 @@ export interface MarketDataProvider {
    */
   getQuotes?(symbols: string[]): Promise<Map<string, MarketQuote>>;
   getPriceHistory(symbol: string, days: number): Promise<PriceCandle[]>;
-  getOptionChain(symbol: string, expiration?: Date): Promise<OptionContractSnapshot[]>;
+  getOptionChain(symbol: string, request?: OptionChainRequest): Promise<OptionContractSnapshot[]>;
   getInstrument(symbol: string): Promise<{ symbol: string; description: string; assetType: string }>;
   getMarketHours(date: Date): Promise<{ isOpen: boolean; opensAt?: Date; closesAt?: Date }>;
 }

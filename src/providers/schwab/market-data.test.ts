@@ -177,3 +177,45 @@ describe("SchwabMarketDataProvider.getQuotes (batch)", () => {
     expect(result.size).toBe(totalSymbols - SCHWAB_QUOTE_BATCH_SIZE);
   });
 });
+
+describe("SchwabMarketDataProvider.getOptionChain (request narrowing)", () => {
+  function captureChainRequest() {
+    const urls: URL[] = [];
+    const fetchFn = (async (url: string | URL) => {
+      urls.push(new URL(url));
+      return jsonResponse({ putExpDateMap: {}, callExpDateMap: {} });
+    }) as unknown as typeof fetch;
+    return { urls, provider: new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn }) };
+  }
+
+  it("sends only the requested contract type and expiration window", async () => {
+    const { urls, provider } = captureChainRequest();
+
+    await provider.getOptionChain("nke", {
+      contractType: "PUT",
+      fromDate: new Date("2026-09-17T00:00:00Z"),
+      toDate: new Date("2026-09-29T00:00:00Z"),
+    });
+
+    const params = urls[0].searchParams;
+    expect(params.get("symbol")).toBe("NKE");
+    expect(params.get("contractType")).toBe("PUT");
+    expect(params.get("fromDate")).toBe("2026-09-17");
+    expect(params.get("toDate")).toBe("2026-09-29");
+    // The scanner's OTM definition and its bid/ask/delta/OI rules both depend on these.
+    expect(params.get("range")).toBe("OTM");
+    expect(params.get("includeQuotes")).toBe("TRUE");
+    expect(params.get("strategy")).toBe("SINGLE");
+  });
+
+  it("keeps the pre-existing un-narrowed behavior when no request is supplied", async () => {
+    const { urls, provider } = captureChainRequest();
+
+    await provider.getOptionChain("NKE");
+
+    const params = urls[0].searchParams;
+    expect(params.get("contractType")).toBe("ALL");
+    expect(params.has("fromDate")).toBe(false);
+    expect(params.has("toDate")).toBe(false);
+  });
+});

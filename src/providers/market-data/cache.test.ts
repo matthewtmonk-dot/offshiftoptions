@@ -156,4 +156,31 @@ describe("withMarketDataCache", () => {
       expect(inner.getQuote).not.toHaveBeenCalled();
     });
   });
+
+  describe("getOptionChain request narrowing", () => {
+    it("never serves one expiration window's cached chain to a request for a different window", async () => {
+      const inner = provider();
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+      const week = { fromDate: new Date("2026-09-17T00:00:00Z"), toDate: new Date("2026-09-29T00:00:00Z"), contractType: "PUT" as const };
+
+      await cached.getOptionChain("NKE", week);
+      await cached.getOptionChain("NKE", week); // identical window - cache hit
+      await cached.getOptionChain("NKE", { ...week, toDate: new Date("2026-10-30T00:00:00Z") }); // wider window
+      await cached.getOptionChain("NKE", { ...week, contractType: "ALL" }); // both contract types
+      await cached.getOptionChain("NKE"); // fully un-narrowed
+
+      // Only the exact repeat was served from cache; every different narrowing refetched.
+      expect(inner.getOptionChain).toHaveBeenCalledTimes(4);
+    });
+
+    it("passes the narrowing straight through to the underlying provider", async () => {
+      const inner = provider();
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+      const request = { fromDate: new Date("2026-09-17T00:00:00Z"), toDate: new Date("2026-09-29T00:00:00Z"), contractType: "PUT" as const };
+
+      await cached.getOptionChain("NKE", request);
+
+      expect(inner.getOptionChain).toHaveBeenCalledWith("NKE", request);
+    });
+  });
 });

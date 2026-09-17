@@ -68,10 +68,15 @@ export type ScannerViewResult = {
     optionVolume: number | null;
     earningsDate: string | null;
     earningsDistance: number | null;
-    /** Explains a blank option column - "no qualifying contract," "stock-stage filter never
-     * reached the option chain," or "option-chain data was unavailable" (see live-scan.ts).
-     * Null means the row's option values are either fully populated or this run predates the
-     * scanNote field existing - never presented as if it were a confirmed empty result either way. */
+    /** Machine-readable OptionEnrichmentState (see live-scan.ts) - whether an option-chain
+     * request was actually spent on this row, and if not, why not. Null for runs that predate the
+     * field; the UI then falls back to its pre-existing behavior rather than guessing. Never
+     * inferred from scanNote prose, which a more specific technical reason can legitimately take. */
+    optionEnrichment: string | null;
+    /** Explains a blank option column - "no qualifying contract," "options not checked," or
+     * "option-chain data was unavailable" (see live-scan.ts). Null means the row's option values
+     * are either fully populated or this run predates the scanNote field existing - never
+     * presented as if it were a confirmed empty result either way. */
     scanNote: string | null;
   };
 };
@@ -276,6 +281,7 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
       optionVolume: snapshotNumber(result.snapshotJson, "optionVolume"),
       earningsDate: snapshotString(result.snapshotJson, "earningsDate"),
       earningsDistance: snapshotNumber(result.snapshotJson, "earningsDistance"),
+      optionEnrichment: snapshotString(result.snapshotJson, "optionEnrichment"),
       scanNote: snapshotString(result.snapshotJson, "scanNote"),
     },
   };

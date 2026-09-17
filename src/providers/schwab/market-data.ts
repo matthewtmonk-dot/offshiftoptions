@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { MarketDataProvider, MarketQuote } from "@/providers/market-data/types";
+import type { MarketDataProvider, MarketQuote, OptionChainRequest } from "@/providers/market-data/types";
 import { SCHWAB_MARKET_DATA_BASE_URL } from "./config";
 import { schwabGetJson, type SchwabFetch } from "./client";
 import { mapWithConcurrency } from "@/lib/concurrency";
@@ -126,20 +126,30 @@ export class SchwabMarketDataProvider implements MarketDataProvider {
     return normalizeSchwabPriceHistoryResponse(normalized, payload).slice(-days);
   }
 
-  async getOptionChain(symbol: string, expiration?: Date) {
+  /**
+   * `request` narrows what Schwab is asked to return (see OptionChainRequest). An un-narrowed
+   * call returns every expiration Schwab lists for the symbol - weeklies, monthlies and LEAPS -
+   * for BOTH contract types, each fully quoted; for a weekly cash-secured-put scanner that is
+   * roughly an order of magnitude more payload than it can use. Narrowing here changes only what
+   * is transferred and parsed, never how a caller chooses among the contracts it receives.
+   * `range: "OTM"` and `includeQuotes: "TRUE"` stay fixed: the scanner's own OTM definition and
+   * its bid/ask/mark/delta/open-interest rules both depend on them.
+   */
+  async getOptionChain(symbol: string, request: OptionChainRequest = {}) {
     const normalized = symbol.toUpperCase();
     const params: Record<string, string> = {
       symbol: normalized,
-      contractType: "ALL",
+      contractType: request.contractType ?? "ALL",
       strategy: "SINGLE",
       includeQuotes: "TRUE",
       range: "OTM",
     };
 
-    if (expiration) {
-      const formatted = formatDate(expiration);
-      params.fromDate = formatted;
-      params.toDate = formatted;
+    if (request.fromDate) {
+      params.fromDate = formatDate(request.fromDate);
+    }
+    if (request.toDate) {
+      params.toDate = formatDate(request.toDate);
     }
 
     const payload = await this.get("/chains", params);

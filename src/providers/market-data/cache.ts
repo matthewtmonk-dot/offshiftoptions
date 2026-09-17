@@ -94,10 +94,17 @@ export function withMarketDataCache(
         provider.getPriceHistory(symbol, days),
       );
     },
-    getOptionChain(symbol, expiration) {
-      const expirationKey = expiration ? expiration.toISOString().slice(0, 10) : "all";
-      return cached(`${providerKey}:chain:${symbol.toUpperCase()}:${expirationKey}`, ttl.optionChain, now, () =>
-        provider.getOptionChain(symbol, expiration),
+    getOptionChain(symbol, request) {
+      // Every narrowing dimension is part of the key: a cached response for one date window or
+      // contract type must never be served to a request asking for a different (especially a
+      // wider) one - that would silently hide contracts the caller actually asked for.
+      const windowKey = [
+        request?.fromDate ? request.fromDate.toISOString().slice(0, 10) : "any",
+        request?.toDate ? request.toDate.toISOString().slice(0, 10) : "any",
+        request?.contractType ?? "ALL",
+      ].join(":");
+      return cached(`${providerKey}:chain:${symbol.toUpperCase()}:${windowKey}`, ttl.optionChain, now, () =>
+        provider.getOptionChain(symbol, request),
       );
     },
     getInstrument(symbol) {
