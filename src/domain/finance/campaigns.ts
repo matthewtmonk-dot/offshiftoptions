@@ -227,7 +227,13 @@ export function summarizeCampaign({
     adjustedBasis,
     sharesHeld,
     finalResult: finalResult(status, totalCampaignPL),
-    currentStage: currentStage(status, lastTradeEvent?.type ?? null, getCurrentOpenPut(orderedEvents)?.expiration ?? null, asOf),
+    currentStage: currentStage(
+      status,
+      lastTradeEvent?.type ?? null,
+      getCurrentOpenPut(orderedEvents)?.expiration ?? null,
+      asOf,
+      hasUnclosedCoveredCall(orderedEvents),
+    ),
     unknowns: unique(unknowns),
   };
 }
@@ -237,6 +243,8 @@ export type CurrentOpenPut = {
   contracts: number;
   expiration: Date;
 };
+
+export type CurrentOpenCall = CurrentOpenPut;
 
 /**
  * The campaign's currently-open short put, if any. The most recent non-NOTE event must be
@@ -263,6 +271,69 @@ export function getCurrentOpenPut(events: CampaignEventInput[]): CurrentOpenPut 
   }
 
   return { contracts, strike, expiration: toDate(lastTradeEvent.expiration) };
+}
+
+/**
+ * The campaign's currently-open short covered call, if any. Unlike a put (the only leg a
+ * campaign holds while OPEN, so "the most recent trade event" is enough), a covered call can
+ * legitimately coexist with a later STOCK_SALE on the uncovered portion of an assigned position
+ * (e.g. 200 shares assigned + 1 call over 100 shares, then the other 100 uncovered shares are
+ * sold while the call is still open - see sellStockForUser's naked-call protection). So this
+ * reduces the FULL event history in order instead of only looking at the last trade event: every
+ * SELL_COVERED_CALL opens a call, every CLOSE_COVERED_CALL/COVERED_CALL_EXPIRED closes it,
+ * regardless of what STOCK_SALE/ASSIGNMENT events happen in between. Correctly handles multiple
+ * sequential calls (open -> close -> open again). Returns null (never guesses) if the most
+ * recently opened leg is missing strike/contracts/expiration.
+ */
+export function getCurrentOpenCall(events: CampaignEventInput[]): CurrentOpenCall | null {
+  const ordered = [...events].sort(compareEvents);
+  let open: CurrentOpenCall | null = null;
+
+  for (const event of ordered) {
+    if (event.type === "SELL_COVERED_CALL") {
+      const contracts = numeric(event.contracts);
+      const strike = numeric(event.strike);
+      open =
+        contracts !== null && contracts > 0 && strike !== null && strike > 0 && event.expiration
+          ? { contracts, strike, expiration: toDate(event.expiration) }
+          : null;
+    } else if (event.type === "CLOSE_COVERED_CALL" || event.type === "COVERED_CALL_EXPIRED") {
+      open = null;
+    }
+  }
+
+  return open;
+}
+
+/**
+ * Loose, type-only version of the same open/closed reduction above - used only for the
+ * "Covered call" vs "Assigned shares" display label in currentStage(), which (like the put side's
+ * lastEventType branches) has never required a fully-populated leg to describe the stage. Kept
+ * separate from getCurrentOpenCall so a synthetic/incomplete test fixture or a legacy row still
+ * gets a sensible stage label even though it wouldn't be usable for real workflow enforcement.
+ */
+function hasUnclosedCoveredCall(events: CampaignEventInput[]): boolean {
+  let open = false;
+  for (const event of events) {
+    if (event.type === "SELL_COVERED_CALL") {
+      open = true;
+    } else if (event.type === "CLOSE_COVERED_CALL" || event.type === "COVERED_CALL_EXPIRED") {
+      open = false;
+    }
+  }
+  return open;
+}
+
+/**
+ * Whether `expiration` has fully passed as of `asOf`, using calendar days only - expiration is
+ * stored as a bare UTC calendar date and processing/settlement happens after market close, so
+ * expiration day itself does not count as "past" yet. Shared by currentStage's "Expiration
+ * processing" stage and expireCoveredCallForUser's manual-expiry eligibility check (see
+ * workflows.ts) so there is exactly one definition of "has this actually expired," not a copy
+ * per caller.
+ */
+export function isPastExpiration(expiration: Date, asOf: Date): boolean {
+  return utcDateOnly(asOf).getTime() > utcDateOnly(expiration).getTime();
 }
 
 function compareEvents(left: CampaignEventInput, right: CampaignEventInput) {
@@ -369,20 +440,21 @@ function currentStage(
   lastEventType: CampaignEventKind | null,
   openPutExpiration: Date | null,
   asOf: Date,
+  hasOpenCoveredCall: boolean,
 ): CampaignCurrentStage {
   if (status === "CLOSED") {
     return "Closed";
   }
 
   if (status === "ASSIGNED") {
-    return lastEventType === "SELL_COVERED_CALL" ? "Covered call" : "Assigned shares";
+    return hasOpenCoveredCall ? "Covered call" : "Assigned shares";
   }
 
   // Expiration/exercise processing happens after market close, and expiration is stored as a
   // bare UTC calendar date - so only flag this once the calendar day AFTER expiration has
   // started. Comparing raw instants would flag "processing" while expiration day is still
   // trading (UTC midnight lands in the previous ET afternoon/evening).
-  if (openPutExpiration && utcDateOnly(asOf).getTime() > utcDateOnly(openPutExpiration).getTime()) {
+  if (openPutExpiration && isPastExpiration(openPutExpiration, asOf)) {
     return "Expiration processing";
   }
 

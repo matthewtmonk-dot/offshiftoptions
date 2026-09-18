@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { getCurrentOpenCall, isPastExpiration, summarizeCampaign } from "@/domain/finance/campaigns";
 import type { SchwabReconciliationEvidence, TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
 import { compareStockStageCandidates, evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
 import type {
@@ -835,6 +836,255 @@ export async function assignCampaignPutForUser(
     data: { status: "ASSIGNED", strategy: "WHEEL" },
     include: campaignDetailInclude,
   });
+}
+
+/**
+ * Manually records a covered call sold against already-assigned shares - this is the safest
+ * useful next slice on top of assignment (see PROJECT_HANDOFF.md's Covered Call Foundation
+ * phase): the accounting engine (summarizeCampaign) already nets covered-call premium into
+ * adjustedBasis/realizedPL, so this function only needs to append a well-formed
+ * SELL_COVERED_CALL event and enforce that it describes a trade that's actually possible against
+ * the shares this campaign holds. OSO never places or previews broker orders - this only records
+ * a covered call the user already sold in their brokerage.
+ */
+export async function sellCoveredCallForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  expirationInput: unknown,
+  strikeInput: unknown,
+  contractsInput: unknown,
+  premiumInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "ASSIGNED") {
+    throw new ValidationError("Only a campaign holding assigned shares can sell a covered call.");
+  }
+  if (getCurrentOpenCall(campaign.events)) {
+    throw new ValidationError("Close or mark the current covered call expired before selling another.");
+  }
+
+  const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+  const maxContracts = Math.floor(summary.sharesHeld / 100);
+  if (maxContracts <= 0) {
+    throw new ValidationError("No shares are held to cover a covered call.");
+  }
+
+  const contracts = parsePositiveInteger(contractsInput, "contracts");
+  if (contracts > maxContracts) {
+    throw new ValidationError(
+      `${summary.sharesHeld} shares held supports at most ${maxContracts} covered call ${maxContracts === 1 ? "contract" : "contracts"}.`,
+    );
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "sale date");
+  const expiration = parseDateInput(expirationInput, "expiration date");
+  const strike = parsePositiveNumber(strikeInput, "strike");
+  const premium = parseNonNegativeNumber(premiumInput, "premium");
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId: campaign.id,
+      type: "SELL_COVERED_CALL",
+      occurredAt,
+      sortOrder: nextSortOrder(campaign.events),
+      optionType: "CALL",
+      contracts,
+      strike,
+      expiration,
+      premium,
+      fees,
+      notes: notes || null,
+    },
+  });
+
+  return prisma.campaign.findUnique({ where: { id: campaign.id }, include: campaignDetailInclude });
+}
+
+/**
+ * Records buying back an open covered call - always the full open leg, exactly like
+ * closeCampaignPutForUser does for puts (no partial-close quantity input). The campaign stays
+ * ASSIGNED: closing a call never closes the campaign by itself, shares are still held either way.
+ */
+export async function closeCoveredCallForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  premiumInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "ASSIGNED") {
+    throw new ValidationError("Only an assigned-stock campaign can close a covered call.");
+  }
+
+  const openCall = getCurrentOpenCall(campaign.events);
+  if (!openCall) {
+    throw new ValidationError("No open covered call was found for this campaign.");
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "close date");
+  const premium = parseNonNegativeNumber(premiumInput, "close premium");
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId: campaign.id,
+      type: "CLOSE_COVERED_CALL",
+      occurredAt,
+      sortOrder: nextSortOrder(campaign.events),
+      optionType: "CALL",
+      contracts: openCall.contracts,
+      strike: openCall.strike,
+      expiration: openCall.expiration,
+      premium,
+      fees,
+      notes: notes || null,
+    },
+  });
+
+  return prisma.campaign.findUnique({ where: { id: campaign.id }, include: campaignDetailInclude });
+}
+
+/**
+ * Manually marks an open covered call expired worthless - no BTC fill exists, so (like
+ * expireCampaignPutForUser) there is no premium input; the collected premium simply stays part of
+ * the campaign's cash flow. Unlike put expiry (which is Schwab-reconciliation-only in this phase),
+ * this is a deliberate manual action a user can take from the Tracker, gated on the call's own
+ * expiration date having actually passed - never inferred from Schwab, never a fabricated debit.
+ */
+export async function expireCoveredCallForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "ASSIGNED") {
+    throw new ValidationError("Only an assigned-stock campaign can mark a covered call expired.");
+  }
+
+  const openCall = getCurrentOpenCall(campaign.events);
+  if (!openCall) {
+    throw new ValidationError("No open covered call was found for this campaign.");
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "expiration date");
+  if (!isPastExpiration(openCall.expiration, occurredAt)) {
+    throw new ValidationError("This covered call has not reached its expiration date yet.");
+  }
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId: campaign.id,
+      type: "COVERED_CALL_EXPIRED",
+      occurredAt,
+      sortOrder: nextSortOrder(campaign.events),
+      optionType: "CALL",
+      contracts: openCall.contracts,
+      strike: openCall.strike,
+      expiration: openCall.expiration,
+      premium: 0,
+      fees,
+      notes: notes || null,
+    },
+  });
+
+  return prisma.campaign.findUnique({ where: { id: campaign.id }, include: campaignDetailInclude });
+}
+
+/**
+ * Records a manual stock sale on assigned shares. Supports a partial sale - summarizeCampaign's
+ * existing proportional-cost-basis allocation already realizes P/L correctly for that (see
+ * PROJECT_HANDOFF.md's Account Ledger / Performance Methodology section) - so no new P/L math is
+ * introduced here. CRITICAL: never allows a sale that would leave an open covered call without
+ * enough remaining shares to cover it (e.g. 200 shares + 1 call over 100 shares allows selling up
+ * to 100, never all 200) - getCurrentOpenCall's full-history reduction means this check is
+ * correct even though the call was opened before this sale. The campaign only closes once every
+ * share is gone AND no call obligation remains open - never merely because a call closed/expired
+ * or because of a partial sale.
+ */
+export async function sellStockForUser(
+  userId: string,
+  campaignId: string,
+  occurredAtInput: unknown,
+  sharesInput: unknown,
+  priceInput: unknown,
+  feesInput: unknown,
+  notesInput: unknown,
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "ASSIGNED") {
+    throw new ValidationError("Only a campaign holding assigned shares can record a stock sale.");
+  }
+
+  const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+  if (summary.sharesHeld <= 0) {
+    throw new ValidationError("No shares are held to sell.");
+  }
+
+  const shares = parsePositiveInteger(sharesInput, "shares");
+  if (shares > summary.sharesHeld) {
+    throw new ValidationError(`Only ${summary.sharesHeld} shares are held.`);
+  }
+
+  const openCall = getCurrentOpenCall(campaign.events);
+  const requiredCoverageShares = openCall ? openCall.contracts * 100 : 0;
+  const sharesRemainingAfterSale = summary.sharesHeld - shares;
+  if (sharesRemainingAfterSale < requiredCoverageShares) {
+    throw new ValidationError(
+      `Selling ${shares} shares would leave only ${sharesRemainingAfterSale}, but the open covered call needs ${requiredCoverageShares} shares of coverage. Close or let it expire first, or sell fewer shares.`,
+    );
+  }
+
+  const occurredAt = parseDateInput(occurredAtInput, "sale date");
+  const price = parsePositiveNumber(priceInput, "sale price");
+  const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
+  const notes = trimText(notesInput, 700);
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId: campaign.id,
+      type: "STOCK_SALE",
+      occurredAt,
+      sortOrder: nextSortOrder(campaign.events),
+      shares,
+      underlyingPrice: price,
+      fees,
+      notes: notes || null,
+    },
+  });
+
+  if (sharesRemainingAfterSale === 0 && !openCall) {
+    return prisma.campaign.update({
+      where: { id: campaign.id },
+      data: { status: "CLOSED", closedAt: occurredAt },
+      include: campaignDetailInclude,
+    });
+  }
+
+  return prisma.campaign.findUnique({ where: { id: campaign.id }, include: campaignDetailInclude });
 }
 
 async function ensureOwnWatchlist(userId: string) {

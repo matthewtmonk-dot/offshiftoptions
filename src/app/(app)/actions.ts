@@ -12,10 +12,12 @@ import {
   addWatchlistCommentForUser,
   assignCampaignPutForUser,
   closeCampaignPutForUser,
+  closeCoveredCallForUser,
   createCampaignForUser,
   createTradingAccountForUser,
   createRecommendationForUser,
   createWatchlistItemForUser,
+  expireCoveredCallForUser,
   markAllNotificationsReadForUser,
   markConversationReadForUser,
   markNotificationReadForUser,
@@ -29,6 +31,8 @@ import {
   safeReturnPath,
   saveSchwabDeveloperCredentialsForUser,
   saveStockNoteForUser,
+  sellCoveredCallForUser,
+  sellStockForUser,
   sendChatMessageForUser,
   setResearchStatusForUser,
   syncSchwabAccountForUser,
@@ -938,6 +942,105 @@ export async function assignCampaignPutAction(formData: FormData) {
       String(formData.get("campaignId") ?? ""),
       formData.get("occurredAt"),
       formData.get("shares"),
+      formData.get("fees"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function sellCoveredCallAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await sellCoveredCallForUser(
+      user.id,
+      String(formData.get("campaignId") ?? ""),
+      formData.get("occurredAt"),
+      formData.get("expiration"),
+      formData.get("strike"),
+      formData.get("contracts"),
+      formData.get("premium"),
+      formData.get("fees"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function closeCoveredCallAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await closeCoveredCallForUser(
+      user.id,
+      String(formData.get("campaignId") ?? ""),
+      formData.get("occurredAt"),
+      formData.get("premium"),
+      formData.get("fees"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function expireCoveredCallAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await expireCoveredCallForUser(
+      user.id,
+      String(formData.get("campaignId") ?? ""),
+      formData.get("occurredAt"),
+      formData.get("fees"),
+      formData.get("notes"),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function sellStockAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/positions");
+
+  try {
+    await sellStockForUser(
+      user.id,
+      String(formData.get("campaignId") ?? ""),
+      formData.get("occurredAt"),
+      formData.get("shares"),
+      formData.get("price"),
       formData.get("fees"),
       formData.get("notes"),
     );

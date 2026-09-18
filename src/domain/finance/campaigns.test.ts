@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getCurrentOpenPut, optionLegValue, summarizeCampaign, type CampaignEventInput } from "./campaigns";
+import { getCurrentOpenCall, getCurrentOpenPut, isPastExpiration, optionLegValue, summarizeCampaign, type CampaignEventInput } from "./campaigns";
 
 describe("campaign financial summaries", () => {
   it("values a standard option leg from per-share premium and contract count", () => {
@@ -251,5 +251,78 @@ describe("getCurrentOpenPut", () => {
 
   it("returns null for an empty event list", () => {
     expect(getCurrentOpenPut([])).toBeNull();
+  });
+});
+
+describe("getCurrentOpenCall", () => {
+  const assigned: CampaignEventInput = { type: "ASSIGNMENT", occurredAt: "2026-08-28T20:00:00Z", strike: 40, shares: 200 };
+
+  it("returns the open call's strike/contracts/expiration", () => {
+    const events: CampaignEventInput[] = [
+      assigned,
+      { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 44, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
+    ];
+    expect(getCurrentOpenCall(events)).toEqual({ strike: 44, contracts: 1, expiration: new Date("2026-09-11") });
+  });
+
+  it("returns null once the call is closed", () => {
+    const events: CampaignEventInput[] = [
+      assigned,
+      { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 44, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
+      { type: "CLOSE_COVERED_CALL", occurredAt: "2026-09-08T14:00:00Z", strike: 44, contracts: 1, premium: 0.1, expiration: "2026-09-11" },
+    ];
+    expect(getCurrentOpenCall(events)).toBeNull();
+  });
+
+  it("returns null once the call expires", () => {
+    const events: CampaignEventInput[] = [
+      assigned,
+      { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 44, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
+      { type: "COVERED_CALL_EXPIRED", occurredAt: "2026-09-12T14:00:00Z", strike: 44, contracts: 1, premium: 0, expiration: "2026-09-11" },
+    ];
+    expect(getCurrentOpenCall(events)).toBeNull();
+  });
+
+  it("finds the second call after the first closes (multiple sequential calls)", () => {
+    const events: CampaignEventInput[] = [
+      assigned,
+      { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 44, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
+      { type: "COVERED_CALL_EXPIRED", occurredAt: "2026-09-12T14:00:00Z", strike: 44, contracts: 1, premium: 0, expiration: "2026-09-11" },
+      { type: "SELL_COVERED_CALL", occurredAt: "2026-09-14T14:00:00Z", strike: 45, contracts: 1, premium: 0.25, expiration: "2026-09-25" },
+    ];
+    expect(getCurrentOpenCall(events)).toEqual({ strike: 45, contracts: 1, expiration: new Date("2026-09-25") });
+  });
+
+  it("keeps reporting an open call across a later STOCK_SALE on uncovered shares", () => {
+    // 200 shares assigned, 1 call over 100 shares, then the other 100 uncovered shares are sold
+    // while the call is still open - see sellStockForUser's naked-call protection.
+    const events: CampaignEventInput[] = [
+      assigned,
+      { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 44, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
+      { type: "STOCK_SALE", occurredAt: "2026-09-05T14:00:00Z", shares: 100, underlyingPrice: 43 },
+    ];
+    expect(getCurrentOpenCall(events)).toEqual({ strike: 44, contracts: 1, expiration: new Date("2026-09-11") });
+  });
+
+  it("returns null for an incomplete SELL_COVERED_CALL missing strike/contracts/expiration", () => {
+    expect(getCurrentOpenCall([{ type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", contracts: 1, premium: 0.3 }])).toBeNull();
+  });
+
+  it("returns null for an empty event list", () => {
+    expect(getCurrentOpenCall([])).toBeNull();
+  });
+});
+
+describe("isPastExpiration", () => {
+  it("is false on expiration day itself (still trading)", () => {
+    expect(isPastExpiration(new Date("2026-09-04"), new Date("2026-09-04T14:00:00Z"))).toBe(false);
+  });
+
+  it("is true the calendar day after expiration", () => {
+    expect(isPastExpiration(new Date("2026-09-04"), new Date("2026-09-05T00:30:00Z"))).toBe(true);
+  });
+
+  it("is false before expiration", () => {
+    expect(isPastExpiration(new Date("2026-09-04"), new Date("2026-09-01"))).toBe(false);
   });
 });

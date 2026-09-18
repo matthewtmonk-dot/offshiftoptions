@@ -30,7 +30,14 @@ import {
   type AccountPerformanceSummary,
 } from "@/domain/finance/accountLedger";
 import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
-import { getCurrentOpenPut, optionLegValue, summarizeCampaign } from "@/domain/finance/campaigns";
+import {
+  getCurrentOpenCall,
+  getCurrentOpenPut,
+  isPastExpiration,
+  optionLegValue,
+  summarizeCampaign,
+  type CurrentOpenCall,
+} from "@/domain/finance/campaigns";
 import { daysToExpiration, distanceToStrikeDollars } from "@/domain/finance/calculations";
 import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import {
@@ -62,13 +69,17 @@ import {
 import {
   assignCampaignPutAction,
   closeCampaignPutAction,
+  closeCoveredCallAction,
   confirmBrokerReconciliationAction,
   confirmSchwabImportAction,
   createCampaignAction,
   createTradingAccountAction,
   discardSchwabImportAction,
+  expireCoveredCallAction,
   previewSchwabImportAction,
   rollCampaignPutAction,
+  sellCoveredCallAction,
+  sellStockAction,
   skipBrokerReconciliationAction,
   toggleCampaignVisibilityAction,
   toggleTradingAccountVisibilityAction,
@@ -233,14 +244,20 @@ export default async function PositionsPage({
   });
   let quoteSnapshots = new Map<string, QuoteSnapshot | null>();
   const rollStatusByCampaignId = new Map<string, RollStatus | "UNAVAILABLE">();
+  // Recomputed only for ASSIGNED rows once a quote is available, so the Assigned Stock card can
+  // show unrealized/total campaign P/L - summarizeCampaign never fabricates these without a real
+  // current price (see PROJECT_HANDOFF.md), so an unavailable quote just leaves them UNKNOWN.
+  const assignedSummaryByCampaignId = new Map<string, ReturnType<typeof summarizeCampaign>>();
   if (view === "open") {
     // Once a campaign is in Expiration Processing, its fate is already decided and just
     // awaiting confirmation - HOLD/ROLL guidance no longer applies, and the lifecycle stage
     // itself (rendered alongside this badge) is the correct guidance to show instead.
     const rollEligibleRows = openRows.filter((row) => isRollGuidanceApplicable(row.summary.currentStage));
-    const tickersNeedingQuotes = rollEligibleRows
-      .filter((row) => openPutsByCampaignId.get(row.campaign.id))
-      .map((row) => row.campaign.ticker);
+    const assignedRows = openRows.filter((row) => row.campaign.status === "ASSIGNED");
+    const tickersNeedingQuotes = [
+      ...rollEligibleRows.filter((row) => openPutsByCampaignId.get(row.campaign.id)).map((row) => row.campaign.ticker),
+      ...assignedRows.map((row) => row.campaign.ticker),
+    ];
     quoteSnapshots = await getQuoteSnapshotsForUser(user.id, tickersNeedingQuotes);
     for (const row of rollEligibleRows) {
       const openPut = openPutsByCampaignId.get(row.campaign.id);
@@ -250,6 +267,13 @@ export default async function PositionsPage({
       const price = quoteSnapshots.get(row.campaign.ticker.toUpperCase())?.price ?? null;
       const status = price !== null ? computeRollStatus({ currentPrice: price, strike: openPut.strike, rollBufferPercent }) : null;
       rollStatusByCampaignId.set(row.campaign.id, status ?? "UNAVAILABLE");
+    }
+    for (const row of assignedRows) {
+      const price = quoteSnapshots.get(row.campaign.ticker.toUpperCase())?.price ?? null;
+      assignedSummaryByCampaignId.set(
+        row.campaign.id,
+        summarizeCampaign({ status: row.campaign.status, events: row.campaign.events, currentUnderlyingPrice: price }),
+      );
     }
   }
 
@@ -425,7 +449,7 @@ export default async function PositionsPage({
             {openRows.map((row) => (
               <CampaignCard
                 key={row.campaign.id}
-                row={row}
+                row={assignedSummaryByCampaignId.has(row.campaign.id) ? { ...row, summary: assignedSummaryByCampaignId.get(row.campaign.id)! } : row}
                 currentUserId={user.id}
                 rollStatus={rollStatusByCampaignId.get(row.campaign.id) ?? null}
                 openView
@@ -684,6 +708,9 @@ function CampaignCard({
   // confirmed $0 in a "Net P/L"-style figure - see getCampaignIdsWithUnknownFees.
   const netPLExact = row.feesFullyKnown ?? true;
   const openPut = campaign.status === "OPEN" ? getCurrentOpenPut(campaign.events) : null;
+  const openCall = campaign.status === "ASSIGNED" ? getCurrentOpenCall(campaign.events) : null;
+  const openCallEventRow = openCall ? openCallEvent(campaign.events) : null;
+  const latestAssignmentEvent = campaign.status === "ASSIGNED" ? latestAssignment(campaign.events) : null;
   // Roll Status's own distancePct (currentPrice - strike) / strike * 100) is reused as-is so this
   // never disagrees with the HOLD/NEAR STRIKE/ROLL guidance shown next to it; only the dollar
   // figure is new math here.
@@ -720,6 +747,17 @@ function CampaignCard({
               <span className="text-zinc-300">{shortCalendarDate(openPut.expiration)}</span>
               <span className="font-semibold text-zinc-100">{daysToExpiration(openPut.expiration, asOf)} DTE</span>
               <span className="text-xs text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
+            </div>
+          ) : null}
+          {openView && openCall ? (
+            <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-call-contract">
+              <span className="font-semibold text-amber-200">{campaign.ticker} {money(openCall.strike)} Call</span>
+              <span className="text-zinc-300">{shortCalendarDate(openCall.expiration)}</span>
+              <span className="font-semibold text-zinc-100">{daysToExpiration(openCall.expiration, asOf)} DTE</span>
+              <span className="text-xs text-zinc-400">Short {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}</span>
+              {openCallEventRow ? (
+                <span className="text-xs text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>
+              ) : null}
             </div>
           ) : null}
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-400">
@@ -853,6 +891,51 @@ function CampaignCard({
               ) : null}
             </div>
 
+            {campaign.status === "ASSIGNED" ? (
+              <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3" data-testid="assigned-stock-card">
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+                  <WalletCards className="size-4 text-amber-300" aria-hidden />
+                  Assigned Stock
+                </div>
+                <dl className="grid gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
+                  <ResultItem label="Shares held" value={summary.sharesHeld} />
+                  <ResultItem
+                    label="Assignment basis"
+                    value={latestAssignmentEvent ? money(latestAssignmentEvent.strike) : "UNKNOWN"}
+                    help="The per-share price shares were assigned at, before any option premium is netted in."
+                  />
+                  <ResultItem
+                    label="Current stock price"
+                    value={quoteSnapshot ? money(quoteSnapshot.price) : "Unavailable"}
+                    help="Schwab's latest available stock price for this ticker; may be delayed or from the last session."
+                  />
+                  <ResultItem
+                    label="Adjusted basis"
+                    value={summary.adjustedBasis === null ? "UNKNOWN" : money(summary.adjustedBasis)}
+                    help="(Stock cost - net option premium) / shares held - falls back to UNKNOWN once any shares from this lot have been sold."
+                  />
+                  <ResultItem
+                    label="Unrealized stock P/L"
+                    value={summary.unrealizedPL === null ? "UNKNOWN" : signedMoney(summary.unrealizedPL)}
+                    tone={summary.unrealizedPL}
+                    help="Held shares marked at the current stock price, minus their remaining cost basis. Requires a current stock price."
+                  />
+                  <ResultItem
+                    label="Campaign option premium"
+                    value={signedMoney(summary.netOptionPremium)}
+                    tone={summary.netOptionPremium}
+                    help={HELP.netPremium}
+                  />
+                  <ResultItem
+                    label="Total campaign P/L"
+                    value={summary.totalCampaignPL === null ? "UNKNOWN" : signedMoney(summary.totalCampaignPL)}
+                    tone={summary.totalCampaignPL}
+                    help="Realized cash flow so far plus unrealized stock P/L on shares still held. Requires a current stock price."
+                  />
+                </dl>
+              </div>
+            ) : null}
+
             {campaign.entrySnapshotJson ? (
               <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-sm text-zinc-400">
                 <div className="mb-1 inline-flex items-center gap-2 font-medium text-zinc-200">
@@ -876,9 +959,7 @@ function CampaignCard({
                 </div>
                 {campaign.status === "OPEN" ? <CampaignActionForms campaignId={campaign.id} /> : null}
                 {campaign.status === "ASSIGNED" ? (
-                  <p className="text-xs text-zinc-500">
-                    Covered call and stock-sale events are modeled now; manual buttons for that phase are a clean next slice.
-                  </p>
+                  <AssignedStockActionForms campaignId={campaign.id} sharesHeld={summary.sharesHeld} openCall={openCall} asOf={asOf} />
                 ) : null}
               </div>
             ) : null}
@@ -932,6 +1013,116 @@ function CampaignActionForms({ campaignId }: { campaignId: string }) {
         <input name="notes" placeholder="Optional note" className={inputClass} />
         <button type="submit" className={tinyButtonClass}>Mark Assigned</button>
       </form>
+    </div>
+  );
+}
+
+/**
+ * Manual covered-call/stock-sale action forms for an ASSIGNED campaign - the Phase 1 covered-call
+ * foundation (see PROJECT_HANDOFF.md). Only ever records a trade the user already made elsewhere;
+ * OSO never places, previews, or cancels broker orders. Which forms show depends entirely on
+ * whether a covered call is currently open (never both sets at once, per "do not show actions
+ * that are invalid for the current stage"): no open call -> Sell Covered Call / Sell Stock; an
+ * open call -> Close Covered Call / Mark Call Expired (only once eligible). Sell Stock stays
+ * hidden rather than merely blocked whenever every held share is already covering an open call,
+ * and is capped to the surplus (sharesHeld minus shares the open call needs) otherwise - the
+ * server-side workflow enforces the same arithmetic regardless of what the form allows.
+ */
+function AssignedStockActionForms({
+  campaignId,
+  sharesHeld,
+  openCall,
+  asOf,
+}: {
+  campaignId: string;
+  sharesHeld: number;
+  openCall: CurrentOpenCall | null;
+  asOf: Date;
+}) {
+  const maxCallContracts = Math.floor(sharesHeld / 100);
+  const maxSellableShares = sharesHeld - (openCall ? openCall.contracts * 100 : 0);
+  const expiredEligible = openCall ? isPastExpiration(openCall.expiration, asOf) : false;
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <p className="text-xs text-zinc-500 lg:col-span-2">
+        Manual recording only - OSO never places, previews, or cancels broker orders here.
+      </p>
+      {!openCall ? (
+        <>
+          {maxCallContracts > 0 ? (
+            <form action={sellCoveredCallAction} className="space-y-2 border-l border-zinc-800 pl-3">
+              <input type="hidden" name="returnTo" value="/positions" />
+              <input type="hidden" name="campaignId" value={campaignId} />
+              <h3 className="text-sm font-semibold text-zinc-100">Sell Covered Call</h3>
+              <input name="occurredAt" type="date" required defaultValue={dateInputValue(new Date())} className={inputClass} />
+              <input name="expiration" type="date" required defaultValue={dateInputValue(daysFromNow(7))} className={inputClass} />
+              <div className="grid grid-cols-2 gap-2">
+                <input name="strike" type="number" step="0.01" min="0.01" required placeholder="Strike" className={inputClass} />
+                <input
+                  name="contracts"
+                  type="number"
+                  step="1"
+                  min="1"
+                  max={maxCallContracts}
+                  required
+                  defaultValue={1}
+                  placeholder="Contracts"
+                  className={inputClass}
+                />
+              </div>
+              <input name="premium" type="number" step="0.0001" min="0" required placeholder="Credit/share" className={inputClass} />
+              <input name="fees" type="number" step="0.01" min="0" placeholder="Fees" className={inputClass} />
+              <input name="notes" placeholder="Optional note" className={inputClass} />
+              <p className="text-xs text-zinc-500">
+                {sharesHeld} shares held - up to {maxCallContracts} {maxCallContracts === 1 ? "contract" : "contracts"}.
+              </p>
+              <button type="submit" className={tinyButtonClass}>Sell Call</button>
+            </form>
+          ) : null}
+          {maxSellableShares > 0 ? (
+            <form action={sellStockAction} className="space-y-2 border-l border-zinc-800 pl-3">
+              <input type="hidden" name="returnTo" value="/positions" />
+              <input type="hidden" name="campaignId" value={campaignId} />
+              <h3 className="text-sm font-semibold text-zinc-100">Sell Stock</h3>
+              <input name="occurredAt" type="date" required defaultValue={dateInputValue(new Date())} className={inputClass} />
+              <div className="grid grid-cols-2 gap-2">
+                <input name="shares" type="number" step="1" min="1" max={maxSellableShares} required placeholder="Shares" className={inputClass} />
+                <input name="price" type="number" step="0.01" min="0.01" required placeholder="Price/share" className={inputClass} />
+              </div>
+              <input name="fees" type="number" step="0.01" min="0" placeholder="Fees" className={inputClass} />
+              <input name="notes" placeholder="Optional note" className={inputClass} />
+              <p className="text-xs text-zinc-500">Up to {maxSellableShares} of {sharesHeld} shares are sellable.</p>
+              <button type="submit" className={tinyButtonClass}>Sell Stock</button>
+            </form>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <form action={closeCoveredCallAction} className="space-y-2 border-l border-zinc-800 pl-3">
+            <input type="hidden" name="returnTo" value="/positions" />
+            <input type="hidden" name="campaignId" value={campaignId} />
+            <h3 className="text-sm font-semibold text-zinc-100">Close Covered Call</h3>
+            <input name="occurredAt" type="date" required defaultValue={dateInputValue(new Date())} className={inputClass} />
+            <input name="premium" type="number" step="0.0001" min="0" required placeholder="Debit/share" className={inputClass} />
+            <input name="fees" type="number" step="0.01" min="0" placeholder="Fees" className={inputClass} />
+            <input name="notes" placeholder="Optional note" className={inputClass} />
+            <button type="submit" className={tinyButtonClass}>Close Call</button>
+          </form>
+
+          {expiredEligible ? (
+            <form action={expireCoveredCallAction} className="space-y-2 border-l border-zinc-800 pl-3">
+              <input type="hidden" name="returnTo" value="/positions" />
+              <input type="hidden" name="campaignId" value={campaignId} />
+              <h3 className="text-sm font-semibold text-zinc-100">Mark Call Expired</h3>
+              <input name="occurredAt" type="date" required defaultValue={dateInputValue(new Date())} className={inputClass} />
+              <input name="fees" type="number" step="0.01" min="0" placeholder="Fees" className={inputClass} />
+              <input name="notes" placeholder="Optional note" className={inputClass} />
+              <button type="submit" className={tinyButtonClass}>Mark Expired</button>
+            </form>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }
@@ -2480,6 +2671,20 @@ function toneClass(value?: number | null) {
 
 function amountClass(value: number) {
   return `font-medium ${toneClass(value)}`;
+}
+
+function latestAssignment(events: CampaignEventRow[]) {
+  return [...events].reverse().find((event) => event.type === "ASSIGNMENT") ?? null;
+}
+
+/**
+ * The actual SELL_COVERED_CALL event row backing getCurrentOpenCall's result, so the Tracker can
+ * show the real premium collected without recomputing it. Only ever called after getCurrentOpenCall
+ * has already confirmed an open call exists, so the most recent SELL_COVERED_CALL in the ledger is
+ * necessarily the one still open.
+ */
+function openCallEvent(events: CampaignEventRow[]) {
+  return [...events].reverse().find((event) => event.type === "SELL_COVERED_CALL") ?? null;
 }
 
 function dateInputValue(date: Date) {
