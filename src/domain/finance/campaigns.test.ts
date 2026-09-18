@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { getCurrentOpenCall, getCurrentOpenPut, isPastExpiration, optionLegValue, summarizeCampaign, type CampaignEventInput } from "./campaigns";
+import {
+  describeCallStrikeVsAdjustedBasis,
+  getCurrentOpenCall,
+  getCurrentOpenPut,
+  isPastExpiration,
+  optionLegValue,
+  summarizeCampaign,
+  type CampaignEventInput,
+} from "./campaigns";
 
 describe("campaign financial summaries", () => {
   it("values a standard option leg from per-share premium and contract count", () => {
@@ -310,6 +318,66 @@ describe("getCurrentOpenCall", () => {
 
   it("returns null for an empty event list", () => {
     expect(getCurrentOpenCall([])).toBeNull();
+  });
+});
+
+describe("describeCallStrikeVsAdjustedBasis", () => {
+  it("test 11: strike above adjusted basis computes a positive, not-flagged difference", () => {
+    const relationship = describeCallStrikeVsAdjustedBasis(44, 40);
+    expect(relationship?.differenceDollars).toBe(4);
+    expect(relationship?.differencePct).toBe(10);
+    expect(relationship?.belowBasis).toBe(false);
+  });
+
+  it("test 12: strike below adjusted basis -> negative difference, flagged as belowBasis", () => {
+    const relationship = describeCallStrikeVsAdjustedBasis(38, 40);
+    expect(relationship?.differenceDollars).toBe(-2);
+    expect(relationship?.differencePct).toBe(-5);
+    expect(relationship?.belowBasis).toBe(true);
+  });
+
+  it("strike exactly at adjusted basis is not flagged as below basis", () => {
+    const relationship = describeCallStrikeVsAdjustedBasis(40, 40);
+    expect(relationship?.differenceDollars).toBe(0);
+    expect(relationship?.belowBasis).toBe(false);
+  });
+
+  it("test 10: returns null (never fabricates a warning) when adjusted basis is unavailable", () => {
+    expect(describeCallStrikeVsAdjustedBasis(44, null)).toBeNull();
+  });
+
+  it("returns null for a non-finite or non-positive strike/basis", () => {
+    expect(describeCallStrikeVsAdjustedBasis(0, 40)).toBeNull();
+    expect(describeCallStrikeVsAdjustedBasis(-5, 40)).toBeNull();
+    expect(describeCallStrikeVsAdjustedBasis(44, 0)).toBeNull();
+    expect(describeCallStrikeVsAdjustedBasis(44, -10)).toBeNull();
+    expect(describeCallStrikeVsAdjustedBasis(Number.NaN, 40)).toBeNull();
+  });
+
+  it("test 13: never touches or references total campaign P/L - it only relates strike to adjusted basis", () => {
+    // A campaign whose strike is below adjusted basis (a stock-exit warning) can still have a
+    // positive total campaign P/L overall once prior option premium is included - the two must
+    // stay independent so the warning never gets relabeled as "this trade loses money."
+    const summary = summarizeCampaign({
+      status: "ASSIGNED",
+      currentUnderlyingPrice: 39,
+      events: [
+        { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 40, contracts: 1, premium: 1.0 },
+        { type: "ASSIGNMENT", occurredAt: "2026-08-28T20:00:00Z", strike: 40, contracts: 1, shares: 100 },
+        { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 38, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
+      ],
+    });
+
+    expect(summary.adjustedBasis).toBe(38.7);
+    const relationship = describeCallStrikeVsAdjustedBasis(38, summary.adjustedBasis);
+    expect(relationship?.belowBasis).toBe(true); // strike (38) is below adjusted basis (38.70)
+
+    // Yet the campaign is still solidly positive overall thanks to the large put premium already
+    // collected - describeCallStrikeVsAdjustedBasis's return value carries no P/L field at all,
+    // so nothing here can be mistaken for (or silently overwrite) the real totalCampaignPL.
+    expect(summary.totalCampaignPL).toBeGreaterThan(0);
+    expect(relationship).not.toHaveProperty("totalCampaignPL");
+    expect(relationship).not.toHaveProperty("campaignPL");
   });
 });
 

@@ -328,12 +328,38 @@ function hasUnclosedCoveredCall(events: CampaignEventInput[]): boolean {
  * Whether `expiration` has fully passed as of `asOf`, using calendar days only - expiration is
  * stored as a bare UTC calendar date and processing/settlement happens after market close, so
  * expiration day itself does not count as "past" yet. Shared by currentStage's "Expiration
- * processing" stage and expireCoveredCallForUser's manual-expiry eligibility check (see
- * workflows.ts) so there is exactly one definition of "has this actually expired," not a copy
- * per caller.
+ * processing" stage, expireCoveredCallForUser's manual-expiry eligibility check (see
+ * workflows.ts), and isCoveredCallRollGuidanceApplicable's suppression check (see rollStatus.ts)
+ * so there is exactly one definition of "has this actually expired," not a copy per caller.
  */
 export function isPastExpiration(expiration: Date, asOf: Date): boolean {
   return utcDateOnly(asOf).getTime() > utcDateOnly(expiration).getTime();
+}
+
+export type CallStrikeBasisRelationship = {
+  /** strike - adjustedBasis, signed and rounded to cents. Positive means the strike is above adjusted basis. */
+  differenceDollars: number;
+  /** differenceDollars / adjustedBasis * 100, signed. */
+  differencePct: number;
+  /** True when assignment at this strike would realize a stock loss relative to adjusted basis. */
+  belowBasis: boolean;
+};
+
+/**
+ * Compares an open covered call's strike against the campaign's already-computed adjustedBasis
+ * (summarizeCampaign) - it never recomputes cost basis itself, only relates two numbers the
+ * accounting engine already produced. Returns null (never fabricates) when adjustedBasis is
+ * unavailable (e.g. once any shares from the assignment lot have been sold - see
+ * summarizeCampaign's own adjustedBasis rule) or when either input isn't a usable positive number.
+ */
+export function describeCallStrikeVsAdjustedBasis(strike: number, adjustedBasis: number | null): CallStrikeBasisRelationship | null {
+  if (!Number.isFinite(strike) || strike <= 0 || adjustedBasis === null || !Number.isFinite(adjustedBasis) || adjustedBasis <= 0) {
+    return null;
+  }
+
+  const differenceDollars = round(strike - adjustedBasis, 2);
+  const differencePct = round((differenceDollars / adjustedBasis) * 100, 2);
+  return { differenceDollars, differencePct, belowBasis: differenceDollars < 0 };
 }
 
 function compareEvents(left: CampaignEventInput, right: CampaignEventInput) {

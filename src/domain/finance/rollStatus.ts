@@ -9,7 +9,7 @@
  * price vs. strike) drives the color.
  */
 
-import type { CampaignCurrentStage } from "./campaigns";
+import { isPastExpiration, type CampaignCurrentStage } from "./campaigns";
 
 export const DEFAULT_ROLL_BUFFER_PERCENT = 3.0;
 
@@ -118,4 +118,90 @@ export function computeRollStatus({
     bufferNote: null,
     reason: `${distanceText} · put is ITM`,
   };
+}
+
+/**
+ * Roll Status for an open COVERED CALL - deliberately NOT a mechanical inversion of
+ * computeRollStatus's inputs/outputs. `distancePct` keeps the exact same physical meaning as the
+ * put side ((currentPrice - strike) / strike * 100, positive = stock trading above strike) so the
+ * field means the same real-world thing regardless of option type - but the classification is
+ * genuinely different, because assignment pressure on a covered call rises as the stock
+ * approaches/crosses the strike from BELOW, the opposite direction from a short put:
+ *
+ *   - GREEN/HOLD: comfortably below strike, outside the buffer (distancePct < -rollBufferPercent).
+ *   - AMBER/NEAR STRIKE: approaching the strike from below, inside the buffer
+ *     (-rollBufferPercent <= distancePct < 0).
+ *   - RED/ROLL CANDIDATE (or ROLL at/after the same Friday management checkpoint used on puts):
+ *     at or above the strike (distancePct >= 0) - the call is ITM.
+ *
+ * Reuses the exact same RollStatus/RollStatusLabel/RollStatusColor types (so RollStatusBadge needs
+ * no changes at all), formatBufferPercent, and isPastFridayManagementCheckpoint - only the
+ * classification thresholds and the wording differ.
+ */
+export function computeCoveredCallRollStatus({
+  currentPrice,
+  strike,
+  rollBufferPercent,
+  now = new Date(),
+}: {
+  currentPrice: number;
+  strike: number;
+  rollBufferPercent: number;
+  now?: Date;
+}): RollStatus | null {
+  if (!Number.isFinite(currentPrice) || !Number.isFinite(strike) || strike <= 0) {
+    return null;
+  }
+
+  const distancePct = ((currentPrice - strike) / strike) * 100;
+  const bufferLabel = formatBufferPercent(rollBufferPercent);
+  const distanceMagnitude = Math.abs(distancePct).toFixed(1);
+
+  if (distancePct < -rollBufferPercent) {
+    const distanceText = `-${distanceMagnitude}% below strike`;
+    return {
+      color: "GREEN",
+      label: "HOLD",
+      distancePct,
+      distanceText,
+      bufferNote: null,
+      reason: `${distanceText} · outside your ${bufferLabel} Roll Buffer`,
+    };
+  }
+
+  if (distancePct < 0) {
+    const distanceText = `-${distanceMagnitude}% below strike`;
+    return {
+      color: "AMBER",
+      label: "NEAR STRIKE",
+      distancePct,
+      distanceText,
+      bufferNote: `Inside ${bufferLabel} Roll Buffer`,
+      reason: `${distanceText} · inside your ${bufferLabel} Roll Buffer`,
+    };
+  }
+
+  const distanceText = distancePct === 0 ? "At strike" : `+${distanceMagnitude}% above strike`;
+  const label: RollStatusLabel = isPastFridayManagementCheckpoint(now) ? "ROLL" : "ROLL CANDIDATE";
+  return {
+    color: "RED",
+    label,
+    distancePct,
+    distanceText,
+    bufferNote: null,
+    reason: `${distanceText} · call is ITM`,
+  };
+}
+
+/**
+ * Whether normal covered-call Roll Status guidance should be shown at all - the same "nothing
+ * left to hold or roll, only awaiting confirmation" philosophy as isRollGuidanceApplicable uses
+ * for puts. A covered call has no dedicated CampaignCurrentStage of its own once a campaign is
+ * ASSIGNED (currentStage stays "Covered call" throughout, see campaigns.ts), so this checks the
+ * call's own expiration directly via the shared isPastExpiration helper instead of reading
+ * currentStage. Like the put side, guidance stays available through expiration day itself and is
+ * only suppressed the calendar day after.
+ */
+export function isCoveredCallRollGuidanceApplicable(callExpiration: Date, asOf: Date = new Date()): boolean {
+  return !isPastExpiration(callExpiration, asOf);
 }
