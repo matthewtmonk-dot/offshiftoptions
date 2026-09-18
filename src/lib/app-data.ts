@@ -1,6 +1,7 @@
 import "server-only";
 
 import { prisma } from "./prisma";
+import { NOTIFICATIONS_PAGE_VISIBLE_TYPES } from "./notifications";
 
 export type TrackerScope = "mine" | "buddy" | "both";
 
@@ -8,11 +9,15 @@ export function normalizeTrackerScope(value: unknown): TrackerScope {
   return value === "buddy" || value === "both" ? value : "mine";
 }
 
+/** Counts only the types the /notifications page still shows (see
+ * NOTIFICATIONS_PAGE_VISIBLE_TYPES) - MESSAGE and RECOMMENDATION are Chat's job now, via
+ * getUnreadChatCount's own independent, ChatMessageRead-backed count. */
 export async function getUnreadNotificationCount(userId: string) {
   return prisma.notification.count({
     where: {
       recipientId: userId,
       readAt: null,
+      type: { in: NOTIFICATIONS_PAGE_VISIBLE_TYPES },
     },
   });
 }
@@ -129,7 +134,11 @@ export async function getDashboardData(userId: string) {
     incomingRecommendations,
     activities,
     conversation,
-    recentMessages: [...(conversation?.messages ?? [])].reverse(),
+    // The query above already orders these `desc` (newest first) and bounds them to the 5 most
+    // recent - this is a compact preview, not a transcript, so newest-first (matching how the
+    // rest of the Dashboard's activity/recommendation feeds already read) is correct here. Do NOT
+    // reverse to oldest-first; that was this preview's own bug, not a rule to preserve.
+    recentMessages: conversation?.messages ?? [],
     latestScanRun: profile?.scanRuns[0] ?? null,
     settings,
   };
@@ -277,7 +286,7 @@ export function getUnreadChatCount(userId: string) {
 
 export async function getNotificationsPageData(userId: string) {
   return prisma.notification.findMany({
-    where: { recipientId: userId },
+    where: { recipientId: userId, type: { in: NOTIFICATIONS_PAGE_VISIBLE_TYPES } },
     orderBy: { createdAt: "desc" },
     include: { actor: true },
   });

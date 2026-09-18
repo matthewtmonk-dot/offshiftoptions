@@ -1,5 +1,6 @@
 import { Check } from "lucide-react";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireCurrentUser } from "@/lib/auth";
 import { getChatPageData } from "@/lib/app-data";
@@ -51,7 +52,11 @@ export default async function ChatPage() {
                     <div className={`max-w-[82%] rounded-lg border p-3 ${own ? "border-emerald-400/30 bg-emerald-400/15" : "border-zinc-800 bg-zinc-900"}`}>
                       <div className="mb-1 flex items-center gap-2 text-xs text-zinc-400">
                         <span>{message.sender.name}</span>
-                        {message.ticker ? <span className="text-emerald-300">${message.ticker}</span> : null}
+                        {message.ticker ? (
+                          <IntentPrefetchLink href="/research" className="text-emerald-300 hover:text-emerald-200" title={`Open ${message.ticker} in Research`}>
+                            ${message.ticker}
+                          </IntentPrefetchLink>
+                        ) : null}
                         <span>{shortDateTime(message.createdAt)}</span>
                       </div>
                       {message.body ? <p className="whitespace-pre-wrap text-sm text-zinc-100">{message.body}</p> : null}

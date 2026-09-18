@@ -25,7 +25,7 @@ import {
 } from "./privacy";
 import { prisma } from "./prisma";
 import { requireTicker, ValidationError } from "./tickers";
-import { notifyInApp } from "./notifications";
+import { notifyInApp, NOTIFICATIONS_PAGE_VISIBLE_TYPES } from "./notifications";
 import type { AccountLedgerEntryType } from "@/generated/prisma/enums";
 import {
   removeSchwabDeveloperCredentialForUser,
@@ -1179,7 +1179,47 @@ export async function createRecommendationForUser(
     href: "/recommendations",
   });
 
+  await postRecommendationChatEcho(sender, recipient.id, ticker, message, recommendation.reasonTags);
+
   return recommendation;
+}
+
+/**
+ * Best-effort structured echo of a new recommendation into the sender/recipient's shared Buddy
+ * Chat conversation - Chat is now the primary human-to-human communication surface, so the
+ * recipient sees "recommended KGC" directly in Chat (with the same ticker-badge treatment as any
+ * other ticker-tagged message) instead of needing a separate Recommendations-inbox visit.
+ *
+ * Never throws: a missing shared conversation (there is exactly one per Matt/Eric pair today, but
+ * this must degrade gracefully rather than fail recommendation creation itself if that ever
+ * changes) just means no echo is posted. The Recommendation row - ticker, tags, status workflow,
+ * threaded comments/reactions - remains the durable structured record; this is only a visibility
+ * echo of it, not a replacement, so nothing here changes what's actually stored.
+ */
+async function postRecommendationChatEcho(sender: { id: string; name: string }, recipientId: string, ticker: string, message: string, tags: string[]) {
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      AND: [{ members: { some: { userId: sender.id } } }, { members: { some: { userId: recipientId } } }],
+    },
+    select: { id: true },
+  });
+  if (!conversation) {
+    return;
+  }
+
+  const body = [`Recommended ${ticker} — ${message}`, tags.length ? `Tags: ${tags.join(", ")}` : null]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+
+  await prisma.chatMessage.create({
+    data: {
+      conversationId: conversation.id,
+      senderId: sender.id,
+      body,
+      ticker,
+      reads: { create: { userId: sender.id } },
+    },
+  });
 }
 
 export async function updateRecommendationStatusForUser(
@@ -1489,11 +1529,15 @@ export async function markNotificationReadForUser(userId: string, notificationId
   });
 }
 
+/** Scoped to the same NOTIFICATIONS_PAGE_VISIBLE_TYPES the page itself queries, so "Mark all
+ * read" only ever touches what the user can actually see there - never a hidden MESSAGE or
+ * RECOMMENDATION notification Chat already owns the read-state for. */
 export async function markAllNotificationsReadForUser(userId: string) {
   return prisma.notification.updateMany({
     where: {
       recipientId: userId,
       readAt: null,
+      type: { in: NOTIFICATIONS_PAGE_VISIBLE_TYPES },
     },
     data: {
       readAt: new Date(),

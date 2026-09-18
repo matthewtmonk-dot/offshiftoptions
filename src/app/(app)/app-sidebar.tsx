@@ -7,7 +7,6 @@ import {
   ChartNoAxesCombined,
   ChevronLeft,
   ChevronRight,
-  Download,
   HeartHandshake,
   KeyRound,
   LayoutDashboard,
@@ -15,7 +14,6 @@ import {
   LogOut,
   MessageSquareText,
   Send,
-  SlidersHorizontal,
   WalletCards,
 } from "lucide-react";
 import { Initials } from "@/components/ui";
@@ -25,17 +23,20 @@ import { signOutAction } from "./actions";
 
 type Appearance = "SYSTEM" | "LIGHT" | "DARK";
 
+// "Scanner Rules" (/scanner/settings) and "Install" (/install) are deliberately not top-level
+// destinations: both remain fully reachable - Scanner Rules via its own icon-button link inside
+// the Scanner page toolbar, Install via a link on the Account page - they just no longer compete
+// for primary sidebar space. See PROJECT_HANDOFF.md's navigation-trim audit for why Notifications
+// and Recs stay for now (each still carries functionality with no other current home).
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/positions", label: "Tracker", icon: WalletCards },
   { href: "/scanner", label: "Scanner", icon: ChartNoAxesCombined },
-  { href: "/scanner/settings", label: "Scanner Rules", icon: SlidersHorizontal },
   { href: "/research", label: "Research", icon: ListChecks },
   { href: "/recommendations", label: "Recs", icon: Send },
   { href: "/chat", label: "Chat", icon: MessageSquareText },
   { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/account", label: "Account", icon: KeyRound },
-  { href: "/install", label: "Install", icon: Download },
 ];
 
 /**

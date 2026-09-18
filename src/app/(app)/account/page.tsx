@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { KeyRound, Link2, Plus, RefreshCw, Save, SearchCheck, ShieldCheck, Unplug } from "lucide-react";
+import { Download, KeyRound, Link2, Plus, RefreshCw, Save, SearchCheck, ShieldCheck, Unplug } from "lucide-react";
 import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
@@ -106,6 +106,19 @@ export default async function AccountPage({
             </p>
           </div>
           <AppearanceControl current={user.settings?.appearance ?? "SYSTEM"} />
+        </div>
+        <div className="mt-4 flex flex-col gap-3 border-t border-zinc-800 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-sm font-medium text-zinc-200">Install app</div>
+            <p className="mt-1 text-xs text-zinc-500">Add Off Shift Options to your home screen for a standalone, app-like view.</p>
+          </div>
+          <Link
+            href="/install"
+            className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300 hover:border-emerald-400/60"
+          >
+            <Download className="size-4" aria-hidden />
+            Install
+          </Link>
         </div>
       </Panel>
 

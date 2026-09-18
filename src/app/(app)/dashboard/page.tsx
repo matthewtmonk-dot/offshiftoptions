@@ -383,7 +383,12 @@ export default async function DashboardPage() {
                 <Initials name={message.sender.name} />
                 <div className="min-w-0">
                   <div className="text-base font-medium text-zinc-100">
-                    {message.sender.name} {message.ticker ? <span className="text-emerald-300">${message.ticker}</span> : null}
+                    {message.sender.name}{" "}
+                    {message.ticker ? (
+                      <IntentPrefetchLink href="/research" className="text-emerald-300 hover:text-emerald-200" title={`Open ${message.ticker} in Research`}>
+                        ${message.ticker}
+                      </IntentPrefetchLink>
+                    ) : null}
                   </div>
                   <EventTime value={message.createdAt} asOf={renderedAt} />
                   <div className="break-words whitespace-pre-wrap text-base leading-relaxed text-zinc-300">{message.body || "Shared an image — open Chat to view."}</div>
