@@ -168,6 +168,24 @@ export async function getScannerPageData(userId: string) {
 }
 
 /**
+ * Covered Call scanner universe (Covered Call Phase 4, see PROJECT_HANDOFF.md) - deliberately
+ * NOT a market-wide query: only this user's OWN ASSIGNED campaigns, never a buddy's shared ones
+ * (selling a covered call is a personal financial decision on shares only this user owns), and
+ * never scoped by anything other than ownerId - a campaign belonging to another user or a
+ * different account can never appear here regardless of visibility settings.
+ */
+export async function getAssignedCampaignsForCoveredCallScanForUser(userId: string) {
+  return prisma.campaign.findMany({
+    where: { ownerId: userId, status: "ASSIGNED" },
+    orderBy: { ticker: "asc" },
+    include: {
+      account: { select: { id: true, name: true } },
+      events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] },
+    },
+  });
+}
+
+/**
  * Research (formerly "Watchlist") - a user's personal judgment of tickers as company/trade
  * candidates. Returns the user's own items (all statuses/visibilities), any buddy items
  * explicitly shared with this user (never merged with the viewer's own - see

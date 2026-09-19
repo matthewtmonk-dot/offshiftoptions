@@ -1014,7 +1014,7 @@ function CampaignCard({
                 </div>
                 {campaign.status === "OPEN" ? <CampaignActionForms campaignId={campaign.id} /> : null}
                 {campaign.status === "ASSIGNED" ? (
-                  <AssignedStockActionForms campaignId={campaign.id} sharesHeld={summary.sharesHeld} openCall={openCall} asOf={asOf} />
+                  <AssignedStockActionForms campaignId={campaign.id} ticker={campaign.ticker} sharesHeld={summary.sharesHeld} openCall={openCall} asOf={asOf} />
                 ) : null}
               </div>
             ) : null}
@@ -1085,11 +1085,13 @@ function CampaignActionForms({ campaignId }: { campaignId: string }) {
  */
 function AssignedStockActionForms({
   campaignId,
+  ticker,
   sharesHeld,
   openCall,
   asOf,
 }: {
   campaignId: string;
+  ticker: string;
   sharesHeld: number;
   openCall: CurrentOpenCall | null;
   asOf: Date;
@@ -1105,6 +1107,16 @@ function AssignedStockActionForms({
       </p>
       {!openCall ? (
         <>
+          {maxCallContracts > 0 ? (
+            <IntentPrefetchLink
+              href={`/scanner?mode=covered-calls&ticker=${encodeURIComponent(ticker)}`}
+              className={`${tinyButtonClass} lg:col-span-2 w-fit`}
+              data-testid="find-covered-call-link"
+            >
+              <Target className="size-3.5" aria-hidden />
+              Find Covered Call
+            </IntentPrefetchLink>
+          ) : null}
           {maxCallContracts > 0 ? (
             <form action={sellCoveredCallAction} className="space-y-2 border-l border-zinc-800 pl-3">
               <input type="hidden" name="returnTo" value="/positions" />

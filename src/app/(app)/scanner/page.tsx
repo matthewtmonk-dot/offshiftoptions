@@ -21,14 +21,19 @@ import { prisma } from "@/lib/prisma";
 import { shortCalendarDate } from "@/lib/format";
 import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
 import { ensureMyLstScannerProfileForUser } from "@/lib/workflows";
+import { getCoveredCallScanForUser } from "@/lib/covered-call-scanner";
 import { runDemoScannerAction } from "../actions";
+import { CoveredCallScannerSection } from "./covered-call-scanner-section";
 import { LiveScanButton } from "./live-scan-button";
+import { ScannerModeTabs, type ScannerMode } from "./scanner-mode-tabs";
 import { ScannerWorkspace } from "./scanner-workspace";
 
 export const dynamic = "force-dynamic";
 
 type ScannerSearchParams = {
   error?: string;
+  mode?: string;
+  ticker?: string;
 };
 
 const ruleOrder = new Map(SCANNER_RULE_DEFINITIONS.map((definition, index) => [definition.name, index]));
@@ -125,6 +130,24 @@ export default async function ScannerPage({
   const user = await requireCurrentUser();
 
   const params = await searchParams;
+  const mode: ScannerMode = params.mode === "covered-calls" ? "covered-calls" : "csp";
+
+  // Covered Call mode is a deliberately separate path (see PROJECT_HANDOFF.md's Covered Call
+  // Phase 4) - it never loads the CSP scanner's own data bundle (loadScannerPageBundle below),
+  // so viewing one mode never makes the other mode's Schwab/DB calls.
+  if (mode === "covered-calls") {
+    const scan = await getCoveredCallScanForUser(user.id);
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-2xl font-semibold text-zinc-50">Scanner</h1>
+          <ScannerModeTabs mode={mode} />
+        </div>
+        <CoveredCallScannerSection scan={scan} highlightTicker={params.ticker ?? null} />
+      </div>
+    );
+  }
+
   const [initialProfile, buddies, researchItems, technicalFreshness] = await loadScannerPageBundle(user.id);
   let profile = initialProfile;
   if (!profile) {
@@ -171,6 +194,7 @@ export default async function ScannerPage({
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <ScannerModeTabs mode={mode} />
           <LiveScanButton />
           <IntentPrefetchLink
             href="/scanner/settings"

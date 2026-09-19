@@ -635,8 +635,12 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const LIQUIDITY_GATE_KEYS = ["optionBid", "openInterest", "spreadPercent"] as const;
 const OTHER_OPTION_GATE_KEYS = ["delta"] as const;
 
-/** Expiration preference is independent of rule scoring and hard DTE eligibility. */
-function compareExpirations(left: { dte: number; expiration: string }, right: { dte: number; expiration: string }) {
+/**
+ * Expiration preference is independent of rule scoring and hard DTE eligibility - shared verbatim
+ * with the Covered Call scanner (src/domain/scanner/covered-call-scan.ts) so both strategies pick
+ * "closest to weekly target" the exact same way, per PROJECT_HANDOFF.md's Covered Call Phase 4.
+ */
+export function compareExpirations(left: { dte: number; expiration: string }, right: { dte: number; expiration: string }) {
   return Math.abs(left.dte - WEEKLY_TARGET_DTE) - Math.abs(right.dte - WEEKLY_TARGET_DTE)
     || right.dte - left.dte
     || compareText(left.expiration, right.expiration);
@@ -782,7 +786,9 @@ function bestPutValues(
   };
 }
 
-function passesEnabledGate(values: Record<string, number | string | boolean | null | undefined>, rules: ScannerRule[], key: string): boolean {
+/** Shared with the Covered Call scanner (see compareExpirations above) - same "disabled rule never
+ * excludes, UNKNOWN never excludes, only a definite FAIL excludes" semantics for either strategy. */
+export function passesEnabledGate(values: Record<string, number | string | boolean | null | undefined>, rules: ScannerRule[], key: string): boolean {
   const rule = rules.find((candidate) => candidate.key === key);
   if (!rule) {
     return true; // rule disabled - never a hidden exclusion
