@@ -69,3 +69,20 @@ export function formatOccOptionSymbol(parsed: ParsedOccOptionSymbol): string {
   const optionLabel = parsed.optionType === "PUT" ? "Put" : "Call";
   return `${parsed.underlying} · ${formatOccExpiration(parsed.expiration)} · ${formatOccStrike(parsed.strike)} ${optionLabel}`;
 }
+
+/**
+ * Constructs the raw, machine-matchable OCC-style symbol Schwab uses in BrokerRecord.symbol
+ * (the exact mirror-image operation of parseOccOptionSymbol), e.g.
+ * formatOccSymbol("RIOT", new Date("2026-09-04"), 17.5, "PUT") -> "RIOT 260904P00017500".
+ * Shared, option-type-generic primitive so a put-side and a covered-call-side reconciliation
+ * path can each reconstruct a campaign's expected contract symbol without duplicating this
+ * date/strike-padding arithmetic per caller.
+ */
+export function formatOccSymbol(underlying: string, expiration: Date, strike: number, optionType: "PUT" | "CALL"): string {
+  const year = String(expiration.getUTCFullYear() % 100).padStart(2, "0");
+  const month = String(expiration.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(expiration.getUTCDate()).padStart(2, "0");
+  const flag = optionType === "PUT" ? "P" : "C";
+  const strikeDigits = String(Math.round(strike * 1000)).padStart(8, "0");
+  return `${underlying} ${year}${month}${day}${flag}${strikeDigits}`;
+}

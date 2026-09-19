@@ -78,6 +78,10 @@ export type SchwabSyncDiagnostics = {
   campaignsExpired: number;
   expirationsDeferred?: number;
   expirationDeferralReason?: "EXPIRATION_EVIDENCE_INCOMPLETE" | null;
+  /** Covered Call Phase 3B - Sell to Open / Buy to Close only (see covered-call-reconciliation.ts).
+   * Optional/absent in diagnostics recorded before this phase existed. */
+  coveredCallsOpened?: number;
+  coveredCallsClosed?: number;
   /** Whether campaign reconciliation ran to completion for every synced account - distinct from
    * the campaign counts above legitimately all being 0. */
   reconciliationStatus: "OK" | "ERROR";

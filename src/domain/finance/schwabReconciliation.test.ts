@@ -4,8 +4,10 @@ import {
   type SchwabReconciliationEvidence,
   type ReconciliationPosition,
   findClosingEvidence,
+  findCoveredCallCloseEvidence,
   findRollPairedOpeningTransactionIds,
   isConfirmedExpiredWorthless,
+  parseOpeningCallTransaction,
   parseOpeningPutTransaction,
   type ReconciliationTransaction,
 } from "./schwabReconciliation";
@@ -349,5 +351,95 @@ describe("expiration evidence completeness", () => {
     evidence.transactions.from = new Date("2026-08-01");
     evidence.transactions.to = new Date("2026-09-05");
     expect(evaluateWorthlessExpiration({ ...input, evidence })).toEqual(incomplete);
+  });
+});
+
+describe("parseOpeningCallTransaction", () => {
+  function callTransaction(overrides: Partial<ReconciliationTransaction> = {}): ReconciliationTransaction {
+    return transaction({ symbol: "APLD 260904C00023500", ...overrides });
+  }
+
+  it("parses a clean Sell to Open call into an openable covered-call leg", () => {
+    const opening = parseOpeningCallTransaction(callTransaction());
+    expect(opening).toMatchObject({
+      transactionId: "txn-1",
+      underlying: "APLD",
+      symbol: "APLD 260904C00023500",
+      strike: 23.5,
+      contracts: 1,
+      premium: 0.28,
+      fees: 0,
+    });
+    expect(opening?.expiration).toEqual(new Date(Date.UTC(2026, 8, 4)));
+  });
+
+  it("returns null for anything other than Sell to Open", () => {
+    expect(parseOpeningCallTransaction(callTransaction({ action: "Buy to Close" }))).toBeNull();
+    expect(parseOpeningCallTransaction(callTransaction({ action: "Sell to Close" }))).toBeNull();
+    expect(parseOpeningCallTransaction(callTransaction({ action: null }))).toBeNull();
+  });
+
+  it("returns null for a put instead of a call - puts flow through the existing put path", () => {
+    expect(parseOpeningCallTransaction(transaction())).toBeNull();
+  });
+
+  it("returns null when quantity or price is missing rather than guessing the leg's terms", () => {
+    expect(parseOpeningCallTransaction(callTransaction({ quantity: null }))).toBeNull();
+    expect(parseOpeningCallTransaction(callTransaction({ quantity: 0 }))).toBeNull();
+    expect(parseOpeningCallTransaction(callTransaction({ price: null }))).toBeNull();
+    expect(parseOpeningCallTransaction(callTransaction({ price: 0 }))).toBeNull();
+  });
+
+  it("returns null for an unparseable or malformed OCC symbol", () => {
+    expect(parseOpeningCallTransaction(callTransaction({ symbol: "not-a-symbol" }))).toBeNull();
+    expect(parseOpeningCallTransaction(callTransaction({ symbol: null }))).toBeNull();
+  });
+
+  it("returns null when occurredAt is missing", () => {
+    expect(parseOpeningCallTransaction(callTransaction({ occurredAt: null }))).toBeNull();
+  });
+
+  it("takes the absolute value of quantity/price/fees, matching the put side's convention", () => {
+    const opening = parseOpeningCallTransaction(callTransaction({ quantity: -2, price: -0.3, fees: -0.66 }));
+    expect(opening).toMatchObject({ contracts: 2, premium: 0.3, fees: 0.66 });
+  });
+});
+
+describe("findCoveredCallCloseEvidence", () => {
+  const leg = { symbol: "APLD 260904C00023500", contracts: 1 };
+
+  it("finds an exact Buy to Close on the open call's contract at the full open quantity", () => {
+    const close = transaction({ id: "close-1", symbol: "APLD 260904C00023500", action: "Buy to Close", quantity: 1, price: 0.1, fees: 0.66 });
+    const evidence = findCoveredCallCloseEvidence(leg, [close]);
+    expect(evidence).toEqual({ kind: "CLOSE", transactionId: "close-1", occurredAt: close.occurredAt, premium: 0.1, fees: 0.66 });
+  });
+
+  it("ignores a Buy to Close on a different strike/expiration (not the same OCC contract)", () => {
+    const wrongStrike = transaction({ symbol: "APLD 260904C00025000", action: "Buy to Close", quantity: 1, price: 0.1 });
+    expect(findCoveredCallCloseEvidence(leg, [wrongStrike])).toEqual({ kind: "NONE" });
+
+    const wrongExpiration = transaction({ symbol: "APLD 260911C00023500", action: "Buy to Close", quantity: 1, price: 0.1 });
+    expect(findCoveredCallCloseEvidence(leg, [wrongExpiration])).toEqual({ kind: "NONE" });
+  });
+
+  it("does not auto-match a partial-quantity close when the manual workflow only supports a full-leg close", () => {
+    const twoOpen = { symbol: "APLD 260904C00023500", contracts: 2 };
+    const partialClose = transaction({ symbol: "APLD 260904C00023500", action: "Buy to Close", quantity: 1, price: 0.1 });
+    expect(findCoveredCallCloseEvidence(twoOpen, [partialClose])).toEqual({ kind: "NONE" });
+  });
+
+  it("does not match a close for MORE contracts than are open either", () => {
+    const overClose = transaction({ symbol: "APLD 260904C00023500", action: "Buy to Close", quantity: 3, price: 0.1 });
+    expect(findCoveredCallCloseEvidence(leg, [overClose])).toEqual({ kind: "NONE" });
+  });
+
+  it("returns NONE when no Buy to Close exists for this contract", () => {
+    expect(findCoveredCallCloseEvidence(leg, [transaction({ action: "Sell to Open" })])).toEqual({ kind: "NONE" });
+    expect(findCoveredCallCloseEvidence(leg, [])).toEqual({ kind: "NONE" });
+  });
+
+  it("ignores a Buy to Close missing occurredAt or price", () => {
+    const noPrice = transaction({ symbol: "APLD 260904C00023500", action: "Buy to Close", quantity: 1, price: null });
+    expect(findCoveredCallCloseEvidence(leg, [noPrice])).toEqual({ kind: "NONE" });
   });
 });

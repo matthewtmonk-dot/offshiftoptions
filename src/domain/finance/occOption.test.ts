@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { formatOccExpiration, formatOccOptionSymbol, formatOccStrike, isSameOccContract, occContractKey, parseOccOptionSymbol } from "./occOption";
+import {
+  formatOccExpiration,
+  formatOccOptionSymbol,
+  formatOccStrike,
+  formatOccSymbol,
+  isSameOccContract,
+  occContractKey,
+  parseOccOptionSymbol,
+} from "./occOption";
 
 describe("parseOccOptionSymbol", () => {
   it("parses a single-space short-put OCC symbol", () => {
@@ -62,5 +70,24 @@ describe("OCC contract identity", () => {
   it("never equates two failed parses", () => {
     expect(isSameOccContract(null, null)).toBe(false);
     expect(isSameOccContract("invalid", "invalid")).toBe(false);
+  });
+});
+
+describe("formatOccSymbol", () => {
+  it("constructs the raw OCC symbol for a put, matching Schwab's format", () => {
+    expect(formatOccSymbol("RIOT", new Date(Date.UTC(2026, 8, 4)), 17.5, "PUT")).toBe("RIOT 260904P00017500");
+  });
+
+  it("constructs the raw OCC symbol for a call", () => {
+    expect(formatOccSymbol("APLD", new Date(Date.UTC(2026, 8, 4)), 23.5, "CALL")).toBe("APLD 260904C00023500");
+  });
+
+  it("round-trips through parseOccOptionSymbol for both put and call", () => {
+    for (const optionType of ["PUT", "CALL"] as const) {
+      const symbol = formatOccSymbol("CORZ", new Date(Date.UTC(2026, 8, 18)), 16.5, optionType);
+      const parsed = parseOccOptionSymbol(symbol);
+      expect(parsed).toMatchObject({ underlying: "CORZ", optionType, strike: 16.5 });
+      expect(parsed?.expiration).toEqual(new Date(Date.UTC(2026, 8, 18)));
+    }
   });
 });

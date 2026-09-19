@@ -96,6 +96,7 @@ import {
   skipBrokerReconciliationForUser,
 } from "@/lib/broker-reconciliation";
 import { reconcileSchwabActivityForUser } from "@/lib/campaign-reconciliation";
+import { reconcileSchwabCoveredCallActivityForUser } from "@/lib/covered-call-reconciliation";
 import { ValidationError, requireTicker } from "@/lib/tickers";
 import {
   runAlphaVantageOverviewDiagnostic,
@@ -1136,6 +1137,8 @@ export async function syncSchwabAccountAction() {
   const campaignTotals = { campaignsCreated: 0, campaignsClosed: 0, campaignsRolled: 0, campaignsAssigned: 0, campaignsExpired: 0 };
   let expirationsDeferred = 0;
   let expirationDeferralReason: "EXPIRATION_EVIDENCE_INCOMPLETE" | null = null;
+  let coveredCallsOpened = 0;
+  let coveredCallsClosed = 0;
   let reconciliationStatus: "OK" | "ERROR" = "OK";
   let reconciliationErrorCode: string | null = null;
   for (const account of result.accounts) {
@@ -1148,6 +1151,10 @@ export async function syncSchwabAccountAction() {
       campaignTotals.campaignsExpired += summary.campaignsExpired;
       expirationsDeferred += summary.expirationsDeferred;
       expirationDeferralReason = summary.expirationDeferralReason ?? expirationDeferralReason;
+
+      const coveredCallSummary = await reconcileSchwabCoveredCallActivityForUser(user.id, account.id);
+      coveredCallsOpened += coveredCallSummary.coveredCallsOpened;
+      coveredCallsClosed += coveredCallSummary.coveredCallsClosed;
     } catch (error) {
       // Balance sync above already succeeded and is durable - a reconciliation hiccup for one
       // account just means it catches up on the next successful sync, not a failed sync.
@@ -1167,6 +1174,8 @@ export async function syncSchwabAccountAction() {
     ...campaignTotals,
     expirationsDeferred,
     expirationDeferralReason,
+    coveredCallsOpened,
+    coveredCallsClosed,
     reconciliationStatus,
     reconciliationErrorCode,
   });
@@ -1176,7 +1185,9 @@ export async function syncSchwabAccountAction() {
     campaignTotals.campaignsClosed +
     campaignTotals.campaignsRolled +
     campaignTotals.campaignsAssigned +
-    campaignTotals.campaignsExpired;
+    campaignTotals.campaignsExpired +
+    coveredCallsOpened +
+    coveredCallsClosed;
 
   revalidatePath("/account");
   revalidatePath("/dashboard");

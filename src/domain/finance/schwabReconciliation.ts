@@ -109,6 +109,105 @@ export function findRollPairedOpeningTransactionIds(candidates: ReconciliationTr
   return reserved;
 }
 
+export type ParsedCallOpen = {
+  transactionId: string;
+  underlying: string;
+  symbol: string;
+  strike: number;
+  expiration: Date;
+  contracts: number;
+  premium: number;
+  fees: number;
+  occurredAt: Date;
+};
+
+/**
+ * The CALL-side twin of parseOpeningPutTransaction - identical evidence requirements (classified
+ * SELL_TO_OPEN, a parseable OCC symbol, positive contracts, a real nonzero price) so a covered
+ * call is held to exactly the same standard of proof as a put. Deliberately does NOT create a
+ * campaign the way the put twin does: a covered call is only ever attached to an
+ * already-ASSIGNED campaign with sufficient held shares, never used to fabricate one - see
+ * reconcileSchwabCoveredCallActivityForUser in src/lib/covered-call-reconciliation.ts.
+ */
+export function parseOpeningCallTransaction(transaction: ReconciliationTransaction): ParsedCallOpen | null {
+  if (classifyBrokerTransactionAction(transaction.action) !== "SELL_TO_OPEN") {
+    return null;
+  }
+  if (!transaction.symbol || !transaction.occurredAt) {
+    return null;
+  }
+
+  const leg = parseOccOptionSymbol(transaction.symbol);
+  if (!leg || leg.optionType !== "CALL") {
+    return null;
+  }
+
+  const contracts = transaction.quantity !== null ? Math.round(Math.abs(transaction.quantity)) : null;
+  if (!contracts || contracts <= 0) {
+    return null;
+  }
+
+  if (transaction.price === null || !Number.isFinite(transaction.price) || transaction.price === 0) {
+    return null;
+  }
+
+  return {
+    transactionId: transaction.id,
+    underlying: leg.underlying,
+    symbol: transaction.symbol,
+    strike: leg.strike,
+    expiration: leg.expiration,
+    contracts,
+    premium: Math.abs(transaction.price),
+    fees: transaction.fees !== null ? Math.abs(transaction.fees) : 0,
+    occurredAt: transaction.occurredAt,
+  };
+}
+
+export type CoveredCallClosingEvidence =
+  | { kind: "CLOSE"; transactionId: string; occurredAt: Date; premium: number; fees: number }
+  | { kind: "NONE" };
+
+/**
+ * Looks for a Buy to Close on an open covered call's exact OCC contract, matching the FULL open
+ * quantity only - deliberately much simpler than findClosingEvidence (no roll pairing, no
+ * assignment fallback): covered-call rolls and call assignment/called-away detection are both
+ * out of scope for this phase (see PROJECT_HANDOFF.md's Covered Call Phase 3A audit - the equity
+ * transferItem of an assignment is currently discarded during normalization, so that evidence
+ * cannot be trusted yet). closeCoveredCallForUser only supports closing the full open leg (see
+ * workflows.ts), so a Buy to Close for a different quantity than the open leg is deliberately
+ * treated as NONE - left unlinked for manual review - rather than guessing at a partial close.
+ */
+export function findCoveredCallCloseEvidence(
+  leg: { symbol: string; contracts: number },
+  candidates: ReconciliationTransaction[],
+): CoveredCallClosingEvidence {
+  const closeTxn = candidates.find(
+    (transaction) =>
+      isSameOccContract(transaction.symbol, leg.symbol) &&
+      classifyBrokerTransactionAction(transaction.action) === "BUY_TO_CLOSE" &&
+      transaction.occurredAt &&
+      transaction.price !== null,
+  );
+
+  if (!closeTxn) {
+    return { kind: "NONE" };
+  }
+
+  const contracts = closeTxn.quantity !== null ? Math.round(Math.abs(closeTxn.quantity)) : null;
+  if (!contracts || contracts <= 0 || contracts !== leg.contracts) {
+    return { kind: "NONE" };
+  }
+
+  return {
+    kind: "CLOSE",
+    transactionId: closeTxn.id,
+    occurredAt: closeTxn.occurredAt!,
+    premium: Math.abs(closeTxn.price!),
+    fees: closeTxn.fees !== null ? Math.abs(closeTxn.fees) : 0,
+  };
+}
+
 export type ClosingEvidence =
   | { kind: "CLOSE"; transactionId: string; occurredAt: Date; premium: number; fees: number }
   | {
