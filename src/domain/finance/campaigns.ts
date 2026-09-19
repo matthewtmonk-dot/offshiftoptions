@@ -23,6 +23,9 @@ export type CampaignEventInput = {
   type: CampaignEventKind;
   occurredAt: Date | string;
   sortOrder?: unknown;
+  /** Row-creation timestamp - used only as a determinism tiebreak in compareEvents, never for
+   * accounting. Optional because older in-repo test fixtures construct events without it. */
+  createdAt?: Date | string | null;
   groupKey?: string | null;
   optionType?: "PUT" | "CALL" | null;
   contracts?: unknown;
@@ -63,7 +66,17 @@ export type CampaignFinancialSummary = {
   realizedPL: number | null;
   unrealizedPL: number | null;
   totalCampaignPL: number | null;
+  /** Historical high-water mark of cash secured over the campaign's whole life (a roll to a
+   * lower strike never reduces this) - the intentional denominator for realized/projected
+   * return-on-collateral in performance.ts. Never use this for "how much is secured RIGHT NOW";
+   * see currentCollateralCommitted for that. */
   collateralCommitted: number | null;
+  /** Cash secured by the campaign's CURRENTLY open put only (getCurrentOpenPut's strike x
+   * contracts x 100) - null once there is no open put (closed, assigned, expired). This is what
+   * an OPEN campaign is actually holding cash against today, which after a roll can be higher OR
+   * lower than collateralCommitted's historical max. Use this (not collateralCommitted) for any
+   * "currently secured capital" display, e.g. the Dashboard's Secured (CSP) stat. */
+  currentCollateralCommitted: number | null;
   adjustedBasis: number | null;
   sharesHeld: number;
   finalResult: CampaignFinalResult;
@@ -207,6 +220,11 @@ export function summarizeCampaign({
     unknowns.push("Open assigned shares need a current stock price for total campaign P/L.");
   }
 
+  const currentOpenPut = getCurrentOpenPut(orderedEvents);
+  const currentCollateralCommitted = currentOpenPut
+    ? round(currentOpenPut.strike * currentOpenPut.contracts * OPTION_MULTIPLIER, 2)
+    : null;
+
   return {
     openedAt,
     closedAt,
@@ -224,13 +242,14 @@ export function summarizeCampaign({
     unrealizedPL,
     totalCampaignPL,
     collateralCommitted,
+    currentCollateralCommitted,
     adjustedBasis,
     sharesHeld,
     finalResult: finalResult(status, totalCampaignPL),
     currentStage: currentStage(
       status,
       lastTradeEvent?.type ?? null,
-      getCurrentOpenPut(orderedEvents)?.expiration ?? null,
+      currentOpenPut?.expiration ?? null,
       asOf,
       hasUnclosedCoveredCall(orderedEvents),
     ),
@@ -362,13 +381,40 @@ export function describeCallStrikeVsAdjustedBasis(strike: number, adjustedBasis:
   return { differenceDollars, differencePct, belowBasis: differenceDollars < 0 };
 }
 
+/**
+ * Ascending event order: occurredAt, then sortOrder, then two further deterministic tiebreaks
+ * (createdAt row-creation time, then id) so that two events tied on both occurredAt AND
+ * sortOrder (e.g. a roll's close/open pair recorded with a colliding sortOrder) always sort the
+ * same way regardless of the order the caller's array/query happened to hand them in. Without a
+ * final deterministic tiebreak, JS's stable sort just preserves *input* order for ties - and
+ * getCurrentOpenPut/currentStage reverse() that ordering to find "the last trade event," so an
+ * incoming array order that merely differs (e.g. two structurally different Prisma queries can
+ * return DB rows tied on ORDER BY keys in different physical order) can flip which event reads as
+ * "current." This is why the SAME campaign could ever look like it has a different open put
+ * depending only on which page queried it - never actually a different open-put algorithm.
+ */
 function compareEvents(left: CampaignEventInput, right: CampaignEventInput) {
   const dateDelta = toDate(left.occurredAt).getTime() - toDate(right.occurredAt).getTime();
   if (dateDelta !== 0) {
     return dateDelta;
   }
 
-  return (numeric(left.sortOrder) ?? 0) - (numeric(right.sortOrder) ?? 0);
+  const sortOrderDelta = (numeric(left.sortOrder) ?? 0) - (numeric(right.sortOrder) ?? 0);
+  if (sortOrderDelta !== 0) {
+    return sortOrderDelta;
+  }
+
+  const leftCreatedAt = left.createdAt ? toDate(left.createdAt).getTime() : null;
+  const rightCreatedAt = right.createdAt ? toDate(right.createdAt).getTime() : null;
+  if (leftCreatedAt !== null && rightCreatedAt !== null && leftCreatedAt !== rightCreatedAt) {
+    return leftCreatedAt - rightCreatedAt;
+  }
+
+  if (left.id !== undefined && right.id !== undefined && left.id !== right.id) {
+    return left.id < right.id ? -1 : 1;
+  }
+
+  return 0;
 }
 
 function daysBetween(start: Date, end: Date) {

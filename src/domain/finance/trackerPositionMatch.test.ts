@@ -209,6 +209,64 @@ describe("matchDashboardPositions (Dashboard duplicate-position dedup)", () => {
     });
   });
 
+  describe("acceptance example after a roll: PATH/ONON's NEW contract still totals $7,550, never $11,650", () => {
+    // Same four production positions as above, but PATH and ONON have since rolled to a new
+    // strike/expiration (Sep 25) while CORZ/HL stay on their original Sep 18 contract. The
+    // Dashboard bug this reproduces double-counted PATH+ONON's $1,400+$2,700 collateral because
+    // the tracked campaign it built still carried the STALE pre-roll strike/expiration (a
+    // getCurrentOpenPut ordering bug - see campaigns.test.ts - not a matching-logic bug): once
+    // the tracked campaign's contract fields are the CURRENT ones, matching here already works.
+    const acceptanceAccount = { id: "account-a", userId: "matt", externalAccountId: "broker-a" };
+    const rolledExpiration = new Date("2026-09-25");
+    const originalExpiration = new Date("2026-09-18");
+    const contracts = [
+      { ticker: "CORZ", strike: 16.5, expiration: originalExpiration },
+      { ticker: "HL", strike: 18, expiration: originalExpiration },
+      { ticker: "PATH", strike: 14, expiration: rolledExpiration },
+      { ticker: "ONON", strike: 27, expiration: rolledExpiration },
+    ];
+    const occSymbol = (ticker: string, expiration: Date, strike: number) =>
+      `${ticker} ${expiration.toISOString().slice(2, 10).replace(/-/g, "")}P${String(Math.round(strike * 1000)).padStart(8, "0")}`;
+
+    const acceptanceCampaigns: TrackedPut[] = contracts.map((contract) => ({
+      id: `campaign-${contract.ticker}`, ownerId: "matt", accountId: "account-a", ticker: contract.ticker,
+      status: "OPEN", strike: contract.strike, expiration: contract.expiration, contracts: 1,
+    }));
+    const acceptancePositions = contracts.map((contract) => ({
+      accountId: "broker-a", symbol: occSymbol(contract.ticker, contract.expiration, contract.strike), quantity: -1,
+      marketValue: -100, linkedCampaignId: null as string | null,
+    }));
+
+    it("matches all four positions EXACT to their own campaign - PATH/ONON's rolled contract included - none stay additive", () => {
+      const results = matchDashboardPositions("matt", acceptancePositions, [acceptanceAccount], acceptanceCampaigns);
+      expect(results.map((result) => result.disposition)).toEqual(["EXACT", "EXACT", "EXACT", "EXACT"]);
+      expect(new Set(results.map((result) => result.confirmedCampaignId))).toEqual(new Set(acceptanceCampaigns.map((campaign) => campaign.id)));
+    });
+
+    it("campaign collateral ($7,550, using PATH/ONON's NEW strikes) plus matched-position collateral ($0) totals $7,550, not $11,650", () => {
+      const results = matchDashboardPositions("matt", acceptancePositions, [acceptanceAccount], acceptanceCampaigns);
+      const additive = results
+        .filter((result): result is typeof result & { disposition: "AMBIGUOUS" | "NONE" } => result.disposition === "AMBIGUOUS" || result.disposition === "NONE")
+        .map((result) => result.position);
+      expect(additive).toHaveLength(0);
+
+      const campaignCollateral = acceptanceCampaigns.reduce((sum, campaign) => sum + campaign.strike * campaign.contracts * 100, 0);
+      expect(campaignCollateral).toBe(7550);
+
+      const fixedBrokerCollateral = summarizeCspSecuredCapital(additive).total;
+      expect(fixedBrokerCollateral).toBe(0);
+      expect(campaignCollateral + fixedBrokerCollateral).toBe(7550);
+
+      // The regression this fixes, made concrete: if getCurrentOpenPut still fed PATH/ONON's
+      // STALE pre-roll strike/expiration into the tracked campaign, PATH/ONON's live post-roll
+      // Schwab positions would find no matching candidate (NONE) and double their $1,400+$2,700
+      // collateral on top of the campaign side, producing Matt's reported $11,650.
+      const oldBuggyBrokerCollateral = summarizeCspSecuredCapital(acceptancePositions).total;
+      expect(oldBuggyBrokerCollateral).toBe(7550);
+      expect(campaignCollateral + oldBuggyBrokerCollateral).toBe(15100);
+    });
+  });
+
   it("processes multiple positions independently in one batch - one ambiguous position never affects another's clean match", () => {
     const corz = positionInput({ symbol: "CORZ  260918P00016500", accountId: "broker-a" });
     const hl = positionInput({ symbol: "HL  260918P00018000", accountId: "broker-a" });

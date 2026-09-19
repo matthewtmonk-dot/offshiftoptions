@@ -260,6 +260,71 @@ describe("getCurrentOpenPut", () => {
   it("returns null for an empty event list", () => {
     expect(getCurrentOpenPut([])).toBeNull();
   });
+
+  describe("deterministic ordering when a roll's close/open pair ties on BOTH occurredAt and sortOrder", () => {
+    // Reproduces the exact production bug: a rolled campaign (PATH/ONON-shaped - STO old put,
+    // BTC old put, STO new put) whose ROLL_PUT_CLOSE/ROLL_PUT_OPEN share the same occurredAt AND
+    // the same sortOrder. Without a deterministic tertiary tiebreak, JS's stable sort + reverse()
+    // would pick whichever of the two happened to come LAST in the caller's input array - so the
+    // Dashboard and Tracker, running structurally different Prisma queries, could each see a
+    // different "current" contract for the identical underlying data. createdAt (row-creation
+    // order) makes the true insert order win regardless of input array order.
+    const sellOld: CampaignEventInput = {
+      id: "evt-1", createdAt: "2026-09-01T14:00:00.000Z",
+      type: "SELL_PUT", occurredAt: "2026-09-01T14:00:00Z", sortOrder: 0,
+      strike: 15.5, contracts: 1, premium: 0.4, expiration: "2026-09-18",
+    };
+    const rollClose: CampaignEventInput = {
+      id: "evt-2", createdAt: "2026-09-15T14:00:05.000Z",
+      type: "ROLL_PUT_CLOSE", occurredAt: "2026-09-15T14:00:00Z", sortOrder: 1,
+      strike: 15.5, contracts: 1, premium: 0.7, expiration: "2026-09-18", groupKey: "roll1",
+    };
+    const rollOpen: CampaignEventInput = {
+      id: "evt-3", createdAt: "2026-09-15T14:00:06.000Z",
+      type: "ROLL_PUT_OPEN", occurredAt: "2026-09-15T14:00:00Z", sortOrder: 1,
+      strike: 14, contracts: 1, premium: 1.02, expiration: "2026-09-25", groupKey: "roll1",
+    };
+    const expectedOpenPut = { strike: 14, contracts: 1, expiration: new Date("2026-09-25") };
+
+    it("returns the new rolled contract regardless of the input array's order", () => {
+      expect(getCurrentOpenPut([sellOld, rollClose, rollOpen])).toEqual(expectedOpenPut);
+      expect(getCurrentOpenPut([rollOpen, rollClose, sellOld])).toEqual(expectedOpenPut);
+      expect(getCurrentOpenPut([rollClose, sellOld, rollOpen])).toEqual(expectedOpenPut);
+    });
+
+    it("falls back to id when createdAt is also absent/tied, still regardless of input order", () => {
+      const closeNoCreatedAt = { ...rollClose, createdAt: undefined };
+      const openNoCreatedAt = { ...rollOpen, createdAt: undefined };
+      expect(getCurrentOpenPut([sellOld, closeNoCreatedAt, openNoCreatedAt])).toEqual(expectedOpenPut);
+      expect(getCurrentOpenPut([openNoCreatedAt, closeNoCreatedAt, sellOld])).toEqual(expectedOpenPut);
+    });
+  });
+});
+
+describe("summarizeCampaign currentStage after a roll (production PATH/ONON regression)", () => {
+  // Old leg (Sep 18) has expired by asOf (Sep 19); the new rolled leg (Sep 25) has not. A
+  // correct implementation must report the CURRENT leg's stage, not "Expiration processing".
+  const events: CampaignEventInput[] = [
+    { id: "evt-1", createdAt: "2026-09-01T14:00:00.000Z", type: "SELL_PUT", occurredAt: "2026-09-01T14:00:00Z", sortOrder: 0, strike: 15.5, contracts: 1, premium: 0.4, expiration: "2026-09-18" },
+    { id: "evt-2", createdAt: "2026-09-15T14:00:05.000Z", type: "ROLL_PUT_CLOSE", occurredAt: "2026-09-15T14:00:00Z", sortOrder: 1, strike: 15.5, contracts: 1, premium: 0.7, expiration: "2026-09-18", groupKey: "roll1" },
+    { id: "evt-3", createdAt: "2026-09-15T14:00:06.000Z", type: "ROLL_PUT_OPEN", occurredAt: "2026-09-15T14:00:00Z", sortOrder: 1, strike: 14, contracts: 1, premium: 1.02, expiration: "2026-09-25", groupKey: "roll1" },
+  ];
+  const asOf = new Date("2026-09-19T15:00:00Z");
+
+  it("reports 'Rolled put', not 'Expiration processing', once the OLD leg is past but the NEW leg is not", () => {
+    const summary = summarizeCampaign({ status: "OPEN", events, asOf });
+    expect(summary.currentStage).toBe("Rolled put");
+  });
+
+  it("currentCollateralCommitted reflects the CURRENT (new) strike ($1,400), while collateralCommitted keeps its historical-max meaning ($1,550, the higher old strike)", () => {
+    const summary = summarizeCampaign({ status: "OPEN", events, asOf });
+    expect(summary.currentCollateralCommitted).toBe(1400);
+    expect(summary.collateralCommitted).toBe(1550);
+  });
+
+  it("still shows exactly Short 1 contract on the current leg after a one-contract roll", () => {
+    expect(getCurrentOpenPut(events)?.contracts).toBe(1);
+  });
 });
 
 describe("getCurrentOpenCall", () => {

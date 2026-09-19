@@ -9,6 +9,7 @@ import { money, percent } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
 import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
+import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { getLinkedCampaignIdsBySymbolForUser, normalizeSymbolForLinking } from "@/lib/broker-reconciliation";
 import { summarizeAccountPerformance, summarizeAccountsPerformance } from "@/domain/finance/accountLedger";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
@@ -89,6 +90,9 @@ export default async function DashboardPage() {
   // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
   // confirmed $0 in a Trading P/L figure - see getCampaignIdsWithUnknownFees.
   const unknownFeeCampaignIds = await getCampaignIdsWithUnknownFees(data.completedCampaigns.map((campaign) => campaign.id));
+  // Read-only: the same persisted BrokerConnection.lastAccountSyncAt the Tracker's "Your
+  // brokerage last synced" already shows (see positions/page.tsx) - never triggers a sync.
+  const schwabConnection = await getSchwabConnectionSummaryForUser(user.id);
 
   const completedPLByAccount = new Map<string, number>();
   const completedForPerformance = data.completedCampaigns.map((campaign) => {
@@ -135,7 +139,11 @@ export default async function DashboardPage() {
   let awaitingExpirationCount = 0;
   for (const campaign of data.openCampaigns) {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-    campaignSecuredCapital += summary.collateralCommitted ?? 0;
+    // currentCollateralCommitted (the CURRENTLY open put's own strike) - not collateralCommitted
+    // (a lifetime high-water mark meant for closed-campaign return-on-collateral math) - so a
+    // roll to a different strike is reflected immediately instead of showing a stale amount.
+    // Falls back to the historical max only once there is no open put left (e.g. assigned).
+    campaignSecuredCapital += summary.currentCollateralCommitted ?? summary.collateralCommitted ?? 0;
     if (summary.currentStage === "Expiration processing") {
       awaitingExpirationCount += 1;
     }
@@ -199,12 +207,19 @@ export default async function DashboardPage() {
         ) : (
           <span>Scanner run: never</span>
         )}
-        {latestBrokerSnapshotAt ? (
+        {schwabConnection?.lastAccountSyncAt ? (
           <span>
-            Brokerage synced: <EventTime value={latestBrokerSnapshotAt} asOf={renderedAt} />
+            Brokerage activity synced: <EventTime value={new Date(schwabConnection.lastAccountSyncAt)} asOf={renderedAt} />
           </span>
         ) : (
-          <span>Brokerage synced: never</span>
+          <span>Brokerage activity synced: never</span>
+        )}
+        {latestBrokerSnapshotAt ? (
+          <span>
+            Account balance snapshot: <EventTime value={latestBrokerSnapshotAt} asOf={renderedAt} />
+          </span>
+        ) : (
+          <span>Account balance snapshot: never</span>
         )}
       </div>
 
