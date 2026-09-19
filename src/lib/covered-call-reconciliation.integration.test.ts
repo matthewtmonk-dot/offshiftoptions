@@ -321,7 +321,10 @@ maybeDescribe("Schwab covered-call auto-reconciliation", () => {
     const summary = await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id);
     expect(summary.coveredCallsClosed).toBe(1);
 
-    const updated = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
+    const updated = await prisma.campaign.findUniqueOrThrow({
+      where: { id: campaign.id },
+      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+    });
     expect(updated.events.map((e) => e.type)).toEqual(["SELL_PUT", "ASSIGNMENT", "SELL_COVERED_CALL", "CLOSE_COVERED_CALL"]);
     expect((await prisma.brokerRecord.findUniqueOrThrow({ where: { id: closeTxn.id } })).linkedCampaignId).toBe(campaign.id);
   });

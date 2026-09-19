@@ -9,6 +9,7 @@ import type {
   BrokerTransactionCategory,
   BrokerTransactionCategoryOutcome,
   BrokerTransactionsResult,
+  BrokerTransferLeg,
 } from "@/providers/broker-read/types";
 import { SCHWAB_TRADER_BASE_URL } from "./config";
 import { schwabGetJson, type SchwabFetch } from "./client";
@@ -183,6 +184,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
       const symbol = stringValue(instrument?.symbol);
       const isOption = stringValue(instrument?.assetType) === "OPTION";
       const putCallRaw = stringValue(instrument?.putCall);
+      const transferLegs = normalizeTransferLegs(transaction);
 
       return {
         id,
@@ -204,6 +206,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         optionType: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
         strike: isOption ? numberValue(instrument?.strikePrice) : null,
         expiration: isOption ? dateValue(instrument?.optionExpirationDate) : null,
+        ...(transferLegs.length ? { transferLegs } : {}),
       };
     });
   }
@@ -292,6 +295,44 @@ function selectTradedSecurityTransferItem(transaction: Record<string, unknown>):
     }
   }
   return objectValue(items[0]);
+}
+
+/**
+ * Normalizes EVERY transferItem on a transaction (not just the one selectTradedSecurityTransferItem
+ * picks as the primary traded security) into BrokerTransferLeg - see that type's own doc comment
+ * for why this exists (Covered Call Phase 3C: preserve the equity leg of an assignment/exercise
+ * that the primary-item selection above would otherwise discard). Skips only entries that aren't
+ * objects at all; a fee-only item (feeType/cost, no instrument) still comes through with its
+ * instrument-derived fields null - it is not dropped, since it's still one of Schwab's own
+ * economically relevant transferItems for this transaction.
+ */
+function normalizeTransferLegs(transaction: Record<string, unknown>): BrokerTransferLeg[] {
+  return arrayValue(transaction.transferItems).flatMap((itemValue): BrokerTransferLeg[] => {
+    const item = objectValue(itemValue);
+    if (!item) {
+      return [];
+    }
+
+    const instrument = objectValue(item.instrument);
+    const isOption = stringValue(instrument?.assetType) === "OPTION";
+    const putCallRaw = stringValue(instrument?.putCall);
+
+    return [
+      {
+        assetType: stringValue(instrument?.assetType),
+        symbol: stringValue(instrument?.symbol),
+        underlyingSymbol: isOption ? stringValue(instrument?.underlyingSymbol) : null,
+        optionType: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
+        strike: isOption ? numberValue(instrument?.strikePrice) : null,
+        expiration: isOption ? dateValue(instrument?.optionExpirationDate) : null,
+        quantity: numberValue(item.amount),
+        price: numberValue(item.price),
+        cost: numberValue(item.cost),
+        instruction: stringValue(item.instruction),
+        positionEffect: stringValue(item.positionEffect),
+      },
+    ];
+  });
 }
 
 const INSTRUCTION_LABELS: Record<string, string> = {

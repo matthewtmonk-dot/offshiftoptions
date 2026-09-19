@@ -177,6 +177,68 @@ describe("Schwab CSV normalization", () => {
     });
   });
 
+  it("test 9: persists transferLegs (multi-leg evidence, Covered Call Phase 3C) into metadata without disturbing fingerprint/identityKey/reconciliationKey", () => {
+    const baseArgs = {
+      id: "txn-sto-legs",
+      accountId: accountHint,
+      symbol: "APLD 260904P00023500",
+      amount: 27.35,
+      occurredAt: new Date("2026-08-28T14:00:00.000Z"),
+      description: "Sell to Open",
+      action: "Sell to Open",
+      quantity: 1,
+      price: 0.28,
+      fees: 0.65,
+      underlyingSymbol: "APLD",
+      optionType: "PUT" as const,
+      strike: 23.5,
+      expiration: new Date("2026-09-04T00:00:00.000Z"),
+    };
+
+    const without = normalizeSchwabApiTransaction(baseArgs);
+    const withLegs = normalizeSchwabApiTransaction({
+      ...baseArgs,
+      transferLegs: [
+        {
+          assetType: "OPTION",
+          symbol: "APLD 260904P00023500",
+          underlyingSymbol: "APLD",
+          optionType: "PUT",
+          strike: 23.5,
+          expiration: new Date("2026-09-04T00:00:00.000Z"),
+          quantity: -1,
+          price: 0.28,
+          cost: null,
+          instruction: null,
+          positionEffect: "OPENING",
+        },
+      ],
+    });
+
+    // Additive only - identity/dedupe fields are completely unaffected by the presence of legs.
+    expect(withLegs.fingerprint).toBe(without.fingerprint);
+    expect(withLegs.identityKey).toBe(without.identityKey);
+    expect(withLegs.reconciliationKey).toBe(without.reconciliationKey);
+    expect(without.metadata).not.toHaveProperty("transferLegs");
+
+    const legs = (withLegs.metadata as { transferLegs?: unknown[] }).transferLegs;
+    expect(legs).toEqual([
+      {
+        assetType: "OPTION",
+        symbol: "APLD 260904P00023500",
+        underlyingSymbol: "APLD",
+        optionType: "PUT",
+        strike: 23.5,
+        expiration: "2026-09-04T00:00:00.000Z",
+        quantity: -1,
+        price: 0.28,
+        cost: null,
+        instruction: null,
+        positionEffect: "OPENING",
+      },
+    ]);
+  });
+
   it("uses Gain/Loss data to validate a completed campaign without adding realized P/L twice", () => {
     const closeTransactions = parseSchwabTransactionsCsv(fixture("transactions.csv"), { accountHint }).filter(
       (record) => record.symbol === "TOOL 260828P00016500",

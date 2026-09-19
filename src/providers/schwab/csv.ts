@@ -382,6 +382,14 @@ export function normalizeSchwabApiTransaction(transaction: BrokerTransaction): N
       strikePrice: transaction.strike ?? parsed?.strike ?? null,
       expiration: (transaction.expiration ?? parsed?.expiration)?.toISOString() ?? null,
       activityKind: classifyBrokerTransactionActivity({ action: transaction.action ?? null, description: transaction.description }),
+      // Covered Call Phase 3C - every economically relevant transferItem Schwab reported on this
+      // transaction (not just the single primary one selected above), so a discarded equity leg
+      // from an assignment/exercise is preserved for a later phase instead of lost. Purely
+      // additive evidence - nothing here drives any reconciliation decision in this phase. Absent
+      // entirely (not an empty array) when the transaction carried no transferItems at all.
+      ...(transaction.transferLegs?.length
+        ? { transferLegs: transaction.transferLegs.map((leg) => ({ ...leg, expiration: leg.expiration ? leg.expiration.toISOString() : null })) }
+        : {}),
     },
   };
 }

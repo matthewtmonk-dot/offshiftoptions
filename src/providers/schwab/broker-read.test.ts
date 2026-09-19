@@ -601,3 +601,192 @@ describe("SchwabBrokerReadProvider.getTransactions - real production transfer-it
     expect(transactions[0].action).not.toBe("Buy to Close");
   });
 });
+
+/**
+ * Covered Call Phase 3C: mapTransactionsPayload now also preserves EVERY transferItem on a
+ * transaction (transferLegs), not just the one selectTradedSecurityTransferItem picks as the
+ * primary traded security - so the equity leg of an assignment/exercise is no longer silently
+ * discarded before normalization. This is purely additive evidence: the existing single-leg
+ * fields (symbol/action/quantity/price/etc.) must keep meaning exactly what they meant before.
+ *
+ * SYNTHETIC FIXTURE WARNING: the real production shape Diagnostic D confirmed (realShapeOptionTransaction
+ * above) is proven for an ordinary option TRADE. No real Schwab CALL-assignment or PUT-assignment
+ * payload with an accompanying equity transferItem exists anywhere in this repo (see the Covered
+ * Call Phase 3A audit) - the multi-leg assignment/exercise fixtures below are hand-constructed for
+ * STRUCTURAL/PARSER testing only, based on the already-confirmed single-leg shapes (assignment
+ * text label, RECEIVE_AND_DELIVER type, instrument.assetType="EQUITY"). They are NOT proof of what
+ * Schwab actually sends for a real assignment - do not treat them as production-verified.
+ */
+describe("SchwabBrokerReadProvider.getTransactions - transferLegs (multi-leg evidence, Covered Call Phase 3C)", () => {
+  it("test 1/2: an ordinary single-security option trade (the real 5-transferItem production shape) still normalizes exactly as before", async () => {
+    const provider = transactionsProvider([
+      realShapeOptionTransaction({
+        activityId: "riot-sto-legs",
+        netAmount: 28,
+        time: "2026-08-31T14:02:00Z",
+        symbol: "RIOT 260904P00017500",
+        positionEffect: "OPENING",
+        amount: -1,
+        price: 0.28,
+        strikePrice: 17.5,
+        underlyingSymbol: "RIOT",
+        optionExpirationDate: "2026-09-04",
+      }),
+    ]);
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    // The existing single-leg fields are completely unchanged - still describe the OPTION leg.
+    expect(transactions[0]).toMatchObject({
+      symbol: "RIOT 260904P00017500",
+      action: "Sell to Open",
+      underlyingSymbol: "RIOT",
+      optionType: "PUT",
+      strike: 17.5,
+      price: 0.28,
+      fees: 0.66,
+    });
+    // test 3: all 5 real transferItems (4 cash/fee legs + 1 option leg) are preserved, not just
+    // the one selected as the primary traded security.
+    expect(transactions[0].transferLegs).toHaveLength(5);
+    const optionLeg = transactions[0].transferLegs!.find((leg) => leg.assetType === "OPTION");
+    expect(optionLeg).toMatchObject({
+      symbol: "RIOT 260904P00017500",
+      underlyingSymbol: "RIOT",
+      optionType: "PUT",
+      strike: 17.5,
+      expiration: new Date("2026-09-04"),
+      quantity: -1,
+      price: 0.28,
+      positionEffect: "OPENING",
+    });
+    const cashLegs = transactions[0].transferLegs!.filter((leg) => leg.assetType === "CURRENCY");
+    expect(cashLegs).toHaveLength(4);
+  });
+
+  it("test 9 (structural): a synthetic PUT-assignment-style transaction preserves both the option leg and a received-shares equity leg", async () => {
+    // SYNTHETIC - see file-level warning above. Modeled on the real "Removed - Expiration"
+    // RECEIVE_AND_DELIVER shape plus a hand-added equity transferItem representing shares
+    // received on assignment - not itself production-confirmed.
+    const provider = transactionsProvider(
+      [
+        {
+          activityId: "synthetic-put-assignment",
+          netAmount: 0,
+          time: "2026-09-11T21:00:00Z",
+          type: "RECEIVE_AND_DELIVER",
+          description: "Option Assignment",
+          transferItems: [
+            {
+              positionEffect: "CLOSING",
+              amount: -1,
+              price: 0,
+              instrument: {
+                symbol: "SYNP 260911P00040000",
+                assetType: "OPTION",
+                putCall: "PUT",
+                strikePrice: 40,
+                underlyingSymbol: "SYNP",
+                optionExpirationDate: "2026-09-11",
+              },
+            },
+            {
+              // test 4/5/6: equity leg - shares RECEIVED on a put assignment, positive quantity.
+              instruction: "BUY",
+              amount: 100,
+              price: 40,
+              instrument: { symbol: "SYNP", assetType: "EQUITY" },
+            },
+          ],
+        },
+      ],
+      { category: "RECEIVE_AND_DELIVER" },
+    );
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].transferLegs).toHaveLength(2);
+    const optionLeg = transactions[0].transferLegs!.find((leg) => leg.assetType === "OPTION");
+    const equityLeg = transactions[0].transferLegs!.find((leg) => leg.assetType === "EQUITY");
+
+    // test 7/8: option leg OCC details (underlying/strike/expiration/PUT) fully retained.
+    expect(optionLeg).toMatchObject({ symbol: "SYNP 260911P00040000", underlyingSymbol: "SYNP", optionType: "PUT", strike: 40, expiration: new Date("2026-09-11") });
+    // test 4/5/6: equity leg symbol/quantity/direction retained - positive = shares received.
+    expect(equityLeg).toMatchObject({ symbol: "SYNP", assetType: "EQUITY", quantity: 100, price: 40, instruction: "BUY", optionType: null, strike: null, expiration: null });
+  });
+
+  it("test 6/8 (structural): a synthetic CALL-assignment (called-away) transaction preserves a NEGATIVE (removed) equity leg quantity, distinct in sign from the PUT-assignment case", async () => {
+    // SYNTHETIC - see file-level warning above. No real called-away payload exists in this repo.
+    const provider = transactionsProvider(
+      [
+        {
+          activityId: "synthetic-call-assignment",
+          netAmount: 0,
+          time: "2026-09-11T21:00:00Z",
+          type: "RECEIVE_AND_DELIVER",
+          description: "Option Assignment",
+          transferItems: [
+            {
+              positionEffect: "CLOSING",
+              amount: -1,
+              price: 0,
+              instrument: {
+                symbol: "SYNC 260911C00045000",
+                assetType: "OPTION",
+                putCall: "CALL",
+                strikePrice: 45,
+                underlyingSymbol: "SYNC",
+                optionExpirationDate: "2026-09-11",
+              },
+            },
+            {
+              // Shares REMOVED (called away) - negative quantity, the opposite sign from a put
+              // assignment's received shares. Never inferred from optionType - this is a
+              // hand-constructed sign choice for structural testing, not observed evidence.
+              instruction: "SELL",
+              amount: -100,
+              price: 45,
+              instrument: { symbol: "SYNC", assetType: "EQUITY" },
+            },
+          ],
+        },
+      ],
+      { category: "RECEIVE_AND_DELIVER" },
+    );
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    const optionLeg = transactions[0].transferLegs!.find((leg) => leg.assetType === "OPTION");
+    const equityLeg = transactions[0].transferLegs!.find((leg) => leg.assetType === "EQUITY");
+
+    expect(optionLeg).toMatchObject({ optionType: "CALL", strike: 45 });
+    expect(equityLeg).toMatchObject({ symbol: "SYNC", quantity: -100, instruction: "SELL" });
+    // Direction is opposite the PUT-assignment fixture's +100 - never collapsed to abs().
+    expect(equityLeg!.quantity).toBeLessThan(0);
+  });
+
+  it("preserves a fee-only transferItem (no instrument at all) with null instrument-derived fields rather than dropping it", async () => {
+    const provider = transactionsProvider([
+      {
+        activityId: "fee-leg-txn",
+        netAmount: -13,
+        time: "2026-09-01T14:00:00Z",
+        transferItems: [
+          { instruction: "BUY_TO_CLOSE", amount: 1, price: 0.12, instrument: { symbol: "APLD 260904P00023500", assetType: "OPTION", putCall: "PUT", strikePrice: 23.5 } },
+          { feeType: "COMMISSION", cost: 0.65 },
+        ],
+      },
+    ]);
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].transferLegs).toHaveLength(2);
+    const feeLeg = transactions[0].transferLegs!.find((leg) => leg.cost !== null);
+    expect(feeLeg).toMatchObject({ assetType: null, symbol: null, quantity: null, price: null, cost: 0.65 });
+  });
+
+  it("omits transferLegs entirely for a transaction with no transferItems, rather than an empty array", async () => {
+    const provider = transactionsProvider([{ activityId: "cash-only", netAmount: 4.12, time: "2026-08-15T14:00:00Z", type: "SOME_UNRECOGNIZED_TYPE" }], {
+      category: "DIVIDEND_OR_INTEREST",
+    });
+
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-08-01"), new Date("2026-09-30"));
+    expect(transactions[0].transferLegs).toBeUndefined();
+  });
+});
