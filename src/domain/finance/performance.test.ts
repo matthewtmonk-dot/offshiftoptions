@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { CampaignEventInput } from "./campaigns";
 import {
   summarizeCampaignProgress,
   summarizeContributionAdjustedGoal,
@@ -215,7 +216,7 @@ describe("campaign progress accounting", () => {
     const progress = summarizeCampaignProgress({
       status: "OPEN",
       currentCostToClose: 20,
-      events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5 }],
+      events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5, expiration: "2026-08-14" }],
       asOf: new Date("2026-08-08"),
     });
 
@@ -230,9 +231,9 @@ describe("campaign progress accounting", () => {
       status: "OPEN",
       currentCostToClose: 55,
       events: [
-        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
-        { type: "ROLL_PUT_CLOSE", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8 },
-        { type: "ROLL_PUT_OPEN", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 29, contracts: 1, premium: 1.2 },
+        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5, expiration: "2026-08-08" },
+        { type: "ROLL_PUT_CLOSE", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8, expiration: "2026-08-08" },
+        { type: "ROLL_PUT_OPEN", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 29, contracts: 1, premium: 1.2, expiration: "2026-08-22" },
       ],
       asOf: new Date("2026-08-15"),
     });
@@ -249,9 +250,9 @@ describe("campaign progress accounting", () => {
       status: "OPEN",
       currentCostToClose: 120,
       events: [
-        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
-        { type: "ROLL_PUT_CLOSE", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8 },
-        { type: "ROLL_PUT_OPEN", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 29, contracts: 1, premium: 1.2 },
+        { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5, expiration: "2026-08-08" },
+        { type: "ROLL_PUT_CLOSE", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8, expiration: "2026-08-08" },
+        { type: "ROLL_PUT_OPEN", optionType: "PUT", occurredAt: "2026-08-08", groupKey: "roll-1", strike: 29, contracts: 1, premium: 1.2, expiration: "2026-08-22" },
       ],
     });
 
@@ -294,6 +295,138 @@ describe("campaign progress accounting", () => {
     expect(progress.currentPL).toBeNull();
     expect(progress.projectedOtmApplicable).toBe(false);
     expect(progress.projectedOtmPL).toBeNull();
+  });
+});
+
+describe("current-leg parity between campaign state and Performance (order-independence)", () => {
+  // Root cause of the reproduced bug: performance.ts carried its OWN private copy of the
+  // "what's the current open put" event-ordering logic (a private findOpenShortPut +
+  // compareEvents, independent of campaigns.ts's getCurrentOpenPut). A roll's
+  // ROLL_PUT_CLOSE/ROLL_PUT_OPEN pair sharing the same occurredAt AND sortOrder is a full tie
+  // under that comparator; JS's stable sort then just preserves whatever order the CALLER's
+  // array happened to be in, and reverse()-then-find() picks a different "last trade event"
+  // depending on that incidental order - even though nothing about the actual trade history
+  // changed. This produced the audited symptom: one ordering reported Current P/L $42 /
+  // Projected P/L $72, another ordering of the IDENTICAL events reported both as unavailable
+  // (null). campaigns.ts's own getCurrentOpenPut already carries a deterministic
+  // createdAt/id tiebreak (see the Dashboard post-roll staleness fix) - the bug was that
+  // Performance never used it.
+  const sellOld: CampaignEventInput = {
+    id: "evt-1",
+    createdAt: "2026-08-01T14:00:00.000Z",
+    type: "SELL_PUT",
+    optionType: "PUT",
+    occurredAt: "2026-08-01",
+    strike: 30,
+    contracts: 1,
+    premium: 0.3,
+    expiration: "2026-08-08",
+  };
+  const rollClose: CampaignEventInput = {
+    id: "evt-2",
+    createdAt: "2026-08-08T14:00:05.000Z",
+    type: "ROLL_PUT_CLOSE",
+    optionType: "PUT",
+    occurredAt: "2026-08-08",
+    sortOrder: 1,
+    groupKey: "roll-1",
+    strike: 30,
+    contracts: 1,
+    premium: 0.5,
+    expiration: "2026-08-08",
+  };
+  const rollOpen: CampaignEventInput = {
+    id: "evt-3",
+    createdAt: "2026-08-08T14:00:06.000Z",
+    type: "ROLL_PUT_OPEN",
+    optionType: "PUT",
+    occurredAt: "2026-08-08", // tied occurredAt with rollClose
+    sortOrder: 1, // AND tied sortOrder with rollClose - a full tie under the old comparator
+    groupKey: "roll-1",
+    strike: 29,
+    contracts: 1,
+    premium: 0.92,
+    expiration: "2026-08-22",
+  };
+  // netOptionPremium = (30 + 92) - 50 = 72; currentCostToClose 30 => currentPL = 42. Matches
+  // the audited example's approximate $42 current / $72 projected exactly.
+  const orderings: [string, CampaignEventInput[]][] = [
+    ["SELL, CLOSE, OPEN", [sellOld, rollClose, rollOpen]],
+    ["SELL, OPEN, CLOSE", [sellOld, rollOpen, rollClose]],
+    ["CLOSE, OPEN, SELL", [rollClose, rollOpen, sellOld]],
+    ["OPEN, CLOSE, SELL", [rollOpen, rollClose, sellOld]],
+    ["OPEN, SELL, CLOSE", [rollOpen, sellOld, rollClose]],
+    ["CLOSE, SELL, OPEN", [rollClose, sellOld, rollOpen]],
+  ];
+
+  it.each(orderings)(
+    "test 1/2/7: reports the same Current/Projected P/L regardless of input array order (%s) - a tied roll close/open pair",
+    (_label, events) => {
+      const progress = summarizeCampaignProgress({
+        status: "OPEN",
+        currentCostToClose: 30,
+        events,
+        asOf: new Date("2026-08-15"),
+      });
+
+      expect(progress.projectedOtmApplicable).toBe(true);
+      expect(progress.projectedOtmPL).toBe(72);
+      expect(progress.currentPL).toBe(42);
+    },
+  );
+
+  it("test 3: an OPEN (non-rolled) campaign's current leg is also order-independent", () => {
+    const a: CampaignEventInput = { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5, expiration: "2026-08-14" };
+    const b: CampaignEventInput = { type: "NOTE", occurredAt: "2026-08-03", notes: "watching earnings" };
+    const first = summarizeCampaignProgress({ status: "OPEN", currentCostToClose: 20, events: [a, b], asOf: new Date("2026-08-08") });
+    const second = summarizeCampaignProgress({ status: "OPEN", currentCostToClose: 20, events: [b, a], asOf: new Date("2026-08-08") });
+    expect(second).toEqual(first);
+    expect(first.currentPL).toBe(30);
+  });
+
+  it("test 4: a CLOSED campaign's realized P/L is order-independent and never derives a phantom open leg", () => {
+    const sell: CampaignEventInput = { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5, expiration: "2026-08-08" };
+    const close: CampaignEventInput = { type: "CLOSE_PUT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1, premium: 0.04 };
+    const first = summarizeCampaignProgress({ status: "CLOSED", events: [sell, close] });
+    const second = summarizeCampaignProgress({ status: "CLOSED", events: [close, sell] });
+    expect(second).toEqual(first);
+    expect(first.realizedPL).toBe(46);
+    expect(first.projectedOtmApplicable).toBe(false);
+    expect(first.projectedOtmPL).toBeNull();
+  });
+
+  it("test 5: an ASSIGNED campaign never reports an open put or OTM projection, order-independent", () => {
+    const sell: CampaignEventInput = { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5, expiration: "2026-08-08" };
+    const assignment: CampaignEventInput = { type: "ASSIGNMENT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1 };
+    const first = summarizeCampaignProgress({ status: "ASSIGNED", events: [sell, assignment] });
+    const second = summarizeCampaignProgress({ status: "ASSIGNED", events: [assignment, sell] });
+    expect(second).toEqual(first);
+    expect(first.currentPL).toBeNull();
+    expect(first.projectedOtmApplicable).toBe(false);
+    expect(first.projectedOtmPL).toBeNull();
+  });
+
+  it("test 6: an incomplete legacy SELL_PUT (missing expiration) never fabricates a valid current leg, in either order", () => {
+    const incompleteSell: CampaignEventInput = { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 }; // no expiration
+    const note: CampaignEventInput = { type: "NOTE", occurredAt: "2026-08-03", notes: "legacy row, imported without an expiration" };
+    for (const events of [[incompleteSell, note], [note, incompleteSell]]) {
+      const progress = summarizeCampaignProgress({ status: "OPEN", currentCostToClose: 10, events, asOf: new Date("2026-08-08") });
+      expect(progress.projectedOtmApplicable).toBe(false);
+      expect(progress.projectedOtmPL).toBeNull();
+      expect(progress.currentPL).toBeNull();
+    }
+  });
+
+  it("test 6b: an incomplete legacy ROLL_PUT_OPEN (missing strike) never fabricates a valid current leg, regardless of tie order with its close leg", () => {
+    const close: CampaignEventInput = { type: "ROLL_PUT_CLOSE", optionType: "PUT", occurredAt: "2026-08-08", sortOrder: 1, groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8 };
+    const incompleteOpen: CampaignEventInput = { type: "ROLL_PUT_OPEN", optionType: "PUT", occurredAt: "2026-08-08", sortOrder: 1, groupKey: "roll-1", contracts: 1, premium: 1.2, expiration: "2026-08-22" }; // no strike
+    const sell: CampaignEventInput = { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5, expiration: "2026-08-08" };
+    for (const events of [[sell, close, incompleteOpen], [sell, incompleteOpen, close]]) {
+      const progress = summarizeCampaignProgress({ status: "OPEN", currentCostToClose: 10, events, asOf: new Date("2026-08-15") });
+      expect(progress.projectedOtmApplicable).toBe(false);
+      expect(progress.projectedOtmPL).toBeNull();
+      expect(progress.currentPL).toBeNull();
+    }
   });
 });
 

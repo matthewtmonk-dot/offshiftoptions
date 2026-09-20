@@ -1,5 +1,5 @@
 import { round } from "./calculations";
-import { summarizeCampaign, type CampaignEventInput, type CampaignStatusInput } from "./campaigns";
+import { getCurrentOpenPut, summarizeCampaign, type CampaignEventInput, type CampaignStatusInput } from "./campaigns";
 
 export type CompletedCampaignResult = {
   campaignId: string;
@@ -372,32 +372,22 @@ function isoWeekKey(date: Date): string {
   return `${utc.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
 }
 
+/**
+ * The campaign's currently-open short put, or null - delegates entirely to getCurrentOpenPut
+ * (campaigns.ts), the single authoritative "what put is open right now" definition also used by
+ * the Dashboard and Tracker. Performance previously carried its own private copy of this
+ * ordering/validity logic (a local findOpenShortPut + compareEvents), which lacked
+ * getCurrentOpenPut's deterministic createdAt/id tiebreak - so a roll's ROLL_PUT_CLOSE/
+ * ROLL_PUT_OPEN pair tied on (occurredAt, sortOrder) could resolve to a different "current"
+ * leg here than on the Dashboard/Tracker, purely depending on the caller's array order, even
+ * though nothing about the actual trade history changed. See PROJECT_HANDOFF.md for the
+ * reproduced example (Current P/L $42 / Projected P/L $72 in one ordering, unavailable in
+ * another) this fixes. Performance must never fabricate a valid leg getCurrentOpenPut itself
+ * would decline (e.g. a legacy event missing strike/contracts/expiration) - it has exactly one
+ * opinion on that question now, not two.
+ */
 function findOpenShortPut(status: CampaignStatusInput, events: CampaignEventInput[]) {
-  if (status !== "OPEN") {
-    return null;
-  }
-
-  const lastTradeEvent =
-    [...events]
-      .sort(compareEvents)
-      .reverse()
-      .find((event) => event.type !== "NOTE") ?? null;
-
-  if (!lastTradeEvent || (lastTradeEvent.type !== "SELL_PUT" && lastTradeEvent.type !== "ROLL_PUT_OPEN")) {
-    return null;
-  }
-
-  if (lastTradeEvent.optionType === "CALL") {
-    return null;
-  }
-
-  const contracts = numeric(lastTradeEvent.contracts);
-  const strike = numeric(lastTradeEvent.strike);
-  if (contracts === null || contracts <= 0 || strike === null || strike <= 0) {
-    return null;
-  }
-
-  return { contracts, strike };
+  return status === "OPEN" ? getCurrentOpenPut(events) : null;
 }
 
 function countRolls(events: CampaignEventInput[]) {
@@ -490,15 +480,6 @@ function returnPercent(value: number | null, basis: number | null) {
   }
 
   return round((value / basis) * 100, 2);
-}
-
-function compareEvents(left: CampaignEventInput, right: CampaignEventInput) {
-  const dateDelta = toDate(left.occurredAt).getTime() - toDate(right.occurredAt).getTime();
-  if (dateDelta !== 0) {
-    return dateDelta;
-  }
-
-  return (numeric(left.sortOrder) ?? 0) - (numeric(right.sortOrder) ?? 0);
 }
 
 function weeksBetween(start: Date, end: Date) {
