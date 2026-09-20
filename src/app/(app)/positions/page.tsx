@@ -357,6 +357,7 @@ export default async function PositionsPage({
         events: campaign.events,
         currentCostToClose: currentCostSource?.costToClose ?? null,
         targetWeeklyPercent: WEEKLY_TARGET_PERCENT,
+        feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
       }),
       currentCostSource,
     };
@@ -364,14 +365,21 @@ export default async function PositionsPage({
   const currentCampaignPLTotal = ownPerformanceRows.some((row) => row.progress.currentPL !== null)
     ? roundMoney(ownPerformanceRows.reduce((sum, row) => sum + (row.progress.currentPL ?? 0), 0))
     : null;
+  // Ticket 4 fix: the prior check (`projectedOtmApplicable && currentPL === null`) conflated
+  // "genuinely not applicable" with "should have a value but evidence is incomplete" - both make
+  // `projectedOtmApplicable` false, so a campaign missing required current-leg evidence (e.g. an
+  // incomplete legacy SELL_PUT - see getOpenPutEvidenceState) silently contributed nothing to the
+  // total AND never tripped this flag. `currentPLStatus` (INCOMPLETE/PENDING vs. NOT_APPLICABLE)
+  // distinguishes them directly - see performance.ts. This also correctly flags an ASSIGNED
+  // campaign's real-but-unvalued exposure as incomplete coverage, not a silently-complete total.
   const currentCampaignPartial = ownPerformanceRows.some(
-    (row) => row.campaign.status !== "CLOSED" && row.progress.projectedOtmApplicable && row.progress.currentPL === null,
+    (row) => row.progress.currentPLStatus === "INCOMPLETE" || row.progress.currentPLStatus === "PENDING",
   );
   const projectedOtmTotal = ownPerformanceRows.some((row) => row.progress.realizedPL !== null || row.progress.projectedOtmPL !== null)
     ? roundMoney(ownPerformanceRows.reduce((sum, row) => sum + (row.progress.realizedPL ?? row.progress.projectedOtmPL ?? 0), 0))
     : null;
   const projectedOtmPartial = ownPerformanceRows.some(
-    (row) => row.campaign.status === "OPEN" && row.progress.projectedOtmApplicable && row.progress.projectedOtmPL === null,
+    (row) => row.progress.projectedOtmStatus === "INCOMPLETE" || row.progress.projectedOtmStatus === "PENDING",
   );
   const ownGoal = summarizeContributionAdjustedGoal({
     accounts: ownAccountRows.map((row) => ({ ledgerEntries: row.performance.cashFlowEvents })),
@@ -1767,6 +1775,9 @@ function PerformanceSection({
   const assignedCount = campaignRows.filter((row) => row.campaign.status === "ASSIGNED").length;
   const markedCount = campaignRows.filter((row) => row.progress.currentPL !== null).length;
   const openProjected = sumKnown(campaignRows.map((row) => (row.campaign.status === "OPEN" ? row.progress.projectedOtmPL : null)));
+  const openProjectedIncomplete = campaignRows.some(
+    (row) => row.campaign.status === "OPEN" && (row.progress.projectedOtmStatus === "INCOMPLETE" || row.progress.projectedOtmStatus === "PENDING"),
+  );
   const activePremium = roundMoney(
     campaignRows
       .filter((row) => row.campaign.status !== "CLOSED")
@@ -1888,7 +1899,15 @@ function PerformanceSection({
               icon={<BarChart3 className="size-4" aria-hidden />}
               label="Closed Record"
               value={`${winLoss.wins}-${winLoss.losses}${winLoss.breakevens ? `-${winLoss.breakevens}` : ""}`}
-              detail={winLoss.winRate === null ? "Win rate N/A" : `${percent(winLoss.winRate, 1)} win rate`}
+              detail={
+                winLoss.winRate === null
+                  ? winLoss.pendingCount > 0
+                    ? `Win rate N/A · ${winLoss.pendingCount} pending`
+                    : "Win rate N/A"
+                  : winLoss.pendingCount > 0
+                    ? `${percent(winLoss.winRate, 1)} confirmed win rate · ${winLoss.pendingCount} pending`
+                    : `${percent(winLoss.winRate, 1)} win rate`
+              }
               tone={winLoss.realizedTradingPL}
               help={HELP.winRate}
               helpTestId="help-closed-record"
@@ -1978,12 +1997,19 @@ function PerformanceSection({
             <Badge tone={markedCount > 0 ? "good" : "neutral"}>{markedCount} with current marks</Badge>
             <Badge tone={openProjected !== null && openProjected > 0 ? "good" : "neutral"}>
               Open OTM {openProjected === null ? "unavailable" : signedMoney(openProjected)}
+              {openProjectedIncomplete ? " · partial" : ""}
             </Badge>
           </div>
           {winLoss.unknownResults > 0 ? (
             <p className="mt-2 text-xs text-zinc-500">
               {winLoss.unknownResults} closed campaign{winLoss.unknownResults === 1 ? "" : "s"} without a known final P/L excluded
               from win/loss math.
+            </p>
+          ) : null}
+          {winLoss.pendingCount > 0 ? (
+            <p className="mt-2 text-xs text-amber-300">
+              {winLoss.pendingCount} closed campaign{winLoss.pendingCount === 1 ? "" : "s"} pending an unresolved fee - excluded from
+              the confirmed win/loss count above until resolved.
             </p>
           ) : null}
         </div>

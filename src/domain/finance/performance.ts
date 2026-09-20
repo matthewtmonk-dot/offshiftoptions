@@ -1,5 +1,30 @@
 import { round } from "./calculations";
-import { getCurrentOpenPut, summarizeCampaign, type CampaignEventInput, type CampaignStatusInput } from "./campaigns";
+import {
+  getCurrentOpenPut,
+  getOpenPutEvidenceState,
+  summarizeCampaign,
+  type CampaignEventInput,
+  type CampaignStatusInput,
+  type OpenPutEvidenceState,
+} from "./campaigns";
+
+/**
+ * Shared completeness model for any profit/performance figure this module produces - see
+ * PROJECT_HANDOFF.md "Financial / Accounting Invariants" and the Ticket 4 handoff note for the
+ * full rationale. A caller must never present a headline/subtotal as more certain than the
+ * weakest CONFIRMED/PENDING/INCOMPLETE status among its contributing rows.
+ *
+ * - CONFIRMED: required inputs are sufficiently known; safe to include in a confirmed total.
+ * - PENDING: a calculable amount exists, but something required (a fee, an expiration
+ *   confirmation, a live mark) isn't final yet. The number shown is real (never a fabricated
+ *   zero), but must be labeled provisional, not final.
+ * - INCOMPLETE: required evidence is missing/unsupported (e.g. a legacy event missing
+ *   strike/contracts/expiration, or an unresolved current-cash-flow unknown) - no trustworthy
+ *   amount can be produced at all.
+ * - NOT_APPLICABLE: the metric legitimately doesn't apply to this campaign/state (e.g. a
+ *   CSP-only "projected OTM" figure for an ASSIGNED or CLOSED campaign).
+ */
+export type CompletenessStatus = "CONFIRMED" | "PENDING" | "INCOMPLETE" | "NOT_APPLICABLE";
 
 export type CompletedCampaignResult = {
   campaignId: string;
@@ -21,63 +46,114 @@ export type CompletedCampaignResult = {
 
 const KNOWN_FINAL_RESULTS = new Set(["GAIN", "LOSS", "BREAKEVEN"]);
 
+/**
+ * A single completed campaign's outcome completeness - CONFIRMED (safe to count as a final
+ * win/loss/breakeven), PENDING (the classification/number exist but a fee isn't resolved yet,
+ * see CompletedCampaignResult.feesFullyKnown), or INCOMPLETE (no usable finalResult/pl at all).
+ * Never NOT_APPLICABLE - every completed campaign has SOME outcome, even if unknown.
+ */
+function completedCampaignCompleteness(c: CompletedCampaignResult): Exclude<CompletenessStatus, "NOT_APPLICABLE"> {
+  if (!KNOWN_FINAL_RESULTS.has(c.finalResult) || c.pl === null) {
+    return "INCOMPLETE";
+  }
+  return c.feesFullyKnown === false ? "PENDING" : "CONFIRMED";
+}
+
 export type WinLossSummary = {
   completedCount: number;
+  /** Campaigns with a fully final outcome - a known GAIN/LOSS/BREAKEVEN AND fees resolved (or
+   * not Schwab-sourced, where a blank fee has always meant an assumed $0). `wins`/`losses`/
+   * `breakevens`/`winRate`/`averageWin`/`averageLoss` are computed over this set ONLY - a
+   * provisional or incomplete campaign can never silently inflate a confirmed win rate. */
+  confirmedCount: number;
+  /** Known GAIN/LOSS/BREAKEVEN, but at least one linked Schwab fee is still unresolved - a real
+   * number exists (never a fabricated zero) but isn't final. Excluded from `wins`/`losses`/
+   * `winRate` on purpose; see `pendingRealizedTradingPL` for their best-known combined P/L. */
+  pendingCount: number;
+  /** No usable finalResult/pl at all (required evidence missing/unsupported) - see
+   * `completedCampaignCompleteness`. */
+  unknownResults: number;
+  /** CONFIRMED-only win/loss/breakeven counts and rate - never includes a PENDING outcome. */
   wins: number;
   losses: number;
   breakevens: number;
-  unknownResults: number;
   winRate: number | null;
   averageWin: number | null;
   averageLoss: number | null;
   averageDurationDays: number | null;
+  /** Sum of `pl` over CONFIRMED campaigns only - the number a "confirmed realized profit"
+   * headline should show. */
+  confirmedRealizedTradingPL: number;
+  /** Sum of `pl` over CONFIRMED + PENDING campaigns (their best-known values, never a fabricated
+   * zero for the pending ones) - kept for continuity with existing callers that already present
+   * this alongside `realizedTradingPLExact`. Prefer `confirmedRealizedTradingPL` for a headline
+   * that must never claim more certainty than its inputs. */
   realizedTradingPL: number;
   /** False when at least one campaign counted into `realizedTradingPL` has an unresolved
    * Schwab fee (see `CompletedCampaignResult.feesFullyKnown`) - callers must present
    * `realizedTradingPL` as "pending"/not-yet-exact rather than a final confirmed number in that
-   * case, the same honesty rule `summarizeThisWeek`'s `netPLExact` already enforces. Win/loss
-   * classification and counts are unaffected - a few cents of unresolved fee essentially never
-   * flips a real premium-collection gain into a loss, and getCampaignIdsWithUnknownFees'
-   * documented rule is "never change the number, only flag it," not "hide the result." */
+   * case, the same honesty rule `summarizeThisWeek`'s `netPLExact` already enforces. */
   realizedTradingPLExact: boolean;
 };
 
 /**
- * Only CLOSED campaigns with a known final result count toward win/loss. An OPEN
- * campaign's current net cash flow (e.g. +$57 after a roll) is never a "win" until it
- * actually closes - see src/domain/finance/campaigns.ts summarizeCampaign for how a
- * campaign's status/finalResult is derived event-by-event.
+ * Only CLOSED campaigns with a known final result count toward win/loss, and only CONFIRMED ones
+ * (see `completedCampaignCompleteness`) count toward the confirmed win/loss/rate figures - an
+ * OPEN campaign's current net cash flow (e.g. +$57 after a roll) is never a "win" until it
+ * actually closes, and a completed campaign with an unresolved Schwab fee is never presented as
+ * a settled win/loss until that fee resolves. See src/domain/finance/campaigns.ts
+ * summarizeCampaign for how a campaign's status/finalResult is derived event-by-event.
  */
 export function summarizeWinLoss(completed: CompletedCampaignResult[]): WinLossSummary {
-  const known = completed.filter((c) => KNOWN_FINAL_RESULTS.has(c.finalResult) && c.pl !== null);
-  const wins = known.filter((c) => c.finalResult === "GAIN");
-  const losses = known.filter((c) => c.finalResult === "LOSS");
-  const breakevens = known.filter((c) => c.finalResult === "BREAKEVEN");
-  const unknownResults = completed.length - known.length;
-  const durations = completed.map((c) => c.daysActive).filter((d): d is number => d !== null);
+  const byCompleteness = new Map<Exclude<CompletenessStatus, "NOT_APPLICABLE">, CompletedCampaignResult[]>([
+    ["CONFIRMED", []],
+    ["PENDING", []],
+    ["INCOMPLETE", []],
+  ]);
+  for (const c of completed) {
+    byCompleteness.get(completedCampaignCompleteness(c))!.push(c);
+  }
+  const confirmed = byCompleteness.get("CONFIRMED")!;
+  const pending = byCompleteness.get("PENDING")!;
+  const confirmedAndPending = [...confirmed, ...pending];
 
-  const realizedTradingPL = round(
-    known.reduce((sum, c) => sum + (c.pl ?? 0), 0),
-    2,
-  );
+  const wins = confirmed.filter((c) => c.finalResult === "GAIN");
+  const losses = confirmed.filter((c) => c.finalResult === "LOSS");
+  const breakevens = confirmed.filter((c) => c.finalResult === "BREAKEVEN");
+  const durations = completed.map((c) => c.daysActive).filter((d): d is number => d !== null);
 
   return {
     completedCount: completed.length,
+    confirmedCount: confirmed.length,
+    pendingCount: pending.length,
+    unknownResults: byCompleteness.get("INCOMPLETE")!.length,
     wins: wins.length,
     losses: losses.length,
     breakevens: breakevens.length,
-    unknownResults,
-    winRate: known.length ? round((wins.length / known.length) * 100, 1) : null,
+    winRate: confirmed.length ? round((wins.length / confirmed.length) * 100, 1) : null,
     averageWin: wins.length ? round(wins.reduce((sum, c) => sum + (c.pl ?? 0), 0) / wins.length, 2) : null,
     averageLoss: losses.length ? round(losses.reduce((sum, c) => sum + (c.pl ?? 0), 0) / losses.length, 2) : null,
     averageDurationDays: durations.length ? round(durations.reduce((a, b) => a + b, 0) / durations.length, 1) : null,
-    realizedTradingPL,
-    realizedTradingPLExact: known.every((c) => c.feesFullyKnown !== false),
+    confirmedRealizedTradingPL: round(
+      confirmed.reduce((sum, c) => sum + (c.pl ?? 0), 0),
+      2,
+    ),
+    realizedTradingPL: round(
+      confirmedAndPending.reduce((sum, c) => sum + (c.pl ?? 0), 0),
+      2,
+    ),
+    realizedTradingPLExact: pending.length === 0,
   };
 }
 
 export type ThisWeekSummary = {
   completedCount: number;
+  /** Campaigns closed this week with a fully final outcome (known result, fees resolved) - see
+   * `completedCampaignCompleteness`. `wins`/`losses`/`breakevens` count CONFIRMED only. */
+  confirmedCount: number;
+  /** Known result, but at least one fee is still unresolved - contributes to `grossPL`/`netPL`
+   * (never a fabricated zero) but not to `wins`/`losses`/`confirmedCount`. */
+  pendingCount: number;
   wins: number;
   losses: number;
   breakevens: number;
@@ -100,22 +176,28 @@ export type ThisWeekSummary = {
  * summarizeWeeklyReturns' fixed-account-baseline trend line below: this buckets only
  * campaigns that CLOSED in the current ISO week and returns their P/L against the actual
  * capital those specific campaigns secured, not the whole account. Never invents a value, and
- * never lets an unresolved fee masquerade as a confirmed net figure - see `netPLExact`.
+ * never lets an unresolved fee masquerade as a confirmed net figure - see `netPLExact`. A
+ * PENDING campaign (known result, unresolved fee) contributes to `grossPL`/`netPL` but never to
+ * `wins`/`losses`/`confirmedCount`, matching `summarizeWinLoss`'s stricter confirmed denominator.
  */
 export function summarizeThisWeek(completed: CompletedCampaignResult[], asOf: Date = new Date()): ThisWeekSummary {
   const currentWeekKey = isoWeekKey(asOf);
   const thisWeek = completed.filter((c) => isoWeekKey(c.closedAt) === currentWeekKey);
   const known = thisWeek.filter((c) => KNOWN_FINAL_RESULTS.has(c.finalResult) && c.pl !== null);
-  const wins = known.filter((c) => c.finalResult === "GAIN").length;
-  const losses = known.filter((c) => c.finalResult === "LOSS").length;
-  const breakevens = known.filter((c) => c.finalResult === "BREAKEVEN").length;
-  const netPLExact = known.every((c) => c.feesFullyKnown !== false);
+  const confirmed = known.filter((c) => c.feesFullyKnown !== false);
+  const pending = known.filter((c) => c.feesFullyKnown === false);
+  const wins = confirmed.filter((c) => c.finalResult === "GAIN").length;
+  const losses = confirmed.filter((c) => c.finalResult === "LOSS").length;
+  const breakevens = confirmed.filter((c) => c.finalResult === "BREAKEVEN").length;
+  const netPLExact = pending.length === 0;
   const grossPL = known.length ? round(known.reduce((sum, c) => sum + (c.grossPL ?? c.pl ?? 0), 0), 2) : null;
   const netPL = known.length ? round(known.reduce((sum, c) => sum + (c.pl ?? 0), 0), 2) : null;
   const securedCapitalTotal = known.reduce((sum, c) => sum + (c.collateralCommitted ?? 0), 0);
 
   return {
     completedCount: thisWeek.length,
+    confirmedCount: confirmed.length,
+    pendingCount: pending.length,
     wins,
     losses,
     breakevens,
@@ -141,8 +223,28 @@ export type CampaignProgressSummary = {
   netPremiumCollected: number;
   realizedPL: number | null;
   currentPL: number | null;
+  /** Completeness of `currentPL` (and, for a CLOSED campaign, `realizedPL`) - see
+   * `CompletenessStatus`. NOT_APPLICABLE for ASSIGNED (no wheel/covered-call valuation engine
+   * exists yet - real exposure isn't "not applicable," see INCOMPLETE note below) - actually
+   * ASSIGNED is INCOMPLETE, not NOT_APPLICABLE: an assigned position has real economic exposure
+   * this app doesn't yet value, and a completeness summary must disclose that gap rather than
+   * imply there's nothing to value. NOT_APPLICABLE covers only a campaign with no current put
+   * position at all (already closed, or never opened one). */
+  currentPLStatus: CompletenessStatus;
   currentCostToClose: number | null;
   projectedOtmPL: number | null;
+  /** Completeness of `projectedOtmPL` specifically (the CSP-only "if OTM" projection) - see
+   * `CompletenessStatus`. NOT_APPLICABLE for CLOSED/ASSIGNED campaigns and for an OPEN campaign
+   * with no current put position; INCOMPLETE when a put is intended but its evidence is
+   * incomplete (see getOpenPutEvidenceState) or campaign cash flow has an unresolved unknown. */
+  projectedOtmStatus: CompletenessStatus;
+  /** Kept for existing callers: true exactly when projectedOtmStatus would be CONFIRMED or
+   * PENDING (there IS a real open CSP to project) - i.e. the narrower "does this campaign
+   * structurally qualify" question, unaffected by whether the leg's own evidence is complete.
+   * Prefer `projectedOtmStatus`/`currentPLStatus` for a completeness summary - this flag alone
+   * cannot distinguish "not applicable" from "incomplete," which is exactly the gap that caused a
+   * missing-expiration campaign to silently drop out of an aggregate without a visible partial
+   * indicator (see PROJECT_HANDOFF.md, Ticket 4). */
   projectedOtmApplicable: boolean;
   rollCount: number;
   collateralCommitted: number | null;
@@ -181,6 +283,81 @@ type AccountGoalInput = {
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
+ * projectedOtmStatus: completeness of the CSP-only "if OTM" projection specifically. NOT_APPLICABLE
+ * for anything but an OPEN campaign with a real (or evidence-incomplete) put and zero held shares;
+ * INCOMPLETE when a put is intended but its own evidence is incomplete (getOpenPutEvidenceState)
+ * or campaign cash flow has an unresolved unknown; otherwise CONFIRMED (this projection needs no
+ * external mark, so it never lands on PENDING).
+ */
+function campaignProjectedOtmStatus({
+  status,
+  openPutEvidenceState,
+  sharesHeld,
+  hasUnknownCashFlow,
+}: {
+  status: CampaignStatusInput;
+  openPutEvidenceState: OpenPutEvidenceState;
+  sharesHeld: number;
+  hasUnknownCashFlow: boolean;
+}): CompletenessStatus {
+  if (status !== "OPEN" || openPutEvidenceState === "NONE") {
+    return "NOT_APPLICABLE";
+  }
+  if (openPutEvidenceState === "INCOMPLETE") {
+    return "INCOMPLETE";
+  }
+  if (sharesHeld !== 0) {
+    return "NOT_APPLICABLE";
+  }
+  return hasUnknownCashFlow ? "INCOMPLETE" : "CONFIRMED";
+}
+
+/**
+ * currentPLStatus: completeness of currentPL (and, for CLOSED, realizedPL). ASSIGNED is
+ * deliberately INCOMPLETE, not NOT_APPLICABLE - real economic exposure (held shares, possibly a
+ * covered call) exists but no valuation engine values it yet (out of scope for this ticket), and
+ * a completeness summary must disclose that coverage gap rather than imply there's nothing to
+ * value. OPEN with a real put but no live cost-to-close mark is PENDING (the leg's own evidence
+ * is complete; only an external mark is missing).
+ */
+function campaignCurrentPLStatus({
+  status,
+  openPutEvidenceState,
+  sharesHeld,
+  hasUnknownCashFlow,
+  feesFullyKnown,
+  hasCostToClose,
+}: {
+  status: CampaignStatusInput;
+  openPutEvidenceState: OpenPutEvidenceState;
+  sharesHeld: number;
+  hasUnknownCashFlow: boolean;
+  feesFullyKnown: boolean;
+  hasCostToClose: boolean;
+}): CompletenessStatus {
+  if (status === "CLOSED") {
+    return feesFullyKnown ? "CONFIRMED" : "PENDING";
+  }
+  if (status === "ASSIGNED") {
+    return "INCOMPLETE";
+  }
+  // status === "OPEN"
+  if (openPutEvidenceState === "NONE") {
+    return "NOT_APPLICABLE";
+  }
+  if (openPutEvidenceState === "INCOMPLETE") {
+    return "INCOMPLETE";
+  }
+  if (sharesHeld !== 0) {
+    return "NOT_APPLICABLE";
+  }
+  if (hasUnknownCashFlow) {
+    return "INCOMPLETE";
+  }
+  return hasCostToClose ? "CONFIRMED" : "PENDING";
+}
+
+/**
  * Campaign progress deliberately keeps the user's three concepts separate:
  * completed/realized P/L, current mark-to-market P/L, and the CSP-only "if the
  * remaining short put expires OTM" projection. Premium collected is useful, but
@@ -191,16 +368,23 @@ export function summarizeCampaignProgress({
   events,
   currentCostToClose = null,
   targetWeeklyPercent = 1,
+  feesFullyKnown = true,
   asOf = new Date(),
 }: {
   status: CampaignStatusInput;
   events: CampaignEventInput[];
   currentCostToClose?: number | null;
   targetWeeklyPercent?: number;
+  /** False when a linked Schwab transaction behind this campaign has an unresolved fee (see
+   * getCampaignIdsWithUnknownFees) - defaults to true, matching the existing manual-entry
+   * convention (a blank fee has always meant an assumed $0). Only affects `currentPLStatus`
+   * (CLOSED case) - never changes `realizedPL`'s own number. */
+  feesFullyKnown?: boolean;
   asOf?: Date;
 }): CampaignProgressSummary {
   const summary = summarizeCampaign({ status, events, asOf });
   const openShortPut = findOpenShortPut(status, events);
+  const openPutEvidenceState: OpenPutEvidenceState = status === "OPEN" ? getOpenPutEvidenceState(events) : "NONE";
   const hasUnknownCashFlow = summary.unknowns.length > 0;
   const realizedPL = status === "CLOSED" ? (summary.totalCampaignPL ?? summary.realizedPL) : null;
   const projectedOtmApplicable = status === "OPEN" && openShortPut !== null && summary.sharesHeld === 0;
@@ -222,8 +406,17 @@ export function summarizeCampaignProgress({
     netPremiumCollected: summary.netOptionPremium,
     realizedPL,
     currentPL,
+    currentPLStatus: campaignCurrentPLStatus({
+      status,
+      openPutEvidenceState,
+      sharesHeld: summary.sharesHeld,
+      hasUnknownCashFlow,
+      feesFullyKnown,
+      hasCostToClose: normalizedCostToClose !== null,
+    }),
     currentCostToClose: normalizedCostToClose,
     projectedOtmPL,
+    projectedOtmStatus: campaignProjectedOtmStatus({ status, openPutEvidenceState, sharesHeld: summary.sharesHeld, hasUnknownCashFlow }),
     projectedOtmApplicable,
     rollCount: countRolls(events),
     collateralCommitted,

@@ -125,7 +125,7 @@ GitHub main → Hostinger auto-deploy → Next.js app → Supabase PostgreSQL
 
 - Account/trading performance is derived from the append-only `AccountLedgerEntry` ledger plus confirmed `BrokerRecord` facts — **never** a raw `currentBalance − startingBalance` shortcut, which would silently mix deposits/withdrawals with trading P/L.
 - Only `CLOSED` campaigns count toward win/loss; an `OPEN` campaign's net cash flow (even if positive) is never counted as a completed win.
-- **Confirmed vs. incomplete/provisional data must stay visibly distinct**: an unresolved Schwab fee shows "Pending"/gross-only, never a fabricated confirmed net number (`feesFullyKnown`/`netPLExact`/`grossPL`). A missing cost-to-close/current-price source means the current mark is shown as unavailable, never guessed. `currentCollateralCommitted` (the *currently* open leg's own collateral) is distinct from `collateralCommitted` (a lifetime high-water mark used only for closed-campaign return-on-collateral) — using the wrong one for "what's secured right now" was a real, fixed bug (see Roadmap status).
+- **Confirmed vs. incomplete/provisional data must stay visibly distinct**: `src/domain/finance/performance.ts` exports a shared `CompletenessStatus` (`CONFIRMED | PENDING | INCOMPLETE | NOT_APPLICABLE`) - `WinLossSummary`/`ThisWeekSummary` compute `wins`/`losses`/`winRate` from CONFIRMED outcomes only (`confirmedCount`/`pendingCount` expose the split), and `CampaignProgressSummary` carries `currentPLStatus`/`projectedOtmStatus` per campaign. An unresolved Schwab fee shows "Pending"/gross-only, never a fabricated confirmed net number (`feesFullyKnown`/`netPLExact`/`grossPL`) and is excluded from the confirmed win/loss denominator. A missing cost-to-close/current-price source means the current mark is shown as unavailable (PENDING), never guessed; a legacy event missing required fields is INCOMPLETE, distinct from a campaign where the metric genuinely doesn't apply (NOT_APPLICABLE) - see `getOpenPutEvidenceState` (`campaigns.ts`). An `ASSIGNED` campaign's current valuation is INCOMPLETE, not NOT_APPLICABLE, since real exposure exists with no valuation engine yet (Roadmap item 7). `currentCollateralCommitted` (the *currently* open leg's own collateral) is distinct from `collateralCommitted` (a lifetime high-water mark used only for closed-campaign return-on-collateral) — using the wrong one for "what's secured right now" was a real, fixed bug (see Roadmap status).
 - Deposits/withdrawals are never presented as trading profit or loss. Total gain, trading P/L, other income, current/mark-to-market P/L, and projected-OTM P/L are separate, explicitly labeled figures, not blended.
 - Full methodology: `docs/ARCHITECTURE.md`, `docs/LST_DOMAIN.md`, and the archive's Account Ledger / Performance Methodology section.
 
@@ -135,18 +135,16 @@ GitHub main → Hostinger auto-deploy → Next.js app → Supabase PostgreSQL
 
 High-level sequence only — implementation detail for a ticket belongs in its own commit/PR/handoff note, not here:
 
-1. **Ticket 1 — Current-leg parity between campaigns and Performance** — **COMPLETE**, commit `f68849f`. Astra-approved with a non-blocking follow-up (see below).
+1. **Ticket 1 — Current-leg parity between campaigns and Performance** — **COMPLETE**, commit `f68849f`. Astra-approved with a non-blocking follow-up (resolved by Ticket 4, see below).
 2. **Ticket 2 — PWA privacy/cache verification** — **NOT REPRODUCED** (the suspected authenticated-content-caching risk did not reproduce under real browser testing, including an adversarial poisoned-cache simulation); no code change made; no Astra review required.
-3. **Ticket 3 — Documentation cleanup** — **CURRENT** (this restructuring).
-4. Profit completeness / trustworthy current marks.
+3. **Ticket 3 — Documentation cleanup** — **COMPLETE** (this restructuring).
+4. **Ticket 4 — Confirmed/pending/incomplete profit-status propagation** — **COMPLETE**, pending Astra review. Added a shared `CompletenessStatus` (`CONFIRMED | PENDING | INCOMPLETE | NOT_APPLICABLE`) to `src/domain/finance/performance.ts`: `WinLossSummary`/`ThisWeekSummary` now split `confirmedCount`/`pendingCount` and compute `wins`/`losses`/`winRate` from CONFIRMED outcomes only (a completed campaign with an unresolved fee no longer inflates the confirmed win rate); `CampaignProgressSummary` gained `currentPLStatus`/`projectedOtmStatus` per campaign, backed by a new `getOpenPutEvidenceState` (`src/domain/finance/campaigns.ts`) that distinguishes "no put open" from "a put should be open but its evidence is incomplete" - the exact distinction `projectedOtmApplicable` alone couldn't make. Fixed the Astra-flagged bug directly: Tracker's `currentCampaignPartial`/`projectedOtmPartial` (`positions/page.tsx`) now check `currentPLStatus`/`projectedOtmStatus === "INCOMPLETE" | "PENDING"` instead of the old `projectedOtmApplicable && value === null` check that silently missed incomplete-evidence rows. An `ASSIGNED` campaign's current valuation is now explicitly INCOMPLETE (real exposure, no valuation engine yet - not NOT_APPLICABLE), so it correctly flags aggregate coverage as partial. Dashboard/Tracker win-loss and Closed-Record displays now show a "+N pending" count. No schema change. 50+ new/updated tests. DB integration tests could not be run this session (local Postgres/Docker unavailable - `ECONNREFUSED`) - flagged for a follow-up run once the environment is back up.
 5. Scanner truthfulness.
 6. Account baseline/contribution boundaries.
-7. Complete wheel valuation/period reporting.
+7. Complete wheel valuation/period reporting - will also be what promotes an ASSIGNED campaign's `currentPLStatus` from INCOMPLETE to CONFIRMED/PENDING once real valuation exists.
 8. Dashboard hierarchy.
 9. Settings/Admin + communication consolidation.
 10. Scanner redesign/readability/mobile/history/benchmarks.
-
-**Non-blocking follow-up from Ticket 1 (Astra), to be addressed under item 4 (profit completeness), not before:** Performance aggregation currently checks `projectedOtmApplicable` before marking totals partial. Missing-expiration rows may therefore be excluded without a visible "partial" indication.
 
 ## Known Active Blockers / Issues
 

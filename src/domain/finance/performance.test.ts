@@ -7,6 +7,7 @@ import {
   summarizeWeeklyReturns,
   summarizeWinLoss,
   tradingProfitFromAccountValue,
+  type CompletedCampaignResult,
 } from "./performance";
 
 describe("win/loss accounting", () => {
@@ -71,11 +72,17 @@ describe("win/loss accounting", () => {
       { campaignId: "c1", closedAt: new Date("2026-02-01"), finalResult: "GAIN", pl: 27.34, daysActive: 4, feesFullyKnown: true },
       { campaignId: "c2", closedAt: new Date("2026-02-02"), finalResult: "GAIN", pl: 27.34, daysActive: 4, feesFullyKnown: false },
     ]);
-    // The dollar figure is still computed (established rule: never hide/change the number) -
-    // only the exactness flag tells the caller to present it as pending, not confirmed.
+    // The combined dollar figure is still computed over confirmed+pending (established rule:
+    // never hide/change the number) - only the exactness flag tells the caller to present it as
+    // pending, not confirmed. The fee-pending campaign is also excluded from the CONFIRMED win
+    // count/denominator (Ticket 4) - it must not silently inflate a confirmed win rate.
     expect(oneUnknown.realizedTradingPLExact).toBe(false);
     expect(oneUnknown.realizedTradingPL).toBe(54.68);
-    expect(oneUnknown.wins).toBe(2);
+    expect(oneUnknown.confirmedRealizedTradingPL).toBe(27.34);
+    expect(oneUnknown.wins).toBe(1);
+    expect(oneUnknown.confirmedCount).toBe(1);
+    expect(oneUnknown.pendingCount).toBe(1);
+    expect(oneUnknown.winRate).toBe(100); // 1 confirmed win / 1 confirmed campaign - the pending one isn't in the denominator
   });
 
   it("defaults realizedTradingPLExact to true when feesFullyKnown is omitted, matching existing manual-entry behavior", () => {
@@ -295,6 +302,236 @@ describe("campaign progress accounting", () => {
     expect(progress.currentPL).toBeNull();
     expect(progress.projectedOtmApplicable).toBe(false);
     expect(progress.projectedOtmPL).toBeNull();
+  });
+});
+
+describe("profit/performance completeness (Ticket 4: confirmed vs. pending vs. incomplete vs. not-applicable)", () => {
+  // Root cause this fixes: higher-level totals derived "is this partial?" from
+  // `projectedOtmApplicable`, which conflates "genuinely not applicable" (e.g. an ASSIGNED
+  // campaign, or an OPEN one with no put) with "should have a value but evidence is incomplete"
+  // (e.g. a SELL_PUT missing expiration - see getOpenPutEvidenceState, Ticket 1). Both cases made
+  // `projectedOtmApplicable` false, so an incomplete row silently contributed nothing to a sum
+  // AND never tripped a "partial" flag that was only checking `projectedOtmApplicable`. The new
+  // `currentPLStatus`/`projectedOtmStatus` fields (and `WinLossSummary`/`ThisWeekSummary`'s
+  // confirmed/pending split) let a caller tell these apart explicitly.
+
+  describe("win/loss confirmed vs. pending vs. incomplete", () => {
+    it("test 1: all completed campaigns fully confirmed - confirmedCount equals completedCount, no pending", () => {
+      const summary = summarizeWinLoss([
+        { campaignId: "c1", closedAt: new Date("2026-01-05"), finalResult: "GAIN", pl: 40, daysActive: 10, feesFullyKnown: true },
+        { campaignId: "c2", closedAt: new Date("2026-01-12"), finalResult: "LOSS", pl: -10, daysActive: 20, feesFullyKnown: true },
+      ]);
+      expect(summary.completedCount).toBe(2);
+      expect(summary.confirmedCount).toBe(2);
+      expect(summary.pendingCount).toBe(0);
+      expect(summary.unknownResults).toBe(0);
+      expect(summary.wins).toBe(1);
+      expect(summary.losses).toBe(1);
+      expect(summary.realizedTradingPLExact).toBe(true);
+      expect(summary.confirmedRealizedTradingPL).toBe(summary.realizedTradingPL);
+    });
+
+    it("test 2: one completed campaign with unresolved fees is pending, not confirmed, but its real number is never treated as zero", () => {
+      const summary = summarizeWinLoss([
+        { campaignId: "c1", closedAt: new Date("2026-01-05"), finalResult: "GAIN", pl: 40, daysActive: 10, feesFullyKnown: false },
+      ]);
+      expect(summary.completedCount).toBe(1);
+      expect(summary.confirmedCount).toBe(0);
+      expect(summary.pendingCount).toBe(1);
+      expect(summary.wins).toBe(0); // not a CONFIRMED win yet
+      expect(summary.winRate).toBeNull(); // confirmed denominator is empty
+      expect(summary.confirmedRealizedTradingPL).toBe(0);
+      expect(summary.realizedTradingPL).toBe(40); // real best-known number, never fabricated as 0
+      expect(summary.realizedTradingPLExact).toBe(false);
+    });
+
+    it("test 3: multiple confirmed campaigns plus one pending result - exactly the ticket's worked example (3 confirmed wins/1 confirmed loss, 1 pending)", () => {
+      const summary = summarizeWinLoss([
+        { campaignId: "c1", closedAt: new Date("2026-01-05"), finalResult: "GAIN", pl: 40, daysActive: 10, feesFullyKnown: true },
+        { campaignId: "c2", closedAt: new Date("2026-01-06"), finalResult: "GAIN", pl: 60, daysActive: 10, feesFullyKnown: true },
+        { campaignId: "c3", closedAt: new Date("2026-01-07"), finalResult: "GAIN", pl: 20, daysActive: 10, feesFullyKnown: true },
+        { campaignId: "c4", closedAt: new Date("2026-01-08"), finalResult: "LOSS", pl: -15, daysActive: 10, feesFullyKnown: true },
+        { campaignId: "c5", closedAt: new Date("2026-01-09"), finalResult: "GAIN", pl: 25, daysActive: 10, feesFullyKnown: false },
+      ]);
+      expect(summary.completedCount).toBe(5);
+      expect(summary.confirmedCount).toBe(4);
+      expect(summary.pendingCount).toBe(1);
+      expect(summary.wins).toBe(3);
+      expect(summary.losses).toBe(1);
+      expect(summary.winRate).toBe(75); // 3 of 4 CONFIRMED, the pending campaign is excluded from both numerator and denominator
+      expect(summary.confirmedRealizedTradingPL).toBe(105); // 40+60+20-15, excludes the pending +25
+      expect(summary.realizedTradingPL).toBe(130); // best-known total including the pending +25
+      expect(summary.realizedTradingPLExact).toBe(false);
+    });
+
+    it("test 4: no completed campaigns - confirmed/pending/unknown all zero, no fabricated rate", () => {
+      const summary = summarizeWinLoss([]);
+      expect(summary.completedCount).toBe(0);
+      expect(summary.confirmedCount).toBe(0);
+      expect(summary.pendingCount).toBe(0);
+      expect(summary.winRate).toBeNull();
+      expect(summary.confirmedRealizedTradingPL).toBe(0);
+    });
+
+    it("test 5: a provisional near-zero result must not silently become a confirmed win/loss/breakeven", () => {
+      const summary = summarizeWinLoss([
+        { campaignId: "c1", closedAt: new Date("2026-01-05"), finalResult: "BREAKEVEN", pl: 0.01, daysActive: 10, feesFullyKnown: false },
+      ]);
+      expect(summary.confirmedCount).toBe(0);
+      expect(summary.pendingCount).toBe(1);
+      expect(summary.wins).toBe(0);
+      expect(summary.losses).toBe(0);
+      expect(summary.breakevens).toBe(0); // not counted as a confirmed breakeven either
+      expect(summary.winRate).toBeNull();
+    });
+
+    it("test 10 (this-week variant): mixed confirmed and pending coverage agrees with the overall win/loss split", () => {
+      const asOf = new Date("2026-09-05T13:00:00Z");
+      const rows: CompletedCampaignResult[] = [
+        { campaignId: "c1", closedAt: new Date("2026-09-01"), finalResult: "GAIN", pl: 30, daysActive: 5, feesFullyKnown: true },
+        { campaignId: "c2", closedAt: new Date("2026-09-02"), finalResult: "GAIN", pl: 45, daysActive: 5, feesFullyKnown: false },
+      ];
+      const winLoss = summarizeWinLoss(rows);
+      const thisWeek = summarizeThisWeek(rows, asOf);
+      expect(winLoss.confirmedCount).toBe(1);
+      expect(winLoss.pendingCount).toBe(1);
+      expect(thisWeek.confirmedCount).toBe(1);
+      expect(thisWeek.pendingCount).toBe(1);
+      expect(thisWeek.wins).toBe(1); // confirmed-only, matches winLoss.wins
+      expect(thisWeek.wins).toBe(winLoss.wins);
+      expect(thisWeek.netPLExact).toBe(false);
+      expect(thisWeek.grossPL).toBe(75); // both real numbers, never a fabricated zero for the pending one
+    });
+  });
+
+  describe("current/projected P/L completeness per campaign", () => {
+    it("test 6: an OPEN campaign with a valid current-leg and a live cost-to-close mark is CONFIRMED", () => {
+      const progress = summarizeCampaignProgress({
+        status: "OPEN",
+        currentCostToClose: 20,
+        events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5, expiration: "2026-08-14" }],
+        asOf: new Date("2026-08-08"),
+      });
+      expect(progress.currentPLStatus).toBe("CONFIRMED");
+      expect(progress.projectedOtmStatus).toBe("CONFIRMED");
+      expect(progress.currentPL).not.toBeNull();
+      expect(progress.projectedOtmPL).not.toBeNull();
+    });
+
+    it("test 7/8: an OPEN campaign missing required current-leg evidence (no expiration) is INCOMPLETE, not silently excluded as not-applicable", () => {
+      const progress = summarizeCampaignProgress({
+        status: "OPEN",
+        currentCostToClose: 20,
+        events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5 }], // no expiration
+        asOf: new Date("2026-08-08"),
+      });
+      expect(progress.currentPLStatus).toBe("INCOMPLETE");
+      expect(progress.projectedOtmStatus).toBe("INCOMPLETE");
+      expect(progress.currentPL).toBeNull();
+      expect(progress.projectedOtmPL).toBeNull();
+      // The old bug: projectedOtmApplicable alone can't tell this apart from "not applicable."
+      expect(progress.projectedOtmApplicable).toBe(false);
+    });
+
+    it("test 7b: a genuinely-not-applicable OPEN campaign (put already closed) is NOT_APPLICABLE, distinct from INCOMPLETE", () => {
+      const progress = summarizeCampaignProgress({
+        status: "OPEN",
+        events: [
+          { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5, expiration: "2026-08-08" },
+          { type: "CLOSE_PUT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1, premium: 0.1 },
+        ],
+      });
+      expect(progress.currentPLStatus).toBe("NOT_APPLICABLE");
+      expect(progress.projectedOtmStatus).toBe("NOT_APPLICABLE");
+    });
+
+    it("test 9: an ASSIGNED campaign's current valuation is INCOMPLETE (real exposure, no valuation engine yet) - never NOT_APPLICABLE, never silently zero", () => {
+      const progress = summarizeCampaignProgress({
+        status: "ASSIGNED",
+        events: [
+          { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5, expiration: "2026-08-08" },
+          { type: "ASSIGNMENT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1 },
+        ],
+      });
+      expect(progress.currentPLStatus).toBe("INCOMPLETE");
+      // The OTM projection is a CSP-only concept and genuinely doesn't apply once assigned -
+      // this is the one legitimately NOT_APPLICABLE case for an ASSIGNED campaign.
+      expect(progress.projectedOtmStatus).toBe("NOT_APPLICABLE");
+      expect(progress.currentPL).toBeNull();
+    });
+
+    it("a CLOSED campaign with unresolved fees is PENDING, not CONFIRMED, even though realizedPL is a real number", () => {
+      const progress = summarizeCampaignProgress({
+        status: "CLOSED",
+        feesFullyKnown: false,
+        events: [
+          { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
+          { type: "CLOSE_PUT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1, premium: 0.04 },
+        ],
+      });
+      expect(progress.currentPLStatus).toBe("PENDING");
+      expect(progress.realizedPL).toBe(46); // the real number is still shown, never hidden
+      expect(progress.currentPL).toBe(46);
+    });
+
+    it("a CLOSED campaign with confirmed fees is CONFIRMED", () => {
+      const progress = summarizeCampaignProgress({
+        status: "CLOSED",
+        feesFullyKnown: true,
+        events: [
+          { type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 30, contracts: 1, premium: 0.5 },
+          { type: "CLOSE_PUT", optionType: "PUT", occurredAt: "2026-08-08", strike: 30, contracts: 1, premium: 0.04 },
+        ],
+      });
+      expect(progress.currentPLStatus).toBe("CONFIRMED");
+    });
+
+    it("an OPEN campaign with complete put evidence but no live cost-to-close mark is PENDING for currentPL while projectedOtm stays CONFIRMED (it needs no external mark)", () => {
+      const progress = summarizeCampaignProgress({
+        status: "OPEN",
+        currentCostToClose: null,
+        events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5, expiration: "2026-08-14" }],
+        asOf: new Date("2026-08-08"),
+      });
+      expect(progress.currentPLStatus).toBe("PENDING");
+      expect(progress.currentPL).toBeNull();
+      expect(progress.projectedOtmStatus).toBe("CONFIRMED");
+      expect(progress.projectedOtmPL).not.toBeNull();
+    });
+  });
+
+  describe("test 10: mixed confirmed and incomplete coverage across an aggregate - the exact bug this ticket fixes", () => {
+    // Reproduces the Astra-flagged aggregation bug directly: an aggregate that only checks
+    // `projectedOtmApplicable` before deciding "partial" would silently show a complete-looking
+    // total here, because the missing-expiration row's `projectedOtmApplicable` is false for the
+    // SAME reason a genuinely-not-applicable row's is. The fix is for callers to check
+    // `currentPLStatus`/`projectedOtmStatus === "INCOMPLETE"` (or "PENDING") instead.
+    const confirmedOpen = summarizeCampaignProgress({
+      status: "OPEN",
+      currentCostToClose: 20,
+      events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 0.5, expiration: "2026-08-14" }],
+      asOf: new Date("2026-08-08"),
+    });
+    const incompleteOpen = summarizeCampaignProgress({
+      status: "OPEN",
+      currentCostToClose: 5,
+      events: [{ type: "SELL_PUT", optionType: "PUT", occurredAt: "2026-08-01", strike: 15, contracts: 1, premium: 0.3 }], // no expiration
+      asOf: new Date("2026-08-08"),
+    });
+    const rows = [confirmedOpen, incompleteOpen];
+
+    it("the old buggy check would miss the incomplete row entirely", () => {
+      const buggyPartial = rows.some((row) => row.projectedOtmApplicable && row.currentPL === null);
+      expect(buggyPartial).toBe(false); // this is the bug: silently looks complete
+    });
+
+    it("the fixed check correctly flags the aggregate as incomplete", () => {
+      const fixedPartial = rows.some((row) => row.currentPLStatus === "INCOMPLETE" || row.currentPLStatus === "PENDING");
+      expect(fixedPartial).toBe(true);
+      // The confirmed row's own number is still usable on its own.
+      expect(confirmedOpen.currentPLStatus).toBe("CONFIRMED");
+      expect(incompleteOpen.currentPLStatus).toBe("INCOMPLETE");
+    });
   });
 });
 

@@ -265,6 +265,10 @@ export type CurrentOpenPut = {
 
 export type CurrentOpenCall = CurrentOpenPut;
 
+function lastNonNoteTradeEvent(events: CampaignEventInput[]): CampaignEventInput | null {
+  return [...events].sort(compareEvents).reverse().find((event) => event.type !== "NOTE") ?? null;
+}
+
 /**
  * The campaign's currently-open short put, if any. The most recent non-NOTE event must be
  * SELL_PUT or ROLL_PUT_OPEN (anything else - CLOSE_PUT, ASSIGNMENT, etc. - means there is no
@@ -274,7 +278,7 @@ export type CurrentOpenCall = CurrentOpenPut;
  * "what put is currently open," not a copy per caller.
  */
 export function getCurrentOpenPut(events: CampaignEventInput[]): CurrentOpenPut | null {
-  const lastTradeEvent = [...events].sort(compareEvents).reverse().find((event) => event.type !== "NOTE") ?? null;
+  const lastTradeEvent = lastNonNoteTradeEvent(events);
 
   if (!lastTradeEvent || (lastTradeEvent.type !== "SELL_PUT" && lastTradeEvent.type !== "ROLL_PUT_OPEN")) {
     return null;
@@ -290,6 +294,35 @@ export function getCurrentOpenPut(events: CampaignEventInput[]): CurrentOpenPut 
   }
 
   return { contracts, strike, expiration: toDate(lastTradeEvent.expiration) };
+}
+
+export type OpenPutEvidenceState =
+  /** The most recent trade event doesn't open a put at all (a close/assignment/call, or no
+   * events) - there is genuinely no current put position to report on. */
+  | "NONE"
+  /** The most recent trade event DOES open a put (SELL_PUT/ROLL_PUT_OPEN, not a CALL), but
+   * getCurrentOpenPut itself declined - required fields (strike/contracts/expiration) are
+   * missing or invalid, e.g. an incomplete legacy row. A real position is intended here; its
+   * terms just aren't confirmable yet. */
+  | "INCOMPLETE"
+  /** getCurrentOpenPut returns a real, fully-populated open put. */
+  | "COMPLETE";
+
+/**
+ * Distinguishes "no put is currently open" from "a put should be open but its evidence is
+ * incomplete" - a distinction getCurrentOpenPut's own null return value can't express (both
+ * cases return null there, by design, since neither is safe to treat as a valid position).
+ * Callers that need to tell "not applicable" apart from "incomplete/unknown" for a completeness
+ * summary (see performance.ts) use this instead of re-deriving the last-trade-event check
+ * themselves - never a second copy of getCurrentOpenPut's own ordering/validity logic.
+ */
+export function getOpenPutEvidenceState(events: CampaignEventInput[]): OpenPutEvidenceState {
+  const lastTradeEvent = lastNonNoteTradeEvent(events);
+  if (!lastTradeEvent || (lastTradeEvent.type !== "SELL_PUT" && lastTradeEvent.type !== "ROLL_PUT_OPEN") || lastTradeEvent.optionType === "CALL") {
+    return "NONE";
+  }
+
+  return getCurrentOpenPut(events) ? "COMPLETE" : "INCOMPLETE";
 }
 
 /**

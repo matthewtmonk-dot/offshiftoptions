@@ -3,6 +3,7 @@ import {
   describeCallStrikeVsAdjustedBasis,
   getCurrentOpenCall,
   getCurrentOpenPut,
+  getOpenPutEvidenceState,
   isPastExpiration,
   optionLegValue,
   summarizeCampaign,
@@ -298,6 +299,66 @@ describe("getCurrentOpenPut", () => {
       expect(getCurrentOpenPut([sellOld, closeNoCreatedAt, openNoCreatedAt])).toEqual(expectedOpenPut);
       expect(getCurrentOpenPut([openNoCreatedAt, closeNoCreatedAt, sellOld])).toEqual(expectedOpenPut);
     });
+  });
+});
+
+describe("getOpenPutEvidenceState", () => {
+  it("returns NONE for an empty event list", () => {
+    expect(getOpenPutEvidenceState([])).toBe("NONE");
+  });
+
+  it("returns NONE once the most recent trade event closed/assigned the put", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1, premium: 0.4, expiration: "2026-08-14" },
+      { type: "CLOSE_PUT", occurredAt: "2026-08-10T14:00:00Z", strike: 15, contracts: 1, premium: 0.1 },
+    ];
+    expect(getOpenPutEvidenceState(events)).toBe("NONE");
+  });
+
+  it("returns NONE for a covered call (optionType CALL), never mistaking it for an incomplete put", () => {
+    const events: CampaignEventInput[] = [
+      { type: "ASSIGNMENT", occurredAt: "2026-08-14T20:30:00Z", strike: 15, contracts: 1 },
+      { type: "SELL_COVERED_CALL", occurredAt: "2026-08-20T14:00:00Z", optionType: "CALL", strike: 18, contracts: 1, premium: 0.3, expiration: "2026-09-04" },
+    ];
+    expect(getOpenPutEvidenceState(events)).toBe("NONE");
+  });
+
+  it("returns COMPLETE when getCurrentOpenPut itself would return a real value", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 17.5, contracts: 2, premium: 0.5, expiration: "2026-09-11" },
+    ];
+    expect(getOpenPutEvidenceState(events)).toBe("COMPLETE");
+    expect(getCurrentOpenPut(events)).not.toBeNull();
+  });
+
+  it("returns INCOMPLETE for a put-opening event missing expiration - a real position intended, terms unconfirmed", () => {
+    const events: CampaignEventInput[] = [
+      { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1, premium: 0.4 }, // no expiration
+    ];
+    expect(getOpenPutEvidenceState(events)).toBe("INCOMPLETE");
+    expect(getCurrentOpenPut(events)).toBeNull();
+  });
+
+  it("returns INCOMPLETE for a put-opening event missing strike or contracts", () => {
+    expect(getOpenPutEvidenceState([{ type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", contracts: 1, premium: 0.4, expiration: "2026-08-14" }])).toBe(
+      "INCOMPLETE",
+    );
+    expect(getOpenPutEvidenceState([{ type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, premium: 0.4, expiration: "2026-08-14" }])).toBe(
+      "INCOMPLETE",
+    );
+  });
+
+  it("returns INCOMPLETE for the newly-rolled leg of a roll missing expiration, regardless of tie order with its close leg", () => {
+    const close: CampaignEventInput = {
+      id: "evt-close", createdAt: "2026-08-08T14:00:05.000Z",
+      type: "ROLL_PUT_CLOSE", occurredAt: "2026-08-08T14:00:00Z", sortOrder: 1, groupKey: "roll-1", strike: 30, contracts: 1, premium: 0.8,
+    };
+    const incompleteOpen: CampaignEventInput = {
+      id: "evt-open", createdAt: "2026-08-08T14:00:06.000Z",
+      type: "ROLL_PUT_OPEN", occurredAt: "2026-08-08T14:00:00Z", sortOrder: 1, groupKey: "roll-1", strike: 29, contracts: 1, premium: 1.2,
+    }; // no expiration - created after close per createdAt, so the deterministic tiebreak still picks it as "last"
+    expect(getOpenPutEvidenceState([close, incompleteOpen])).toBe("INCOMPLETE");
+    expect(getOpenPutEvidenceState([incompleteOpen, close])).toBe("INCOMPLETE");
   });
 });
 

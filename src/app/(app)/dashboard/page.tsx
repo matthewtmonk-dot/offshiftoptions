@@ -278,6 +278,7 @@ export default async function DashboardPage() {
             <span className="text-zinc-500">
               W-L {winLoss.wins}-{winLoss.losses}
               {winLoss.breakevens ? `-${winLoss.breakevens}` : ""}
+              {winLoss.pendingCount > 0 ? ` (+${winLoss.pendingCount} pending)` : ""}
             </span>
           </div>
         )}
