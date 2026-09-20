@@ -74,6 +74,79 @@ export function summarizeCspSecuredCapital(positions: BrokerPosition[]): CspSecu
   return { total: round(total, 2), hasUnknown };
 }
 
+export type CampaignExposureInput = {
+  status: "OPEN" | "ASSIGNED" | "CLOSED";
+  /** summarizeCampaign's currentCollateralCommitted - the CURRENTLY open put's own collateral,
+   * null once there is no current open put (already closed, assigned, or evidence incomplete).
+   * Never `collateralCommitted` (the lifetime high-water mark) - see Ticket 4/5, PROJECT_HANDOFF.md. */
+  currentCollateralCommitted: number | null;
+  /** summarizeCampaign's stockCost - the assignment's own cost basis (strike x shares), a
+   * completely different exposure from put collateral. 0 when never assigned. */
+  stockCost: number;
+  /** getCurrentOpenCall(events) !== null - whether an ASSIGNED campaign's shares are currently
+   * covered by an open call. Only meaningful when status is ASSIGNED. */
+  hasOpenCoveredCall: boolean;
+};
+
+export type CampaignExposureSummary = {
+  /** Cash secured for genuinely OPEN put obligations only - never an ASSIGNED campaign's
+   * historical put collateral (the put is gone once assigned; the cash became equity). This is
+   * what a "Secured (CSP)" headline may show. */
+  securedPutCollateral: number;
+  assignedCampaignCount: number;
+  /** Sum of stockCost over ASSIGNED campaigns with a known basis - the assignment's own cost
+   * basis, NOT a live mark-to-market value (no wheel valuation engine exists yet - see
+   * PROJECT_HANDOFF.md). Must always be displayed under a distinct label from put collateral. */
+  assignedShareCapital: number;
+  assignedCampaignsWithKnownBasis: number;
+  assignedCampaignsWithCoveredCall: number;
+};
+
+/**
+ * Ticket 5: keeps open cash-secured-put collateral, assigned-share capital/basis, and
+ * covered-call coverage as three explicitly separate facts - never blended into one number, and
+ * never silently dropped. Fixes a real bug: the prior "Secured (CSP)" aggregate fell back to a
+ * campaign's historical put collateral whenever it had no current open put, which kept an
+ * ASSIGNED campaign's old put collateral inside "Secured (CSP)" forever even though that put is
+ * gone and the cash is now equity. Does NOT build a full wheel/covered-call valuation engine -
+ * `assignedShareCapital` is the already-computed cost basis, not a live value.
+ */
+export function summarizeCampaignExposure(campaigns: CampaignExposureInput[]): CampaignExposureSummary {
+  let securedPutCollateral = 0;
+  let assignedCampaignCount = 0;
+  let assignedShareCapital = 0;
+  let assignedCampaignsWithKnownBasis = 0;
+  let assignedCampaignsWithCoveredCall = 0;
+
+  for (const campaign of campaigns) {
+    // Defense in depth, not merely relying on currentCollateralCommitted already being null for
+    // a non-OPEN campaign in practice: only a genuinely OPEN campaign's put collateral counts as
+    // currently secured. A CLOSED or ASSIGNED campaign's put is gone regardless of what this
+    // field happens to hold.
+    if (campaign.status === "OPEN" && campaign.currentCollateralCommitted !== null) {
+      securedPutCollateral += campaign.currentCollateralCommitted;
+    }
+    if (campaign.status === "ASSIGNED") {
+      assignedCampaignCount += 1;
+      if (campaign.stockCost > 0) {
+        assignedShareCapital += campaign.stockCost;
+        assignedCampaignsWithKnownBasis += 1;
+      }
+      if (campaign.hasOpenCoveredCall) {
+        assignedCampaignsWithCoveredCall += 1;
+      }
+    }
+  }
+
+  return {
+    securedPutCollateral: round(securedPutCollateral, 2),
+    assignedCampaignCount,
+    assignedShareCapital: round(assignedShareCapital, 2),
+    assignedCampaignsWithKnownBasis,
+    assignedCampaignsWithCoveredCall,
+  };
+}
+
 export type BrokerPositionDisplay = {
   title: string;
   detailLine: string | null;

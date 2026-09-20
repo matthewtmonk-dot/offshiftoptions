@@ -40,6 +40,66 @@ export function previousNyseMarketDay(date: Date): Date {
   return candidate;
 }
 
+export type MarkFreshness =
+  /** Captured on today's calendar date, AND today is an NYSE market day. Safe to describe as
+   * "today's" data - never claims a specific intraday time, since a snapshot's own timestamp is
+   * the only intraday precision this policy uses (see the file-level note on why no finer-grained
+   * "is the market open right now" check exists here). */
+  | "CURRENT_SESSION"
+  /** Captured on the most recent NYSE market day strictly before `now` - the honest "last known"
+   * answer while markets are closed (weekend/holiday) or before today's own data has arrived.
+   * Must be labeled "as of last session," never presented as a live/executable quote. */
+  | "LAST_SESSION"
+  /** Older than the last completed session - two or more trading days behind `now`. No longer
+   * trustworthy as a current valuation input. */
+  | "STALE"
+  /** No timestamp at all - cannot be trusted as current by construction. */
+  | "MISSING";
+
+/**
+ * Conservative, calendar-day-only freshness policy for a market-data snapshot (an option mark,
+ * a linked broker position observation, a quote) used to value a CURRENT position - see Ticket 5
+ * (PROJECT_HANDOFF.md). Deliberately classifies by CALENDAR DATE only, never intraday time:
+ * the provider contracts this project has (Schwab quote/position `asOf`, snapshot `capturedAt`,
+ * `BrokerRecord.observedAt`) are real timestamps, but nothing in this codebase establishes a
+ * verified "is the market open at this exact minute" contract independent of the NYSE
+ * open/closed calendar already used for candle-data freshness (see previousNyseMarketDay) -
+ * inventing finer-grained intraday freshness on top of that would be exactly the kind of
+ * unverified precision this project avoids. A caller that needs "is this timestamp within the
+ * last N minutes" for a genuinely real-time feed should establish and document that policy
+ * separately; this one only answers "which trading session is this snapshot from, relative to
+ * now."
+ *
+ * - CURRENT_SESSION: `asOf` is today's calendar date AND today is itself an NYSE market day.
+ * - LAST_SESSION: `asOf` is exactly the most recent NYSE market day at-or-before `now` otherwise
+ *   (covers a weekend/holiday showing Friday's data, and a market day whose own fresh data
+ *   hasn't arrived yet showing the prior session's).
+ * - STALE: older than that - two or more sessions behind.
+ * - MISSING: no `asOf` at all.
+ */
+export function classifyMarkFreshness(asOf: Date | null, now: Date): MarkFreshness {
+  if (!asOf) {
+    return "MISSING";
+  }
+
+  const today = utcDateOnly(now);
+  const asOfDay = utcDateOnly(asOf);
+  // Never treat a future-dated snapshot (clock skew, test fixtures) as further in the future
+  // than "today" - it still can't be more current than that.
+  const effectiveAsOfDay = asOfDay.getTime() > today.getTime() ? today : asOfDay;
+
+  if (isNyseMarketDay(today) && effectiveAsOfDay.getTime() === today.getTime()) {
+    return "CURRENT_SESSION";
+  }
+
+  const priorSession = utcDateOnly(previousNyseMarketDay(today));
+  return effectiveAsOfDay.getTime() >= priorSession.getTime() ? "LAST_SESSION" : "STALE";
+}
+
+function utcDateOnly(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
 const holidayCache = new Map<number, Set<string>>();
 
 function nyseHolidaysForYear(year: number): Set<string> {

@@ -29,7 +29,7 @@ import {
   summarizeAccountsPerformance,
   type AccountPerformanceSummary,
 } from "@/domain/finance/accountLedger";
-import { classifyBrokerPosition, describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
+import { describeBrokerPositionForDisplay } from "@/domain/finance/brokerPositions";
 import {
   describeCallStrikeVsAdjustedBasis,
   getCurrentOpenCall,
@@ -39,6 +39,7 @@ import {
   summarizeCampaign,
   type CurrentOpenCall,
 } from "@/domain/finance/campaigns";
+import { resolveCurrentCostToClose, type CurrentCostToCloseSource } from "@/domain/finance/currentPositionMark";
 import { daysToExpiration, distanceToStrikeDollars } from "@/domain/finance/calculations";
 import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import {
@@ -63,7 +64,6 @@ import { money, percent, shortCalendarDate, shortDate, toNumber } from "@/lib/fo
 import { getQuoteSnapshotsForUser, type QuoteSnapshot } from "@/lib/live-quotes";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { resolveInheritedVisibility } from "@/lib/privacy";
-import type { BrokerPosition } from "@/providers/broker-read/types";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { getPendingBrokerImportBatchForUser, getBrokerImportBatchesForUser, type BrokerImportPreviewRow } from "@/lib/broker-import";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
@@ -169,15 +169,8 @@ type CampaignRow = TrackerData["campaigns"][number];
 type CampaignEventRow = CampaignRow["events"][number];
 type AccountRow = TrackerData["visibleAccounts"][number];
 type PerformanceCampaignRow = TrackerData["ownPerformanceCampaigns"][number];
-type OptionMarkRow = TrackerData["optionMarksForPerformance"][number];
 type ViewMode = "open" | "history" | "performance" | "accounts";
 type SchwabPositions = Awaited<ReturnType<typeof getSchwabOpenPositionsForUser>>;
-type CurrentCostToCloseSource = {
-  costToClose: number;
-  source: "LINKED_BROKER_POSITION" | "CACHED_OPTION_MARK";
-  label: string;
-  asOf: Date | null;
-};
 type PerformanceCampaignViewRow = {
   campaign: PerformanceCampaignRow;
   summary: ReturnType<typeof summarizeCampaign>;
@@ -348,7 +341,19 @@ export default async function PositionsPage({
     ]),
   );
   const ownPerformanceRows = data.ownPerformanceCampaigns.map((campaign): PerformanceCampaignViewRow => {
-    const currentCostSource = resolveCurrentCostToClose(campaign, optionMarksByKey);
+    const activePut = getCurrentOpenPut(campaign.events);
+    const optionMark = activePut
+      ? (optionMarksByKey.get(optionContractKey(campaign.ticker, activePut.expiration, activePut.strike, "PUT")) ?? null)
+      : null;
+    const currentCostSource = resolveCurrentCostToClose({
+      campaignStatus: campaign.status,
+      campaignAccountId: campaign.accountId,
+      campaignTicker: campaign.ticker,
+      activePut,
+      linkedRecords: campaign.linkedBrokerRecords,
+      optionMark: optionMark ? { mark: optionMark.mark, bid: optionMark.bid, ask: optionMark.ask, capturedAt: optionMark.capturedAt } : null,
+      now: snapshotCheckedAt,
+    });
     return {
       campaign,
       summary: summarizeCampaign({ status: campaign.status, events: campaign.events }),
@@ -2309,10 +2314,15 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
                 <Badge tone={row.currentCostSource.source === "LINKED_BROKER_POSITION" ? "info" : "neutral"}>
                   {row.currentCostSource.label}
                 </Badge>
+                {row.currentCostSource.freshness === "LAST_SESSION" ? <Badge tone="warn">Last session</Badge> : null}
                 <span className="text-zinc-400">{money(row.currentCostSource.costToClose)} cost to close</span>
               </div>
               <p className="mt-2 text-xs text-zinc-500">
-                {row.currentCostSource.asOf ? `As of ${shortDate(row.currentCostSource.asOf)}.` : "Snapshot date unavailable."}
+                {row.currentCostSource.asOf
+                  ? row.currentCostSource.freshness === "LAST_SESSION"
+                    ? `As of ${shortDate(row.currentCostSource.asOf)} (last completed session - not a live quote).`
+                    : `As of ${shortDate(row.currentCostSource.asOf)}.`
+                  : "Snapshot date unavailable."}
               </p>
             </div>
           ) : (
@@ -2596,80 +2606,6 @@ function entrySnapshotText(value: unknown) {
   return "Stored with the campaign for future performance reports.";
 }
 
-function resolveCurrentCostToClose(
-  campaign: PerformanceCampaignRow,
-  optionMarksByKey: Map<string, OptionMarkRow>,
-): CurrentCostToCloseSource | null {
-  if (campaign.status !== "OPEN") {
-    return null;
-  }
-
-  for (const record of campaign.linkedBrokerRecords) {
-    const position = brokerPositionFromRecord(record);
-    if (!position) {
-      continue;
-    }
-    if (classifyBrokerPosition(position).kind !== "SHORT_PUT") {
-      continue;
-    }
-
-    return {
-      costToClose: roundMoney(Math.abs(position.marketValue)),
-      source: "LINKED_BROKER_POSITION",
-      label: "Linked Schwab position",
-      asOf: record.observedAt ?? null,
-    };
-  }
-
-  const activePut = getCurrentOpenPut(campaign.events);
-  if (!activePut) {
-    return null;
-  }
-
-  const snapshot = optionMarksByKey.get(optionContractKey(campaign.ticker, activePut.expiration, activePut.strike, "PUT"));
-  if (!snapshot) {
-    return null;
-  }
-
-  const mark = toNullableNumber(snapshot.mark);
-  const bid = toNullableNumber(snapshot.bid);
-  const ask = toNullableNumber(snapshot.ask);
-  const midpoint = bid === null || ask === null ? null : (bid + ask) / 2;
-  const markPerShare = mark !== null && mark > 0 ? mark : midpoint;
-  if (markPerShare === null) {
-    return null;
-  }
-
-  return {
-    costToClose: roundMoney(markPerShare * activePut.contracts * 100),
-    source: "CACHED_OPTION_MARK",
-    label: "Cached option mark",
-    asOf: snapshot.capturedAt,
-  };
-}
-
-function brokerPositionFromRecord(record: PerformanceCampaignRow["linkedBrokerRecords"][number]): BrokerPosition | null {
-  const symbol = record.symbol;
-  const quantity = toNullableNumber(record.quantity);
-  const marketValue = toNullableNumber(record.amount);
-  if (!symbol || quantity === null || marketValue === null) {
-    return null;
-  }
-
-  const metadata = objectValue(record.metadata);
-  const putCallRaw = stringValue(metadata?.putCall);
-  return {
-    accountId: record.accountId ?? stringValue(metadata?.accountId) ?? "linked-broker-record",
-    symbol,
-    quantity,
-    marketValue,
-    assetType: stringValue(metadata?.assetType),
-    putCall: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
-    strikePrice: toNullableNumber(metadata?.strikePrice),
-    underlyingSymbol: record.underlyingSymbol ?? stringValue(metadata?.underlyingSymbol),
-  };
-}
-
 function sumKnown(values: Array<number | null>) {
   const known = values.filter((value): value is number => value !== null);
   return known.length ? roundMoney(known.reduce((sum, value) => sum + value, 0)) : null;
@@ -2680,23 +2616,6 @@ function goalTone(value: number | null) {
     return "bg-zinc-700";
   }
   return value >= 0 ? "bg-emerald-300" : "bg-red-300";
-}
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-function stringValue(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function toNullableNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") {
-    return null;
-  }
-
-  const parsed = toNumber(value);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function firstParam(value: string | string[] | undefined) {

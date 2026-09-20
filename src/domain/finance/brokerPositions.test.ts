@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { BrokerPosition } from "@/providers/broker-read/types";
-import { classifyBrokerPosition, describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "./brokerPositions";
+import {
+  classifyBrokerPosition,
+  describeBrokerPositionForDisplay,
+  summarizeCampaignExposure,
+  summarizeCspSecuredCapital,
+  type CampaignExposureInput,
+} from "./brokerPositions";
 
 function shortPut(overrides: Partial<BrokerPosition> = {}): BrokerPosition {
   return {
@@ -120,5 +126,64 @@ describe("describeBrokerPositionForDisplay", () => {
     const equity = describeBrokerPositionForDisplay({ accountId: "acct-1", symbol: "RIOT", quantity: 100, marketValue: 1500 });
     expect(equity.valueLabel).toBe("Market value");
     expect(equity.value).toBe(1500);
+  });
+});
+
+describe("summarizeCampaignExposure (Ticket 5: separate exposure types)", () => {
+  function campaign(overrides: Partial<CampaignExposureInput> = {}): CampaignExposureInput {
+    return { status: "OPEN", currentCollateralCommitted: null, stockCost: 0, hasOpenCoveredCall: false, ...overrides };
+  }
+
+  it("test 13: an ASSIGNED campaign with no current put contributes zero to securedPutCollateral, and its share basis is tracked separately", () => {
+    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", currentCollateralCommitted: null, stockCost: 3000 })]);
+    expect(summary.securedPutCollateral).toBe(0); // the real bug this fixes: no historical put collateral leaks in here
+    expect(summary.assignedCampaignCount).toBe(1);
+    expect(summary.assignedShareCapital).toBe(3000);
+    expect(summary.assignedCampaignsWithKnownBasis).toBe(1);
+    expect(summary.assignedCampaignsWithCoveredCall).toBe(0);
+  });
+
+  it("test 14: an ASSIGNED campaign with an existing covered call is counted, without fabricating a valuation for it", () => {
+    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", stockCost: 4000, hasOpenCoveredCall: true })]);
+    expect(summary.assignedCampaignsWithCoveredCall).toBe(1);
+    expect(summary.assignedShareCapital).toBe(4000); // still just the cost basis, never a call-adjusted mark-to-market
+  });
+
+  it("test 15: mixed exposure - an open CSP's collateral, an assigned campaign's basis, and an unsupported/incomplete campaign all stay distinct and additive where valid", () => {
+    const summary = summarizeCampaignExposure([
+      campaign({ status: "OPEN", currentCollateralCommitted: 1650 }), // CORZ-like open put
+      campaign({ status: "ASSIGNED", stockCost: 3000 }), // assigned, no call yet
+      campaign({ status: "ASSIGNED", stockCost: 4000, hasOpenCoveredCall: true }), // assigned + covered call
+      campaign({ status: "OPEN", currentCollateralCommitted: null }), // evidence incomplete - contributes nothing, never a fabricated zero-as-collateral claim
+    ]);
+    expect(summary.securedPutCollateral).toBe(1650); // only the genuinely open put's collateral
+    expect(summary.assignedCampaignCount).toBe(2);
+    expect(summary.assignedShareCapital).toBe(7000); // 3000 + 4000, never blended with the 1650 above
+    expect(summary.assignedCampaignsWithCoveredCall).toBe(1);
+  });
+
+  it("never lets an ASSIGNED campaign's real exposure disappear when its basis is unknown - counted, but flagged as unknown rather than zero", () => {
+    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", stockCost: 0 })]);
+    expect(summary.assignedCampaignCount).toBe(1);
+    expect(summary.assignedShareCapital).toBe(0);
+    expect(summary.assignedCampaignsWithKnownBasis).toBe(0); // the caller can tell "known $0" apart from "no data" via this count
+  });
+
+  it("a CLOSED campaign never contributes to either secured collateral or assigned capital", () => {
+    const summary = summarizeCampaignExposure([campaign({ status: "CLOSED", currentCollateralCommitted: 2000, stockCost: 5000 })]);
+    expect(summary.securedPutCollateral).toBe(0);
+    expect(summary.assignedCampaignCount).toBe(0);
+    expect(summary.assignedShareCapital).toBe(0);
+  });
+
+  it("returns all zeros for an empty campaign list", () => {
+    const summary = summarizeCampaignExposure([]);
+    expect(summary).toEqual({
+      securedPutCollateral: 0,
+      assignedCampaignCount: 0,
+      assignedShareCapital: 0,
+      assignedCampaignsWithKnownBasis: 0,
+      assignedCampaignsWithCoveredCall: 0,
+    });
   });
 });

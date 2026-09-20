@@ -13,8 +13,8 @@ import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { getLinkedCampaignIdsBySymbolForUser, normalizeSymbolForLinking } from "@/lib/broker-reconciliation";
 import { summarizeAccountPerformance, summarizeAccountsPerformance } from "@/domain/finance/accountLedger";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
-import { describeBrokerPositionForDisplay, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
-import { getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
+import { describeBrokerPositionForDisplay, summarizeCampaignExposure, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
+import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { matchDashboardPositions, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
@@ -135,19 +135,29 @@ export default async function DashboardPage() {
   // Awaiting-expiration is a lifecycle-stage breakdown of the SAME open-campaign count, never a
   // broker position count - an Expiration Processing campaign has no corresponding Schwab
   // position once its option expires, so it must never be labeled or summed as one.
-  let campaignSecuredCapital = 0;
   let awaitingExpirationCount = 0;
-  for (const campaign of data.openCampaigns) {
-    const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-    // currentCollateralCommitted (the CURRENTLY open put's own strike) - not collateralCommitted
-    // (a lifetime high-water mark meant for closed-campaign return-on-collateral math) - so a
-    // roll to a different strike is reflected immediately instead of showing a stale amount.
-    // Falls back to the historical max only once there is no open put left (e.g. assigned).
-    campaignSecuredCapital += summary.currentCollateralCommitted ?? summary.collateralCommitted ?? 0;
+  const campaignSummaries = data.openCampaigns.map((campaign) => ({
+    campaign,
+    summary: summarizeCampaign({ status: campaign.status, events: campaign.events }),
+  }));
+  for (const { summary } of campaignSummaries) {
     if (summary.currentStage === "Expiration processing") {
       awaitingExpirationCount += 1;
     }
   }
+  // Ticket 5: keeps open put collateral, assigned-share capital, and covered-call coverage as
+  // three explicitly separate facts - see summarizeCampaignExposure (brokerPositions.ts) for the
+  // real bug this fixes (an ASSIGNED campaign's historical put collateral no longer silently
+  // stays inside "Secured (CSP)" after the put is gone).
+  const exposure = summarizeCampaignExposure(
+    campaignSummaries.map(({ campaign, summary }) => ({
+      status: campaign.status,
+      currentCollateralCommitted: summary.currentCollateralCommitted,
+      stockCost: summary.stockCost,
+      hasOpenCoveredCall: campaign.status === "ASSIGNED" && getCurrentOpenCall(campaign.events) !== null,
+    })),
+  );
+  const campaignSecuredCapital = exposure.securedPutCollateral;
   const openCampaignCount = data.openCampaigns.length;
   const winLoss = summarizeWinLoss(completedForPerformance);
   const weekly = summarizeWeeklyReturns(completedForPerformance, hasAnyAccountValue ? totalValue : null, WEEKLY_TARGET_PERCENT);
@@ -238,7 +248,7 @@ export default async function DashboardPage() {
         <Stat
           label="Open campaigns"
           value={String(openCampaignCount)}
-          detail={awaitingExpirationCount > 0 ? `${awaitingExpirationCount} awaiting expiration confirmation` : "Tracker lifecycle count"}
+          detail={dashboardOpenCampaignsDetail(awaitingExpirationCount, exposure)}
         />
         <Suspense fallback={<DashboardBrokerStatsFallback openCampaignCount={openCampaignCount} securedCapital={campaignSecuredCapital} />}>
           <DashboardBrokerStats
@@ -780,6 +790,27 @@ function latestSnapshotAt(dates: (Date | null)[]) {
     }
     return !latest || date > latest ? date : latest;
   }, null);
+}
+
+/**
+ * Ticket 5: keeps assigned-share exposure visibly distinct from the "Secured (CSP)" put-collateral
+ * stat above, rather than silently absent from the header once a campaign is assigned. Never
+ * fabricates a mark-to-market value - `assignedShareCapital` is the existing, already-computed
+ * assignment cost basis (strike x shares), not a live valuation (see PROJECT_HANDOFF.md - no full
+ * wheel valuation engine exists yet).
+ */
+function dashboardOpenCampaignsDetail(awaitingExpirationCount: number, exposure: ReturnType<typeof summarizeCampaignExposure>) {
+  const parts: string[] = [];
+  if (awaitingExpirationCount > 0) {
+    parts.push(`${awaitingExpirationCount} awaiting expiration confirmation`);
+  }
+  if (exposure.assignedCampaignCount > 0) {
+    const coveredNote = exposure.assignedCampaignsWithCoveredCall > 0 ? `, ${exposure.assignedCampaignsWithCoveredCall} with a covered call` : "";
+    const basisNote =
+      exposure.assignedCampaignsWithKnownBasis > 0 ? `${money(exposure.assignedShareCapital)} share basis${coveredNote}` : "basis unknown";
+    parts.push(`${exposure.assignedCampaignCount} assigned (${basisNote}) - not put collateral`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "Tracker lifecycle count";
 }
 
 function dashboardTradingDetail(source: string | null, exact: boolean) {
