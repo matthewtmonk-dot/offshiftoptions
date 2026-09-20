@@ -14,7 +14,7 @@ Before doing meaningful work in this repository, read `PROJECT_HANDOFF.md`.
 
 If Matt explicitly says **"Read PROJECT_HANDOFF.md"**: read it in full, read this file, and verify enough repository context to understand the current state. If there are no critical blockers, respond with only `Ready.` — no summary, no recap, no next-steps list.
 
-`PROJECT_HANDOFF.md` is the canonical current-state document (architecture, deployment, database/seed safety, environment variables, features, security, testing, known issues, and next tasks). This `AGENTS.md` file covers general operating notes; `PROJECT_HANDOFF.md` is authoritative for project state.
+`PROJECT_HANDOFF.md` is the canonical current-state document (architecture, deployment, database/seed safety, environment variables, invariants, current roadmap, and known issues) — it is deliberately concise; read it first, in full, before reading anything else. It points to `docs/PROJECT_HANDOFF_ARCHIVE.md` and the other `docs/*.md` files for chronological history and subsystem depth — read those only when a task actually needs that detail, not by default. This `AGENTS.md` file covers general operating notes; `PROJECT_HANDOFF.md` is authoritative for project state.
 
 **After every meaningful project change, update `PROJECT_HANDOFF.md` automatically before considering the task complete.** Matt should never need to ask. "Meaningful" includes changes to application behavior, architecture, database/schema, auth, deployment, environment variables, hosting/domain, external integrations, scanner, market-data behavior, Schwab status, security, PWA, chat, notifications, production status, known issues, technical debt, test status, or important decisions. Never put secrets into `PROJECT_HANDOFF.md` or any other tracked file.
 
@@ -74,12 +74,15 @@ Schwab market data is shared application infrastructure, but brokerage account d
 - Playwright specs log in via the real email/password sign-in form, not a dev-only shortcut button — this is what lets the suite run against a genuine `next start` production build, which is the authoritative pass/fail signal for this project (see `PROJECT_HANDOFF.md` Testing section on the dev-only overlay artifact that otherwise makes `next dev` runs unreliable for anything involving Sign Out).
 - Never let a personal/preference field (Research status, exclusion, a future per-user setting) alter a Scan/Scanner result's technical score, status, or label. Compute them independently and join only for display — this is a load-bearing product invariant, not a style preference. See `PROJECT_HANDOFF.md` Product Model and Research sections.
 - Don't blindly trust a claim about what a third-party API (e.g. Schwab's quote `fundamental` field group) returns — verify the actual live response (field names, presence, units) before normalizing/displaying it. Guessing at units (e.g. Debt/Equity as `0.42` vs `42%`) is exactly the kind of silent-wrong-interpretation bug this project explicitly guards against.
-- Update `PROJECT_HANDOFF.md` automatically after every meaningful change (see top of this file). `docs/HANDOFF.md` is an older chronological session log kept for detailed history.
+- Update `PROJECT_HANDOFF.md` automatically after every meaningful change (see top of this file), keeping it concise — move chronological/historical detail to `docs/PROJECT_HANDOFF_ARCHIVE.md` rather than letting it grow into a diary again. `docs/HANDOFF.md` is an older, separate chronological session log (earliest project history, through the first production deploy) kept for detailed history.
 
 ## Key Docs
+
+Read `PROJECT_HANDOFF.md` first. These are subsystem/historical depth, read only when a task needs them:
 
 - `docs/ARCHITECTURE.md`
 - `docs/DATA_MODEL.md`
 - `docs/DECISIONS.md`
-- `docs/HANDOFF.md`
+- `docs/PROJECT_HANDOFF_ARCHIVE.md` — full chronological history superseded out of the root handoff (2026-09-20 cleanup)
+- `docs/HANDOFF.md` — earliest project history (Phase 1 foundation)
 - `docs/SCHWAB_INTEGRATION.md`
