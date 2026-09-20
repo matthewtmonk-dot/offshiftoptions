@@ -48,6 +48,7 @@ next-env.d.ts
 
 # generated clients and local data
 /src/generated/prisma
+/src/generated/build-info.json
 /postgres-data
 /data
 /.data
