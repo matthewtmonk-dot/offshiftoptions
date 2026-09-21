@@ -143,7 +143,7 @@ const HELP = {
   capitalSecured:
     "Cash or account capital currently committed to secure open short puts. For cash-secured puts, OSO uses strike times contracts times 100 shares.",
   currentCostToClose:
-    "Estimated cost to buy back the open short put today. OSO uses a linked Schwab position when available, otherwise an exact cached option quote.",
+    "Estimated cost to buy back the open short put today. OSO uses a linked Schwab position when available, otherwise an exact cached option quote. When the broker doesn't provide a verified pricing time, the value is still shown but labeled as an unverified snapshot rather than a confirmed market result.",
   currentReturn:
     "Current mark-to-market result divided by secured capital. It can move around while the campaign is open.",
   projectedReturn:
@@ -153,7 +153,7 @@ const HELP = {
   rolls:
     "A roll buys back an existing short put and sells a new one. OSO keeps both legs in the campaign history.",
   markSource:
-    "Current option value comes from your linked Schwab position when available, otherwise from an exact cached option quote. If OSO cannot establish a reliable mark, current P/L is left unavailable rather than guessed.",
+    "Current option value comes from your linked Schwab position when available, otherwise from an exact cached option quote. If OSO cannot establish a reliable mark, current P/L is left unavailable rather than guessed. A mark without a verified valuation timestamp is still shown, but labeled as a broker snapshot - it counts toward current P/L but is never treated as a confirmed market result.",
   colorLegend:
     "Color guide: green means profitable or on target, amber means unresolved or behind target, red means losing or closed loss, and blue/neutral is informational or open state.",
   sto:
@@ -368,6 +368,7 @@ export default async function PositionsPage({
         status: campaign.status,
         events: campaign.events,
         currentCostToClose: currentCostSource?.costToClose ?? null,
+        costToCloseVerified: currentCostSource?.provenance === "VERIFIED_MARKET_TIMESTAMP",
         targetWeeklyPercent: WEEKLY_TARGET_PERCENT,
         feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
       }),
@@ -2254,7 +2255,8 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
         <span className={toneClass(progress.netPremiumCollected)}>{performanceMetricText(progress.netPremiumCollected, progress.netPremiumStatus, signedMoney)}</span>
         <span className={toneClass(progress.currentPL)}>
           {performanceMetricText(progress.currentPL, progress.currentPLStatus, signedMoney)}
-          {row.currentCostSource?.freshness === "LAST_SESSION" ? <span className="block text-xs text-amber-300">Last session</span> : null}
+          {row.currentCostSource?.freshness === "LAST_SESSION" ? <span className="block text-xs text-amber-300">Last session</span>
+            : row.currentCostSource?.provenance === "BROKER_SNAPSHOT" ? <span className="block text-xs text-zinc-500">Snapshot</span> : null}
         </span>
         <span className={toneClass(progress.projectedOtmPL)}>
           {performanceMetricText(progress.projectedOtmPL, progress.projectedOtmStatus, signedMoney)}
@@ -2316,14 +2318,15 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
                   {row.currentCostSource.label}
                 </Badge>
                 {row.currentCostSource.freshness === "LAST_SESSION" ? <Badge tone="warn">Last session</Badge> : null}
+                {row.currentCostSource.provenance === "BROKER_SNAPSHOT" ? <Badge tone="neutral">Unverified timing</Badge> : null}
                 <span className="text-zinc-400">{money(row.currentCostSource.costToClose)} cost to close</span>
               </div>
               <p className="mt-2 text-xs text-zinc-500">
-                {row.currentCostSource.asOf
-                  ? row.currentCostSource.freshness === "LAST_SESSION"
+                {row.currentCostSource.provenance === "BROKER_SNAPSHOT"
+                  ? `Schwab snapshot - fetched ${shortDate(row.currentCostSource.asOf)}. Broker did not provide a verified valuation timestamp.`
+                  : row.currentCostSource.freshness === "LAST_SESSION"
                     ? `As of ${shortDate(row.currentCostSource.asOf)} (last completed session - not a live quote).`
-                    : `As of ${shortDate(row.currentCostSource.asOf)}.`
-                  : "Snapshot date unavailable."}
+                    : `As of ${shortDate(row.currentCostSource.asOf)}.`}
               </p>
             </div>
           ) : (

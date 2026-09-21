@@ -52,6 +52,7 @@ describe("resolveCurrentCostToClose (Ticket 5: validated current-position marks)
     expect(result!.source).toBe("LINKED_BROKER_POSITION");
     expect(result!.costToClose).toBe(150);
     expect(result!.freshness).toBe("CURRENT_SESSION");
+    expect(result!.provenance).toBe("VERIFIED_MARKET_TIMESTAMP");
   });
 
   it("test 2: old pre-roll contract and new post-roll contract both linked - the OLD one must never supply the current mark", () => {
@@ -195,9 +196,54 @@ describe("valuation evidence regressions", () => {
     expect(resolve({ linkedRecords: [linkedRecord({ amount: null })] })).toBeNull();
     expect(resolve({ linkedRecords: [linkedRecord({ amount: 0 })] })?.costToClose).toBe(0);
   });
-  it("neither a new sync timestamp nor database capturedAt proves valuation freshness", () => {
-    expect(resolve({ linkedRecords: [linkedRecord({ metadata: null })] })).toBeNull();
-    expect(resolve({ optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: MARKET_DAY, valuationAsOf: null } })).toBeNull();
+  it("a linked position with no verified valuation timestamp still returns a numeric estimate, honestly labeled as a broker snapshot", () => {
+    const result = resolve({ linkedRecords: [linkedRecord({ metadata: null })] });
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe("LINKED_BROKER_POSITION");
+    expect(result!.costToClose).toBe(150);
+    expect(result!.provenance).toBe("BROKER_SNAPSHOT");
+    expect(result!.freshness).toBeNull(); // never CURRENT_SESSION/LAST_SESSION - retrieval time is not a session claim
+    expect(result!.label).not.toMatch(/current session|live|last session/i);
+    expect(result!.label).toMatch(/unverified/i);
+  });
+  it("a cached quote with no verified valuation timestamp still returns a numeric estimate, honestly labeled as a broker snapshot", () => {
+    const result = resolve({ optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: MARKET_DAY, valuationAsOf: null } });
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe("CACHED_OPTION_MARK");
+    expect(result!.costToClose).toBe(100); // 1 * 1 contract * 100
+    expect(result!.provenance).toBe("BROKER_SNAPSHOT");
+    expect(result!.freshness).toBeNull();
+    expect(result!.label).not.toMatch(/current session|live|last session/i);
+    expect(result!.label).toMatch(/unverified/i);
+  });
+  it("a broker-snapshot estimate is rejected once its retrieval time itself is stale, same as a verified mark", () => {
+    // now = Sep 9 (Wed); Sep 4 (Fri) is two sessions behind - identical staleness boundary to
+    // "test 10" above, but here with no valuationAsOf at all (metadata: null).
+    const stale = linkedRecord({ observedAt: new Date("2026-09-04T20:00:00Z"), metadata: null });
+    expect(resolve({ linkedRecords: [stale], now: new Date("2026-09-09T15:00:00Z") })).toBeNull();
+    expect(resolve({
+      optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: new Date("2026-09-04T20:00:00Z"), valuationAsOf: null },
+      now: new Date("2026-09-09T15:00:00Z"),
+    })).toBeNull();
+  });
+  it("a verified valuation timestamp reaches CONFIRMED completeness, but a broker-snapshot estimate is capped at PENDING even with fully known fees", () => {
+    const sellPut = [{ type: "SELL_PUT" as const, optionType: "PUT" as const, occurredAt: "2026-08-01", strike: 20, contracts: 1, premium: 2, expiration: "2026-09-18" }];
+    const verified = resolve({ linkedRecords: [linkedRecord()] });
+    expect(verified!.provenance).toBe("VERIFIED_MARKET_TIMESTAMP");
+    const verifiedProgress = summarizeCampaignProgress({
+      status: "OPEN", events: sellPut, feesFullyKnown: true, asOf: MARKET_DAY,
+      currentCostToClose: verified!.costToClose, costToCloseVerified: verified!.provenance === "VERIFIED_MARKET_TIMESTAMP",
+    });
+    expect(verifiedProgress.currentPLStatus).toBe("CONFIRMED");
+
+    const snapshot = resolve({ linkedRecords: [linkedRecord({ metadata: null })] });
+    expect(snapshot!.provenance).toBe("BROKER_SNAPSHOT");
+    const snapshotProgress = summarizeCampaignProgress({
+      status: "OPEN", events: sellPut, feesFullyKnown: true, asOf: MARKET_DAY,
+      currentCostToClose: snapshot!.costToClose, costToCloseVerified: snapshot!.provenance === "VERIFIED_MARKET_TIMESTAMP",
+    });
+    expect(snapshotProgress.currentPLStatus).toBe("PENDING");
+    expect(snapshotProgress.currentPL).toBe(verifiedProgress.currentPL); // same numeric value either way
   });
   it.each([[0, 0], [-1, 1], [1, -1], [2, 1], [NaN, 1]])("rejects invalid bid/ask %s / %s", (bid, ask) => {
     expect(resolve({ optionMark: { mark: null, bid, ask, capturedAt: MARKET_DAY } })).toBeNull();

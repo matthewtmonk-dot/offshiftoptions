@@ -8,7 +8,14 @@ export type CurrentCostToCloseSource = {
   source: "LINKED_BROKER_POSITION" | "CACHED_OPTION_MARK";
   label: string;
   asOf: Date;
-  freshness: "CURRENT_SESSION" | "LAST_SESSION";
+  /** VERIFIED_MARKET_TIMESTAMP: a genuine provider-verified pricing time (see valuationAsOf)
+   * backs this value, and `freshness` reports its NYSE session recency. BROKER_SNAPSHOT: no
+   * verified pricing time exists, but a valid, unambiguous, identity-matched value was fetched at
+   * `asOf` - a retrieval/insertion time, not a priced time. Useful, but never a session claim. */
+  provenance: "VERIFIED_MARKET_TIMESTAMP" | "BROKER_SNAPSHOT";
+  /** Only meaningful for VERIFIED_MARKET_TIMESTAMP. Always null for BROKER_SNAPSHOT - retrieval
+   * time must never be presented as proof of a market session (see `provenance`). */
+  freshness: "CURRENT_SESSION" | "LAST_SESSION" | null;
 };
 
 export type LinkedPositionRecordInput = {
@@ -95,22 +102,36 @@ export function resolveCurrentCostToClose({
         (record.underlyingSymbol != null && record.underlyingSymbol.trim().toUpperCase() !== ticker) ||
         (metadata?.underlyingSymbol != null && String(metadata.underlyingSymbol).trim().toUpperCase() !== ticker) ||
         (metadata?.strikePrice != null && !sameStrike(toNullableNumber(metadata.strikePrice) ?? NaN, activePut.strike))) return null;
-    const freshness = classifyMarkFreshness(latest.valuationAsOf, now);
+    const verifiedFreshness = classifyMarkFreshness(latest.valuationAsOf, now);
     if (latest.amount !== null && latest.valuationAsOf && latest.valuationAsOf <= record.observedAt! &&
-        (freshness === "CURRENT_SESSION" || freshness === "LAST_SESSION")) {
+        (verifiedFreshness === "CURRENT_SESSION" || verifiedFreshness === "LAST_SESSION")) {
       return {
         costToClose: round(Math.abs(latest.amount), 2), source: "LINKED_BROKER_POSITION",
-        label: "Linked Schwab position", asOf: latest.valuationAsOf, freshness,
+        label: "Linked Schwab position", asOf: latest.valuationAsOf,
+        provenance: "VERIFIED_MARKET_TIMESTAMP", freshness: verifiedFreshness,
       };
     }
-    // Identity and quantity agree, but a missing/stale value may use an independently dated quote.
+    // No verified provider pricing time (the common production case today - see broker-read.ts,
+    // which has no verified valuation timestamp for this endpoint). Identity and quantity already
+    // agree above, so this is still the right, unambiguous contract and a real fetched value - just
+    // retrieved rather than priced. `record.observedAt` bounds how recent that retrieval must be
+    // (via the same session-boundary rules used for a real valuation), but it is never surfaced as
+    // `freshness` or treated as proof of a market session - only as an honestly-labeled snapshot.
+    if (latest.amount !== null) {
+      const snapshotRecency = classifyMarkFreshness(record.observedAt, now);
+      if (snapshotRecency === "CURRENT_SESSION" || snapshotRecency === "LAST_SESSION") {
+        return {
+          costToClose: round(Math.abs(latest.amount), 2), source: "LINKED_BROKER_POSITION",
+          label: "Schwab snapshot (unverified pricing time)", asOf: record.observedAt!,
+          provenance: "BROKER_SNAPSHOT", freshness: null,
+        };
+      }
+    }
   }
 
   if (!optionMark) return null;
   if (optionMark.capturedAt && (!Number.isFinite(optionMark.capturedAt.getTime()) || optionMark.capturedAt > now ||
       (optionMark.valuationAsOf && optionMark.valuationAsOf > optionMark.capturedAt))) return null;
-  const freshness = classifyMarkFreshness(optionMark.valuationAsOf ?? null, now);
-  if (freshness !== "CURRENT_SESSION" && freshness !== "LAST_SESSION") return null;
   const mark = toNullableNumber(optionMark.mark);
   const bid = toNullableNumber(optionMark.bid);
   const ask = toNullableNumber(optionMark.ask);
@@ -122,9 +143,23 @@ export function resolveCurrentCostToClose({
   const markPerShare = mark !== null && mark > 0 ? mark : midpoint;
   // An empty/zero quote is not proof of a worthless contract. A verified broker $0 above is different.
   if (markPerShare === null || markPerShare <= 0) return null;
+  const costToClose = round(markPerShare * activePut.contracts * 100, 2);
+  const verifiedFreshness = classifyMarkFreshness(optionMark.valuationAsOf ?? null, now);
+  if (verifiedFreshness === "CURRENT_SESSION" || verifiedFreshness === "LAST_SESSION") {
+    return {
+      costToClose, source: "CACHED_OPTION_MARK", label: "Cached option mark",
+      asOf: optionMark.valuationAsOf!, provenance: "VERIFIED_MARKET_TIMESTAMP", freshness: verifiedFreshness,
+    };
+  }
+  // capturedAt is this table's insertion time only - never proven to be a priced time (see the
+  // call site's own comment in positions/page.tsx). Same honest-snapshot treatment as the linked
+  // broker position above: a valid quote, bounded to recent retrieval, never labeled as a session.
+  if (!optionMark.capturedAt) return null;
+  const snapshotRecency = classifyMarkFreshness(optionMark.capturedAt, now);
+  if (snapshotRecency !== "CURRENT_SESSION" && snapshotRecency !== "LAST_SESSION") return null;
   return {
-    costToClose: round(markPerShare * activePut.contracts * 100, 2), source: "CACHED_OPTION_MARK",
-    label: "Cached option mark", asOf: optionMark.valuationAsOf!, freshness,
+    costToClose, source: "CACHED_OPTION_MARK", label: "Cached quote (unverified pricing time)",
+    asOf: optionMark.capturedAt, provenance: "BROKER_SNAPSHOT", freshness: null,
   };
 }
 

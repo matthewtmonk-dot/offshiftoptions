@@ -316,7 +316,11 @@ function campaignProjectedOtmStatus({
  * covered call) exists but no valuation engine values it yet (out of scope for this ticket), and
  * a completeness summary must disclose that coverage gap rather than imply there's nothing to
  * value. OPEN with a real put but no live cost-to-close mark is PENDING (the leg's own evidence
- * is complete; only an external mark is missing).
+ * is complete; only an external mark is missing). A numeric mark alone never reaches CONFIRMED -
+ * `costToCloseVerified` keeps this economic-completeness status distinct from market-data
+ * provenance (see `CurrentCostToCloseSource.provenance` in currentPositionMark.ts): a value
+ * fetched from a broker snapshot with no verified pricing time is real and usable, but is capped
+ * at PENDING even with fully known fees, since it is not a verified market result.
  */
 function campaignCurrentPLStatus({
   status,
@@ -325,6 +329,7 @@ function campaignCurrentPLStatus({
   hasUnknownCashFlow,
   feesFullyKnown,
   hasCostToClose,
+  costToCloseVerified,
 }: {
   status: CampaignStatusInput;
   openPutEvidenceState: OpenPutEvidenceState;
@@ -332,6 +337,7 @@ function campaignCurrentPLStatus({
   hasUnknownCashFlow: boolean;
   feesFullyKnown: boolean;
   hasCostToClose: boolean;
+  costToCloseVerified: boolean;
 }): CompletenessStatus {
   if (status === "CLOSED") {
     if (hasUnknownCashFlow) return "INCOMPLETE";
@@ -353,7 +359,7 @@ function campaignCurrentPLStatus({
   if (hasUnknownCashFlow) {
     return "INCOMPLETE";
   }
-  return hasCostToClose && feesFullyKnown ? "CONFIRMED" : "PENDING";
+  return hasCostToClose && feesFullyKnown && costToCloseVerified ? "CONFIRMED" : "PENDING";
 }
 
 /**
@@ -366,6 +372,7 @@ export function summarizeCampaignProgress({
   status,
   events,
   currentCostToClose = null,
+  costToCloseVerified = true,
   targetWeeklyPercent = 1,
   feesFullyKnown = true,
   asOf = new Date(),
@@ -373,6 +380,12 @@ export function summarizeCampaignProgress({
   status: CampaignStatusInput;
   events: CampaignEventInput[];
   currentCostToClose?: number | null;
+  /** Whether `currentCostToClose` came from a verified market valuation timestamp, as opposed to
+   * an unverified broker-snapshot/retrieval-time estimate (see
+   * `CurrentCostToCloseSource.provenance` in currentPositionMark.ts). Defaults to true so callers
+   * that don't yet distinguish provenance keep their existing behavior; the one caller that does
+   * (positions/page.tsx) passes it explicitly. A snapshot-sourced value never reaches CONFIRMED. */
+  costToCloseVerified?: boolean;
   targetWeeklyPercent?: number;
   /** False when a linked Schwab transaction behind this campaign has an unresolved fee (see
    * getCampaignIdsWithUnknownFees) - defaults to true, matching the existing manual-entry
@@ -415,6 +428,7 @@ export function summarizeCampaignProgress({
       hasUnknownCashFlow,
       feesFullyKnown,
       hasCostToClose: normalizedCostToClose !== null,
+      costToCloseVerified,
     }),
     currentCostToClose: normalizedCostToClose,
     projectedOtmPL,
@@ -434,7 +448,7 @@ export type PerformanceMetric = { value: number | null; status: CompletenessStat
 export function summarizePerformanceMetrics(rows: {
   status: CampaignStatusInput;
   progress: CampaignProgressSummary;
-  freshness?: "CURRENT_SESSION" | "LAST_SESSION";
+  freshness?: "CURRENT_SESSION" | "LAST_SESSION" | null;
 }[]) {
   const aggregate = (metrics: PerformanceMetric[]): PerformanceMetric => {
     const applicable = metrics.filter((m) => m.status !== "NOT_APPLICABLE");
