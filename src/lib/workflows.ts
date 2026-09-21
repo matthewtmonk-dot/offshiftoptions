@@ -1899,73 +1899,96 @@ export async function ensureMyLstScannerProfileForUser(userId: string) {
   }
 }
 
+/**
+ * Ticket 7: saving/resetting Scanner settings is a pure preference change - it must never run a
+ * scan (demo or live), never replace the latest ScanRun, and never partially apply an invalid
+ * rule set. The whole proposed rule set is parsed/validated FIRST (synchronously, before any
+ * database write); an invalid field throws here and nothing is persisted. Only once validation
+ * succeeds does a single `$transaction` upsert every rule AND touch the profile's own `updatedAt` -
+ * atomic (Postgres rolls back everything if any step fails) and the same mechanism the Scanner
+ * page uses to honestly disclose "results were generated with earlier settings" (compares
+ * `ScannerProfile.updatedAt` against the latest `ScanRun.createdAt` - no new versioning field).
+ * Explicit demo mode remains exactly `runDemoScannerAction` -> `rerunDemoScannerForUser`,
+ * unchanged and untouched by either function below.
+ */
 export async function updateScannerSettingsForUser(userId: string, formData: FormData) {
   const profile = await ensureMyLstScannerProfileForUser(userId);
 
-  for (const [index, definition] of SCANNER_RULE_DEFINITIONS.entries()) {
-    const desired = parseScannerDesiredFromForm(definition, formData);
-    const enabled = formData.get(`${definition.key}:enabled`) === "on";
-    await prisma.scannerRule.upsert({
-      where: {
-        profileId_key: {
+  // Validate every field before writing anything - an invalid rule anywhere must reject the
+  // whole save, never partially persist the rules parsed before it.
+  const parsedRules = SCANNER_RULE_DEFINITIONS.map((definition, index) => ({
+    definition,
+    index,
+    desired: parseScannerDesiredFromForm(definition, formData),
+    enabled: formData.get(`${definition.key}:enabled`) === "on",
+  }));
+
+  await prisma.$transaction(async (tx) => {
+    for (const { definition, index, desired, enabled } of parsedRules) {
+      await tx.scannerRule.upsert({
+        where: {
+          profileId_key: {
+            profileId: profile.id,
+            key: definition.key,
+          },
+        },
+        update: {
+          name: definition.name,
+          operator: definition.operator,
+          valueJson: { desired },
+          enabled,
+          sortOrder: index,
+        },
+        create: {
           profileId: profile.id,
           key: definition.key,
+          name: definition.name,
+          operator: definition.operator,
+          valueJson: { desired },
+          enabled,
+          sortOrder: index,
         },
-      },
-      update: {
-        name: definition.name,
-        operator: definition.operator,
-        valueJson: { desired },
-        enabled,
-        sortOrder: index,
-      },
-      create: {
-        profileId: profile.id,
-        key: definition.key,
-        name: definition.name,
-        operator: definition.operator,
-        valueJson: { desired },
-        enabled,
-        sortOrder: index,
-      },
-    });
-  }
+      });
+    }
+    await tx.scannerProfile.update({ where: { id: profile.id }, data: { updatedAt: new Date() } });
+  });
 
-  await rerunDemoScannerForUser(userId, profile.id);
   return profile;
 }
 
 export async function resetScannerSettingsToLstCoreForUser(userId: string) {
   const profile = await ensureMyLstScannerProfileForUser(userId);
 
-  for (const [index, definition] of SCANNER_RULE_DEFINITIONS.entries()) {
-    await prisma.scannerRule.upsert({
-      where: {
-        profileId_key: {
+  await prisma.$transaction(async (tx) => {
+    for (const [index, definition] of SCANNER_RULE_DEFINITIONS.entries()) {
+      await tx.scannerRule.upsert({
+        where: {
+          profileId_key: {
+            profileId: profile.id,
+            key: definition.key,
+          },
+        },
+        update: {
+          name: definition.name,
+          operator: definition.operator,
+          valueJson: { desired: definition.defaultDesired },
+          enabled: definition.defaultEnabled,
+          sortOrder: index,
+        },
+        create: {
           profileId: profile.id,
           key: definition.key,
+          name: definition.name,
+          operator: definition.operator,
+          valueJson: { desired: definition.defaultDesired },
+          enabled: definition.defaultEnabled,
+          sortOrder: index,
         },
-      },
-      update: {
-        name: definition.name,
-        operator: definition.operator,
-        valueJson: { desired: definition.defaultDesired },
-        enabled: definition.defaultEnabled,
-        sortOrder: index,
-      },
-      create: {
-        profileId: profile.id,
-        key: definition.key,
-        name: definition.name,
-        operator: definition.operator,
-        valueJson: { desired: definition.defaultDesired },
-        enabled: definition.defaultEnabled,
-        sortOrder: index,
-      },
-    });
-  }
+      });
+    }
+    await tx.scannerProfile.update({ where: { id: profile.id }, data: { updatedAt: new Date() } });
+  });
 
-  await rerunDemoScannerForUser(userId, profile.id);
   return profile;
 }
 

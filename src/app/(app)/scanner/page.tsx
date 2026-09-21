@@ -14,7 +14,7 @@ import {
   type ScannerOperator,
   type ScannerRule,
 } from "@/domain/scanner/scanner";
-import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
+import { GATING_RULE_KEYS, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
@@ -159,6 +159,7 @@ export default async function ScannerPage({
     profile = await getScannerPageData(user.id);
   }
   const run = profile?.scanRuns[0];
+  const settingsChangedAfterRun = Boolean(run && profile && resultsPredateCurrentSettings(profile.updatedAt, run.createdAt));
   const researchByTicker = new Map(researchItems.map((item) => [item.ticker, item.researchStatus]));
   const allResults = (run?.results ?? []).map((result) => toViewResult(result, researchByTicker));
   const isLiveSchwabRun = run?.source === "LIVE:SCHWAB";
@@ -233,6 +234,15 @@ export default async function ScannerPage({
       {params.error ? (
         <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
           {params.error}
+        </div>
+      ) : null}
+
+      {settingsChangedAfterRun ? (
+        <div
+          data-testid="settings-changed-after-run-warning"
+          className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100"
+        >
+          Results below were generated with earlier settings. Run another scan to evaluate them under your current rules.
         </div>
       ) : null}
 

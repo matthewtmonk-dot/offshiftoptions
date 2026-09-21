@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffScannerRulesFromLstCore, SCANNER_RULE_DEFINITIONS } from "./profile";
+import { diffScannerRulesFromLstCore, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "./profile";
 
 describe("LST Core profile diff", () => {
   it("reports no differences for records matching the LST Core defaults", () => {
@@ -49,5 +49,24 @@ describe("LST Core profile diff", () => {
   it("treats a missing record as still matching LST Core defaults", () => {
     const diff = diffScannerRulesFromLstCore([]);
     expect(diff.every((entry) => !entry.changed)).toBe(true);
+  });
+});
+
+describe("resultsPredateCurrentSettings (Ticket 7: honest disclosure when settings changed after the visible run)", () => {
+  it("8. flags a run whose results were generated before the profile's settings last changed", () => {
+    const runCreatedAt = new Date("2026-09-01T12:00:00Z");
+    const profileUpdatedAt = new Date("2026-09-02T09:00:00Z"); // settings saved AFTER the run
+    expect(resultsPredateCurrentSettings(profileUpdatedAt, runCreatedAt)).toBe(true);
+  });
+
+  it("does not flag a run created after the most recent settings change", () => {
+    const runCreatedAt = new Date("2026-09-02T09:00:00Z");
+    const profileUpdatedAt = new Date("2026-09-01T12:00:00Z"); // settings saved BEFORE the run
+    expect(resultsPredateCurrentSettings(profileUpdatedAt, runCreatedAt)).toBe(false);
+  });
+
+  it("does not flag a run created at the exact same instant as the settings change", () => {
+    const instant = new Date("2026-09-01T12:00:00Z");
+    expect(resultsPredateCurrentSettings(instant, instant)).toBe(false);
   });
 });

@@ -698,6 +698,20 @@ export function formatRuleDesired(operator: ScannerOperator, desired: EngineScan
   return `${operator} ${String(desired)}`;
 }
 
+/**
+ * Ticket 7: whether the currently-visible ScanRun predates the user's last settings change.
+ * Saving/resetting Scanner settings deliberately never re-runs a scan (see
+ * updateScannerSettingsForUser/resetScannerSettingsToLstCoreForUser in workflows.ts), so the
+ * results on screen can legitimately have been evaluated under an earlier rule set. Rather than a
+ * new versioning field, this reuses the smallest honest signal already on the two rows involved:
+ * `ScannerProfile.updatedAt` (bumped by every settings save/reset) against this run's own
+ * `createdAt`. True means the visible results must be disclosed as evaluated under earlier
+ * settings, not presented as current, until the user runs another scan.
+ */
+export function resultsPredateCurrentSettings(profileUpdatedAt: Date, runCreatedAt: Date): boolean {
+  return profileUpdatedAt.getTime() > runCreatedAt.getTime();
+}
+
 export function parseScannerDesiredFromForm(definition: ScannerRuleDefinition, formData: FormData) {
   if (definition.input.kind === "boolean") {
     return false;
