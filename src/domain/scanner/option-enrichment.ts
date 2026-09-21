@@ -46,6 +46,19 @@ export function isNotOptionAssessed(state: unknown): boolean {
   return typeof state === "string" && NOT_ENRICHED_STATES.has(state);
 }
 
+/**
+ * Extracts the raw `optionEnrichment` state out of a persisted candidate snapshot
+ * (`ScanResult.snapshotJson`, or an in-memory candidate's `values`) for a reader that only has the
+ * snapshot, not the original typed candidate - e.g. Dashboard's persisted-scan-based Top Setups
+ * selection. Returns `unknown` by design: callers pass it straight to `isNotOptionAssessed`.
+ */
+export function optionEnrichmentFromSnapshot(snapshot: unknown): unknown {
+  if (!snapshot || typeof snapshot !== "object" || !("optionEnrichment" in snapshot)) {
+    return null;
+  }
+  return (snapshot as Record<string, unknown>).optionEnrichment;
+}
+
 /** Long-form reason persisted as the row's scanNote when nothing more specific already claimed it. */
 export function notEnrichedScanNote(state: NotEnrichedState, chainBudget: number): string {
   switch (state) {

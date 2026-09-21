@@ -20,7 +20,8 @@ import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/perfo
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isRollGuidanceApplicable } from "@/domain/finance/rollStatus";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
-import { honestSetupLabel, honestSetupScore, type CriterionResult, type ScanSummary } from "@/domain/scanner/scanner";
+import { classifyReadiness, honestSetupLabel, honestSetupScore, isActionableReadiness, type CriterionResult, type ScanSummary } from "@/domain/scanner/scanner";
+import { optionEnrichmentFromSnapshot } from "@/domain/scanner/option-enrichment";
 import { addReactionAction } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -173,13 +174,21 @@ export default async function DashboardPage() {
       ? "MANUAL"
       : null;
 
-  const topSetups = (data.latestScanRun?.results ?? [])
-    .map((result) => {
-      const summary = toDomainSummary(result);
-      return { result, summary, score: honestSetupScore(summary, GATING_RULE_KEYS), label: honestSetupLabel(summary, GATING_RULE_KEYS) };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 3);
+  const scannedSetups = (data.latestScanRun?.results ?? []).map((result) => {
+    const summary = toDomainSummary(result);
+    const optionEnrichment = optionEnrichmentFromSnapshot(result.snapshotJson);
+    return {
+      result,
+      summary,
+      score: honestSetupScore(summary, GATING_RULE_KEYS),
+      label: honestSetupLabel(summary, GATING_RULE_KEYS),
+      readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment),
+    };
+  });
+  // Only a technically complete, actionable candidate (PASS or NEAR - see classifyReadiness) may
+  // appear as a "Top setup": a NEEDS_DATA row (unassessed options, unresolved criteria) or a known
+  // FAIL must never be promoted here just because it happens to carry a high historical score.
+  const topSetups = scannedSetups.filter((setup) => isActionableReadiness(setup.readiness)).sort((a, b) => b.score - a.score).slice(0, 3);
 
   const dedupedActivities = dedupeActivities(data.activities);
   const checkpointLabel = getNextLstCheckpointLabel();
@@ -357,7 +366,11 @@ export default async function DashboardPage() {
               </div>
             ))}
             {data.latestScanRun ? <p className="text-sm text-zinc-400" data-testid="dashboard-scan-time">Scan run: <EventTime value={data.latestScanRun.createdAt} asOf={renderedAt} />. Saved results; check Scanner for current readiness.</p> : null}
-            {topSetups.length === 0 ? <EmptyState>No scan results yet.</EmptyState> : null}
+            {topSetups.length === 0 ? (
+              <EmptyState>
+                {scannedSetups.length === 0 ? "No scan results yet." : "No actionable setups from the latest scan yet - check Scanner for candidates still needing data."}
+              </EmptyState>
+            ) : null}
           </div>
         </Panel>
 
@@ -878,6 +891,7 @@ type ScannerResultLike = {
   passedCriteria: number;
   totalCriteria: number;
   summaryStatus: string;
+  snapshotJson: unknown;
   criterionResults: {
     criterionName: string;
     actualValue: string | null;

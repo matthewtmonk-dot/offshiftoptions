@@ -11,8 +11,8 @@ import type {
   RollFriendliness,
   WouldOwnStatus,
 } from "@/generated/prisma/enums";
-import { evaluateDemoScan, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
-import { getNearMisses } from "@/domain/scanner/scanner";
+import { evaluateDemoScan, GATING_RULE_KEYS, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
+import { classifyReadiness } from "@/domain/scanner/scanner";
 import { sanitizeResearchColumns, isResearchSortKey } from "@/domain/research/columns";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
 import { mapWithConcurrency } from "./concurrency";
@@ -2195,7 +2195,11 @@ export async function rerunLiveSchwabScannerForUser(
 
     return {
       scanned: toPersist.length,
-      nearMatches: toPersist.filter((candidate) => getNearMisses(candidate.summary.results).length === 1).length,
+      // Same authoritative classifier the Scanner page itself uses (see scanner.ts) - this toast
+      // must never disagree with the page's own "Near" count for the same run.
+      nearMatches: toPersist.filter(
+        (candidate) => classifyReadiness(candidate.summary, GATING_RULE_KEYS, candidate.values.optionEnrichment) === "NEAR",
+      ).length,
       elapsedMs: Date.now() - startedAt,
       universeSymbols: universe.length,
       universeSource: universeSourceKind,

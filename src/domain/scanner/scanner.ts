@@ -1,3 +1,5 @@
+import { isNotOptionAssessed } from "./option-enrichment";
+
 export type CriterionStatus = "PASS" | "FAIL" | "UNKNOWN";
 export type ScannerOperator = "LTE" | "GTE" | "BETWEEN" | "EQ" | "NEQ" | "EXISTS";
 
@@ -161,6 +163,68 @@ export function honestSetupLabel(summary: ScanSummary, gatingKeys: ReadonlySet<s
   }
 
   return setupScoreLabel(honestSetupScore(summary, gatingKeys));
+}
+
+export type ScannerReadiness = "PASS" | "NEAR" | "NEEDS_DATA" | "FAIL";
+
+/**
+ * The one authoritative Scanner readiness classification - used identically by every surface that
+ * labels, counts, filters, or promotes a Scanner result (row badges, one-click filters, header
+ * counts, the live-scan "near matches" summary, Dashboard's Top Setups selection), so two surfaces
+ * can no longer disagree about what "near" or "pass" means (e.g. one counting a gating near-miss
+ * as NEAR while another correctly excludes it as FAIL - see PROJECT_HANDOFF.md).
+ *
+ * Exactly four states:
+ *  - PASS: every enabled criterion is known, no gating failure, nothing fails.
+ *  - NEAR: every enabled criterion is known (including a real option-chain assessment - "stock
+ *    screen only" never counts as known here), no gating failure, and exactly one non-gating
+ *    criterion fails by a small ("near", see getNearMisses/criterionGap's 12% gap cutoff) margin
+ *    - every other criterion passes.
+ *  - NEEDS_DATA: no known gating failure, but at least one enabled criterion is UNKNOWN, or the
+ *    option chain itself was never assessed for this candidate. The evidence is incomplete, not
+ *    bad - this must never be promoted or counted alongside a real PASS/NEAR.
+ *  - FAIL: any known gating failure, or (with otherwise-known evidence) more than one failing
+ *    criterion, or a single failing criterion that isn't a near miss. A known failure is reported
+ *    as FAIL even when other evidence is also missing elsewhere - missing evidence is disclosed
+ *    separately (see unknownReasons/scannerRowReasons at the call site) but never downgrades an
+ *    already-known failure into NEEDS_DATA.
+ *
+ * Personal Research state (LIKE/WATCH/NEVER_TRADE/etc.) never enters this function and must never
+ * change its answer - readiness is a purely technical judgment, kept deliberately separate from
+ * the user's own opinion of a ticker (see PROJECT_HANDOFF.md's Scanner/Research separation rule).
+ */
+export function classifyReadiness(
+  summary: ScanSummary,
+  gatingKeys: ReadonlySet<string>,
+  optionEnrichment?: unknown,
+): ScannerReadiness {
+  if (hasGatingFailure(summary.results, gatingKeys)) {
+    return "FAIL";
+  }
+
+  const failCount = summary.results.filter((result) => result.status === "FAIL").length;
+  const evidenceIncomplete = summary.results.some((result) => result.status === "UNKNOWN") || isNotOptionAssessed(optionEnrichment);
+
+  if (failCount === 0) {
+    return evidenceIncomplete ? "NEEDS_DATA" : "PASS";
+  }
+
+  if (failCount === 1 && !evidenceIncomplete && getNearMisses(summary.results).length === 1) {
+    return "NEAR";
+  }
+
+  return "FAIL";
+}
+
+/**
+ * Only a PASS or NEAR candidate has complete enough evidence to be promoted as actionable. A
+ * NEEDS_DATA row (including one whose options were never assessed) or a known FAIL must never
+ * appear in an actionable list (Dashboard "Top setups", a promoted candidate feed, etc.) as if it
+ * were comparable to a fully-evaluated PASS/NEAR row - regardless of any historical numeric score
+ * it may also carry.
+ */
+export function isActionableReadiness(readiness: ScannerReadiness): boolean {
+  return readiness === "PASS" || readiness === "NEAR";
 }
 
 /**

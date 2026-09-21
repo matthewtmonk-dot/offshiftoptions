@@ -8,11 +8,13 @@ import {
 } from "./profile";
 import {
   buildExclusionDiagnostics,
+  classifyReadiness,
   evaluateCandidate,
   evaluateCriterion,
   getNearMisses,
   honestSetupLabel,
   honestSetupScore,
+  isActionableReadiness,
   parseStoredCriterionActualValue,
   parseStoredCriterionDesiredValue,
   setupScore,
@@ -232,5 +234,191 @@ describe("persisted-criterion reconstruction helpers (shared by Research's scan 
     const misses = getNearMisses([reconstructed]);
     expect(misses).toHaveLength(1);
     expect(misses[0].near).toBe(true);
+  });
+});
+
+describe("classifyReadiness / isActionableReadiness - Scanner truthfulness: one authoritative readiness classifier", () => {
+  // price is a real GATING_RULE_KEYS entry; rsi/bbPercent are real preference (non-gating) keys.
+  const rules2: ScannerRule[] = [
+    { key: "price", name: "Price", operator: "BETWEEN", desired: [10, 80] },
+    { key: "rsi", name: "RSI", operator: "LTE", desired: 40 },
+  ];
+  const rules3: ScannerRule[] = [
+    ...rules2,
+    { key: "bbPercent", name: "BB %", operator: "LTE", desired: 33 },
+  ];
+
+  it("1. complete all-pass evidence -> PASS", () => {
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: 30 });
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("PASS");
+  });
+
+  it("2. one permitted complete near miss -> NEAR", () => {
+    // rsi <= 40, actual 42: gap = (42-40)/40 = 5% <= the 12% near cutoff.
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: 42 });
+    expect(getNearMisses(summary.results)).toHaveLength(1);
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("NEAR");
+  });
+
+  it("3. two near misses -> FAIL (NEAR only ever permits exactly one)", () => {
+    // rsi near-fail (42 vs <=40) and bbPercent near-fail (35 vs <=33, gap ~6%) at the same time.
+    const summary = evaluateCandidate(rules3, { price: 20, rsi: 42, bbPercent: 35 });
+    expect(getNearMisses(summary.results)).toHaveLength(2);
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("FAIL");
+  });
+
+  it("4. unknown required option evidence, no failures -> NEEDS_DATA", () => {
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: null });
+    expect(summary.status).toBe("UNKNOWN");
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("NEEDS_DATA");
+  });
+
+  it("5. options never checked -> NEEDS_DATA, even when every enabled criterion otherwise passes", () => {
+    // All enabled criteria PASS (summary.status would read PASS on its own), but the option chain
+    // itself was never assessed - this must still block PASS/NEAR admission.
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: 30 });
+    expect(summary.status).toBe("PASS");
+    expect(classifyReadiness(summary, GATING_RULE_KEYS, "NOT_ENRICHED_BUDGET")).toBe("NEEDS_DATA");
+  });
+
+  it("6. known gating failure + unknown other evidence -> FAIL (gating always wins)", () => {
+    const summary = evaluateCandidate(rules2, { price: 200, rsi: null }); // price fails the gating band
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("FAIL");
+  });
+
+  it("7. complete non-near failure -> FAIL", () => {
+    // rsi <= 40, actual 80: gap = (80-40)/40 = 100%, nowhere near the 12% cutoff.
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: 80 });
+    expect(getNearMisses(summary.results)).toHaveLength(0);
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("FAIL");
+  });
+
+  it("8. a disabled optional metric never enters evaluation, so it cannot block readiness", () => {
+    // "Disabled" is simulated exactly as scannerRulesFromRecords (profile.ts) really does it: the
+    // rule is simply absent from the evaluated rule set, so it can never appear as UNKNOWN.
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: 30, bbPercent: null });
+    expect(summary.results.some((result) => result.key === "bbPercent")).toBe(false);
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("PASS");
+  });
+
+  it("9. personal Research exclusion/watch state does not alter technical classification", () => {
+    // classifyReadiness's signature has no researchStatus parameter at all - the same evidence
+    // always classifies the same way regardless of what the user's own opinion of the ticker is.
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: 30 });
+    const asIfNeverTrade = classifyReadiness(summary, GATING_RULE_KEYS);
+    const asIfLiked = classifyReadiness(summary, GATING_RULE_KEYS);
+    expect(asIfNeverTrade).toBe(asIfLiked);
+    expect(asIfNeverTrade).toBe("PASS");
+  });
+
+  it("10 & 11. isActionableReadiness admits only PASS/NEAR - Dashboard-style filtering excludes NEEDS_DATA and FAIL", () => {
+    expect(isActionableReadiness("PASS")).toBe(true);
+    expect(isActionableReadiness("NEAR")).toBe(true);
+    expect(isActionableReadiness("NEEDS_DATA")).toBe(false);
+    expect(isActionableReadiness("FAIL")).toBe(false);
+
+    const candidates = [
+      { ticker: "GOOD", summary: evaluateCandidate(rules2, { price: 20, rsi: 30 }), optionEnrichment: "ENRICHED" },
+      { ticker: "UNCHECKED", summary: evaluateCandidate(rules2, { price: 20, rsi: 30 }), optionEnrichment: "NOT_ENRICHED_BUDGET" },
+      { ticker: "BROKEN", summary: evaluateCandidate(rules2, { price: 200, rsi: 30 }), optionEnrichment: "ENRICHED" },
+    ];
+    const actionableTickers = candidates
+      .filter((candidate) => isActionableReadiness(classifyReadiness(candidate.summary, GATING_RULE_KEYS, candidate.optionEnrichment)))
+      .map((candidate) => candidate.ticker);
+    expect(actionableTickers).toEqual(["GOOD"]);
+  });
+
+  it("10 & 11b. end-to-end Dashboard Top Setups selection (filter-then-sort-then-slice) never promotes a NEEDS_DATA/FAIL row ahead of a real PASS/NEAR, even with a higher score", () => {
+    // Mirrors dashboard/page.tsx's actual topSetups pipeline exactly: map to {summary, score,
+    // readiness}, filter to isActionableReadiness, sort by score desc, slice(0, 3).
+    const rows = [
+      // A never-assessed row: every enabled criterion PASSES on paper (score would be 100), but
+      // its options were never checked - this is the exact "unassessed chain looks more
+      // actionable than the evidence supports" failure mode this ticket exists to close.
+      { ticker: "UNCHECKED_HIGH_SCORE", summary: evaluateCandidate(rules2, { price: 20, rsi: 20 }), optionEnrichment: "NOT_ENRICHED_BUDGET" },
+      { ticker: "REAL_PASS", summary: evaluateCandidate(rules2, { price: 20, rsi: 30 }), optionEnrichment: "ENRICHED" },
+      { ticker: "REAL_NEAR", summary: evaluateCandidate(rules2, { price: 20, rsi: 42 }), optionEnrichment: "ENRICHED" },
+      { ticker: "GATING_FAIL", summary: evaluateCandidate(rules2, { price: 200, rsi: 20 }), optionEnrichment: "ENRICHED" },
+    ];
+    const topSetups = rows
+      .map((row) => ({
+        ...row,
+        score: honestSetupScore(row.summary, GATING_RULE_KEYS),
+        readiness: classifyReadiness(row.summary, GATING_RULE_KEYS, row.optionEnrichment),
+      }))
+      .filter((row) => isActionableReadiness(row.readiness))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3);
+
+    expect(topSetups.map((row) => row.ticker)).toEqual(["REAL_PASS", "REAL_NEAR"]);
+    expect(topSetups.every((row) => row.readiness === "PASS" || row.readiness === "NEAR")).toBe(true);
+  });
+
+  it("12. two independent count computations over the same classifier agree (the exact '2 near' vs 'Near 1' bug this ticket fixes)", () => {
+    const rows = [
+      { summary: evaluateCandidate(rules2, { price: 20, rsi: 30 }), optionEnrichment: "ENRICHED" }, // PASS
+      { summary: evaluateCandidate(rules2, { price: 20, rsi: 42 }), optionEnrichment: "ENRICHED" }, // real NEAR
+      // A gating-key near-miss (price just outside its band) must NOT count as NEAR anywhere -
+      // this is exactly the discrepancy: a cruder "one near-fail" check would have counted it.
+      { summary: evaluateCandidate(rules2, { price: 82, rsi: 30 }), optionEnrichment: "ENRICHED" },
+    ];
+    // Simulates the page-header style computation (a plain .filter().length over all rows)...
+    const headerNearCount = rows.filter(
+      (row) => classifyReadiness(row.summary, GATING_RULE_KEYS, row.optionEnrichment) === "NEAR",
+    ).length;
+    // ...and the workspace-tab style computation (memoized over an "actionable" subset) - both
+    // must agree because both call the identical function.
+    const workspaceNearCount = rows
+      .filter(() => true) // stand-in for the "actionable" (non-excluded) subset
+      .filter((row) => classifyReadiness(row.summary, GATING_RULE_KEYS, row.optionEnrichment) === "NEAR").length;
+    expect(headerNearCount).toBe(1);
+    expect(workspaceNearCount).toBe(1);
+    expect(headerNearCount).toBe(workspaceNearCount);
+    // The old getNearMisses(...).length === 1 predicate (no gating awareness) would have wrongly
+    // counted the gating near-miss row too - proving this is a real behavior change, not a no-op.
+    const naiveNearCount = rows.filter((row) => getNearMisses(row.summary.results).length === 1).length;
+    expect(naiveNearCount).toBe(2);
+  });
+
+  it("13. a historical stored high score on an incomplete candidate does not make it actionable", () => {
+    // One UNKNOWN criterion still earns real partial credit in setupScore/honestSetupScore, so an
+    // incomplete row can carry a deceptively high historical score.
+    const manyPassRules: ScannerRule[] = Array.from({ length: 9 }, (_, index) => ({
+      key: `pass${index}`,
+      name: `Pass rule ${index}`,
+      operator: "GTE" as const,
+      desired: 0,
+    }));
+    const values = Object.fromEntries(manyPassRules.map((rule) => [rule.key, 1]));
+    const summary = evaluateCandidate([...manyPassRules, { key: "rsi", name: "RSI", operator: "LTE", desired: 40 }], {
+      ...values,
+      rsi: null, // the one unknown - still incomplete
+    });
+    const score = honestSetupScore(summary, GATING_RULE_KEYS);
+    expect(score).toBeGreaterThanOrEqual(90); // a deceptively high historical/stored score
+    const readiness = classifyReadiness(summary, GATING_RULE_KEYS);
+    expect(readiness).toBe("NEEDS_DATA");
+    expect(isActionableReadiness(readiness)).toBe(false);
+  });
+
+  it("14. bounded option-check/provider behavior is untouched - classifyReadiness is a pure function of already-computed evidence", () => {
+    // No network/provider call, no option-chain budget concept, no randomness or clock read -
+    // calling it twice with identical inputs always agrees, and it never mutates its inputs.
+    const summary = evaluateCandidate(rules2, { price: 20, rsi: 30 });
+    const before = JSON.stringify(summary);
+    const first = classifyReadiness(summary, GATING_RULE_KEYS, "NOT_ENRICHED_BUDGET");
+    const second = classifyReadiness(summary, GATING_RULE_KEYS, "NOT_ENRICHED_BUDGET");
+    expect(first).toBe(second);
+    expect(JSON.stringify(summary)).toBe(before);
+  });
+
+  it("a known non-gating failure remains FAIL even when other required evidence is still unknown (missing evidence never downgrades a known failure to NEEDS_DATA)", () => {
+    const summary = evaluateCandidate(rules3, { price: 20, rsi: 80, bbPercent: null }); // big non-gating fail + an unrelated unknown
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("FAIL");
+  });
+
+  it("a near miss combined with any additional unknown does not soften into NEEDS_DATA - NEAR requires fully complete evidence", () => {
+    const summary = evaluateCandidate(rules3, { price: 20, rsi: 42, bbPercent: null }); // near-fail + an unrelated unknown
+    expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("FAIL");
   });
 });

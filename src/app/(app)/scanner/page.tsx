@@ -3,12 +3,13 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge } from "@/components/ui";
 import {
   buildExclusionDiagnostics,
-  getNearMisses,
+  classifyReadiness,
   honestSetupLabel,
   honestSetupScore,
   primaryConcern,
   type CriterionResult,
   type CriterionStatus,
+  type ScannerReadiness,
   type ScanSummary,
   type ScannerOperator,
   type ScannerRule,
@@ -48,7 +49,10 @@ export type ScannerViewResult = {
   summary: ScanSummary;
   score: number;
   scoreLabel: ReturnType<typeof honestSetupLabel>;
-  nearMisses: ReturnType<typeof getNearMisses>;
+  /** The one authoritative PASS/NEAR/NEEDS_DATA/FAIL classification (see classifyReadiness in
+   * scanner.ts) - every row badge, one-click filter, and header count must read this field rather
+   * than re-deriving its own notion of "near" or "pass". */
+  readiness: ScannerReadiness;
   concern: CriterionResult | null;
   researchStatus: ResearchStatus | null;
   values: {
@@ -161,9 +165,12 @@ export default async function ScannerPage({
   const diagnostics = buildExclusionDiagnostics(
     allResults.map((result) => ({ ticker: result.record.ticker, summary: result.summary })),
   );
-  const passCount = allResults.filter((result) => result.summary.status === "PASS").length;
-  const nearMatchCount = allResults.filter((result) => result.nearMisses.length === 1).length;
-  const unknownCount = allResults.filter((result) => result.summary.status === "UNKNOWN").length;
+  // These must use the same classifyReadiness answer as ScannerWorkspace's own filter chips/badges
+  // (readiness, computed once in toViewResult) - two independent re-derivations of "near"/"pass"
+  // here is exactly how this page's header count and its own "Near" filter used to disagree.
+  const passCount = allResults.filter((result) => result.readiness === "PASS").length;
+  const nearMatchCount = allResults.filter((result) => result.readiness === "NEAR").length;
+  const unknownCount = allResults.filter((result) => result.readiness === "NEEDS_DATA").length;
   const averageScore = allResults.length
     ? Math.round(allResults.reduce((sum, result) => sum + result.score, 0) / allResults.length)
     : 0;
@@ -274,13 +281,14 @@ function shortRunTime(date: Date) {
 function toViewResult(result: ScannerResult, researchByTicker: Map<string, ResearchStatus>): ScannerViewResult {
   const summary = toDomainSummary(result);
   const score = honestSetupScore(summary, GATING_RULE_KEYS);
+  const optionEnrichment = snapshotString(result.snapshotJson, "optionEnrichment");
 
   return {
     record: result,
     summary,
     score,
     scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
-    nearMisses: getNearMisses(summary.results),
+    readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment),
     concern: primaryConcern(summary.results),
     researchStatus: researchByTicker.get(result.ticker) ?? null,
     values: {
@@ -305,7 +313,7 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
       optionVolume: snapshotNumber(result.snapshotJson, "optionVolume"),
       earningsDate: snapshotString(result.snapshotJson, "earningsDate"),
       earningsDistance: snapshotNumber(result.snapshotJson, "earningsDistance"),
-      optionEnrichment: snapshotString(result.snapshotJson, "optionEnrichment"),
+      optionEnrichment,
       scanNote: snapshotString(result.snapshotJson, "scanNote"),
     },
   };

@@ -172,8 +172,8 @@ export function ScannerWorkspace({
   );
   const counts = useMemo(
     () => ({
-      pass: actionable.filter((result) => result.summary.status === "PASS").length,
-      near: actionable.filter(isNearMatch).length,
+      pass: actionable.filter((result) => result.readiness === "PASS").length,
+      near: actionable.filter((result) => result.readiness === "NEAR").length,
       watchlist: actionable.filter((result) => result.researchStatus !== null).length,
     }),
     [actionable],
@@ -953,51 +953,29 @@ function VerifyReasons({ result }: { result: ScannerViewResult }) {
 }
 
 /**
- * The domain's own classification (honestSetupLabel: a gating FAIL always reads "Fails," any
- * UNKNOWN criterion always reads "Verify") must win before the "NEAR" heuristic ever gets a
- * say - otherwise a candidate that fails a gating rule by a small margin can render the amber
- * "NEAR" badge instead of "FAIL"/"VERIFY," directly contradicting the domain's own answer.
- * getNearMisses doesn't distinguish gating from preference criteria, so it cannot be trusted
- * to override either of those on its own. Shared by the status badge, the row border, the
- * "Near" one-click filter, and its count chip, so all four always agree on what "near" means.
+ * The status badge word/tone reads `result.readiness` (classifyReadiness in scanner.ts)
+ * exclusively - the same authoritative PASS/NEAR/NEEDS_DATA/FAIL answer used by the row border,
+ * the "Near"/"Pass" one-click filters, and every header count, so none of them can disagree about
+ * what "near" or "pass" means. NEEDS_DATA still splits into two badge WORDS for the user's benefit
+ * (STOCK SCREEN ONLY vs VERIFY) - that is presentation detail on top of the single NEEDS_DATA
+ * classification, not a second competing classification.
  */
-function isNearMatch(result: ScannerViewResult): boolean {
-  if (result.summary.status === "PASS") {
-    return false;
-  }
-  // Deliberately NOT filtered on option-enrichment state: "near" here means "one criterion from
-  // passing on the evidence OSO has", which is a different question from whether that evidence
-  // includes an option assessment yet (the badge reports that separately). Changing it would also
-  // move the page's own near-match statistic, which is part of the still-open scoring decision
-  // recorded in docs/SCANNER_RULES.md - not this slice.
-  if (result.scoreLabel === "Verify" || result.scoreLabel === "Fails" || result.score < 45) {
-    return false;
-  }
-  return result.nearMisses.length === 1;
-}
-
 function statusInfo(result: ScannerViewResult): { word: string; tone: string } {
-  if (result.summary.status === "PASS") {
+  if (result.readiness === "PASS") {
     return { word: "PASS", tone: "border-emerald-400/40 bg-emerald-400/15 text-emerald-100" };
   }
-  // An assessment-stage label, deliberately NOT an option-quality verdict: a muted outline that
-  // reads as "not evaluated yet", never as the emerald/amber/red/VERIFY judgments around it.
-  if (isNotOptionAssessed(result)) {
-    return { word: NOT_OPTION_ASSESSED_BADGE, tone: "whitespace-nowrap border-dashed border-zinc-700 bg-transparent text-zinc-400" };
-  }
-  if (result.scoreLabel === "Verify") {
+  if (result.readiness === "NEEDS_DATA") {
+    // An assessment-stage label, deliberately NOT an option-quality verdict: a muted outline that
+    // reads as "not evaluated yet", never as the emerald/amber/red/VERIFY judgments around it.
+    if (isNotOptionAssessed(result)) {
+      return { word: NOT_OPTION_ASSESSED_BADGE, tone: "whitespace-nowrap border-dashed border-zinc-700 bg-transparent text-zinc-400" };
+    }
     return { word: "VERIFY", tone: "border-zinc-600 bg-zinc-800 text-zinc-300" };
   }
-  if (result.scoreLabel === "Fails" || result.score < 45) {
+  if (result.readiness === "FAIL") {
     return { word: "FAIL", tone: "border-red-400/40 bg-red-400/15 text-red-100" };
   }
-  if (isNearMatch(result)) {
-    return { word: "NEAR", tone: "border-amber-400/40 bg-amber-400/15 text-amber-100" };
-  }
-  if (result.score >= 78) {
-    return { word: result.scoreLabel.toUpperCase(), tone: "border-sky-400/40 bg-sky-400/15 text-sky-100" };
-  }
-  return { word: result.scoreLabel.toUpperCase(), tone: "border-amber-400/40 bg-amber-400/15 text-amber-100" };
+  return { word: "NEAR", tone: "border-amber-400/40 bg-amber-400/15 text-amber-100" };
 }
 
 function scoreChipClass(score: number, label?: string) {
@@ -1017,14 +995,13 @@ function scoreChipClass(score: number, label?: string) {
 }
 
 function resultBorder(result: ScannerViewResult) {
-  if (result.summary.status === "PASS") {
+  if (result.readiness === "PASS") {
     return "border-emerald-400/35";
   }
-  // A real FAIL (see isNearMatch's comment on precedence) must win over the "near" heuristic.
-  if (result.summary.status === "FAIL") {
+  if (result.readiness === "FAIL") {
     return "border-red-400/25";
   }
-  if (isNearMatch(result)) {
+  if (result.readiness === "NEAR") {
     return "border-amber-400/35";
   }
   return "border-zinc-800";
@@ -1033,9 +1010,9 @@ function resultBorder(result: ScannerViewResult) {
 function applyQuickFilter(results: ScannerViewResult[], quick: QuickKey) {
   switch (quick) {
     case "pass":
-      return results.filter((result) => result.summary.status === "PASS");
+      return results.filter((result) => result.readiness === "PASS");
     case "near":
-      return results.filter(isNearMatch);
+      return results.filter((result) => result.readiness === "NEAR");
     case "watchlist":
       return results.filter((result) => result.researchStatus !== null);
     case "strongest":
