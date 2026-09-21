@@ -62,21 +62,48 @@ export type ScannerViewResult = {
     strike: number | null;
     expiration: string | null;
     dte: number | null;
+    /** A mark/midpoint estimate (option.mark, falling back to the bid/ask midpoint) - never the
+     * bid-based figure `ror`/`annualizedRor` actually use (see `premiumBasis`/`bidProceedsPerContract`). */
     premium: number | null;
+    /** Always "MARK_MIDPOINT" when `premium` is non-null - documents what `premium` represents so
+     * it is never mistaken for the bid-based amount ROR is calculated from. */
+    premiumBasis: "MARK_MIDPOINT" | null;
     optionBid: number | null;
     optionAsk: number | null;
     midpoint: number | null;
+    /** The actual dollars a seller would receive per contract if filled at the current bid
+     * (bid * 100) - the real basis for `ror`/`annualizedRor`, distinct from the mark/midpoint
+     * `premium` shown alongside it. */
+    bidProceedsPerContract: number | null;
     delta: number | null;
     rsi: number | null;
     bbPercent: number | null;
     distanceOtmPercent: number | null;
+    /** Calculated from the bid, never from `premium` - see `rorBasis`. */
     ror: number | null;
     annualizedRor: number | null;
+    /** Always "BID" when `ror`/`annualizedRor` are non-null. */
+    rorBasis: "BID" | null;
     spreadPercent: number | null;
     openInterest: number | null;
     optionVolume: number | null;
     earningsDate: string | null;
     earningsDistance: number | null;
+    /** True only when a real earnings date and this contract's own DTE are both known and the
+     * earnings date falls on or before expiration - never guessed from just one of the two. */
+    earningsWithinHoldingPeriod: boolean | null;
+    /** No option-chain provider used here has ever supplied a verified per-quote pricing
+     * timestamp (same finding as Tickets 4/5's valuationAsOf) - always null today, kept explicit
+     * so its absence is machine-readable rather than silently omitted. */
+    optionQuotedAt: string | null;
+    /** When this contract's data was actually fetched - the only timing fact genuinely known,
+     * distinct from a verified provider pricing time (see `optionQuotedAt`). Null when no
+     * option-chain request was made for this ticker at all. */
+    retrievedAt: string | null;
+    /** A coarse NYSE-trading-day check on `retrievedAt` (not exact session hours) - true means
+     * the retrieval fell on a day the exchange was closed, so this reflects the last available
+     * quote, not a live one, regardless of how recently it was fetched. */
+    retrievedOnNonTradingDay: boolean | null;
     /** Machine-readable OptionEnrichmentState (see live-scan.ts) - whether an option-chain
      * request was actually spent on this row, and if not, why not. Null for runs that predate the
      * field; the UI then falls back to its pre-existing behavior rather than guessing. Never
@@ -309,20 +336,27 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
       expiration: snapshotString(result.snapshotJson, "expiration"),
       dte: snapshotNumber(result.snapshotJson, "dte"),
       premium: snapshotNumber(result.snapshotJson, "premium"),
+      premiumBasis: snapshotString(result.snapshotJson, "premiumBasis") as "MARK_MIDPOINT" | null,
       optionBid: snapshotNumber(result.snapshotJson, "optionBid"),
       optionAsk: snapshotNumber(result.snapshotJson, "optionAsk"),
       midpoint: snapshotNumber(result.snapshotJson, "midpoint"),
+      bidProceedsPerContract: snapshotNumber(result.snapshotJson, "bidProceedsPerContract"),
       delta: snapshotNumber(result.snapshotJson, "delta"),
       rsi: snapshotNumber(result.snapshotJson, "rsi"),
       bbPercent: snapshotNumber(result.snapshotJson, "bbPercent"),
       distanceOtmPercent: snapshotNumber(result.snapshotJson, "distanceOtmPercent"),
       ror: snapshotNumber(result.snapshotJson, "ror"),
       annualizedRor: snapshotNumber(result.snapshotJson, "annualizedRor"),
+      rorBasis: snapshotString(result.snapshotJson, "rorBasis") as "BID" | null,
       spreadPercent: snapshotNumber(result.snapshotJson, "spreadPercent"),
       openInterest: snapshotNumber(result.snapshotJson, "openInterest"),
       optionVolume: snapshotNumber(result.snapshotJson, "optionVolume"),
       earningsDate: snapshotString(result.snapshotJson, "earningsDate"),
       earningsDistance: snapshotNumber(result.snapshotJson, "earningsDistance"),
+      earningsWithinHoldingPeriod: snapshotBoolean(result.snapshotJson, "earningsWithinHoldingPeriod"),
+      optionQuotedAt: snapshotString(result.snapshotJson, "optionQuotedAt"),
+      retrievedAt: snapshotString(result.snapshotJson, "retrievedAt"),
+      retrievedOnNonTradingDay: snapshotBoolean(result.snapshotJson, "retrievedOnNonTradingDay"),
       optionEnrichment,
       scanNote: snapshotString(result.snapshotJson, "scanNote"),
     },
@@ -402,4 +436,16 @@ function snapshotString(snapshot: unknown, key: string) {
 
   const value = (snapshot as Record<string, unknown>)[key];
   return value ? String(value) : null;
+}
+
+/** Unlike snapshotString/snapshotNumber, `false` is a real, meaningful value here (e.g.
+ * "earnings do NOT fall within the holding period") - only a genuinely missing/non-boolean value
+ * reads as unknown (null), never coerced from a truthy/falsy check the way the other two do. */
+function snapshotBoolean(snapshot: unknown, key: string) {
+  if (!snapshot || typeof snapshot !== "object" || !(key in snapshot)) {
+    return null;
+  }
+
+  const value = (snapshot as Record<string, unknown>)[key];
+  return typeof value === "boolean" ? value : null;
 }

@@ -97,7 +97,10 @@ const marketDateFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
 });
 
-function marketDate(instant: Date): Date {
+/** The America/New_York calendar date of `instant`, as a UTC-midnight Date - exported for any
+ * caller (e.g. the Scanner domain's own honest-retrieval-timing disclosure) that needs the same
+ * NY-calendar-day conversion `isNyseMarketDay` expects, without duplicating this Intl lookup. */
+export function marketDate(instant: Date): Date {
   const parts = marketDateFormatter.formatToParts(instant);
   const value = (type: string) => Number(parts.find((part) => part.type === type)!.value);
   return new Date(Date.UTC(value("year"), value("month") - 1, value("day")));

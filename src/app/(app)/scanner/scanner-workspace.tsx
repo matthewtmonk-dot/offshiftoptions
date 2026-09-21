@@ -25,7 +25,7 @@ import {
   NOT_OPTION_ASSESSED_BADGE,
 } from "@/domain/scanner/option-enrichment";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
-import { money, percent, shortDate, toNumber } from "@/lib/format";
+import { money, percent, shortDate, shortDateTime, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
 import type { ScannerBuddy, ScannerViewResult } from "./page";
 
@@ -432,8 +432,22 @@ export function ScannerWorkspace({
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Price</th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">RSI / BB</th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Strike</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Premium</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">ROR</th>
+              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
+                <span className="inline-flex items-center gap-1">
+                  Premium
+                  <InfoTip label="Premium basis" testId="help-scanner-premium-basis">
+                    A mark/midpoint estimate, not the bid. Expand a row for the bid-based dollar figure ROR actually uses.
+                  </InfoTip>
+                </span>
+              </th>
+              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
+                <span className="inline-flex items-center gap-1">
+                  ROR
+                  <InfoTip label="ROR basis" testId="help-scanner-ror-basis">
+                    Calculated from the bid, not the mark/midpoint premium shown to its left.
+                  </InfoTip>
+                </span>
+              </th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">DTE</th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">OI / Vol</th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Earnings</th>
@@ -699,6 +713,16 @@ function CandidateInspector({
             label="Days to earnings"
             value={coloredCell(result.values.earningsDistance, formatCount, ruleSeverityTone(criterionFor(result, "earningsDistance")))}
           />
+          <Datum
+            label="Earnings vs. this contract"
+            value={
+              result.values.earningsWithinHoldingPeriod === null
+                ? dash()
+                : result.values.earningsWithinHoldingPeriod
+                  ? <span className="text-amber-300">Falls within the holding period</span>
+                  : "After expiration"
+            }
+          />
         </dl>
       </section>
       <section>
@@ -710,6 +734,15 @@ function CandidateInspector({
           </InfoTip>
         </h3>
         {result.values.scanNote ? <p className="mt-2 text-xs text-zinc-500">{result.values.scanNote}</p> : null}
+        {result.values.retrievedAt ? (
+          <p className="mt-1 text-xs text-zinc-500">
+            Retrieved {shortDateTime(result.values.retrievedAt)}. Schwab does not provide a verified option-quote pricing
+            timestamp{" "}
+            {result.values.retrievedOnNonTradingDay
+              ? "- and this was fetched on a day the market was closed, so it reflects the last available quote, not a live one."
+              : "- this is the retrieval time, not proof of when the quote itself was priced."}
+          </p>
+        ) : null}
         <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <Datum label="Expiration" value={result.values.expiration ? shortDate(result.values.expiration) : dash()} />
           <Datum label="DTE" value={coloredCell(result.values.dte, formatCount, ruleSeverityTone(criterionFor(result, "dte")))} />
@@ -718,6 +751,16 @@ function CandidateInspector({
           <Datum label="Bid" value={coloredCell(result.values.optionBid, money, ruleSeverityTone(criterionFor(result, "optionBid")))} />
           <Datum label="Ask" value={cell(result.values.optionAsk, money)} />
           <Datum label="Midpoint" value={cell(result.values.midpoint, money)} />
+          <Datum
+            label="Premium at bid"
+            value={
+              result.values.bidProceedsPerContract === null
+                ? dash()
+                : <span title="The bid-based dollar amount ROR is actually calculated from - not the mark/midpoint premium above.">
+                    {money(result.values.bidProceedsPerContract)}/contract
+                  </span>
+            }
+          />
           <Datum label="Delta" value={cell(result.values.delta, (v) => toNumber(v).toFixed(2))} />
           <Datum
             label="Open interest"

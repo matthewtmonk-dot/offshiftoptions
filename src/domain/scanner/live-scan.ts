@@ -6,8 +6,10 @@ import {
   cashSecuredReturnOnRisk,
   daysToExpiration,
   distanceToStrikePercent,
+  round,
   wilderRsi,
 } from "@/domain/finance/calculations";
+import { isNyseMarketDay, marketDate } from "@/domain/finance/marketCalendar";
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { DEMO_SCAN_CANDIDATES } from "./profile";
@@ -296,6 +298,10 @@ export async function evaluateLiveMarketScan({
             contractReasonCode: "CHAIN_UNAVAILABLE" as const,
             optionEnrichment: "ENRICHED" as const,
             scanNote: OPTION_REASON_MESSAGES.CHAIN_UNAVAILABLE,
+            // A chain request genuinely was attempted (and failed) at this instant - distinct
+            // from NOT_ENRICHED below, where no request was ever made for this ticker at all.
+            retrievedAt: asOf.toISOString(),
+            retrievedOnNonTradingDay: !isNyseMarketDay(marketDate(asOf)),
           }
         : { ...bestPutValues(candidate, optionsByTicker.get(candidate.ticker) ?? [], rules, asOf), optionEnrichment: "ENRICHED" as const }
       : {
@@ -704,6 +710,10 @@ function bestPutValues(
     ...unknownOptionValues(),
     contractReasonCode: reasonCode,
     scanNote: OPTION_REASON_MESSAGES[reasonCode],
+    // The chain WAS fetched and considered (that is exactly why one of these reasons applies) -
+    // distinct from a NOT_ENRICHED row, where no request was ever made for this ticker at all.
+    retrievedAt: asOf.toISOString(),
+    retrievedOnNonTradingDay: !isNyseMarketDay(marketDate(asOf)),
   });
 
   const puts = options.filter((option) => option.optionType === "PUT").map((option) => candidateValues(candidate, option, asOf));
@@ -797,10 +807,27 @@ export function passesEnabledGate(values: Record<string, number | string | boole
   return evaluateCriterion(rule, values[key]).status !== "FAIL";
 }
 
+/**
+ * Ticket 8: every field here comes from exactly one `option: OptionContractSnapshot` argument -
+ * the single selected contract - so expiration/strike/liquidity/delta/ROR can never mix evidence
+ * from a different strike or expiration by construction. Two ambiguities the audit found are
+ * fixed explicitly rather than left implicit:
+ *  - `premium` is a per-share MARK/MIDPOINT estimate, never the amount ROR is computed from.
+ *    `premiumBasis`/`rorBasis` say so in the data itself, and `bidProceedsPerContract` is the
+ *    actual bid-based dollar figure (see cashSecuredReturnOnRisk below, which already uses
+ *    `option.bid`, not `premium`) - "Premium at bid" and "Premium at mark" are never conflated.
+ *  - No option-chain provider used here has ever supplied a verified per-quote pricing timestamp
+ *    (the same finding as Tickets 4/5's `valuationAsOf`) - `optionQuotedAt` stays explicitly null
+ *    rather than silently omitted, `retrievedAt` is the honest fact this scan actually has, and
+ *    `retrievedOnNonTradingDay` (NYSE trading-day calendar only, not exact session hours) flags
+ *    when that retrieval fell on a day the exchange was closed - a request made Sunday does not
+ *    make Friday's last-known quote a live Sunday quote.
+ */
 function candidateValues(candidate: StockStageCandidate, option: OptionContractSnapshot, asOf: Date) {
   const dte = daysToExpiration(option.expiration, asOf);
   const premium = option.mark || midpoint(option.bid, option.ask);
   const ror = cashSecuredReturnOnRisk(option.bid, option.strike, 1);
+  const earningsDistance = numericValue(candidate.values.earningsDistance);
 
   return {
     ...candidate.values,
@@ -809,16 +836,25 @@ function candidateValues(candidate: StockStageCandidate, option: OptionContractS
     expiration: option.expiration.toISOString().slice(0, 10),
     dte,
     premium,
+    premiumBasis: "MARK_MIDPOINT" as const,
     optionBid: option.bid,
     optionAsk: option.ask,
     midpoint: midpoint(option.bid, option.ask),
+    bidProceedsPerContract: round(option.bid * 100, 2),
     delta: option.delta === undefined ? null : Math.abs(option.delta),
     distanceOtmPercent: distanceToStrikePercent(candidate.quote.price, option.strike),
     ror,
     annualizedRor: ror === null ? null : annualizedReturnOnRisk(ror, dte),
+    rorBasis: "BID" as const,
     spreadPercent: bidAskSpreadPercent(option.bid, option.ask),
     openInterest: option.openInterest ?? null,
     optionVolume: option.volume ?? null,
+    // Never guessed from only one side - both the earnings date and this contract's own DTE must
+    // be genuinely known before this is anything but null (see "never invent an earnings date").
+    earningsWithinHoldingPeriod: earningsDistance === null || dte === null ? null : earningsDistance <= dte,
+    optionQuotedAt: null as string | null,
+    retrievedAt: asOf.toISOString(),
+    retrievedOnNonTradingDay: !isNyseMarketDay(marketDate(asOf)),
   };
 }
 
@@ -845,16 +881,23 @@ function unknownOptionValues() {
     expiration: null,
     dte: null,
     premium: null,
+    premiumBasis: null as "MARK_MIDPOINT" | null,
     optionBid: null,
     optionAsk: null,
     midpoint: null,
+    bidProceedsPerContract: null,
     delta: null,
     distanceOtmPercent: null,
     ror: null,
     annualizedRor: null,
+    rorBasis: null as "BID" | null,
     spreadPercent: null,
     openInterest: null,
     optionVolume: null,
+    earningsWithinHoldingPeriod: null,
+    optionQuotedAt: null,
+    retrievedAt: null,
+    retrievedOnNonTradingDay: null,
     contractReasonCode: null as OptionScanReasonCode | null,
   };
 }
