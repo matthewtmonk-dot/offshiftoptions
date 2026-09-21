@@ -71,6 +71,28 @@ export function classifyMarkFreshness(asOf: Date | null, now: Date): MarkFreshne
   return valuationDay.getTime() === previousNyseMarketDay(today).getTime() ? "LAST_SESSION" : "STALE";
 }
 
+/** Retrieval recency for an UNVERIFIED broker snapshot - deliberately separate from
+ * classifyMarkFreshness, which answers a different question (was this priced during a real
+ * market session). A retrieval can happen on any calendar day, including a weekend or holiday,
+ * and a fresh weekend/holiday retrieval must not be rejected merely because that calendar day
+ * itself never traded - `classifyMarkFreshness` would otherwise classify it MISSING regardless of
+ * how recent it is. The acceptance window is the most recently completed-or-current session's
+ * calendar day plus the session immediately before it (the same two-session conservatism
+ * `classifyMarkFreshness` uses for CURRENT_SESSION/LAST_SESSION), but membership in the window is
+ * judged by real elapsed calendar days, not by requiring the retrieval's own day to have traded.
+ * This never returns or implies a session label - callers must not present a true result as
+ * CURRENT_SESSION/LAST_SESSION.
+ */
+export function isRecentRetrieval(observedAt: Date | null, now: Date): boolean {
+  if (!observedAt || !Number.isFinite(observedAt.getTime()) || !Number.isFinite(now.getTime())) return false;
+  if (observedAt.getTime() > now.getTime()) return false;
+  const today = marketDate(now);
+  const retrievalDay = marketDate(observedAt);
+  const referenceSessionDay = isNyseMarketDay(today) ? today : previousNyseMarketDay(today);
+  const windowStart = previousNyseMarketDay(referenceSessionDay);
+  return retrievalDay.getTime() >= windowStart.getTime() && retrievalDay.getTime() <= today.getTime();
+}
+
 const marketDateFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
 });

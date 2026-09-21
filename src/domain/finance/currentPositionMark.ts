@@ -1,6 +1,6 @@
 import { round } from "./calculations";
 import type { CurrentOpenPut } from "./campaigns";
-import { classifyMarkFreshness } from "./marketCalendar";
+import { classifyMarkFreshness, isRecentRetrieval } from "./marketCalendar";
 import { parseOccOptionSymbol } from "./occOption";
 
 export type CurrentCostToCloseSource = {
@@ -111,21 +111,22 @@ export function resolveCurrentCostToClose({
         provenance: "VERIFIED_MARKET_TIMESTAMP", freshness: verifiedFreshness,
       };
     }
-    // No verified provider pricing time (the common production case today - see broker-read.ts,
-    // which has no verified valuation timestamp for this endpoint). Identity and quantity already
-    // agree above, so this is still the right, unambiguous contract and a real fetched value - just
-    // retrieved rather than priced. `record.observedAt` bounds how recent that retrieval must be
-    // (via the same session-boundary rules used for a real valuation), but it is never surfaced as
-    // `freshness` or treated as proof of a market session - only as an honestly-labeled snapshot.
-    if (latest.amount !== null) {
-      const snapshotRecency = classifyMarkFreshness(record.observedAt, now);
-      if (snapshotRecency === "CURRENT_SESSION" || snapshotRecency === "LAST_SESSION") {
-        return {
-          costToClose: round(Math.abs(latest.amount), 2), source: "LINKED_BROKER_POSITION",
-          label: "Schwab snapshot (unverified pricing time)", asOf: record.observedAt!,
-          provenance: "BROKER_SNAPSHOT", freshness: null,
-        };
-      }
+    // A PRESENT valuationAsOf that failed verification above (stale, future/contradictory versus
+    // observedAt, or otherwise not a usable session) is a rejected pricing claim - it must not be
+    // quietly discarded in favor of treating this same record as an unverified snapshot instead.
+    // Only a genuinely ABSENT valuationAsOf (the common production case today - see
+    // broker-read.ts, which has no verified valuation timestamp for this endpoint) may fall back.
+    // Identity and quantity already agree above, so this is still the right, unambiguous contract
+    // and a real fetched value - just retrieved rather than priced. `record.observedAt` bounds how
+    // recent that retrieval must be (isRecentRetrieval, NOT classifyMarkFreshness - a retrieval can
+    // happen on a non-trading day and must not be rejected merely for that), but it is never
+    // surfaced as `freshness` or treated as proof of a market session - only as an honest snapshot.
+    if (latest.valuationAsOf == null && latest.amount !== null && isRecentRetrieval(record.observedAt, now)) {
+      return {
+        costToClose: round(Math.abs(latest.amount), 2), source: "LINKED_BROKER_POSITION",
+        label: "Schwab snapshot (unverified pricing time)", asOf: record.observedAt!,
+        provenance: "BROKER_SNAPSHOT", freshness: null,
+      };
     }
   }
 
@@ -151,12 +152,16 @@ export function resolveCurrentCostToClose({
       asOf: optionMark.valuationAsOf!, provenance: "VERIFIED_MARKET_TIMESTAMP", freshness: verifiedFreshness,
     };
   }
+  // A PRESENT valuationAsOf that failed verification above (stale, or - already rejected above by
+  // the top-of-function contradiction guard - after capturedAt) is a rejected pricing claim; it
+  // must not be quietly discarded in favor of an unverified snapshot for the same quote. Only a
+  // genuinely ABSENT valuationAsOf may fall back to capturedAt-based retrieval recency.
+  if (optionMark.valuationAsOf != null) return null;
   // capturedAt is this table's insertion time only - never proven to be a priced time (see the
   // call site's own comment in positions/page.tsx). Same honest-snapshot treatment as the linked
-  // broker position above: a valid quote, bounded to recent retrieval, never labeled as a session.
-  if (!optionMark.capturedAt) return null;
-  const snapshotRecency = classifyMarkFreshness(optionMark.capturedAt, now);
-  if (snapshotRecency !== "CURRENT_SESSION" && snapshotRecency !== "LAST_SESSION") return null;
+  // broker position above: a valid quote, bounded to recent retrieval (isRecentRetrieval, not
+  // classifyMarkFreshness - see that branch's comment), never labeled as a session.
+  if (!optionMark.capturedAt || !isRecentRetrieval(optionMark.capturedAt, now)) return null;
   return {
     costToClose, source: "CACHED_OPTION_MARK", label: "Cached quote (unverified pricing time)",
     asOf: optionMark.capturedAt, provenance: "BROKER_SNAPSHOT", freshness: null,

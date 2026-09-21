@@ -307,3 +307,89 @@ describe("valuation evidence regressions", () => {
     expect(performanceMetricText(progress.currentPL, progress.currentPLStatus, (v) => `$${v}`)).toBe("$170 - pending");
   });
 });
+
+describe("Astra follow-up: stale/contradictory valuationAsOf must not fall back to BROKER_SNAPSHOT; retrieval recency is separate from pricing-session freshness", () => {
+  it("a linked position with a stale valuationAsOf is rejected outright, never falling back to a broker-snapshot estimate", () => {
+    // Astra's exact repro: pricing time Sep 16 (a real trading day) vs retrieval Sep 21 (also a
+    // real trading day) - more than 2 sessions stale, even though the retrieval itself would be
+    // fresh enough to qualify as a valid snapshot entirely on its own.
+    const stalePricing = linkedRecord({
+      observedAt: new Date("2026-09-21T15:00:00Z"),
+      metadata: { valuationAsOf: new Date("2026-09-16T20:00:00Z").toISOString() },
+    });
+    expect(resolve({ linkedRecords: [stalePricing], now: new Date("2026-09-21T15:00:00Z") })).toBeNull();
+  });
+
+  it("a cached quote with a stale valuationAsOf is rejected outright, never falling back to a broker-snapshot estimate", () => {
+    const result = resolve({
+      optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: new Date("2026-09-21T15:00:00Z"), valuationAsOf: new Date("2026-09-16T20:00:00Z") },
+      now: new Date("2026-09-21T15:00:00Z"),
+    });
+    expect(result).toBeNull();
+  });
+
+  it("a linked position whose valuationAsOf is after its own observedAt is a contradiction, rejected outright with no fallback", () => {
+    const contradictory = linkedRecord({
+      observedAt: new Date("2026-09-16T15:00:00Z"),
+      metadata: { valuationAsOf: new Date("2026-09-17T15:00:00Z").toISOString() }, // "priced" a day after it was fetched
+    });
+    expect(resolve({ linkedRecords: [contradictory], now: new Date("2026-09-17T20:00:00Z") })).toBeNull();
+  });
+
+  it("an independent valid source can still supply a value when the linked position's own valuationAsOf is rejected", () => {
+    const stalePricing = linkedRecord({
+      observedAt: new Date("2026-09-21T15:00:00Z"),
+      metadata: { valuationAsOf: new Date("2026-09-16T20:00:00Z").toISOString() },
+    });
+    const result = resolve({
+      linkedRecords: [stalePricing],
+      optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: new Date("2026-09-21T15:00:00Z"), valuationAsOf: null },
+      now: new Date("2026-09-21T15:00:00Z"),
+    });
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe("CACHED_OPTION_MARK");
+    expect(result!.provenance).toBe("BROKER_SNAPSHOT");
+  });
+
+  it("a recent weekday broker-snapshot retrieval is accepted when valuationAsOf is absent", () => {
+    const result = resolve({ linkedRecords: [linkedRecord({ metadata: null })] }); // MARKET_DAY, a Tuesday
+    expect(result).not.toBeNull();
+    expect(result!.provenance).toBe("BROKER_SNAPSHOT");
+  });
+
+  it("a recent weekend broker-snapshot retrieval is accepted without claiming any market-session label", () => {
+    const sunday = new Date("2026-09-06T15:00:00Z"); // Sunday - no trading session that day at all
+    const record = linkedRecord({ observedAt: sunday, metadata: null });
+    const result = resolve({ linkedRecords: [record], now: sunday });
+    expect(result).not.toBeNull();
+    expect(result!.provenance).toBe("BROKER_SNAPSHOT");
+    expect(result!.freshness).toBeNull(); // never CURRENT_SESSION/LAST_SESSION for a Sunday retrieval
+  });
+
+  it("a genuinely old broker-snapshot retrieval is still rejected", () => {
+    // Same boundary as "test 10" and the earlier stale-snapshot test, reused here to isolate the
+    // retrieval-recency gate specifically (no valuationAsOf present at all).
+    const stale = linkedRecord({ observedAt: new Date("2026-09-04T20:00:00Z"), metadata: null });
+    expect(resolve({ linkedRecords: [stale], now: new Date("2026-09-09T15:00:00Z") })).toBeNull();
+  });
+
+  it("a production-shaped Schwab metadata object with valuationAsOf: null still allows a recent broker snapshot to work", () => {
+    // Mirrors normalizeSchwabApiPosition's real metadata shape (src/providers/schwab/csv.ts) -
+    // populated identity fields alongside an explicit null valuationAsOf, not a bare `metadata: null`.
+    const record = linkedRecord({
+      metadata: {
+        accountId: "SCHWAB-ACCT-1",
+        assetType: "OPTION",
+        putCall: "PUT",
+        strikePrice: 20,
+        marketValue: -150,
+        valuationAsOf: null,
+        economicEffect: "CURRENT_POSITION",
+      },
+    });
+    const result = resolve({ linkedRecords: [record] });
+    expect(result).not.toBeNull();
+    expect(result!.provenance).toBe("BROKER_SNAPSHOT");
+    expect(result!.costToClose).toBe(150);
+  });
+});

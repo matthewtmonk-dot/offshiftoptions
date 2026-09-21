@@ -384,7 +384,13 @@ export function summarizeCampaignProgress({
    * an unverified broker-snapshot/retrieval-time estimate (see
    * `CurrentCostToCloseSource.provenance` in currentPositionMark.ts). Defaults to true so callers
    * that don't yet distinguish provenance keep their existing behavior; the one caller that does
-   * (positions/page.tsx) passes it explicitly. A snapshot-sourced value never reaches CONFIRMED. */
+   * (positions/page.tsx) passes it explicitly. A snapshot-sourced value never reaches CONFIRMED.
+   * KNOWN FOLLOW-UP (Astra, Ticket 5 corrective review): a safer API would make this required or
+   * default false, so a future caller can't silently earn CONFIRMED by omission. Left as `true`
+   * here because ~30 existing test call sites across performance.test.ts/currentPositionMark.test.ts
+   * rely on the default to assert CONFIRMED and are unrelated to provenance - flipping it would be
+   * broad, semantics-unrelated test churn rather than a narrow corrective fix. Revisit if another
+   * production caller is ever added. */
   costToCloseVerified?: boolean;
   targetWeeklyPercent?: number;
   /** False when a linked Schwab transaction behind this campaign has an unresolved fee (see

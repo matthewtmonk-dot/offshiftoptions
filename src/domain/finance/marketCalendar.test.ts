@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyMarkFreshness, isNyseMarketDay, nextNyseMarketDay, previousNyseMarketDay } from "./marketCalendar";
+import { classifyMarkFreshness, isNyseMarketDay, isRecentRetrieval, nextNyseMarketDay, previousNyseMarketDay } from "./marketCalendar";
 
 function utc(year: number, month: number, day: number) {
   return new Date(Date.UTC(year, month - 1, day));
@@ -220,5 +220,49 @@ describe("market-date boundaries for valuation timestamps", () => {
   });
   it("uses Dec 31 as the valid previous session after a Saturday New Year", () => {
     expect(classifyMarkFreshness(new Date("2027-12-31T21:00:00Z"), new Date("2028-01-03T14:00:00Z"))).toBe("LAST_SESSION");
+  });
+});
+
+describe("isRecentRetrieval (broker-snapshot retrieval recency, separate from pricing-session freshness)", () => {
+  it("accepts a recent weekday retrieval", () => {
+    const now = new Date("2026-09-08T20:00:00Z"); // Tuesday, a real trading day
+    expect(isRecentRetrieval(now, now)).toBe(true);
+  });
+
+  it("accepts a recent weekend retrieval, even though classifyMarkFreshness would call the same instant MISSING", () => {
+    const sunday = new Date("2026-09-06T15:00:00Z"); // Sunday - no trading session that day at all
+    expect(isRecentRetrieval(sunday, sunday)).toBe(true);
+    expect(classifyMarkFreshness(sunday, sunday)).toBe("MISSING"); // confirms the two policies genuinely differ
+  });
+
+  it("accepts a Friday retrieval reused over the following weekend", () => {
+    const friday = new Date("2026-09-04T20:00:00Z");
+    const sunday = new Date("2026-09-06T15:00:00Z");
+    expect(isRecentRetrieval(friday, sunday)).toBe(true);
+  });
+
+  it("does not treat a fresher weekend retrieval as less acceptable than an older weekday one", () => {
+    const friday = new Date("2026-09-04T20:00:00Z");
+    const sunday = new Date("2026-09-06T15:00:00Z");
+    expect(isRecentRetrieval(sunday, sunday)).toBe(true);
+    expect(isRecentRetrieval(friday, sunday)).toBe(true);
+  });
+
+  it("rejects a genuinely old retrieval (2+ trading sessions behind), matching classifyMarkFreshness's STALE boundary", () => {
+    const now = new Date("2026-09-09T15:00:00Z"); // Wednesday
+    const stale = new Date("2026-09-04T20:00:00Z"); // Friday - 2 sessions behind (Fri -> Tue -> Wed)
+    expect(isRecentRetrieval(stale, now)).toBe(false);
+  });
+
+  it("rejects a future retrieval and invalid timestamps", () => {
+    const now = new Date("2026-09-08T20:00:00Z");
+    expect(isRecentRetrieval(new Date("2026-09-09T00:00:00Z"), now)).toBe(false);
+    expect(isRecentRetrieval(new Date("invalid"), now)).toBe(false);
+    expect(isRecentRetrieval(null, now)).toBe(false);
+  });
+
+  it("never returns or implies a market-session label - it is a plain boolean", () => {
+    const now = new Date("2026-09-08T20:00:00Z");
+    expect(typeof isRecentRetrieval(now, now)).toBe("boolean");
   });
 });
