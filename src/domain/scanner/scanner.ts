@@ -175,19 +175,33 @@ export type ScannerReadiness = "PASS" | "NEAR" | "NEEDS_DATA" | "FAIL";
  * as NEAR while another correctly excludes it as FAIL - see PROJECT_HANDOFF.md).
  *
  * Exactly four states:
- *  - PASS: every enabled criterion is known, no gating failure, nothing fails.
- *  - NEAR: every enabled criterion is known (including a real option-chain assessment - "stock
- *    screen only" never counts as known here), no gating failure, and exactly one non-gating
- *    criterion fails by a small ("near", see getNearMisses/criterionGap's 12% gap cutoff) margin
- *    - every other criterion passes.
+ *  - PASS: every enabled criterion is known, no gating failure, nothing fails, AND a real option
+ *    contract was actually selected (see `contractReasonCode` below) - independent of which
+ *    scoring rules happen to be enabled.
+ *  - NEAR: same evidence-completeness and selected-contract requirement as PASS, no gating
+ *    failure, and exactly one non-gating criterion fails by a small ("near", see
+ *    getNearMisses/criterionGap's 12% gap cutoff) margin - every other criterion passes.
  *  - NEEDS_DATA: no known gating failure, but at least one enabled criterion is UNKNOWN, or the
- *    option chain itself was never assessed for this candidate. The evidence is incomplete, not
- *    bad - this must never be promoted or counted alongside a real PASS/NEAR.
- *  - FAIL: any known gating failure, or (with otherwise-known evidence) more than one failing
- *    criterion, or a single failing criterion that isn't a near miss. A known failure is reported
- *    as FAIL even when other evidence is also missing elsewhere - missing evidence is disclosed
- *    separately (see unknownReasons/scannerRowReasons at the call site) but never downgrades an
- *    already-known failure into NEEDS_DATA.
+ *    option chain itself was never assessed for this candidate, or a chain WAS assessed
+ *    (`optionEnrichment === "ENRICHED"`) but never yielded a selected contract (a failed request,
+ *    an empty chain, or no strike/expiration meeting the structural requirements - see
+ *    `contractReasonCode`). The evidence is incomplete, not bad - this must never be promoted or
+ *    counted alongside a real PASS/NEAR.
+ *  - FAIL: any known gating failure, or (with otherwise-known evidence AND a selected contract)
+ *    more than one failing criterion, or a single failing criterion that isn't a near miss. A
+ *    known failure is reported as FAIL even when other evidence is also missing elsewhere -
+ *    missing evidence is disclosed separately (see unknownReasons/scannerRowReasons at the call
+ *    site) but never downgrades an already-known failure into NEEDS_DATA.
+ *
+ * `optionEnrichment === "ENRICHED"` alone is NOT sufficient evidence of a successful option
+ * assessment - it only means a chain request was spent on this ticker, which also covers
+ * CHAIN_UNAVAILABLE (the request failed), NO_PUT_CONTRACTS, and every other structural-selection
+ * miss in `OptionScanReasonCode` (live-scan.ts). `contractReasonCode` is the actual signal for
+ * "was a contract selected" - present (non-null/undefined) means no contract was chosen, so
+ * PASS/NEAR can never be reached no matter which criteria happen to be enabled (e.g. only the
+ * stock-level "price" rule). A candidate whose run predates this field (contractReasonCode
+ * omitted entirely) is treated exactly as before - selection success is assumed, matching every
+ * other legacy-tolerance rule in this module.
  *
  * Personal Research state (LIKE/WATCH/NEVER_TRADE/etc.) never enters this function and must never
  * change its answer - readiness is a purely technical judgment, kept deliberately separate from
@@ -197,13 +211,16 @@ export function classifyReadiness(
   summary: ScanSummary,
   gatingKeys: ReadonlySet<string>,
   optionEnrichment?: unknown,
+  contractReasonCode?: unknown,
 ): ScannerReadiness {
   if (hasGatingFailure(summary.results, gatingKeys)) {
     return "FAIL";
   }
 
   const failCount = summary.results.filter((result) => result.status === "FAIL").length;
-  const evidenceIncomplete = summary.results.some((result) => result.status === "UNKNOWN") || isNotOptionAssessed(optionEnrichment);
+  const noSelectedContract = optionEnrichment === "ENRICHED" && contractReasonCode != null;
+  const evidenceIncomplete =
+    summary.results.some((result) => result.status === "UNKNOWN") || isNotOptionAssessed(optionEnrichment) || noSelectedContract;
 
   if (failCount === 0) {
     return evidenceIncomplete ? "NEEDS_DATA" : "PASS";

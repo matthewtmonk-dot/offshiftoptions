@@ -1992,6 +1992,22 @@ export async function resetScannerSettingsToLstCoreForUser(userId: string) {
   return profile;
 }
 
+/**
+ * Astra follow-up (Ticket 7 concurrency gap): stamps each candidate's values with the settings
+ * revision (`ScannerProfile.updatedAt`) that was actually in effect when THIS scan read its rules
+ * - captured at read time, not at persist time. `ScanRun.createdAt` alone cannot answer "which
+ * rules produced this run": a scan that reads old rules, then finishes and persists AFTER a
+ * settings save that happened while it was running, would otherwise look newer than the save
+ * (`run.createdAt > profile.updatedAt`) even though it evaluated the OLD rule set. Persisted into
+ * the existing flexible `snapshotJson` (same mechanism as Ticket 8's `retrievedAt`) - no schema
+ * change, no new versioning subsystem. Read back by resultsPredateCurrentSettings's caller in
+ * scanner/page.tsx.
+ */
+function withSettingsRevision(candidates: LiveScanCandidate[], settingsRevisionAsOf: Date): LiveScanCandidate[] {
+  const stamp = settingsRevisionAsOf.toISOString();
+  return candidates.map((candidate) => ({ ...candidate, values: { ...candidate.values, settingsRevisionAsOf: stamp } }));
+}
+
 export async function rerunDemoScannerForUser(userId: string, profileId?: string) {
   const profile =
     profileId
@@ -2007,7 +2023,7 @@ export async function rerunDemoScannerForUser(userId: string, profileId?: string
     orderBy: { sortOrder: "asc" },
   });
   const rules = scannerRulesFromRecords(records);
-  return persistScannerRun(userId, profile.id, "DEMO", evaluateDemoScan(rules));
+  return persistScannerRun(userId, profile.id, "DEMO", withSettingsRevision(evaluateDemoScan(rules), profile.updatedAt));
 }
 
 export type LiveScanUniverseSource = "OCC" | "LIMITED_FALLBACK";
@@ -2193,7 +2209,10 @@ export async function rerunLiveSchwabScannerForUser(
     const toPersist = [...tier1Persisted, ...rankedNonTier1StockStage];
 
     advanceStage("PERSIST_RESULTS");
-    await persistScannerRun(userId, profile.id, "LIVE:SCHWAB", toPersist);
+    // profile.updatedAt was read at the very start of this run (before the rules were even
+    // fetched) - the settings revision this scan actually evaluated against, regardless of any
+    // settings save that lands while EVALUATE/PERSIST_RESULTS are still running.
+    await persistScannerRun(userId, profile.id, "LIVE:SCHWAB", withSettingsRevision(toPersist, profile.updatedAt));
     resultsPersisted = true;
     persistedCount = toPersist.length;
 
@@ -2221,7 +2240,8 @@ export async function rerunLiveSchwabScannerForUser(
       // Same authoritative classifier the Scanner page itself uses (see scanner.ts) - this toast
       // must never disagree with the page's own "Near" count for the same run.
       nearMatches: toPersist.filter(
-        (candidate) => classifyReadiness(candidate.summary, GATING_RULE_KEYS, candidate.values.optionEnrichment) === "NEAR",
+        (candidate) =>
+          classifyReadiness(candidate.summary, GATING_RULE_KEYS, candidate.values.optionEnrichment, candidate.values.contractReasonCode) === "NEAR",
       ).length,
       elapsedMs: Date.now() - startedAt,
       universeSymbols: universe.length,

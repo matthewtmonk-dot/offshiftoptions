@@ -422,3 +422,68 @@ describe("classifyReadiness / isActionableReadiness - Scanner truthfulness: one 
     expect(classifyReadiness(summary, GATING_RULE_KEYS)).toBe("FAIL");
   });
 });
+
+describe("classifyReadiness - Astra corrective patch: PASS/NEAR require actual selected-contract evidence", () => {
+  // Astra's exact repro: only the stock-level "price" rule enabled - no option-related criterion
+  // exists to catch a missing contract via UNKNOWN propagation, so ENRICHED alone (a request was
+  // spent) was wrongly treated as proof a contract was selected.
+  const priceOnly: ScannerRule[] = [{ key: "price", name: "Price", operator: "BETWEEN", desired: [10, 80] }];
+
+  it("CHAIN_UNAVAILABLE with only price enabled must NOT be PASS", () => {
+    const summary = evaluateCandidate(priceOnly, { price: 20 }); // price passes; no option criteria at all
+    expect(summary.status).toBe("PASS"); // confirms the old bug's precondition: nothing else can catch this
+    const readiness = classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED", "CHAIN_UNAVAILABLE");
+    expect(readiness).not.toBe("PASS");
+    expect(readiness).toBe("NEEDS_DATA");
+    expect(isActionableReadiness(readiness)).toBe(false);
+  });
+
+  it("NO_PUT_CONTRACTS with only price enabled must NOT be PASS", () => {
+    const summary = evaluateCandidate(priceOnly, { price: 20 });
+    const readiness = classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED", "NO_PUT_CONTRACTS");
+    expect(readiness).not.toBe("PASS");
+    expect(readiness).toBe("NEEDS_DATA");
+    expect(isActionableReadiness(readiness)).toBe(false);
+  });
+
+  it("every structural no-contract reason blocks PASS/NEAR the same way, regardless of which rules are enabled", () => {
+    const reasons = [
+      "CHAIN_UNAVAILABLE", "NO_PUT_CONTRACTS", "NO_ACCEPTABLE_STRIKE",
+      "NO_CONTRACT_WITH_POSITIVE_BID", "NO_EXPIRATIONS_IN_CONFIGURED_RANGE", "NO_WEEKLY_EXPIRATION",
+    ];
+    for (const reason of reasons) {
+      const summary = evaluateCandidate(priceOnly, { price: 20 });
+      const readiness = classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED", reason);
+      expect(isActionableReadiness(readiness)).toBe(false);
+    }
+  });
+
+  it("chain fetched but NO_ACCEPTABLE_STRIKE with option rules disabled must not be PASS/NEAR even with a coincidental near-looking score", () => {
+    const summary = evaluateCandidate(priceOnly, { price: 20 });
+    const readiness = classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED", "NO_ACCEPTABLE_STRIKE");
+    expect(readiness).not.toBe("PASS");
+    expect(readiness).not.toBe("NEAR");
+  });
+
+  it("a valid selected contract with complete passing enabled evidence still reaches PASS", () => {
+    const summary = evaluateCandidate(priceOnly, { price: 20 });
+    // contractReasonCode absent (undefined) - the real "contract was selected" shape.
+    expect(classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED", undefined)).toBe("PASS");
+  });
+
+  it("a valid selected contract with exactly one permitted near miss still reaches NEAR", () => {
+    const priceAndRsi: ScannerRule[] = [...priceOnly, { key: "rsi", name: "RSI", operator: "LTE", desired: 40 }];
+    const summary = evaluateCandidate(priceAndRsi, { price: 20, rsi: 42 }); // rsi near-fail: gap 5% <= 12%
+    expect(classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED", undefined)).toBe("NEAR");
+  });
+
+  it("a known gating failure still wins over the missing-contract signal (precedence unchanged)", () => {
+    const summary = evaluateCandidate(priceOnly, { price: 200 }); // price fails its own gating band
+    expect(classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED", "CHAIN_UNAVAILABLE")).toBe("FAIL");
+  });
+
+  it("a run predating contractReasonCode (field entirely absent) is not penalized - legacy tolerance matches optionEnrichment's own rule", () => {
+    const summary = evaluateCandidate(priceOnly, { price: 20 });
+    expect(classifyReadiness(summary, GATING_RULE_KEYS, "ENRICHED")).toBe("PASS");
+  });
+});

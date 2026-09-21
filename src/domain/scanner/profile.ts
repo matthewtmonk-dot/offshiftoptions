@@ -699,17 +699,28 @@ export function formatRuleDesired(operator: ScannerOperator, desired: EngineScan
 }
 
 /**
- * Ticket 7: whether the currently-visible ScanRun predates the user's last settings change.
- * Saving/resetting Scanner settings deliberately never re-runs a scan (see
- * updateScannerSettingsForUser/resetScannerSettingsToLstCoreForUser in workflows.ts), so the
- * results on screen can legitimately have been evaluated under an earlier rule set. Rather than a
- * new versioning field, this reuses the smallest honest signal already on the two rows involved:
- * `ScannerProfile.updatedAt` (bumped by every settings save/reset) against this run's own
- * `createdAt`. True means the visible results must be disclosed as evaluated under earlier
- * settings, not presented as current, until the user runs another scan.
+ * Ticket 7 (corrected by an Astra-found concurrency gap): whether the currently-visible ScanRun
+ * predates the user's last settings change. Saving/resetting Scanner settings deliberately never
+ * re-runs a scan (see updateScannerSettingsForUser/resetScannerSettingsToLstCoreForUser in
+ * workflows.ts), so the results on screen can legitimately have been evaluated under an earlier
+ * rule set.
+ *
+ * `evaluatedAt` should be the settings revision the run actually evaluated against - captured at
+ * scan-read time via `withSettingsRevision` (workflows.ts) and persisted per-result, NOT
+ * `ScanRun.createdAt` (a persist-time value). A scan that reads old rules, then finishes and
+ * persists AFTER a settings save that happened while it was still running, would otherwise look
+ * newer than the save even though it evaluated the OLD rules - `ScanRun.createdAt` cannot
+ * distinguish "evaluated after this save" from "merely persisted after this save". Falls back to
+ * `ScanRun.createdAt` only when no per-result revision is available (an empty run, or one that
+ * predates this field) - see the call site in scanner/page.tsx.
+ *
+ * Still reuses the smallest honest signal already in the architecture (`ScannerProfile.updatedAt`,
+ * bumped by every settings save/reset) rather than a new versioning field. True means the visible
+ * results must be disclosed as evaluated under earlier settings, not presented as current, until
+ * the user runs another scan.
  */
-export function resultsPredateCurrentSettings(profileUpdatedAt: Date, runCreatedAt: Date): boolean {
-  return profileUpdatedAt.getTime() > runCreatedAt.getTime();
+export function resultsPredateCurrentSettings(profileUpdatedAt: Date, evaluatedAt: Date): boolean {
+  return profileUpdatedAt.getTime() > evaluatedAt.getTime();
 }
 
 export function parseScannerDesiredFromForm(definition: ScannerRuleDefinition, formData: FormData) {

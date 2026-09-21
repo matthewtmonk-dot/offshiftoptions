@@ -70,3 +70,40 @@ describe("resultsPredateCurrentSettings (Ticket 7: honest disclosure when settin
     expect(resultsPredateCurrentSettings(instant, instant)).toBe(false);
   });
 });
+
+describe("resultsPredateCurrentSettings - Astra follow-up: overlapping save/scan concurrency", () => {
+  // Astra's exact scenario: a scan reads rules A at 14:00:00, the user saves new rules B at
+  // 14:00:10 (while the scan is still evaluating), and the scan finishes and persists its
+  // ScanRun at 14:00:20 - AFTER the save. The old mechanism compared profileUpdatedAt against
+  // ScanRun.createdAt (14:00:20), which is later than the save (14:00:10), and so incorrectly
+  // concluded the results were current. The fix compares against the settings revision the scan
+  // actually captured at read time (14:00:00, via withSettingsRevision in workflows.ts) instead.
+  const scanReadsRulesAt = new Date("2026-09-21T14:00:00Z");
+  const settingsSavedAt = new Date("2026-09-21T14:00:10Z");
+  const scanPersistsAt = new Date("2026-09-21T14:00:20Z");
+
+  it("1. scan A reads old rules, settings save lands mid-scan, scan A persists after the save -> must warn", () => {
+    // The corrected mechanism: compare against the captured read-time revision.
+    expect(resultsPredateCurrentSettings(settingsSavedAt, scanReadsRulesAt)).toBe(true);
+  });
+
+  it("demonstrates the old mechanism's bug directly: comparing against persist time instead would have missed it", () => {
+    expect(resultsPredateCurrentSettings(settingsSavedAt, scanPersistsAt)).toBe(false); // the bug
+    expect(resultsPredateCurrentSettings(settingsSavedAt, scanReadsRulesAt)).toBe(true); // the fix
+  });
+
+  it("2. a scan that reads rules AFTER the save captures the already-current revision -> no warning", () => {
+    const scanReadsRulesAfterSave = new Date("2026-09-21T14:00:15Z"); // after settingsSavedAt
+    expect(resultsPredateCurrentSettings(settingsSavedAt, scanReadsRulesAfterSave)).toBe(false);
+  });
+
+  it("3. ordinary sequential case - scan finishes, then settings are saved later -> warning", () => {
+    const laterSave = new Date("2026-09-21T15:00:00Z");
+    expect(resultsPredateCurrentSettings(laterSave, scanReadsRulesAt)).toBe(true);
+  });
+
+  it("4. settings saved, then a brand-new scan reads the already-current rules -> no warning", () => {
+    const newScanReadsRulesAt = new Date("2026-09-21T14:05:00Z"); // after settingsSavedAt
+    expect(resultsPredateCurrentSettings(settingsSavedAt, newScanReadsRulesAt)).toBe(false);
+  });
+});

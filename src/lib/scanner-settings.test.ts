@@ -15,11 +15,11 @@ vi.mock("./prisma", () => ({ prisma: db }));
 import { SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { rerunDemoScannerForUser, resetScannerSettingsToLstCoreForUser, updateScannerSettingsForUser } from "./workflows";
 
-function mattProfile() {
-  return { id: "profile-matt", ownerId: "matt", name: "My LST" };
+function mattProfile(overrides: Partial<{ updatedAt: Date }> = {}) {
+  return { id: "profile-matt", ownerId: "matt", name: "My LST", updatedAt: new Date("2026-09-21T14:00:00Z"), ...overrides };
 }
 function ericProfile() {
-  return { id: "profile-eric", ownerId: "eric", name: "My LST" };
+  return { id: "profile-eric", ownerId: "eric", name: "My LST", updatedAt: new Date("2026-09-21T14:00:00Z") };
 }
 
 /** Mirrors the real settings form exactly - every definition gets a valid field for its input
@@ -184,5 +184,22 @@ describe("rerunDemoScannerForUser (Ticket 7: demo mode still works, but only as 
 
     expect(db.scanRun.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ source: "DEMO", ownerId: "matt" }) }));
     expect(db.scanResult.create).toHaveBeenCalled();
+  });
+});
+
+describe("settings-revision stamping (Astra follow-up: scan/settings concurrency)", () => {
+  it("stamps every persisted result with the settings revision (profile.updatedAt) read at scan-start time, not persist time", async () => {
+    const readAtScanStart = new Date("2026-09-21T14:00:00Z");
+    db.scannerProfile.findFirst.mockResolvedValue(mattProfile({ updatedAt: readAtScanStart }));
+    db.scannerRule.findMany.mockResolvedValue([]);
+    db.scanRun.create.mockResolvedValue({ id: "run-demo-1" });
+    db.scanResult.create.mockResolvedValue({});
+
+    await rerunDemoScannerForUser("matt");
+
+    expect(db.scanResult.create).toHaveBeenCalled();
+    for (const [args] of db.scanResult.create.mock.calls) {
+      expect(args.data.snapshotJson.settingsRevisionAsOf).toBe(readAtScanStart.toISOString());
+    }
   });
 });

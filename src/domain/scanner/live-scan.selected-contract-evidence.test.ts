@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MarketDataProvider, OptionContractSnapshot } from "@/providers/market-data/types";
 import { evaluateLiveMarketScan, OPTION_CHAIN_ENRICHMENT_LIMIT, type LiveScanEarningsLookup, type LiveScanTechnicalLookup } from "./live-scan";
-import { classifyReadiness } from "./scanner";
+import { classifyReadiness, isActionableReadiness } from "./scanner";
 import { SCANNER_RULE_DEFINITIONS, GATING_RULE_KEYS } from "./profile";
 import type { ScannerRule } from "./scanner";
 
@@ -251,6 +251,97 @@ describe("bounded provider usage is unchanged (Ticket 8)", () => {
     tickers.forEach((ticker, index) => input.technicalCache.set(ticker, { ...ready, rsi: 20 + index }));
 
     await evaluateLiveMarketScan(input);
+
+    expect(input.chainCalls).toHaveLength(OPTION_CHAIN_ENRICHMENT_LIMIT);
+  });
+});
+
+describe("Astra corrective patch: end-to-end - PASS/NEAR require actual selected-contract evidence, not just an ENRICHED attempt", () => {
+  // Only the stock-level "price" rule enabled - Astra's exact repro condition. No option-related
+  // criterion exists to catch a missing contract via UNKNOWN propagation, so this is the case that
+  // would have silently produced a false PASS before the corrective patch.
+  const priceOnly: ScannerRule[] = [{ key: "price", name: "Stock price", operator: "BETWEEN", desired: [5, 40] }];
+
+  it("1. a failed chain request (CHAIN_UNAVAILABLE), only price enabled, is not PASS and not actionable", async () => {
+    const input = fixture(() => [put()], ["BROKEN"], { failChainFor: new Set(["BROKEN"]) });
+    const row = (await evaluateLiveMarketScan({ ...input, rules: priceOnly }))[0];
+
+    expect(row.values.contractReasonCode).toBe("CHAIN_UNAVAILABLE");
+    expect(row.values.strike).toBeNull();
+    const readiness = classifyReadiness(row.summary, GATING_RULE_KEYS, row.values.optionEnrichment, row.values.contractReasonCode);
+    expect(readiness).not.toBe("PASS");
+    expect(isActionableReadiness(readiness)).toBe(false);
+  });
+
+  it("2. an empty chain (NO_PUT_CONTRACTS), only price enabled, is not PASS and not actionable", async () => {
+    const input = fixture(() => [], ["EMPTY"]); // no contracts returned at all
+    const row = (await evaluateLiveMarketScan({ ...input, rules: priceOnly }))[0];
+
+    expect(row.values.contractReasonCode).toBe("NO_PUT_CONTRACTS");
+    expect(row.values.strike).toBeNull();
+    const readiness = classifyReadiness(row.summary, GATING_RULE_KEYS, row.values.optionEnrichment, row.values.contractReasonCode);
+    expect(readiness).not.toBe("PASS");
+    expect(isActionableReadiness(readiness)).toBe(false);
+  });
+
+  it("3. a chain fetched with no acceptable strike, option rules disabled, is not PASS/NEAR", async () => {
+    const input = fixture(() => [put({ strike: 25 })], ["TEST"]); // strike above current price (20) - no OTM put
+    const row = (await evaluateLiveMarketScan({ ...input, rules: priceOnly }))[0];
+
+    expect(row.values.contractReasonCode).toBe("NO_ACCEPTABLE_STRIKE");
+    const readiness = classifyReadiness(row.summary, GATING_RULE_KEYS, row.values.optionEnrichment, row.values.contractReasonCode);
+    expect(readiness).not.toBe("PASS");
+    expect(readiness).not.toBe("NEAR");
+  });
+
+  it("4. a genuinely valid selected contract with complete passing evidence still reaches PASS", async () => {
+    const row = (await evaluateLiveMarketScan(fixture(() => [put()], ["GOOD"])))[0]; // full default-enabled rules
+    expect(row.values.contractReasonCode == null).toBe(true); // no reason code - a contract WAS selected
+    expect(classifyReadiness(row.summary, GATING_RULE_KEYS, row.values.optionEnrichment, row.values.contractReasonCode)).toBe("PASS");
+  });
+
+  it("5. a genuinely valid selected contract with exactly one permitted near miss still reaches NEAR", async () => {
+    // A near-miss must be an OPTION-level criterion (only known once a contract is actually
+    // selected) - a stock-level near-miss (e.g. RSI) would instead cause a known stock-stage FAIL
+    // that excludes the candidate from the option-chain shortlist entirely, a separate, correct,
+    // pre-existing mechanism unrelated to this patch. ror (GTE 1%) just below threshold:
+    // bid 0.184 / strike 19 -> ror ~0.968%, gap (1-0.968)/1 = ~3.2% <= the 12% near cutoff.
+    const input = fixture(() => [put({ bid: 0.184, ask: 0.22, mark: 0.20 })], ["NEARISH"]);
+    const row = (await evaluateLiveMarketScan(input))[0];
+
+    expect(row.summary.results.filter((r) => r.status === "FAIL")).toHaveLength(1);
+    expect(row.summary.results.find((r) => r.key === "ror")?.status).toBe("FAIL");
+    expect(row.values.contractReasonCode == null).toBe(true);
+    expect(classifyReadiness(row.summary, GATING_RULE_KEYS, row.values.optionEnrichment, row.values.contractReasonCode)).toBe("NEAR");
+  });
+
+  it("6. the Dashboard promotion pipeline excludes every case without selected-contract evidence, even with only price enabled", async () => {
+    const failedInput = fixture(() => [put()], ["BROKEN"], { failChainFor: new Set(["BROKEN"]) });
+    const emptyInput = fixture(() => [], ["EMPTY"]);
+    const goodInput = fixture(() => [put()], ["GOOD"]);
+
+    const [failedRow] = await evaluateLiveMarketScan({ ...failedInput, rules: priceOnly });
+    const [emptyRow] = await evaluateLiveMarketScan({ ...emptyInput, rules: priceOnly });
+    const [goodRow] = await evaluateLiveMarketScan({ ...goodInput, rules: priceOnly });
+
+    // Mirrors dashboard/page.tsx's actual topSetups pipeline: classify, filter to actionable,
+    // sort by score, slice(0, 3).
+    const rows = [failedRow, emptyRow, goodRow].map((row) => ({
+      ticker: row.ticker,
+      score: row.summary.passed, // stand-in ranking signal, not the point of this test
+      readiness: classifyReadiness(row.summary, GATING_RULE_KEYS, row.values.optionEnrichment, row.values.contractReasonCode),
+    }));
+    const topSetups = rows.filter((row) => isActionableReadiness(row.readiness));
+
+    expect(topSetups.map((row) => row.ticker)).toEqual(["GOOD"]);
+  });
+
+  it("7. the option-chain call budget is unaffected by the corrective patch", async () => {
+    const tickers = Array.from({ length: OPTION_CHAIN_ENRICHMENT_LIMIT + 2 }, (_, i) => `RANK${String(i).padStart(2, "0")}`);
+    const input = fixture(() => [], tickers); // every enriched ticker gets NO_PUT_CONTRACTS
+    tickers.forEach((ticker, index) => input.technicalCache.set(ticker, { ...ready, rsi: 20 + index }));
+
+    await evaluateLiveMarketScan({ ...input, rules: priceOnly });
 
     expect(input.chainCalls).toHaveLength(OPTION_CHAIN_ENRICHMENT_LIMIT);
   });

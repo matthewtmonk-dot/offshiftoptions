@@ -186,7 +186,14 @@ export default async function ScannerPage({
     profile = await getScannerPageData(user.id);
   }
   const run = profile?.scanRuns[0];
-  const settingsChangedAfterRun = Boolean(run && profile && resultsPredateCurrentSettings(profile.updatedAt, run.createdAt));
+  // Astra follow-up: the settings revision this run actually evaluated against was captured at
+  // scan-read time (see withSettingsRevision in workflows.ts) and travels with each persisted
+  // result - comparing it here, rather than run.createdAt (a persist-time value that can land
+  // AFTER a settings save that happened mid-scan, silently hiding a real earlier-settings case).
+  // Falls back to run.createdAt only for a run with no results, or one that predates this field.
+  const settingsRevisionAsOfRaw = run?.results[0] ? snapshotString(run.results[0].snapshotJson, "settingsRevisionAsOf") : null;
+  const runEvaluatedAt = settingsRevisionAsOfRaw ? new Date(settingsRevisionAsOfRaw) : (run?.createdAt ?? null);
+  const settingsChangedAfterRun = Boolean(run && profile && runEvaluatedAt && resultsPredateCurrentSettings(profile.updatedAt, runEvaluatedAt));
   const researchByTicker = new Map(researchItems.map((item) => [item.ticker, item.researchStatus]));
   const allResults = (run?.results ?? []).map((result) => toViewResult(result, researchByTicker));
   const isLiveSchwabRun = run?.source === "LIVE:SCHWAB";
@@ -319,13 +326,14 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
   const summary = toDomainSummary(result);
   const score = honestSetupScore(summary, GATING_RULE_KEYS);
   const optionEnrichment = snapshotString(result.snapshotJson, "optionEnrichment");
+  const contractReasonCode = snapshotString(result.snapshotJson, "contractReasonCode");
 
   return {
     record: result,
     summary,
     score,
     scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
-    readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment),
+    readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment, contractReasonCode),
     concern: primaryConcern(summary.results),
     researchStatus: researchByTicker.get(result.ticker) ?? null,
     values: {

@@ -46,6 +46,13 @@ export function isNotOptionAssessed(state: unknown): boolean {
   return typeof state === "string" && NOT_ENRICHED_STATES.has(state);
 }
 
+function fieldFromSnapshot(snapshot: unknown, key: string): unknown {
+  if (!snapshot || typeof snapshot !== "object" || !(key in snapshot)) {
+    return null;
+  }
+  return (snapshot as Record<string, unknown>)[key];
+}
+
 /**
  * Extracts the raw `optionEnrichment` state out of a persisted candidate snapshot
  * (`ScanResult.snapshotJson`, or an in-memory candidate's `values`) for a reader that only has the
@@ -53,10 +60,15 @@ export function isNotOptionAssessed(state: unknown): boolean {
  * selection. Returns `unknown` by design: callers pass it straight to `isNotOptionAssessed`.
  */
 export function optionEnrichmentFromSnapshot(snapshot: unknown): unknown {
-  if (!snapshot || typeof snapshot !== "object" || !("optionEnrichment" in snapshot)) {
-    return null;
-  }
-  return (snapshot as Record<string, unknown>).optionEnrichment;
+  return fieldFromSnapshot(snapshot, "optionEnrichment");
+}
+
+/** Same extraction, for the sibling `contractReasonCode` field (live-scan.ts) - together with
+ * `optionEnrichmentFromSnapshot` this tells a reader that only has the persisted snapshot whether
+ * a contract was actually selected, not just whether a chain request was attempted (see
+ * classifyReadiness in scanner.ts, which requires both to reach PASS/NEAR). */
+export function contractReasonCodeFromSnapshot(snapshot: unknown): unknown {
+  return fieldFromSnapshot(snapshot, "contractReasonCode");
 }
 
 /** Long-form reason persisted as the row's scanNote when nothing more specific already claimed it. */

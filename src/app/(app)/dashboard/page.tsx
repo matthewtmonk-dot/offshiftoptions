@@ -21,7 +21,7 @@ import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isRollGuidanceApplicable } from "@/domain/finance/rollStatus";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { classifyReadiness, honestSetupLabel, honestSetupScore, isActionableReadiness, type CriterionResult, type ScanSummary } from "@/domain/scanner/scanner";
-import { optionEnrichmentFromSnapshot } from "@/domain/scanner/option-enrichment";
+import { contractReasonCodeFromSnapshot, optionEnrichmentFromSnapshot } from "@/domain/scanner/option-enrichment";
 import { addReactionAction } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -177,12 +177,13 @@ export default async function DashboardPage() {
   const scannedSetups = (data.latestScanRun?.results ?? []).map((result) => {
     const summary = toDomainSummary(result);
     const optionEnrichment = optionEnrichmentFromSnapshot(result.snapshotJson);
+    const contractReasonCode = contractReasonCodeFromSnapshot(result.snapshotJson);
     return {
       result,
       summary,
       score: honestSetupScore(summary, GATING_RULE_KEYS),
       label: honestSetupLabel(summary, GATING_RULE_KEYS),
-      readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment),
+      readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment, contractReasonCode),
     };
   });
   // Only a technically complete, actionable candidate (PASS or NEAR - see classifyReadiness) may
