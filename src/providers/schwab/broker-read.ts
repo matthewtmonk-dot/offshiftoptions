@@ -115,7 +115,9 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         accountId,
         symbol,
         quantity: positionQuantity(position),
-        marketValue: numberValue(position?.marketValue) ?? 0,
+        marketValue: optionalMarketValue(position?.marketValue),
+        // No provider valuation timestamp has been verified for this endpoint. Never use fetch time.
+        valuationAsOf: null,
         assetType: stringValue(instrument?.assetType),
         putCall: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
         strikePrice: numberValue(instrument?.strikePrice),
@@ -517,6 +519,12 @@ function stringValue(value: unknown): string | null {
   }
 
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function optionalMarketValue(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  return numberValue(value);
 }
 
 function numberValue(value: unknown): number | null {

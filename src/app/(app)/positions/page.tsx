@@ -44,6 +44,8 @@ import { daysToExpiration, distanceToStrikeDollars } from "@/domain/finance/calc
 import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import {
   summarizeCampaignProgress,
+  summarizePerformanceMetrics,
+  performanceMetricText,
   summarizeContributionAdjustedGoal,
   summarizeThisWeek,
   summarizeWinLoss,
@@ -71,7 +73,7 @@ import { NewAccountNameAndTypeFields } from "./new-account-name-field";
 import {
   getBrokerActivityAwaitingReviewForUser,
   getLinkedCampaignSymbolsForUser,
-  normalizeSymbolForLinking,
+  brokerPositionLinkKey,
   type BrokerActivityAwaitingReview,
 } from "@/lib/broker-reconciliation";
 import {
@@ -230,7 +232,10 @@ export default async function PositionsPage({
   const openCampaignCount = rows.filter((row) => row.campaign.status === "OPEN").length;
   const assignedCampaignCount = rows.filter((row) => row.campaign.status === "ASSIGNED").length;
   const closedCount = closedRows.length;
-  const realizedTotal = closedRows.reduce((sum, row) => sum + (row.summary.totalCampaignPL ?? row.summary.realizedPL ?? 0), 0);
+  const knownClosedRows = closedRows.filter((row) => row.summary.unknowns.length === 0);
+  const realizedTotal = closedRows.length && !knownClosedRows.length ? null : knownClosedRows.reduce((sum, row) => sum + (row.summary.totalCampaignPL ?? row.summary.realizedPL ?? 0), 0);
+  const realizedIncomplete = knownClosedRows.length !== closedRows.length || closedRows.some((row) => !row.feesFullyKnown);
+  const premiumIncomplete = rows.some((row) => !row.feesFullyKnown || row.summary.unknowns.length > 0);
   const premiumTotal = rows.reduce((sum, row) => sum + row.summary.netOptionPremium, 0);
 
   // Roll Status (see PROJECT_HANDOFF.md) - always uses the VIEWER's own Roll Buffer setting,
@@ -299,11 +304,12 @@ export default async function PositionsPage({
   // switching the Mine/Buddy/Both selector can never blend Matt's and Eric's P/L together.
   const ownCompletedForPerformance = data.ownCompletedCampaigns.map((campaign) => {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-    const pl = summary.totalCampaignPL ?? summary.realizedPL;
+    const pl = summary.unknowns.length ? null : summary.totalCampaignPL ?? summary.realizedPL;
     return {
       campaignId: campaign.id,
       closedAt: campaign.closedAt ?? campaign.updatedAt,
       finalResult: summary.finalResult,
+      cashFlowsFullyKnown: summary.unknowns.length === 0,
       pl,
       grossPL: pl !== null ? pl + summary.fees : null,
       feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
@@ -351,7 +357,8 @@ export default async function PositionsPage({
       campaignTicker: campaign.ticker,
       activePut,
       linkedRecords: campaign.linkedBrokerRecords,
-      optionMark: optionMark ? { mark: optionMark.mark, bid: optionMark.bid, ask: optionMark.ask, capturedAt: optionMark.capturedAt } : null,
+      // This legacy table only records insertion time, not verified price time. Do not promote it.
+      optionMark: optionMark ? { mark: optionMark.mark, bid: optionMark.bid, ask: optionMark.ask, capturedAt: optionMark.capturedAt, valuationAsOf: null } : null,
       now: snapshotCheckedAt,
     });
     return {
@@ -367,25 +374,13 @@ export default async function PositionsPage({
       currentCostSource,
     };
   });
-  const currentCampaignPLTotal = ownPerformanceRows.some((row) => row.progress.currentPL !== null)
-    ? roundMoney(ownPerformanceRows.reduce((sum, row) => sum + (row.progress.currentPL ?? 0), 0))
-    : null;
-  // Ticket 4 fix: the prior check (`projectedOtmApplicable && currentPL === null`) conflated
-  // "genuinely not applicable" with "should have a value but evidence is incomplete" - both make
-  // `projectedOtmApplicable` false, so a campaign missing required current-leg evidence (e.g. an
-  // incomplete legacy SELL_PUT - see getOpenPutEvidenceState) silently contributed nothing to the
-  // total AND never tripped this flag. `currentPLStatus` (INCOMPLETE/PENDING vs. NOT_APPLICABLE)
-  // distinguishes them directly - see performance.ts. This also correctly flags an ASSIGNED
-  // campaign's real-but-unvalued exposure as incomplete coverage, not a silently-complete total.
-  const currentCampaignPartial = ownPerformanceRows.some(
-    (row) => row.progress.currentPLStatus === "INCOMPLETE" || row.progress.currentPLStatus === "PENDING",
-  );
-  const projectedOtmTotal = ownPerformanceRows.some((row) => row.progress.realizedPL !== null || row.progress.projectedOtmPL !== null)
-    ? roundMoney(ownPerformanceRows.reduce((sum, row) => sum + (row.progress.realizedPL ?? row.progress.projectedOtmPL ?? 0), 0))
-    : null;
-  const projectedOtmPartial = ownPerformanceRows.some(
-    (row) => row.progress.projectedOtmStatus === "INCOMPLETE" || row.progress.projectedOtmStatus === "PENDING",
-  );
+  const metricTotals = summarizePerformanceMetrics(ownPerformanceRows.map((row) => ({
+    status: row.campaign.status, progress: row.progress, freshness: row.currentCostSource?.freshness,
+  })));
+  const currentCampaignPLTotal = metricTotals.current.value;
+  const currentCampaignPartial = metricTotals.current.status === "PENDING" || metricTotals.current.status === "INCOMPLETE";
+  const projectedOtmTotal = metricTotals.projected.value;
+  const projectedOtmPartial = metricTotals.projected.status === "PENDING" || metricTotals.projected.status === "INCOMPLETE";
   const ownGoal = summarizeContributionAdjustedGoal({
     accounts: ownAccountRows.map((row) => ({ ledgerEntries: row.performance.cashFlowEvents })),
     currentValue: ownAccounting.currentValue,
@@ -433,7 +428,7 @@ export default async function PositionsPage({
           icon={<CircleDollarSign className="size-4" aria-hidden />}
           label="Known realized P/L"
           value={signedMoney(realizedTotal)}
-          detail="Closed campaigns only"
+          detail={realizedIncomplete ? "Closed campaigns - partial / pending" : "Closed campaigns only"}
           tone={realizedTotal}
           help={HELP.knownRealized}
           helpTestId="help-known-realized"
@@ -442,7 +437,7 @@ export default async function PositionsPage({
           icon={<TrendingUp className="size-4" aria-hidden />}
           label="Net option premium"
           value={signedMoney(premiumTotal)}
-          detail="Credits minus debits and option fees"
+          detail={premiumIncomplete ? "Credits minus debits - partial / pending fees or cash flows" : "Credits minus debits and option fees"}
           tone={premiumTotal}
           help={HELP.netPremium}
           helpTestId="help-net-option-premium"
@@ -549,6 +544,7 @@ export default async function PositionsPage({
           currentCampaignPLTotal={currentCampaignPLTotal}
           currentCampaignPartial={currentCampaignPartial}
           projectedOtmPartial={projectedOtmPartial}
+          lastSessionCount={metricTotals.lastSessionCount}
         />
       ) : null}
 
@@ -920,9 +916,9 @@ function CampaignCard({
                   help={HELP.roll}
                 />
                 <ResultItem
-                  label="Capital committed"
+                  label="Peak put collateral"
                   value={summary.collateralCommitted === null ? "UNKNOWN" : money(summary.collateralCommitted)}
-                  help={HELP.capitalSecured}
+                  help="Historical maximum collateral; not current exposure."
                 />
                 <ResultItem label="Stock cost" value={money(summary.stockCost)} />
                 <ResultItem label="Stock proceeds" value={money(summary.stockProceeds)} />
@@ -1391,7 +1387,7 @@ function SchwabPositionsPanel({
         <div className="space-y-2">
           {positions.map((position) => {
             const display = describeBrokerPositionForDisplay(position);
-            const normalizedSymbol = normalizeSymbolForLinking(position.symbol);
+            const normalizedSymbol = brokerPositionLinkKey(position.accountId, position.symbol);
             const isLinked = Boolean(normalizedSymbol && linkedSymbols.has(normalizedSymbol));
             const inferredMatch = matchTrackedPut(userId, position, positions, accounts, campaigns);
             const match = resolveTrackerPositionMatchState(isLinked, inferredMatch);
@@ -1408,7 +1404,7 @@ function SchwabPositionsPanel({
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="text-zinc-400">
-                    {display.quantityLabel} · {display.valueLabel}: {money(display.value)}
+                    {display.quantityLabel} · {display.valueLabel}: {display.value === null ? "Unavailable" : money(display.value)}
                   </span>
                   <Badge tone={match === "LINKED" ? "good" : match === "EXACT" ? "info" : match === "AMBIGUOUS" ? "warn" : "neutral"}>
                     {match === "LINKED"
@@ -1766,6 +1762,7 @@ function PerformanceSection({
   currentCampaignPLTotal,
   currentCampaignPartial,
   projectedOtmPartial,
+  lastSessionCount,
 }: {
   thisWeek: ReturnType<typeof summarizeThisWeek>;
   winLoss: ReturnType<typeof summarizeWinLoss>;
@@ -1775,14 +1772,16 @@ function PerformanceSection({
   currentCampaignPLTotal: number | null;
   currentCampaignPartial: boolean;
   projectedOtmPartial: boolean;
+  lastSessionCount: number;
 }) {
   const openCount = campaignRows.filter((row) => row.campaign.status === "OPEN").length;
   const assignedCount = campaignRows.filter((row) => row.campaign.status === "ASSIGNED").length;
-  const markedCount = campaignRows.filter((row) => row.progress.currentPL !== null).length;
+  const markedCount = campaignRows.filter((row) => row.currentCostSource !== null && row.progress.currentPL !== null).length;
   const openProjected = sumKnown(campaignRows.map((row) => (row.campaign.status === "OPEN" ? row.progress.projectedOtmPL : null)));
   const openProjectedIncomplete = campaignRows.some(
     (row) => row.campaign.status === "OPEN" && (row.progress.projectedOtmStatus === "INCOMPLETE" || row.progress.projectedOtmStatus === "PENDING"),
   );
+  const activePremiumIncomplete = campaignRows.some((row) => row.campaign.status !== "CLOSED" && row.progress.netPremiumStatus !== "CONFIRMED");
   const activePremium = roundMoney(
     campaignRows
       .filter((row) => row.campaign.status !== "CLOSED")
@@ -1821,7 +1820,7 @@ function PerformanceSection({
                   {thisWeek.grossReturnOnSecuredCapitalPercent === null ? "Return unavailable" : `${percent(thisWeek.grossReturnOnSecuredCapitalPercent)} gross return`}
                 </span>
                 <span className="inline-flex items-center gap-1 text-sm text-amber-300">
-                  Net P/L: pending (a fee on one of this week&apos;s campaigns hasn&apos;t been confirmed yet)
+                  Net P/L: partial or pending (fees or campaign cash flows are not fully confirmed)
                 </span>
               </>
             )}
@@ -1921,7 +1920,7 @@ function PerformanceSection({
               icon={<Activity className="size-4" aria-hidden />}
               label="Current / MTM P/L"
               value={currentCampaignPLTotal === null ? "Unavailable" : signedMoney(currentCampaignPLTotal)}
-              detail={currentCampaignPartial ? "Partial marks available" : "Closed plus marked open campaigns"}
+              detail={`${currentCampaignPartial ? "Partial / pending results" : "Closed plus marked open campaigns"}${lastSessionCount ? ` - ${lastSessionCount} last-session marks` : ""}`}
               tone={currentCampaignPLTotal}
               help={HELP.currentMtm}
               helpTestId="help-current-mtm-pl"
@@ -1969,6 +1968,7 @@ function PerformanceSection({
             </InfoTip>
           </div>
           <PerformanceGoalChart goal={goal} />
+          {projectedOtmPartial ? <p className="mt-2 text-xs text-amber-300">OTM projection includes partial or pending results.</p> : null}
         </div>
 
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
@@ -1991,7 +1991,7 @@ function PerformanceSection({
             <ResultItem label="Avg duration" value={winLoss.averageDurationDays === null ? "N/A" : `${winLoss.averageDurationDays} days`} />
             <ResultItem
               label="Active premium"
-              value={signedMoney(activePremium)}
+              value={`${signedMoney(activePremium)}${activePremiumIncomplete ? " - partial / pending" : ""}`}
               tone={activePremium}
               help={HELP.netPremium}
             />
@@ -1999,7 +1999,7 @@ function PerformanceSection({
           <div className="mt-3 flex flex-wrap gap-2 text-xs">
             <Badge tone="info">{openCount} open</Badge>
             <Badge tone="warn">{assignedCount} assigned</Badge>
-            <Badge tone={markedCount > 0 ? "good" : "neutral"}>{markedCount} with current marks</Badge>
+            <Badge tone={markedCount > 0 ? "good" : "neutral"}>{markedCount} with usable marks{lastSessionCount ? ` - ${lastSessionCount} last session` : ""}</Badge>
             <Badge tone={openProjected !== null && openProjected > 0 ? "good" : "neutral"}>
               Open OTM {openProjected === null ? "unavailable" : signedMoney(openProjected)}
               {openProjectedIncomplete ? " · partial" : ""}
@@ -2215,7 +2215,7 @@ function CampaignPerformanceTable({ rows }: { rows: PerformanceCampaignViewRow[]
             <div className="grid grid-cols-[1.05fr_0.75fr_0.85fr_0.9fr_0.9fr_0.9fr_0.85fr_0.7fr_0.7fr] gap-3 px-3 pb-2 text-[11px] font-semibold uppercase tracking-normal text-zinc-500">
               <span>Ticker</span>
               <HelpLabel label="Status" help={HELP.historyStatus} testId="help-campaign-status" align="start" />
-              <HelpLabel label="Secured Capital" help={HELP.capitalSecured} testId="help-secured-capital" align="start" />
+              <HelpLabel label="Peak put collateral" help="Historical maximum collateral; used for return calculations, not current exposure." testId="help-secured-capital" align="start" />
               <HelpLabel label="Net Premium" help={HELP.netPremium} testId="help-campaign-net-premium" align="start" />
               <HelpLabel label="Current P/L" help={HELP.currentMtm} testId="help-campaign-current-pl" align="start" />
               <HelpLabel label="Projected OTM" help={HELP.projectedOtm} testId="help-campaign-projected-otm" align="start" />
@@ -2251,15 +2251,16 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
           <Badge tone={statusTone(campaign.status, progress.realizedPL ?? progress.currentPL)}>{campaign.status}</Badge>
         </span>
         <span>{progress.collateralCommitted === null ? "UNKNOWN" : money(progress.collateralCommitted)}</span>
-        <span className={toneClass(progress.netPremiumCollected)}>{signedMoney(progress.netPremiumCollected)}</span>
+        <span className={toneClass(progress.netPremiumCollected)}>{performanceMetricText(progress.netPremiumCollected, progress.netPremiumStatus, signedMoney)}</span>
         <span className={toneClass(progress.currentPL)}>
-          {progress.currentPL === null ? "Unavailable" : signedMoney(progress.currentPL)}
+          {performanceMetricText(progress.currentPL, progress.currentPLStatus, signedMoney)}
+          {row.currentCostSource?.freshness === "LAST_SESSION" ? <span className="block text-xs text-amber-300">Last session</span> : null}
         </span>
         <span className={toneClass(progress.projectedOtmPL)}>
-          {progress.projectedOtmPL === null ? (progress.projectedOtmApplicable ? "Unavailable" : "N/A") : signedMoney(progress.projectedOtmPL)}
+          {performanceMetricText(progress.projectedOtmPL, progress.projectedOtmStatus, signedMoney)}
         </span>
         <span className={toneClass(goalDelta)}>
-          {goalDelta === null ? "N/A" : `${goalDelta >= 0 ? "+" : ""}${goalDelta.toFixed(2)} pts`}
+          {performanceMetricText(goalDelta, progress.projectedOtmStatus, (value) => `${value >= 0 ? "+" : ""}${value.toFixed(2)} pts`)}
         </span>
         <span>{progress.rollCount}</span>
         <span className="inline-flex items-center gap-1">
@@ -2278,7 +2279,7 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
           <dl className="grid gap-3 sm:grid-cols-2">
             <ResultItem
               label="Realized P/L"
-              value={progress.realizedPL === null ? "Not closed" : signedMoney(progress.realizedPL)}
+              value={performanceMetricText(progress.realizedPL, progress.realizedPLStatus, signedMoney)}
               tone={progress.realizedPL}
               help={HELP.realizedPL}
             />
@@ -2289,13 +2290,13 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
             />
             <ResultItem
               label="Current return"
-              value={progress.currentReturnPercent === null ? "N/A" : percent(progress.currentReturnPercent)}
+              value={performanceMetricText(progress.currentReturnPercent, progress.currentPLStatus, percent)}
               tone={progress.currentReturnPercent}
               help={HELP.currentReturn}
             />
             <ResultItem
               label="Projected return"
-              value={progress.projectedReturnPercent === null ? "N/A" : percent(progress.projectedReturnPercent)}
+              value={performanceMetricText(progress.projectedReturnPercent, progress.projectedOtmStatus, percent)}
               tone={progress.projectedReturnPercent}
               help={HELP.projectedReturn}
             />

@@ -333,6 +333,7 @@ export function normalizeSchwabApiPosition(position: BrokerPosition, observedAt 
       putCall: position.putCall ?? parsed.optionType ?? null,
       strikePrice: position.strikePrice ?? parsed.strike ?? null,
       marketValue: position.marketValue,
+      valuationAsOf: position.valuationAsOf?.toISOString() ?? null,
       economicEffect: "CURRENT_POSITION",
     },
   };

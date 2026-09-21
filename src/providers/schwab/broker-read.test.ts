@@ -790,3 +790,16 @@ describe("SchwabBrokerReadProvider.getTransactions - transferLegs (multi-leg evi
     expect(transactions[0].transferLegs).toBeUndefined();
   });
 });
+
+describe("Schwab valuation presence", () => {
+  it.each([undefined, null, "unavailable", "", " ", false, NaN, Infinity])("preserves missing or invalid marketValue %s as null", async (marketValue) => {
+    const positions = await stubProvider({ positions: [optionPosition({ marketValue })] }).getPositions("acct-hash-1");
+    expect(positions[0].marketValue).toBeNull();
+    expect(positions[0].valuationAsOf).toBeNull();
+  });
+  it("preserves an explicitly reported zero without inventing its valuation timestamp", async () => {
+    const [position] = await stubProvider({ positions: [optionPosition({ marketValue: 0 })] }).getPositions("acct-hash-1");
+    expect(position.marketValue).toBe(0);
+    expect(position.valuationAsOf).toBeNull();
+  });
+});

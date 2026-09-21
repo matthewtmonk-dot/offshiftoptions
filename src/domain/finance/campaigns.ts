@@ -61,6 +61,8 @@ export type CampaignFinancialSummary = {
   rollDebits: number;
   netRollPremium: number;
   stockCost: number;
+  /** Cost basis still held after sales; null when assignment/sale evidence is incomplete. */
+  remainingShareBasis: number | null;
   stockProceeds: number;
   fees: number;
   realizedPL: number | null;
@@ -118,6 +120,8 @@ export function summarizeCampaign({
   let optionFees = 0;
   let fees = 0;
   let stockCost = 0;
+  let stockBasisKnown = true;
+  let hasAssignedBasis = false;
   let stockProceeds = 0;
   let sharesHeld = 0;
   let collateralCommitted: number | null = null;
@@ -167,8 +171,11 @@ export function summarizeCampaign({
       const contracts = numeric(event.contracts);
       const shares = numeric(event.shares) ?? (contracts === null ? null : contracts * OPTION_MULTIPLIER);
       if (strike === null || shares === null) {
+        stockBasisKnown = false;
         unknowns.push("Assignment is missing strike or share count.");
       } else {
+        hasAssignedBasis = true;
+        stockBasisKnown &&= strike > 0 && shares > 0;
         stockCost += round(strike * shares, 2);
         sharesHeld += shares;
       }
@@ -179,6 +186,7 @@ export function summarizeCampaign({
       const cashAmount = numeric(event.cashAmount);
       const price = numeric(event.underlyingPrice);
       if (shares === null || (cashAmount === null && price === null)) {
+        stockBasisKnown = false;
         unknowns.push("Stock sale is missing shares and proceeds.");
       } else {
         const proceeds = cashAmount ?? round((price ?? 0) * shares, 2);
@@ -236,6 +244,7 @@ export function summarizeCampaign({
     rollDebits,
     netRollPremium,
     stockCost,
+    remainingShareBasis: stockBasisKnown && hasAssignedBasis ? remainingStockCost : null,
     stockProceeds,
     fees,
     realizedPL,

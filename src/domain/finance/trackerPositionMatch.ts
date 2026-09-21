@@ -105,15 +105,9 @@ export type DashboardPositionMatch<P extends DashboardPositionInput> = {
   confirmedCampaignId: string | null;
 };
 
-/**
- * Applies the Tracker's own persisted-link-then-EXACT-match precedence across a full set of
- * broker positions at once, for a caller that must decide, for every position, whether it is
- * already represented by a tracked campaign (the Dashboard's duplicate-position cleanup). Not a
- * new matching algorithm - it only assembles matchTrackedPut/resolveTrackerPositionMatchState/
- * exactMatchedCampaignId's existing per-position results into one pass, with the exact same
- * user-scoped/account-scoped/contract-specific/quantity-aware/unique guarantees. Pure: makes no
- * database or network call, creates no persisted link, and never mutates any input.
- */
+/** Excludes live exposure only when the exact current obligation is represented by a campaign.
+ * A persisted link adds provenance after ownership, contract, quantity, and uniqueness checks.
+ * Pure: no database writes, network calls, or changes to inputs. */
 export function matchDashboardPositions<P extends DashboardPositionInput>(
   userId: string,
   positions: P[],
@@ -122,13 +116,10 @@ export function matchDashboardPositions<P extends DashboardPositionInput>(
 ): DashboardPositionMatch<P>[] {
   return positions.map((position) => {
     const inferredMatch = matchTrackedPut(userId, position, positions, accounts, campaigns);
-    const disposition = resolveTrackerPositionMatchState(Boolean(position.linkedCampaignId), inferredMatch);
-    const confirmedCampaignId =
-      disposition === "LINKED"
-        ? position.linkedCampaignId
-        : disposition === "EXACT"
-          ? exactMatchedCampaignId(userId, position, positions, accounts, campaigns)
-          : null;
+    const exactId = inferredMatch === "EXACT" ? exactMatchedCampaignId(userId, position, positions, accounts, campaigns) : null;
+    // A link proves provenance, not that today's live obligation is already in campaign totals.
+    const disposition: TrackerPositionMatchState = exactId && position.linkedCampaignId === exactId ? "LINKED" : inferredMatch;
+    const confirmedCampaignId = exactId;
     return { position, disposition, confirmedCampaignId };
   });
 }

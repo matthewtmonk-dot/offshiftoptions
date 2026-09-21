@@ -10,7 +10,7 @@ import { requireCurrentUser } from "@/lib/auth";
 import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
-import { getLinkedCampaignIdsBySymbolForUser, normalizeSymbolForLinking } from "@/lib/broker-reconciliation";
+import { getLinkedCampaignIdsBySymbolForUser, brokerPositionLinkKey } from "@/lib/broker-reconciliation";
 import { summarizeAccountPerformance, summarizeAccountsPerformance } from "@/domain/finance/accountLedger";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { describeBrokerPositionForDisplay, summarizeCampaignExposure, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
@@ -66,7 +66,7 @@ const loadDashboardBrokerData = cache(async (userId: string, ownAccounts: Dashbo
 
   const linkedCampaignIdBySymbol = await getLinkedCampaignIdsBySymbolForUser(userId, schwabPositions);
   const positionsWithLink = schwabPositions.map((position) => {
-    const normalizedSymbol = normalizeSymbolForLinking(position.symbol);
+    const normalizedSymbol = brokerPositionLinkKey(position.accountId, position.symbol);
     return { ...position, linkedCampaignId: (normalizedSymbol && linkedCampaignIdBySymbol.get(normalizedSymbol)) || null };
   });
   const trackedPuts = buildTrackedPuts(openCampaigns);
@@ -97,12 +97,13 @@ export default async function DashboardPage() {
   const completedPLByAccount = new Map<string, number>();
   const completedForPerformance = data.completedCampaigns.map((campaign) => {
     const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-    const pl = summary.totalCampaignPL ?? summary.realizedPL;
+    const pl = summary.unknowns.length ? null : summary.totalCampaignPL ?? summary.realizedPL;
     completedPLByAccount.set(campaign.accountId, (completedPLByAccount.get(campaign.accountId) ?? 0) + (pl ?? 0));
     return {
       campaignId: campaign.id,
       closedAt: campaign.closedAt ?? campaign.updatedAt,
       finalResult: summary.finalResult,
+      cashFlowsFullyKnown: summary.unknowns.length === 0,
       pl,
       feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
       daysActive: summary.daysActive,
@@ -153,7 +154,7 @@ export default async function DashboardPage() {
     campaignSummaries.map(({ campaign, summary }) => ({
       status: campaign.status,
       currentCollateralCommitted: summary.currentCollateralCommitted,
-      stockCost: summary.stockCost,
+      remainingShareBasis: summary.remainingShareBasis,
       hasOpenCoveredCall: campaign.status === "ASSIGNED" && getCurrentOpenCall(campaign.events) !== null,
     })),
   );
@@ -257,6 +258,7 @@ export default async function DashboardPage() {
             openCampaigns={data.openCampaigns}
             openCampaignCount={openCampaignCount}
             campaignSecuredCapital={campaignSecuredCapital}
+            unknownCampaignCollateral={exposure.openCampaignsWithUnknownCollateral}
           />
         </Suspense>
         <Stat
@@ -293,6 +295,10 @@ export default async function DashboardPage() {
           </div>
         )}
       </section>
+
+      {weekly.excludedCount > 0 ? (
+        <p className="text-sm text-amber-300">Weekly returns use confirmed results only - {weekly.excludedCount} pending or incomplete result(s) excluded.</p>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Panel
@@ -585,12 +591,14 @@ async function DashboardBrokerStats({
   openCampaigns,
   openCampaignCount,
   campaignSecuredCapital,
+  unknownCampaignCollateral,
 }: {
   userId: string;
   ownAccounts: DashboardAccount[];
   openCampaigns: DashboardOpenCampaign[];
   openCampaignCount: number;
   campaignSecuredCapital: number;
+  unknownCampaignCollateral: number;
 }) {
   const { schwabPositions, additivePositions } = await loadDashboardBrokerData(userId, ownAccounts, openCampaigns);
 
@@ -599,7 +607,7 @@ async function DashboardBrokerStats({
       <>
         <Stat
           label="Secured (CSP)"
-          value={openCampaignCount > 0 ? money(campaignSecuredCapital) : "No broker data"}
+          value={unknownCampaignCollateral ? (campaignSecuredCapital > 0 ? `${money(campaignSecuredCapital)} - partial` : "Unavailable") : openCampaignCount > 0 ? money(campaignSecuredCapital) : "No broker data"}
           detail="Schwab unavailable; stored campaigns only"
         />
         <Stat label="Broker positions" value="No broker data" detail="Schwab unavailable" />
@@ -620,8 +628,8 @@ async function DashboardBrokerStats({
     <>
       <Stat
         label="Secured (CSP)"
-        value={brokerCsp.hasUnknown ? `${money(securedCapital)}+` : money(securedCapital)}
-        detail="Campaigns + unmatched Schwab positions"
+        value={brokerCsp.hasUnknown || unknownCampaignCollateral ? (securedCapital > 0 ? `${money(securedCapital)} - partial` : "Unavailable") : money(securedCapital)}
+        detail={unknownCampaignCollateral ? `${unknownCampaignCollateral} campaign collateral unknown` : "Campaigns + unmatched Schwab positions"}
       />
       <Stat
         label="Broker positions"
@@ -703,7 +711,7 @@ async function DashboardBrokerPositions({
             <div className="text-right">
               <div className="text-zinc-200">{display.quantityLabel}</div>
               <div className="text-xs text-zinc-500">
-                {display.valueLabel}: {money(display.value)}
+                {display.valueLabel}: {display.value === null ? "Unavailable" : money(display.value)}
               </div>
               <Badge tone={isAmbiguous ? "warn" : "info"}>{isAmbiguous ? "AMBIGUOUS" : "SCHWAB"}</Badge>
             </div>
@@ -807,7 +815,7 @@ function dashboardOpenCampaignsDetail(awaitingExpirationCount: number, exposure:
   if (exposure.assignedCampaignCount > 0) {
     const coveredNote = exposure.assignedCampaignsWithCoveredCall > 0 ? `, ${exposure.assignedCampaignsWithCoveredCall} with a covered call` : "";
     const basisNote =
-      exposure.assignedCampaignsWithKnownBasis > 0 ? `${money(exposure.assignedShareCapital)} share basis${coveredNote}` : "basis unknown";
+      exposure.assignedCampaignsWithKnownBasis > 0 ? `${money(exposure.assignedShareCapital)} remaining share basis${exposure.assignedCampaignsWithKnownBasis < exposure.assignedCampaignCount ? ` - partial (${exposure.assignedCampaignCount - exposure.assignedCampaignsWithKnownBasis} unknown)` : ""}${coveredNote}` : "basis unknown";
     parts.push(`${exposure.assignedCampaignCount} assigned (${basisNote}) - not put collateral`);
   }
   return parts.length > 0 ? parts.join(" · ") : "Tracker lifecycle count";
@@ -818,10 +826,10 @@ function dashboardTradingDetail(source: string | null, exact: boolean) {
     return "Schwab option trade cashflow";
   }
   if (source === "MIXED") {
-    return exact ? "Schwab trades + manual campaigns" : "Schwab trades + campaigns with a pending fee";
+    return exact ? "Schwab trades + manual campaigns" : "Schwab trades + campaigns with pending or incomplete results";
   }
   if (source === "CAMPAIGNS") {
-    return exact ? "Closed campaigns only" : "Closed campaigns only - pending a fee";
+    return exact ? "Closed campaigns only" : "Closed campaigns only - partial or pending";
   }
   return undefined;
 }

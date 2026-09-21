@@ -96,13 +96,12 @@ describe("matchDashboardPositions (Dashboard duplicate-position dedup)", () => {
     return { ...position, linkedCampaignId: null, ...overrides };
   }
 
-  it("test 1: a persisted-linked position renders its campaign once (LINKED, confirmed)", () => {
-    // Campaign is CLOSED so the inferred match alone would be NONE - the persisted link must
-    // still win, exactly like resolveTrackerPositionMatchState's own precedence.
+  it("a persisted link to a closed campaign cannot hide live exposure", () => {
+    // The campaign no longer contributes current collateral, so the broker position must remain additive.
     const linked = positionInput({ linkedCampaignId: "campaign-a" });
     const [result] = matchDashboardPositions("matt", [linked], [account], [{ ...campaign, status: "CLOSED" }]);
-    expect(result.disposition).toBe("LINKED");
-    expect(result.confirmedCampaignId).toBe("campaign-a");
+    expect(result.disposition).toBe("NONE");
+    expect(result.confirmedCampaignId).toBeNull();
   });
 
   it("test 2: an EXACT inferred match (no persisted link) renders its campaign once", () => {

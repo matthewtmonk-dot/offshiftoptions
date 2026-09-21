@@ -9,7 +9,9 @@ export type BrokerPosition = {
   accountId: string;
   symbol: string;
   quantity: number;
-  marketValue: number;
+  marketValue: number | null;
+  /** Actual provider valuation time, if verified. Retrieval time is not valuation provenance. */
+  valuationAsOf?: Date | null;
   /** Schwab's own instrument classification, when available (e.g. "OPTION", "EQUITY"). */
   assetType?: string | null;
   /** Schwab's own put/call flag for an option instrument, when available - the most

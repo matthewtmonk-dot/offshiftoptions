@@ -129,6 +129,8 @@ type Classified = {
   classification: BrokerImportRowClassification;
   reason: string | null;
   existingId: string | null;
+  refreshObservation?: boolean;
+  observationConflict?: boolean;
 };
 
 /**
@@ -164,7 +166,13 @@ async function classifyCandidates(
         if (candidateObservedAt > existingObservedAt && !financiallyEqual(record, matchByFingerprint)) {
           return { record, classification: "NEW", reason: "Newer position snapshot supersedes the stored one", existingId: matchByFingerprint.id };
         }
-        return { record, classification: "DUPLICATE", reason: "Same or older position snapshot already recorded", existingId: matchByFingerprint.id };
+        if (candidateObservedAt === existingObservedAt && !financiallyEqual(record, matchByFingerprint)) {
+          return { record, classification: "DUPLICATE", reason: "Conflicting position observations at the same time", existingId: matchByFingerprint.id, observationConflict: true };
+        }
+        return {
+          record, classification: "DUPLICATE", reason: "Position already recorded", existingId: matchByFingerprint.id,
+          refreshObservation: candidateObservedAt > existingObservedAt && financiallyEqual(record, matchByFingerprint),
+        };
       }
       return { record, classification: "DUPLICATE", reason: "Identical record already imported", existingId: matchByFingerprint.id };
     }
@@ -444,6 +452,27 @@ export async function persistClassifiedBrokerRecords(
   };
 
   for (const item of classified) {
+    if (item.observationConflict && item.existingId) {
+      // The position's fingerprint is unique. Preserve its economics but make the tie unusable
+      // for valuation; only a strictly newer observation can clear this metadata marker.
+      await prisma.brokerRecord.updateMany({
+        where: { id: item.existingId, userId, accountId, kind: "POSITION", observedAt: item.record.observedAt },
+        data: { metadata: { ...item.record.metadata, observationConflict: true } as Prisma.InputJsonValue },
+      });
+      summary.unresolved += 1;
+    }
+    if (item.refreshObservation && item.existingId && item.record.observedAt) {
+      // Compare-and-update prevents an older concurrent sync from moving observation time back.
+      // No fees, cash flows, campaign events, financial amounts, or identity keys change here.
+      await prisma.brokerRecord.updateMany({
+        where: {
+          id: item.existingId, userId, accountId, kind: "POSITION",
+          quantity: item.record.quantity, amount: item.record.amount,
+          OR: [{ observedAt: null }, { observedAt: { lt: item.record.observedAt } }],
+        },
+        data: { observedAt: item.record.observedAt, metadata: item.record.metadata as Prisma.InputJsonValue },
+      });
+    }
     if (item.classification === "DUPLICATE" || item.classification === "INVALID") {
       summary.duplicatesSkipped += 1;
       continue;
@@ -469,10 +498,11 @@ export async function persistClassifiedBrokerRecords(
       underlyingSymbol: item.record.underlyingSymbol ?? undefined,
       action: item.record.action ?? undefined,
       description: item.record.description ?? undefined,
-      quantity: item.record.quantity ?? undefined,
+      quantity: kind === "POSITION" ? item.record.quantity : item.record.quantity ?? undefined,
       price: item.record.price ?? undefined,
       fees: item.record.fees ?? undefined,
-      amount: item.record.amount ?? undefined,
+      // A newer snapshot with unavailable valuation must clear the previous snapshot's value.
+      amount: kind === "POSITION" ? item.record.amount : item.record.amount ?? undefined,
       sources: item.record.sources,
       sourceIds: item.record.sourceIds,
       metadata: item.record.metadata as Prisma.InputJsonValue,
@@ -480,8 +510,18 @@ export async function persistClassifiedBrokerRecords(
 
     try {
       if (item.classification === "NEW" && item.existingId) {
-        // Position supersede: update the existing current-position row in place.
-        await prisma.brokerRecord.update({ where: { id: item.existingId }, data });
+        // Position supersede: a concurrent newer sync must never be overwritten by this one.
+        const updated = await prisma.brokerRecord.updateMany({
+          where: {
+            id: item.existingId, userId, accountId, kind: "POSITION",
+            OR: [{ observedAt: null }, { observedAt: { lt: item.record.observedAt! } }],
+          },
+          data,
+        });
+        if (updated.count === 0) {
+          summary.duplicatesSkipped += 1;
+          continue;
+        }
       } else {
         await prisma.brokerRecord.create({ data });
       }

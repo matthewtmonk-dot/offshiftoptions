@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { CampaignEventInput } from "./campaigns";
 import {
   summarizeCampaignProgress,
+  summarizePerformanceMetrics,
+  performanceMetricText,
   summarizeContributionAdjustedGoal,
   summarizeThisWeek,
   summarizeWeeklyReturns,
@@ -739,5 +741,52 @@ describe("contribution-adjusted 1% goal", () => {
     expect(goal.startingCapital).toBe(10_000);
     expect(goal.tradingPLNow).toBe(123.7);
     expect(goal.actualWeeklyPacePercent).toBe(1.24);
+  });
+});
+
+describe("Ticket 4/5 metric completeness regressions", () => {
+  const sell: CampaignEventInput = { type: "SELL_PUT", occurredAt: "2026-09-01", strike: 20, contracts: 1, premium: 1, expiration: "2026-09-18" };
+  it("unresolved fees keep OPEN current and projected amounts provisional", () => {
+    const progress = summarizeCampaignProgress({ status: "OPEN", events: [sell], feesFullyKnown: false, currentCostToClose: 20 });
+    expect(progress.netPremiumStatus).toBe("PENDING");
+    expect(progress.currentPL).toBe(80);
+    expect(progress.currentPLStatus).toBe("PENDING");
+    expect(progress.projectedOtmPL).toBe(100);
+    expect(progress.projectedOtmStatus).toBe("PENDING");
+  });
+  it("unknown CLOSED cash flow produces no confirmed zero or final P/L", () => {
+    const progress = summarizeCampaignProgress({ status: "CLOSED", events: [{ ...sell, premium: null }, { type: "PUT_EXPIRED", occurredAt: "2026-09-18" }] });
+    expect(progress.currentPLStatus).toBe("INCOMPLETE");
+    expect(progress.realizedPLStatus).toBe("INCOMPLETE");
+    expect(progress.realizedPL).toBeNull();
+    expect(progress.currentPL).toBeNull();
+  });
+  it("a pending CLOSED result makes the combined projected aggregate pending", () => {
+    const closed = summarizeCampaignProgress({ status: "CLOSED", feesFullyKnown: false, events: [sell, { type: "PUT_EXPIRED", occurredAt: "2026-09-18" }] });
+    const open = summarizeCampaignProgress({ status: "OPEN", events: [sell], currentCostToClose: 20 });
+    const totals = summarizePerformanceMetrics([{ status: "CLOSED", progress: closed }, { status: "OPEN", progress: open }]);
+    expect(totals.projected).toEqual({ value: 200, status: "PENDING" });
+    expect(totals.current).toEqual({ value: 180, status: "PENDING" });
+  });
+  it("missing expiration stays incomplete in normal-row presentation", () => {
+    const progress = summarizeCampaignProgress({ status: "OPEN", events: [{ ...sell, expiration: null }] });
+    expect(performanceMetricText(progress.projectedOtmPL, progress.projectedOtmStatus, String)).toBe("Unavailable - incomplete");
+  });
+  it.each([-1, NaN, Infinity])("invalid cost to close %s never becomes a zero-cost mark", (currentCostToClose) => {
+    const p = summarizeCampaignProgress({ status: "OPEN", events: [sell], currentCostToClose });
+    expect(p.currentCostToClose).toBeNull();
+    expect(p.currentPL).toBeNull();
+    expect(p.currentPLStatus).toBe("PENDING");
+  });
+  it("weekly confirmed performance excludes provisional and incomplete results and discloses exclusions", () => {
+    const rows = [
+      { closedAt: new Date("2026-09-14"), pl: 40, feesFullyKnown: true },
+      { closedAt: new Date("2026-09-15"), pl: 500, feesFullyKnown: false },
+      { closedAt: new Date("2026-09-16"), pl: 200, cashFlowsFullyKnown: false },
+    ];
+    const weekly = summarizeWeeklyReturns(rows, 10000, 1, new Date("2026-09-18"));
+    expect(weekly.thisWeekPercent).toBe(0.4);
+    expect(weekly.excludedCount).toBe(2);
+    expect(weekly.completeness).toBe("INCOMPLETE");
   });
 });

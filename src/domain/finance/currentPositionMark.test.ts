@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { resolveCurrentCostToClose, type LinkedPositionRecordInput, type OptionMarkSnapshotInput } from "./currentPositionMark";
-import type { CurrentOpenPut } from "./campaigns";
+import { performanceMetricText, summarizeCampaignProgress, summarizePerformanceMetrics } from "./performance";
+import { resolveCurrentCostToClose, sameStrike, type LinkedPositionRecordInput, type OptionMarkSnapshotInput } from "./currentPositionMark";
+import { getCurrentOpenPut, type CampaignEventInput, type CurrentOpenPut } from "./campaigns";
 
 // Fri Sep 4 2026 is a real NYSE market day (see marketCalendar.test.ts); Sat Sep 5/Sun Sep 6 are
 // weekend; Mon Sep 7 is Labor Day; Tue Sep 8 is the next market day. Reused here so freshness
@@ -18,7 +19,7 @@ function linkedRecord(overrides: Partial<LinkedPositionRecordInput> = {}): Linke
     quantity: -1,
     amount: -150, // Schwab's own signed market value for a short option
     observedAt: MARKET_DAY,
-    metadata: null,
+    metadata: { valuationAsOf: (overrides.observedAt ?? MARKET_DAY).toISOString() },
     ...overrides,
   };
 }
@@ -38,7 +39,8 @@ function resolve(opts: {
     campaignTicker: opts.campaignTicker ?? "RIOT",
     activePut: opts.activePut === undefined ? activePut : opts.activePut,
     linkedRecords: opts.linkedRecords ?? [],
-    optionMark: opts.optionMark ?? null,
+    // These fixtures explicitly represent a verified price timestamp, separate from storage time.
+    optionMark: opts.optionMark ? { valuationAsOf: opts.optionMark.capturedAt, ...opts.optionMark } : null,
     now: opts.now ?? MARKET_DAY,
   });
 }
@@ -185,5 +187,77 @@ describe("resolveCurrentCostToClose (Ticket 5: validated current-position marks)
       expect(result!.source).toBe("LINKED_BROKER_POSITION");
       expect(result!.costToClose).toBe(150); // the linked position's real value, not the mark's 9900
     });
+  });
+});
+
+describe("valuation evidence regressions", () => {
+  it("rejects missing market value but accepts a verified, dated broker zero", () => {
+    expect(resolve({ linkedRecords: [linkedRecord({ amount: null })] })).toBeNull();
+    expect(resolve({ linkedRecords: [linkedRecord({ amount: 0 })] })?.costToClose).toBe(0);
+  });
+  it("neither a new sync timestamp nor database capturedAt proves valuation freshness", () => {
+    expect(resolve({ linkedRecords: [linkedRecord({ metadata: null })] })).toBeNull();
+    expect(resolve({ optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: MARKET_DAY, valuationAsOf: null } })).toBeNull();
+  });
+  it.each([[0, 0], [-1, 1], [1, -1], [2, 1], [NaN, 1]])("rejects invalid bid/ask %s / %s", (bid, ask) => {
+    expect(resolve({ optionMark: { mark: null, bid, ask, capturedAt: MARKET_DAY } })).toBeNull();
+  });
+  it("rejects a negative mark instead of disguising it with a valid midpoint", () => {
+    expect(resolve({ optionMark: { mark: -1, bid: 1, ask: 2, capturedAt: MARKET_DAY } })).toBeNull();
+  });
+  it("allows a zero bid with a positive ask", () => {
+    expect(resolve({ optionMark: { mark: null, bid: 0, ask: 0.1, capturedAt: MARKET_DAY } })?.costToClose).toBe(5);
+  });
+  it.each([-0.005, 0.005])("includes the exact half-cent strike boundary %s", (delta) => {
+    expect(sameStrike(20, 20 + delta)).toBe(true);
+    const symbol = `RIOT 260918P${String(Math.round((20 + delta) * 1000)).padStart(8, "0")}`;
+    expect(resolve({ linkedRecords: [linkedRecord({ symbol })] })?.costToClose).toBe(150);
+  });
+  it("rejects beyond the half-cent boundary", () => {
+    expect(sameStrike(20, 20.005001)).toBe(false);
+    expect(sameStrike(20, 19.994999)).toBe(false);
+  });
+  it.each([-2, 0, 1, null])("latest contradictory quantity %s never falls back to an older match or a quote", (quantity) => {
+    const old = linkedRecord({ observedAt: new Date("2026-09-08T15:00:00Z") });
+    const latest = linkedRecord({ quantity });
+    for (const linkedRecords of [[old, latest], [latest, old]]) {
+      expect(resolve({ linkedRecords, optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: MARKET_DAY } })).toBeNull();
+    }
+  });
+  it("equal-time conflicting amounts are ambiguous in both orders", () => {
+    const a = linkedRecord(), b = linkedRecord({ amount: -300 });
+    expect(resolve({ linkedRecords: [a, b] })).toBeNull();
+    expect(resolve({ linkedRecords: [b, a] })).toBeNull();
+  });
+  it("equal-time identical observations can agree", () => {
+    expect(resolve({ linkedRecords: [linkedRecord(), linkedRecord()] })?.costToClose).toBe(150);
+  });
+  it("a persisted equal-time conflict cannot use the stored price or a fallback quote", () => {
+    expect(resolve({ linkedRecords: [linkedRecord({ metadata: { valuationAsOf: MARKET_DAY.toISOString(), observationConflict: true } })],
+      optionMark: { mark: 1, bid: 0.9, ask: 1.1, capturedAt: MARKET_DAY } })).toBeNull();
+  });
+  it("rejects future observation and valuation timestamps", () => {
+    const future = new Date("2026-10-01T15:00:00Z");
+    expect(resolve({ linkedRecords: [linkedRecord({ observedAt: future })] })).toBeNull();
+    expect(resolve({ optionMark: { mark: 1, bid: 1, ask: 1, capturedAt: MARKET_DAY, valuationAsOf: future } })).toBeNull();
+    expect(resolve({ optionMark: { mark: 1, bid: 1, ask: 1, capturedAt: future, valuationAsOf: MARKET_DAY } })).toBeNull();
+  });
+  it("full tied roll history selects the new put and preserves pending and last-session presentation", () => {
+    const events: CampaignEventInput[] = [
+      { type: "ROLL_PUT_OPEN", id: "3", sortOrder: 1, createdAt: "2026-09-04T15:00:02Z", occurredAt: "2026-09-04", strike: 20, contracts: 1, premium: 1.5, expiration: "2026-09-18" },
+      { type: "SELL_PUT", id: "1", occurredAt: "2026-09-01", strike: 25, contracts: 1, premium: 1, expiration: "2026-09-04" },
+      { type: "ROLL_PUT_CLOSE", id: "2", sortOrder: 1, createdAt: "2026-09-04T15:00:01Z", occurredAt: "2026-09-04", strike: 25, contracts: 1, premium: 0.5 },
+    ];
+    const source = resolve({ activePut: getCurrentOpenPut(events), now: WEEKEND_DAY, linkedRecords: [
+      linkedRecord({ symbol: "RIOT 260904P00025000", amount: -900, observedAt: new Date("2026-09-04T20:00:00Z") }),
+      linkedRecord({ amount: -30, observedAt: new Date("2026-09-04T20:00:00Z") }),
+    ] });
+    expect(source?.costToClose).toBe(30);
+    expect(source?.freshness).toBe("LAST_SESSION");
+    const progress = summarizeCampaignProgress({ status: "OPEN", events, feesFullyKnown: false, currentCostToClose: source!.costToClose });
+    const totals = summarizePerformanceMetrics([{ status: "OPEN", progress, freshness: source!.freshness }]);
+    expect(totals.current).toEqual({ value: 170, status: "PENDING" });
+    expect(totals.lastSessionCount).toBe(1);
+    expect(performanceMetricText(progress.currentPL, progress.currentPLStatus, (v) => `$${v}`)).toBe("$170 - pending");
   });
 });

@@ -80,9 +80,9 @@ export type CampaignExposureInput = {
    * null once there is no current open put (already closed, assigned, or evidence incomplete).
    * Never `collateralCommitted` (the lifetime high-water mark) - see Ticket 4/5, PROJECT_HANDOFF.md. */
   currentCollateralCommitted: number | null;
-  /** summarizeCampaign's stockCost - the assignment's own cost basis (strike x shares), a
-   * completely different exposure from put collateral. 0 when never assigned. */
-  stockCost: number;
+  /** summarizeCampaign's remainingShareBasis - assigned cost basis still held after sales.
+   * Null means basis is unknown, distinct from a verified zero. */
+  remainingShareBasis: number | null;
   /** getCurrentOpenCall(events) !== null - whether an ASSIGNED campaign's shares are currently
    * covered by an open call. Only meaningful when status is ASSIGNED. */
   hasOpenCoveredCall: boolean;
@@ -93,8 +93,10 @@ export type CampaignExposureSummary = {
    * historical put collateral (the put is gone once assigned; the cash became equity). This is
    * what a "Secured (CSP)" headline may show. */
   securedPutCollateral: number;
+  openCampaignsWithKnownCollateral: number;
+  openCampaignsWithUnknownCollateral: number;
   assignedCampaignCount: number;
-  /** Sum of stockCost over ASSIGNED campaigns with a known basis - the assignment's own cost
+  /** Sum of remaining share basis over ASSIGNED campaigns with a known basis - the assignment's own cost
    * basis, NOT a live mark-to-market value (no wheel valuation engine exists yet - see
    * PROJECT_HANDOFF.md). Must always be displayed under a distinct label from put collateral. */
   assignedShareCapital: number;
@@ -113,6 +115,8 @@ export type CampaignExposureSummary = {
  */
 export function summarizeCampaignExposure(campaigns: CampaignExposureInput[]): CampaignExposureSummary {
   let securedPutCollateral = 0;
+  let openCampaignsWithKnownCollateral = 0;
+  let openCampaignsWithUnknownCollateral = 0;
   let assignedCampaignCount = 0;
   let assignedShareCapital = 0;
   let assignedCampaignsWithKnownBasis = 0;
@@ -125,11 +129,13 @@ export function summarizeCampaignExposure(campaigns: CampaignExposureInput[]): C
     // field happens to hold.
     if (campaign.status === "OPEN" && campaign.currentCollateralCommitted !== null) {
       securedPutCollateral += campaign.currentCollateralCommitted;
+      openCampaignsWithKnownCollateral += 1;
     }
+    if (campaign.status === "OPEN" && campaign.currentCollateralCommitted === null) openCampaignsWithUnknownCollateral += 1;
     if (campaign.status === "ASSIGNED") {
       assignedCampaignCount += 1;
-      if (campaign.stockCost > 0) {
-        assignedShareCapital += campaign.stockCost;
+      if (campaign.remainingShareBasis !== null) {
+        assignedShareCapital += campaign.remainingShareBasis;
         assignedCampaignsWithKnownBasis += 1;
       }
       if (campaign.hasOpenCoveredCall) {
@@ -140,6 +146,8 @@ export function summarizeCampaignExposure(campaigns: CampaignExposureInput[]): C
 
   return {
     securedPutCollateral: round(securedPutCollateral, 2),
+    openCampaignsWithKnownCollateral,
+    openCampaignsWithUnknownCollateral,
     assignedCampaignCount,
     assignedShareCapital: round(assignedShareCapital, 2),
     assignedCampaignsWithKnownBasis,
@@ -159,7 +167,7 @@ export type BrokerPositionDisplay = {
   valueLabel: string;
   /** Already sign-adjusted to match `valueLabel`: a short option's liability is shown as a
    * positive cost, everything else is Schwab's raw market value. */
-  value: number;
+  value: number | null;
 };
 
 function optionQuantityLabel(quantity: number, optionType: "PUT" | "CALL" | null): string {
@@ -182,7 +190,7 @@ export function describeBrokerPositionForDisplay(position: BrokerPosition): Brok
     ? optionQuantityLabel(position.quantity, classified.optionType)
     : `${position.quantity} sh`;
   const valueLabel = isShortOption ? "Cost to close" : "Market value";
-  const value = isShortOption ? Math.abs(position.marketValue) : position.marketValue;
+  const value = position.marketValue === null ? null : isShortOption ? Math.abs(position.marketValue) : position.marketValue;
 
   if (!isOption || classified.strike === null || classified.expiration === null || classified.optionType === null) {
     return { title: classified.underlying, detailLine: null, quantityLabel, valueLabel, value };

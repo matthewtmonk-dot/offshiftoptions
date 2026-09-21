@@ -28,6 +28,8 @@ export type CompletenessStatus = "CONFIRMED" | "PENDING" | "INCOMPLETE" | "NOT_A
 
 export type CompletedCampaignResult = {
   campaignId: string;
+  /** Explicitly false when campaign history lacks required cash-flow evidence. */
+  cashFlowsFullyKnown?: boolean;
   closedAt: Date;
   finalResult: "GAIN" | "LOSS" | "BREAKEVEN" | "OPEN" | "UNKNOWN";
   /** Fee-inclusive realized P/L - unchanged meaning from before fee-knownness tracking existed. */
@@ -53,7 +55,7 @@ const KNOWN_FINAL_RESULTS = new Set(["GAIN", "LOSS", "BREAKEVEN"]);
  * Never NOT_APPLICABLE - every completed campaign has SOME outcome, even if unknown.
  */
 function completedCampaignCompleteness(c: CompletedCampaignResult): Exclude<CompletenessStatus, "NOT_APPLICABLE"> {
-  if (!KNOWN_FINAL_RESULTS.has(c.finalResult) || c.pl === null) {
+  if (c.cashFlowsFullyKnown === false || !KNOWN_FINAL_RESULTS.has(c.finalResult) || c.pl === null || !Number.isFinite(c.pl)) {
     return "INCOMPLETE";
   }
   return c.feesFullyKnown === false ? "PENDING" : "CONFIRMED";
@@ -142,7 +144,7 @@ export function summarizeWinLoss(completed: CompletedCampaignResult[]): WinLossS
       confirmedAndPending.reduce((sum, c) => sum + (c.pl ?? 0), 0),
       2,
     ),
-    realizedTradingPLExact: pending.length === 0,
+    realizedTradingPLExact: pending.length === 0 && byCompleteness.get("INCOMPLETE")!.length === 0,
   };
 }
 
@@ -183,13 +185,13 @@ export type ThisWeekSummary = {
 export function summarizeThisWeek(completed: CompletedCampaignResult[], asOf: Date = new Date()): ThisWeekSummary {
   const currentWeekKey = isoWeekKey(asOf);
   const thisWeek = completed.filter((c) => isoWeekKey(c.closedAt) === currentWeekKey);
-  const known = thisWeek.filter((c) => KNOWN_FINAL_RESULTS.has(c.finalResult) && c.pl !== null);
+  const known = thisWeek.filter((c) => completedCampaignCompleteness(c) !== "INCOMPLETE");
   const confirmed = known.filter((c) => c.feesFullyKnown !== false);
   const pending = known.filter((c) => c.feesFullyKnown === false);
   const wins = confirmed.filter((c) => c.finalResult === "GAIN").length;
   const losses = confirmed.filter((c) => c.finalResult === "LOSS").length;
   const breakevens = confirmed.filter((c) => c.finalResult === "BREAKEVEN").length;
-  const netPLExact = pending.length === 0;
+  const netPLExact = pending.length === 0 && known.length === thisWeek.length;
   const grossPL = known.length ? round(known.reduce((sum, c) => sum + (c.grossPL ?? c.pl ?? 0), 0), 2) : null;
   const netPL = known.length ? round(known.reduce((sum, c) => sum + (c.pl ?? 0), 0), 2) : null;
   const securedCapitalTotal = known.reduce((sum, c) => sum + (c.collateralCommitted ?? 0), 0);
@@ -212,6 +214,8 @@ export function summarizeThisWeek(completed: CompletedCampaignResult[], asOf: Da
 
 export type WeeklyReturnSummary = {
   status: "OK" | "INSUFFICIENT_HISTORY";
+  completeness: CompletenessStatus;
+  excludedCount: number;
   targetPercent: number;
   thisWeekPercent: number | null;
   trailing4WeekAveragePercent: number | null;
@@ -221,15 +225,12 @@ export type WeeklyReturnSummary = {
 
 export type CampaignProgressSummary = {
   netPremiumCollected: number;
+  netPremiumStatus: CompletenessStatus;
   realizedPL: number | null;
+  realizedPLStatus: CompletenessStatus;
   currentPL: number | null;
-  /** Completeness of `currentPL` (and, for a CLOSED campaign, `realizedPL`) - see
-   * `CompletenessStatus`. NOT_APPLICABLE for ASSIGNED (no wheel/covered-call valuation engine
-   * exists yet - real exposure isn't "not applicable," see INCOMPLETE note below) - actually
-   * ASSIGNED is INCOMPLETE, not NOT_APPLICABLE: an assigned position has real economic exposure
-   * this app doesn't yet value, and a completeness summary must disclose that gap rather than
-   * imply there's nothing to value. NOT_APPLICABLE covers only a campaign with no current put
-   * position at all (already closed, or never opened one). */
+  /** CLOSED uses realized completeness. ASSIGNED is INCOMPLETE until shares can be valued.
+   * OPEN requires complete put/cash-flow evidence, known fees, and a usable close mark. */
   currentPLStatus: CompletenessStatus;
   currentCostToClose: number | null;
   projectedOtmPL: number | null;
@@ -238,13 +239,8 @@ export type CampaignProgressSummary = {
    * with no current put position; INCOMPLETE when a put is intended but its evidence is
    * incomplete (see getOpenPutEvidenceState) or campaign cash flow has an unresolved unknown. */
   projectedOtmStatus: CompletenessStatus;
-  /** Kept for existing callers: true exactly when projectedOtmStatus would be CONFIRMED or
-   * PENDING (there IS a real open CSP to project) - i.e. the narrower "does this campaign
-   * structurally qualify" question, unaffected by whether the leg's own evidence is complete.
-   * Prefer `projectedOtmStatus`/`currentPLStatus` for a completeness summary - this flag alone
-   * cannot distinguish "not applicable" from "incomplete," which is exactly the gap that caused a
-   * missing-expiration campaign to silently drop out of an aggregate without a visible partial
-   * indicator (see PROJECT_HANDOFF.md, Ticket 4). */
+  /** Structural eligibility only: a complete open put and no held shares. Cash-flow or fee
+   * completeness still requires projectedOtmStatus; this boolean cannot replace it. */
   projectedOtmApplicable: boolean;
   rollCount: number;
   collateralCommitted: number | null;
@@ -286,19 +282,21 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * projectedOtmStatus: completeness of the CSP-only "if OTM" projection specifically. NOT_APPLICABLE
  * for anything but an OPEN campaign with a real (or evidence-incomplete) put and zero held shares;
  * INCOMPLETE when a put is intended but its own evidence is incomplete (getOpenPutEvidenceState)
- * or campaign cash flow has an unresolved unknown; otherwise CONFIRMED (this projection needs no
- * external mark, so it never lands on PENDING).
+ * or campaign cash flow has an unresolved unknown; unresolved fees are PENDING. The projection
+ * needs no external price mark.
  */
 function campaignProjectedOtmStatus({
   status,
   openPutEvidenceState,
   sharesHeld,
   hasUnknownCashFlow,
+  feesFullyKnown,
 }: {
   status: CampaignStatusInput;
   openPutEvidenceState: OpenPutEvidenceState;
   sharesHeld: number;
   hasUnknownCashFlow: boolean;
+  feesFullyKnown: boolean;
 }): CompletenessStatus {
   if (status !== "OPEN" || openPutEvidenceState === "NONE") {
     return "NOT_APPLICABLE";
@@ -309,7 +307,7 @@ function campaignProjectedOtmStatus({
   if (sharesHeld !== 0) {
     return "NOT_APPLICABLE";
   }
-  return hasUnknownCashFlow ? "INCOMPLETE" : "CONFIRMED";
+  return hasUnknownCashFlow ? "INCOMPLETE" : feesFullyKnown ? "CONFIRMED" : "PENDING";
 }
 
 /**
@@ -336,6 +334,7 @@ function campaignCurrentPLStatus({
   hasCostToClose: boolean;
 }): CompletenessStatus {
   if (status === "CLOSED") {
+    if (hasUnknownCashFlow) return "INCOMPLETE";
     return feesFullyKnown ? "CONFIRMED" : "PENDING";
   }
   if (status === "ASSIGNED") {
@@ -354,7 +353,7 @@ function campaignCurrentPLStatus({
   if (hasUnknownCashFlow) {
     return "INCOMPLETE";
   }
-  return hasCostToClose ? "CONFIRMED" : "PENDING";
+  return hasCostToClose && feesFullyKnown ? "CONFIRMED" : "PENDING";
 }
 
 /**
@@ -377,8 +376,8 @@ export function summarizeCampaignProgress({
   targetWeeklyPercent?: number;
   /** False when a linked Schwab transaction behind this campaign has an unresolved fee (see
    * getCampaignIdsWithUnknownFees) - defaults to true, matching the existing manual-entry
-   * convention (a blank fee has always meant an assumed $0). Only affects `currentPLStatus`
-   * (CLOSED case) - never changes `realizedPL`'s own number. */
+   * convention (a blank fee has always meant an assumed $0). Applies to every affected metric;
+   * known numeric estimates are preserved as provisional, never confirmed. */
   feesFullyKnown?: boolean;
   asOf?: Date;
 }): CampaignProgressSummary {
@@ -386,10 +385,11 @@ export function summarizeCampaignProgress({
   const openShortPut = findOpenShortPut(status, events);
   const openPutEvidenceState: OpenPutEvidenceState = status === "OPEN" ? getOpenPutEvidenceState(events) : "NONE";
   const hasUnknownCashFlow = summary.unknowns.length > 0;
-  const realizedPL = status === "CLOSED" ? (summary.totalCampaignPL ?? summary.realizedPL) : null;
+  const realizedPL = status === "CLOSED" && !hasUnknownCashFlow ? (summary.totalCampaignPL ?? summary.realizedPL) : null;
   const projectedOtmApplicable = status === "OPEN" && openShortPut !== null && summary.sharesHeld === 0;
   const projectedOtmPL = projectedOtmApplicable && !hasUnknownCashFlow ? summary.netOptionPremium : null;
-  const normalizedCostToClose = currentCostToClose === null ? null : round(Math.max(0, currentCostToClose), 2);
+  const normalizedCostToClose = currentCostToClose !== null && Number.isFinite(currentCostToClose) && currentCostToClose >= 0
+    ? round(currentCostToClose, 2) : null;
   const currentPL =
     status === "CLOSED"
       ? realizedPL
@@ -404,7 +404,9 @@ export function summarizeCampaignProgress({
 
   return {
     netPremiumCollected: summary.netOptionPremium,
+    netPremiumStatus: hasUnknownCashFlow ? "INCOMPLETE" : feesFullyKnown ? "CONFIRMED" : "PENDING",
     realizedPL,
+    realizedPLStatus: status !== "CLOSED" ? "NOT_APPLICABLE" : hasUnknownCashFlow ? "INCOMPLETE" : feesFullyKnown ? "CONFIRMED" : "PENDING",
     currentPL,
     currentPLStatus: campaignCurrentPLStatus({
       status,
@@ -416,7 +418,7 @@ export function summarizeCampaignProgress({
     }),
     currentCostToClose: normalizedCostToClose,
     projectedOtmPL,
-    projectedOtmStatus: campaignProjectedOtmStatus({ status, openPutEvidenceState, sharesHeld: summary.sharesHeld, hasUnknownCashFlow }),
+    projectedOtmStatus: campaignProjectedOtmStatus({ status, openPutEvidenceState, sharesHeld: summary.sharesHeld, hasUnknownCashFlow, feesFullyKnown }),
     projectedOtmApplicable,
     rollCount: countRolls(events),
     collateralCommitted,
@@ -425,6 +427,37 @@ export function summarizeCampaignProgress({
     projectedReturnPercent,
     requiredReturnPercent,
   };
+}
+
+export type PerformanceMetric = { value: number | null; status: CompletenessStatus };
+
+export function summarizePerformanceMetrics(rows: {
+  status: CampaignStatusInput;
+  progress: CampaignProgressSummary;
+  freshness?: "CURRENT_SESSION" | "LAST_SESSION";
+}[]) {
+  const aggregate = (metrics: PerformanceMetric[]): PerformanceMetric => {
+    const applicable = metrics.filter((m) => m.status !== "NOT_APPLICABLE");
+    const known = applicable.filter((m) => m.value !== null && m.status !== "INCOMPLETE");
+    const status: CompletenessStatus = !applicable.length ? "NOT_APPLICABLE"
+      : applicable.some((m) => m.status === "INCOMPLETE") ? "INCOMPLETE"
+      : applicable.some((m) => m.status === "PENDING" || m.value === null) ? "PENDING" : "CONFIRMED";
+    return { value: known.length ? round(known.reduce((sum, m) => sum + m.value!, 0), 2) : null, status };
+  };
+  return {
+    current: aggregate(rows.map(({ progress: p }) => ({ value: p.currentPL, status: p.currentPLStatus }))),
+    projected: aggregate(rows.map(({ status, progress: p }) => status === "CLOSED"
+      ? { value: p.realizedPL, status: p.realizedPLStatus }
+      : { value: p.projectedOtmPL, status: p.projectedOtmStatus })),
+    lastSessionCount: rows.filter((r) => r.progress.currentPL !== null && r.freshness === "LAST_SESSION").length,
+  };
+}
+
+/** Shared normal-row presentation; incomplete evidence is never rendered as N/A. */
+export function performanceMetricText(value: number | null, status: CompletenessStatus, format: (value: number) => string) {
+  if (status === "NOT_APPLICABLE") return "N/A";
+  if (value === null) return status === "PENDING" ? "Unavailable - pending" : "Unavailable - incomplete";
+  return `${format(value)}${status === "PENDING" ? " - pending" : status === "INCOMPLETE" ? " - partial" : ""}`;
 }
 
 export function tradingProfitFromAccountValue({
@@ -513,16 +546,21 @@ export function summarizeContributionAdjustedGoal({
  * one meaningful.
  */
 export function summarizeWeeklyReturns(
-  completed: { closedAt: Date; pl: number | null }[],
+  completed: { closedAt: Date; pl: number | null; feesFullyKnown?: boolean; cashFlowsFullyKnown?: boolean }[],
   baseline: number | null,
   targetPercent: number,
   asOf: Date = new Date(),
 ): WeeklyReturnSummary {
-  const known = completed.filter((c): c is { closedAt: Date; pl: number } => c.pl !== null);
+  const known = completed.filter((c): c is typeof c & { pl: number } =>
+    c.pl !== null && Number.isFinite(c.pl) && c.feesFullyKnown !== false && c.cashFlowsFullyKnown !== false);
+  const excludedCount = completed.length - known.length;
+  const completeness: CompletenessStatus = completed.some((c) => c.pl === null || !Number.isFinite(c.pl) || c.cashFlowsFullyKnown === false)
+    ? "INCOMPLETE" : excludedCount ? "PENDING" : "CONFIRMED";
 
   if (baseline === null || baseline <= 0 || known.length === 0) {
     return {
       status: "INSUFFICIENT_HISTORY",
+      completeness, excludedCount,
       targetPercent,
       thisWeekPercent: null,
       trailing4WeekAveragePercent: null,
@@ -546,6 +584,7 @@ export function summarizeWeeklyReturns(
 
   return {
     status: "OK",
+    completeness, excludedCount,
     targetPercent,
     thisWeekPercent,
     trailing4WeekAveragePercent: last4Prior.length

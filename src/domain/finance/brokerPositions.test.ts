@@ -1,3 +1,4 @@
+import { getCurrentOpenCall, summarizeCampaign } from "./campaigns";
 import { describe, expect, it } from "vitest";
 import type { BrokerPosition } from "@/providers/broker-read/types";
 import {
@@ -131,11 +132,11 @@ describe("describeBrokerPositionForDisplay", () => {
 
 describe("summarizeCampaignExposure (Ticket 5: separate exposure types)", () => {
   function campaign(overrides: Partial<CampaignExposureInput> = {}): CampaignExposureInput {
-    return { status: "OPEN", currentCollateralCommitted: null, stockCost: 0, hasOpenCoveredCall: false, ...overrides };
+    return { status: "OPEN", currentCollateralCommitted: null, remainingShareBasis: null, hasOpenCoveredCall: false, ...overrides };
   }
 
   it("test 13: an ASSIGNED campaign with no current put contributes zero to securedPutCollateral, and its share basis is tracked separately", () => {
-    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", currentCollateralCommitted: null, stockCost: 3000 })]);
+    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", currentCollateralCommitted: null, remainingShareBasis: 3000 })]);
     expect(summary.securedPutCollateral).toBe(0); // the real bug this fixes: no historical put collateral leaks in here
     expect(summary.assignedCampaignCount).toBe(1);
     expect(summary.assignedShareCapital).toBe(3000);
@@ -144,7 +145,7 @@ describe("summarizeCampaignExposure (Ticket 5: separate exposure types)", () => 
   });
 
   it("test 14: an ASSIGNED campaign with an existing covered call is counted, without fabricating a valuation for it", () => {
-    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", stockCost: 4000, hasOpenCoveredCall: true })]);
+    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", remainingShareBasis: 4000, hasOpenCoveredCall: true })]);
     expect(summary.assignedCampaignsWithCoveredCall).toBe(1);
     expect(summary.assignedShareCapital).toBe(4000); // still just the cost basis, never a call-adjusted mark-to-market
   });
@@ -152,8 +153,8 @@ describe("summarizeCampaignExposure (Ticket 5: separate exposure types)", () => 
   it("test 15: mixed exposure - an open CSP's collateral, an assigned campaign's basis, and an unsupported/incomplete campaign all stay distinct and additive where valid", () => {
     const summary = summarizeCampaignExposure([
       campaign({ status: "OPEN", currentCollateralCommitted: 1650 }), // CORZ-like open put
-      campaign({ status: "ASSIGNED", stockCost: 3000 }), // assigned, no call yet
-      campaign({ status: "ASSIGNED", stockCost: 4000, hasOpenCoveredCall: true }), // assigned + covered call
+      campaign({ status: "ASSIGNED", remainingShareBasis: 3000 }), // assigned, no call yet
+      campaign({ status: "ASSIGNED", remainingShareBasis: 4000, hasOpenCoveredCall: true }), // assigned + covered call
       campaign({ status: "OPEN", currentCollateralCommitted: null }), // evidence incomplete - contributes nothing, never a fabricated zero-as-collateral claim
     ]);
     expect(summary.securedPutCollateral).toBe(1650); // only the genuinely open put's collateral
@@ -163,14 +164,14 @@ describe("summarizeCampaignExposure (Ticket 5: separate exposure types)", () => 
   });
 
   it("never lets an ASSIGNED campaign's real exposure disappear when its basis is unknown - counted, but flagged as unknown rather than zero", () => {
-    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", stockCost: 0 })]);
+    const summary = summarizeCampaignExposure([campaign({ status: "ASSIGNED", remainingShareBasis: null })]);
     expect(summary.assignedCampaignCount).toBe(1);
     expect(summary.assignedShareCapital).toBe(0);
     expect(summary.assignedCampaignsWithKnownBasis).toBe(0); // the caller can tell "known $0" apart from "no data" via this count
   });
 
   it("a CLOSED campaign never contributes to either secured collateral or assigned capital", () => {
-    const summary = summarizeCampaignExposure([campaign({ status: "CLOSED", currentCollateralCommitted: 2000, stockCost: 5000 })]);
+    const summary = summarizeCampaignExposure([campaign({ status: "CLOSED", currentCollateralCommitted: 2000, remainingShareBasis: 5000 })]);
     expect(summary.securedPutCollateral).toBe(0);
     expect(summary.assignedCampaignCount).toBe(0);
     expect(summary.assignedShareCapital).toBe(0);
@@ -180,10 +181,49 @@ describe("summarizeCampaignExposure (Ticket 5: separate exposure types)", () => 
     const summary = summarizeCampaignExposure([]);
     expect(summary).toEqual({
       securedPutCollateral: 0,
+      openCampaignsWithKnownCollateral: 0,
+      openCampaignsWithUnknownCollateral: 0,
       assignedCampaignCount: 0,
       assignedShareCapital: 0,
       assignedCampaignsWithKnownBasis: 0,
       assignedCampaignsWithCoveredCall: 0,
     });
+  });
+});
+
+describe("remaining assigned basis and exposure completeness", () => {
+  it("assignment followed by a partial sale reports only the held basis, including a covered call", () => {
+    const events = [
+      { type: "ASSIGNMENT" as const, occurredAt: "2026-09-01", strike: 20, contracts: 2 },
+      { type: "SELL_COVERED_CALL" as const, occurredAt: "2026-09-02", strike: 22, contracts: 1, premium: 1, expiration: "2026-10-16" },
+      { type: "STOCK_SALE" as const, occurredAt: "2026-09-03", shares: 100, underlyingPrice: 21 },
+    ];
+    const campaign = summarizeCampaign({ status: "ASSIGNED", events });
+    expect(campaign.stockCost).toBe(4000); // Historical acquisition cost is preserved.
+    expect(campaign.sharesHeld).toBe(100);
+    const exposure = summarizeCampaignExposure([{ status: "ASSIGNED", ...campaign, hasOpenCoveredCall: getCurrentOpenCall(events) !== null }]);
+    expect(exposure.assignedShareCapital).toBe(2000);
+    expect(exposure.securedPutCollateral).toBe(0);
+    expect(exposure.assignedCampaignsWithCoveredCall).toBe(1);
+  });
+  it("mixed known and unknown basis and collateral carry their coverage counts", () => {
+    const exposure = summarizeCampaignExposure([
+      { status: "OPEN", currentCollateralCommitted: null, remainingShareBasis: null, hasOpenCoveredCall: false },
+      { status: "OPEN", currentCollateralCommitted: 1500, remainingShareBasis: null, hasOpenCoveredCall: false },
+      { status: "ASSIGNED", currentCollateralCommitted: null, remainingShareBasis: 2000, hasOpenCoveredCall: false },
+      { status: "ASSIGNED", currentCollateralCommitted: null, remainingShareBasis: null, hasOpenCoveredCall: false },
+    ]);
+    expect(exposure.openCampaignsWithUnknownCollateral).toBe(1);
+    expect(exposure.openCampaignsWithKnownCollateral).toBe(1);
+    expect(exposure.assignedCampaignCount).toBe(2);
+    expect(exposure.assignedCampaignsWithKnownBasis).toBe(1);
+    expect(exposure.assignedShareCapital).toBe(2000);
+  });
+  it("a second incomplete assignment does not make a known first lot appear like complete basis", () => {
+    const summary = summarizeCampaign({ status: "ASSIGNED", events: [
+      { type: "ASSIGNMENT", occurredAt: "2026-09-01", strike: 20, contracts: 1 },
+      { type: "ASSIGNMENT", occurredAt: "2026-09-02", contracts: 1 },
+    ] });
+    expect(summary.remainingShareBasis).toBeNull();
   });
 });

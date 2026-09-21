@@ -1,5 +1,7 @@
 import "server-only";
 
+import { getCurrentOpenPut } from "@/domain/finance/campaigns";
+import { matchTrackedPut } from "@/domain/finance/trackerPositionMatch";
 import { classifyBrokerPosition } from "@/domain/finance/brokerPositions";
 import { parseOccOptionSymbol } from "@/domain/finance/occOption";
 import type { BrokerPosition } from "@/providers/broker-read/types";
@@ -59,7 +61,7 @@ export async function getBrokerActivityAwaitingReviewForUser(userId: string): Pr
       accountId: position.accountId ?? "unknown",
       symbol: position.symbol ?? "",
       quantity: Number(position.quantity ?? 0),
-      marketValue: Number(position.amount ?? 0),
+      marketValue: position.amount === null ? null : Number(position.amount),
     });
 
     results.push({
@@ -225,91 +227,65 @@ export async function skipBrokerReconciliationForUser(userId: string, brokerReco
   return prisma.brokerRecord.update({ where: { id: position.id }, data: { reconciliationDismissedAt: new Date() } });
 }
 
-/**
- * Bridges the LIVE Schwab positions (`getSchwabOpenPositionsForUser`, fetched fresh on
- * every page load, never persisted) against the persisted, reconciled `BrokerRecord`
- * table: returns the set of option symbols the user has already linked to a Campaign, so
- * the Dashboard/Tracker can count a linked live position once (via its Campaign) instead
- * of twice (Campaign + raw broker position). Matches on the normalized OCC-style option
- * symbol itself - deliberately NOT the internal per-source account key - since the same
- * option contract must be recognized as "the same position" whether it was originally
- * reconciled from a live sync or a CSV import.
- */
-export async function getLinkedCampaignSymbolsForUser(userId: string, positions: BrokerPosition[]): Promise<Set<string>> {
-  const symbols = positions
-    .map((position) => normalizeSymbolForLinking(position.symbol))
-    .filter((symbol): symbol is string => Boolean(symbol));
-  if (symbols.length === 0) {
-    return new Set();
-  }
-
-  const linked = await prisma.brokerRecord.findMany({
-    where: { userId, provider: "SCHWAB", kind: "POSITION", symbol: { in: symbols }, linkedCampaignId: { not: null } },
-    select: { symbol: true },
-  });
-
-  return new Set(linked.flatMap((row) => (row.symbol ? [row.symbol] : [])));
+/** Account is the live broker account id; the symbol is a canonical contract, not just a ticker. */
+export function brokerPositionLinkKey(accountId: string, rawSymbol: string): string | null {
+  const symbol = normalizeSymbolForLinking(rawSymbol);
+  return symbol ? `${accountId}|${symbol}` : null;
 }
 
-/**
- * Same persisted-link query as getLinkedCampaignSymbolsForUser, but keyed to the specific
- * campaign each symbol is linked to - for a caller that must attribute a persisted link to one
- * particular campaign (e.g. the Dashboard's "Schwab confirmed" indicator), not merely know that
- * some link exists. A symbol linked to more than one campaign (should not happen, but never
- * trusted blindly) is excluded rather than picking one arbitrarily.
+export async function getLinkedCampaignSymbolsForUser(userId: string, positions: BrokerPosition[]): Promise<Set<string>> {
+  return new Set((await getLinkedCampaignIdsBySymbolForUser(userId, positions)).keys());
+}
+
+/** Returns account+contract keys, retaining the exported name for existing callers.
+ * Both sides of the link must belong to this user and the exact current put obligation must
+ * still be represented. A historical link alone is never permission to drop live exposure.
  */
 export async function getLinkedCampaignIdsBySymbolForUser(userId: string, positions: BrokerPosition[]): Promise<Map<string, string>> {
-  const symbols = positions
-    .map((position) => normalizeSymbolForLinking(position.symbol))
-    .filter((symbol): symbol is string => Boolean(symbol));
-  if (symbols.length === 0) {
-    return new Map();
-  }
-
+  const symbols = positions.map((p) => normalizeSymbolForLinking(p.symbol)).filter((s): s is string => s !== null);
+  if (!symbols.length) return new Map();
   const linked = await prisma.brokerRecord.findMany({
-    where: { userId, provider: "SCHWAB", kind: "POSITION", symbol: { in: symbols }, linkedCampaignId: { not: null } },
-    select: { symbol: true, linkedCampaignId: true },
+    where: {
+      userId, provider: "SCHWAB", kind: "POSITION", status: "CONFIRMED", symbol: { in: symbols },
+      account: { userId, externalAccountId: { in: positions.map((p) => p.accountId) } },
+      linkedCampaign: { ownerId: userId, status: "OPEN" },
+    },
+    select: {
+      accountId: true, symbol: true,
+      account: { select: { id: true, userId: true, externalAccountId: true } },
+      linkedCampaign: { select: { id: true, ownerId: true, accountId: true, ticker: true, status: true, events: true } },
+    },
   });
-
-  const bySymbol = new Map<string, Set<string>>();
+  const byKey = new Map<string, Set<string>>();
   for (const row of linked) {
-    if (!row.symbol || !row.linkedCampaignId) {
-      continue;
-    }
-    const campaignIds = bySymbol.get(row.symbol) ?? new Set<string>();
-    campaignIds.add(row.linkedCampaignId);
-    bySymbol.set(row.symbol, campaignIds);
+    const { account, linkedCampaign: campaign } = row;
+    if (!row.symbol || !account?.externalAccountId || !campaign || account.userId !== userId || campaign.ownerId !== userId ||
+        row.accountId !== campaign.accountId || account.id !== campaign.accountId) continue;
+    const put = getCurrentOpenPut(campaign.events);
+    if (!put) continue;
+    const key = brokerPositionLinkKey(account.externalAccountId, row.symbol);
+    if (!key) continue;
+    const tracked = { ...campaign, ...put };
+    const matching = positions.filter((position) => brokerPositionLinkKey(position.accountId, position.symbol) === key);
+    if (matching.length !== 1 || matchTrackedPut(userId, matching[0], positions, [account], [tracked]) !== "EXACT") continue;
+    const ids = byKey.get(key) ?? new Set<string>();
+    ids.add(campaign.id);
+    byKey.set(key, ids);
   }
-
-  return new Map(
-    [...bySymbol.entries()].flatMap(([symbol, campaignIds]) => (campaignIds.size === 1 ? [[symbol, [...campaignIds][0]] as const] : [])),
-  );
+  return new Map([...byKey].flatMap(([key, ids]) => ids.size === 1 ? [[key, [...ids][0]]] : []));
 }
 
-export type BrokerPositionDedupeResult = {
-  unlinked: BrokerPosition[];
-  linked: BrokerPosition[];
-};
+export type BrokerPositionDedupeResult = { unlinked: BrokerPosition[]; linked: BrokerPosition[] };
 
-/**
- * Splits a user's live broker positions into those already reconciled to an open
- * Campaign (and so already represented in the Dashboard's campaign-derived numbers) and
- * those that are not - so callers never count a linked position a second time. See
- * getLinkedCampaignSymbolsForUser for the matching rule.
- */
 export async function splitBrokerPositionsByCampaignLink(userId: string, positions: BrokerPosition[]): Promise<BrokerPositionDedupeResult> {
-  const linkedSymbols = await getLinkedCampaignSymbolsForUser(userId, positions);
-  const unlinked: BrokerPosition[] = [];
+  const keys = await getLinkedCampaignSymbolsForUser(userId, positions);
   const linked: BrokerPosition[] = [];
+  const unlinked: BrokerPosition[] = [];
   for (const position of positions) {
-    const symbol = normalizeSymbolForLinking(position.symbol);
-    if (symbol && linkedSymbols.has(symbol)) {
-      linked.push(position);
-    } else {
-      unlinked.push(position);
-    }
+    const key = brokerPositionLinkKey(position.accountId, position.symbol);
+    (key && keys.has(key) ? linked : unlinked).push(position);
   }
-  return { unlinked, linked };
+  return { linked, unlinked };
 }
 
 export function normalizeSymbolForLinking(rawSymbol: string): string | null {

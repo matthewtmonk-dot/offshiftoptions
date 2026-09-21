@@ -4,7 +4,7 @@
  * so it keeps working for any future year without upkeep. Covers the standard, currently
  * observed NYSE holidays: New Year's Day, MLK Day, Presidents Day, Good Friday, Memorial Day,
  * Juneteenth (observed from 2022 onward), Independence Day, Labor Day, Thanksgiving, and
- * Christmas - each with the standard Saturday-observe-Friday / Sunday-observe-Monday shift.
+ * Christmas, including the New Year Saturday exception (the prior Friday remains open).
  *
  * Known, documented limitation: extraordinary one-off market closures (a national day of
  * mourning, a weather/system closure, etc.) are NOT modeled here - there is no reliable
@@ -56,48 +56,29 @@ export type MarkFreshness =
   /** No timestamp at all - cannot be trusted as current by construction. */
   | "MISSING";
 
-/**
- * Conservative, calendar-day-only freshness policy for a market-data snapshot (an option mark,
- * a linked broker position observation, a quote) used to value a CURRENT position - see Ticket 5
- * (PROJECT_HANDOFF.md). Deliberately classifies by CALENDAR DATE only, never intraday time:
- * the provider contracts this project has (Schwab quote/position `asOf`, snapshot `capturedAt`,
- * `BrokerRecord.observedAt`) are real timestamps, but nothing in this codebase establishes a
- * verified "is the market open at this exact minute" contract independent of the NYSE
- * open/closed calendar already used for candle-data freshness (see previousNyseMarketDay) -
- * inventing finer-grained intraday freshness on top of that would be exactly the kind of
- * unverified precision this project avoids. A caller that needs "is this timestamp within the
- * last N minutes" for a genuinely real-time feed should establish and document that policy
- * separately; this one only answers "which trading session is this snapshot from, relative to
- * now."
- *
- * - CURRENT_SESSION: `asOf` is today's calendar date AND today is itself an NYSE market day.
- * - LAST_SESSION: `asOf` is exactly the most recent NYSE market day at-or-before `now` otherwise
- *   (covers a weekend/holiday showing Friday's data, and a market day whose own fresh data
- *   hasn't arrived yet showing the prior session's).
- * - STALE: older than that - two or more sessions behind.
- * - MISSING: no `asOf` at all.
+/** Session-level freshness of a VERIFIED valuation timestamp, never a retrieval timestamp.
+ * Both instants use America/New_York calendar dates; expiration comparisons elsewhere stay UTC.
+ * This does not assert intraday/live precision. A non-session valuation date is not evidence of
+ * a market session, and an invalid/future timestamp is unusable rather than clamped to today.
  */
 export function classifyMarkFreshness(asOf: Date | null, now: Date): MarkFreshness {
-  if (!asOf) {
-    return "MISSING";
-  }
-
-  const today = utcDateOnly(now);
-  const asOfDay = utcDateOnly(asOf);
-  // Never treat a future-dated snapshot (clock skew, test fixtures) as further in the future
-  // than "today" - it still can't be more current than that.
-  const effectiveAsOfDay = asOfDay.getTime() > today.getTime() ? today : asOfDay;
-
-  if (isNyseMarketDay(today) && effectiveAsOfDay.getTime() === today.getTime()) {
-    return "CURRENT_SESSION";
-  }
-
-  const priorSession = utcDateOnly(previousNyseMarketDay(today));
-  return effectiveAsOfDay.getTime() >= priorSession.getTime() ? "LAST_SESSION" : "STALE";
+  if (!asOf || !Number.isFinite(asOf.getTime()) || !Number.isFinite(now.getTime())) return "MISSING";
+  if (asOf.getTime() > now.getTime()) return "STALE";
+  const today = marketDate(now);
+  const valuationDay = marketDate(asOf);
+  if (!isNyseMarketDay(valuationDay)) return "MISSING";
+  if (isNyseMarketDay(today) && valuationDay.getTime() === today.getTime()) return "CURRENT_SESSION";
+  return valuationDay.getTime() === previousNyseMarketDay(today).getTime() ? "LAST_SESSION" : "STALE";
 }
 
-function utcDateOnly(date: Date): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+const marketDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+});
+
+function marketDate(instant: Date): Date {
+  const parts = marketDateFormatter.formatToParts(instant);
+  const value = (type: string) => Number(parts.find((part) => part.type === type)!.value);
+  return new Date(Date.UTC(value("year"), value("month") - 1, value("day")));
 }
 
 const holidayCache = new Map<number, Set<string>>();
@@ -110,11 +91,8 @@ function nyseHolidaysForYear(year: number): Set<string> {
 
   const holidays = new Set<string>();
 
-  addObserved(holidays, year, 1, 1); // New Year's Day
-  // If NEXT year's New Year's Day falls on a Saturday, NYSE observes it on Dec 31 of THIS year.
-  if (new Date(Date.UTC(year + 1, 0, 1)).getUTCDay() === 6) {
-    holidays.add(toKey(year, 12, 31));
-  }
+  // NYSE does not observe Saturday New Year's Day on the prior year-end Friday.
+  if (new Date(Date.UTC(year, 0, 1)).getUTCDay() !== 6) addObserved(holidays, year, 1, 1);
 
   addDate(holidays, nthWeekdayOfMonth(year, 1, 1, 3)); // MLK Day: 3rd Monday of January
   addDate(holidays, nthWeekdayOfMonth(year, 2, 1, 3)); // Presidents Day: 3rd Monday of February

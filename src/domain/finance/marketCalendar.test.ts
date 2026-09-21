@@ -147,8 +147,9 @@ describe("isNyseMarketDay - named holidays", () => {
     expect(isNyseMarketDay(utc(2027, 12, 24))).toBe(false);
   });
 
-  it("New Year's Day 2022 (Sat Jan 1) was observed Friday Dec 31 2021 - the cross-year-boundary case", () => {
-    expect(isNyseMarketDay(utc(2021, 12, 31))).toBe(false);
+  it("Saturday New Year's Day is not observed on year-end Friday", () => {
+    expect(isNyseMarketDay(utc(2021, 12, 31))).toBe(true);
+    expect(isNyseMarketDay(utc(2027, 12, 31))).toBe(true);
   });
 
   it("an ordinary midweek trading day is open", () => {
@@ -157,44 +158,67 @@ describe("isNyseMarketDay - named holidays", () => {
 });
 
 describe("classifyMarkFreshness (Ticket 5)", () => {
+  const session = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d, 20));
   // Reuses the Labor Day weekend anchors already established above: Fri Sep 4 2026 is a market
   // day, Sat/Sun Sep 5-6 are weekend, Mon Sep 7 is Labor Day (closed), Tue Sep 8 is the next
   // market day after the long weekend.
 
   it("MISSING when there is no timestamp at all", () => {
-    expect(classifyMarkFreshness(null, utc(2026, 9, 8))).toBe("MISSING");
+    expect(classifyMarkFreshness(null, session(2026, 9, 8))).toBe("MISSING");
   });
 
   it("CURRENT_SESSION when captured today and today is a market day", () => {
-    expect(classifyMarkFreshness(utc(2026, 9, 8), utc(2026, 9, 8))).toBe("CURRENT_SESSION");
+    expect(classifyMarkFreshness(session(2026, 9, 8), session(2026, 9, 8))).toBe("CURRENT_SESSION");
   });
 
   it("LAST_SESSION on a weekend, showing Friday's data - never described as live", () => {
-    expect(classifyMarkFreshness(utc(2026, 9, 4), utc(2026, 9, 5))).toBe("LAST_SESSION"); // Saturday, Friday's mark
-    expect(classifyMarkFreshness(utc(2026, 9, 4), utc(2026, 9, 6))).toBe("LAST_SESSION"); // Sunday, Friday's mark
+    expect(classifyMarkFreshness(session(2026, 9, 4), session(2026, 9, 5))).toBe("LAST_SESSION"); // Saturday, Friday's mark
+    expect(classifyMarkFreshness(session(2026, 9, 4), session(2026, 9, 6))).toBe("LAST_SESSION"); // Sunday, Friday's mark
   });
 
   it("LAST_SESSION on a market holiday, showing the last real session before it", () => {
-    expect(classifyMarkFreshness(utc(2026, 9, 4), utc(2026, 9, 7))).toBe("LAST_SESSION"); // Labor Day, Friday's mark
+    expect(classifyMarkFreshness(session(2026, 9, 4), session(2026, 9, 7))).toBe("LAST_SESSION"); // Labor Day, Friday's mark
   });
 
   it("LAST_SESSION on a market day whose own fresh data hasn't arrived yet, correctly skipping the holiday weekend gap", () => {
     // Tue Sep 8 is a market day; its immediately preceding session is Fri Sep 4 (Labor Day
     // weekend in between), not literally "yesterday."
-    expect(classifyMarkFreshness(utc(2026, 9, 4), utc(2026, 9, 8))).toBe("LAST_SESSION");
+    expect(classifyMarkFreshness(session(2026, 9, 4), session(2026, 9, 8))).toBe("LAST_SESSION");
   });
 
   it("STALE once a mark is two or more sessions behind", () => {
     // Wed Sep 9's immediately preceding session is Tue Sep 8 - a mark from Fri Sep 4 is now two
     // sessions old (Sep 4 -> Sep 8 -> Sep 9) and no longer trustworthy as current.
-    expect(classifyMarkFreshness(utc(2026, 9, 4), utc(2026, 9, 9))).toBe("STALE");
+    expect(classifyMarkFreshness(session(2026, 9, 4), session(2026, 9, 9))).toBe("STALE");
   });
 
-  it("never treats a future-dated (clock-skew) timestamp as more current than today", () => {
-    expect(classifyMarkFreshness(utc(2026, 9, 9), utc(2026, 9, 8))).toBe("CURRENT_SESSION");
+  it("rejects future-dated evidence", () => {
+    expect(classifyMarkFreshness(session(2026, 9, 9), session(2026, 9, 8))).toBe("STALE");
   });
 
-  it("a non-market-day timestamp (should not occur in real data) is still treated as recent rather than crashing", () => {
-    expect(classifyMarkFreshness(utc(2026, 9, 7), utc(2026, 9, 8))).toBe("LAST_SESSION"); // Labor Day itself as the asOf date
+  it("a non-market-day price timestamp does not prove session provenance", () => {
+    expect(classifyMarkFreshness(session(2026, 9, 7), session(2026, 9, 8))).toBe("MISSING"); // Labor Day itself as the asOf date
+  });
+});
+
+describe("market-date boundaries for valuation timestamps", () => {
+  it("Sunday evening ET is not Monday's session even after UTC midnight", () => {
+    const now = new Date("2026-09-20T21:00:00-04:00");
+    expect(classifyMarkFreshness(new Date("2026-09-18T16:00:00-04:00"), now)).toBe("LAST_SESSION");
+    expect(classifyMarkFreshness(now, now)).toBe("MISSING");
+  });
+  it("UTC midnight does not advance Tuesday evening to Wednesday's session", () => {
+    expect(classifyMarkFreshness(new Date("2026-09-21T16:00:00-04:00"), new Date("2026-09-22T21:00:00-04:00"))).toBe("LAST_SESSION");
+  });
+  it("preserves the last session over a DST weekend", () => {
+    expect(classifyMarkFreshness(new Date("2026-10-30T16:00:00-04:00"), new Date("2026-11-01T23:00:00-05:00"))).toBe("LAST_SESSION");
+  });
+  it("rejects future times within the same date and invalid timestamps", () => {
+    const now = new Date("2026-09-21T15:00:00Z");
+    expect(classifyMarkFreshness(new Date("2026-09-21T16:00:00Z"), now)).toBe("STALE");
+    expect(classifyMarkFreshness(new Date("invalid"), now)).toBe("MISSING");
+  });
+  it("uses Dec 31 as the valid previous session after a Saturday New Year", () => {
+    expect(classifyMarkFreshness(new Date("2027-12-31T21:00:00Z"), new Date("2028-01-03T14:00:00Z"))).toBe("LAST_SESSION");
   });
 });

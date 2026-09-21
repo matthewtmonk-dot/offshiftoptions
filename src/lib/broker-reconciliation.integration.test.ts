@@ -98,7 +98,10 @@ maybeDescribe("Schwab broker reconciliation (linking, dashboard dedupe, privacy)
     const stillAwaiting = await getBrokerActivityAwaitingReviewForUser(userA.id);
     expect(stillAwaiting.some((entry) => entry.brokerRecordId === position.id)).toBe(false);
 
+    // Model an account-scoped imported position, as the production sync/import provides.
+    await prisma.brokerRecord.update({ where: { id: position.id }, data: { accountId: account.id } });
     // The live-position dedupe split must now classify this exact symbol as "linked."
+    await prisma.tradingAccount.update({ where: { id: account.id }, data: { externalAccountId: "live-account" } });
     const livePosition = { accountId: "live-account", symbol: "WORK 260904P00023500", quantity: -1, marketValue: -19 };
     const { unlinked, linked: linkedPositions } = await splitBrokerPositionsByCampaignLink(userA.id, [livePosition]);
     expect(linkedPositions).toHaveLength(1);
@@ -106,7 +109,7 @@ maybeDescribe("Schwab broker reconciliation (linking, dashboard dedupe, privacy)
 
     // The Dashboard's per-campaign attribution needs the SPECIFIC campaign id, not just "linked."
     const campaignIdsBySymbol = await getLinkedCampaignIdsBySymbolForUser(userA.id, [livePosition]);
-    expect(campaignIdsBySymbol.get("WORK 260904P00023500")).toBe(campaign.id);
+    expect(campaignIdsBySymbol.get("live-account|WORK 260904P00023500")).toBe(campaign.id);
   });
 
   it("getLinkedCampaignIdsBySymbolForUser returns nothing for a User A symbol when queried as User B", async () => {
@@ -115,13 +118,15 @@ maybeDescribe("Schwab broker reconciliation (linking, dashboard dedupe, privacy)
     const campaign = await confirmBrokerPositionAsCampaignForUser(
       userA.id, position.id, account.id, "ATTR", "2026-08-31", "2026-09-04", "15", "1", "0.3", "0", "", "PRIVATE",
     );
-    const livePosition = { accountId: "live-account", symbol: "ATTR 260904P00015000", quantity: -1, marketValue: -14 };
+    await prisma.tradingAccount.update({ where: { id: account.id }, data: { externalAccountId: "attribution-account" } });
+    await prisma.brokerRecord.update({ where: { id: position.id }, data: { accountId: account.id } });
+    const livePosition = { accountId: "attribution-account", symbol: "ATTR 260904P00015000", quantity: -1, marketValue: -14 };
 
     const asOwner = await getLinkedCampaignIdsBySymbolForUser(userA.id, [livePosition]);
-    expect(asOwner.get("ATTR 260904P00015000")).toBe(campaign.id);
+    expect(asOwner.get("attribution-account|ATTR 260904P00015000")).toBe(campaign.id);
 
     const asOtherUser = await getLinkedCampaignIdsBySymbolForUser(userB.id, [livePosition]);
-    expect(asOtherUser.has("ATTR 260904P00015000")).toBe(false);
+    expect(asOtherUser.has("attribution-account|ATTR 260904P00015000")).toBe(false);
   });
 
   it("cannot be confirmed twice - a second confirm attempt is rejected", async () => {
