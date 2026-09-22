@@ -553,26 +553,25 @@ function decimalKey(value: unknown) {
 }
 
 export async function getAccountPageData(userId: string) {
-  const [accounts, completedCampaigns] = await Promise.all([
-    prisma.tradingAccount.findMany({
-      where: { userId },
-      orderBy: [{ source: "asc" }, { createdAt: "asc" }],
-      include: {
-        ledgerEntries: { orderBy: { occurredAt: "asc" } },
-        brokerRecords: {
-          where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
-          orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
-          select: brokerPerformanceRecordSelect,
-        },
+  // Reporting Phase, Ticket 4: Account is the evidence/auditability page (current value, baseline,
+  // funding coverage, ending valuation) - it no longer shows Confirmed Trading P/L/Trading Cash
+  // Flow (Dashboard's/Tracker's job, per Section 10's "don't duplicate Dashboard" instruction), so
+  // it has no need for `fallbackTradingPL` and therefore no need to load completed campaigns at
+  // all (this query existed solely to compute that fallback).
+  const accounts = await prisma.tradingAccount.findMany({
+    where: { userId },
+    orderBy: [{ source: "asc" }, { createdAt: "asc" }],
+    include: {
+      ledgerEntries: { orderBy: { occurredAt: "asc" } },
+      brokerRecords: {
+        where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
+        orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+        select: brokerPerformanceRecordSelect,
       },
-    }),
-    prisma.campaign.findMany({
-      where: { ownerId: userId, status: "CLOSED" },
-      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
-    }),
-  ]);
+    },
+  });
 
-  return { accounts, completedCampaigns };
+  return { accounts };
 }
 
 const brokerPerformanceRecordSelect = {

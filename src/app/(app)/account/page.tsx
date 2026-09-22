@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Download, KeyRound, Link2, Plus, RefreshCw, Save, SearchCheck, ShieldCheck, Unplug } from "lucide-react";
+import { ChevronDown, Download, KeyRound, Link2, Plus, RefreshCw, Save, SearchCheck, ShieldCheck, Unplug } from "lucide-react";
 import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
@@ -12,8 +12,19 @@ import {
   type SchwabConnectionHealth,
   type SchwabSyncDiagnostics,
 } from "@/lib/broker-connections";
-import { summarizeAccountPerformance, type FundingCoverageStatus } from "@/domain/finance/accountLedger";
-import { summarizeCampaign } from "@/domain/finance/campaigns";
+import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
+import { summarizeAccountReporting } from "@/domain/finance/reporting";
+import { accountValueDetail, accountValueUnavailableReason } from "@/lib/reporting-display";
+import {
+  baselineExplanation,
+  fundingCoverageBadge,
+  fundingCoverageMessage,
+  ledgerEntryLabel,
+  ledgerEntrySourceLabel,
+  parseBaselineNote,
+  signedLedgerAmount,
+  wholeAccountGainStatusBadge,
+} from "@/lib/account-evidence-display";
 import { getSanitizedBrokerRecordClassificationForUser } from "@/lib/broker-record-classification-diagnostic";
 import { money, shortDate, shortDateTime } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
@@ -71,13 +82,6 @@ export default async function AccountPage({
         ? `The last sync's transaction evidence was ${transactionsEvidenceStatus.toLowerCase()}. Some activity may be missing and expiration confirmation may be deferred. Retry Brokerage Sync once your connection is available; a successful sync can supply the missing evidence.`
         : null;
 
-  const realizedPLByAccount = new Map<string, number>();
-  for (const campaign of accountData.completedCampaigns) {
-    const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-    const pl = summary.totalCampaignPL ?? summary.realizedPL ?? 0;
-    realizedPLByAccount.set(campaign.accountId, (realizedPLByAccount.get(campaign.accountId) ?? 0) + pl);
-  }
-
   return (
     <div className="space-y-6">
       <div>
@@ -124,76 +128,120 @@ export default async function AccountPage({
       </Panel>
 
       <Panel title="Your Accounts">
-        <div className="space-y-3">
+        <div className="space-y-4">
           {accountData.accounts.map((account) => {
-            const realized = realizedPLByAccount.get(account.id) ?? 0;
+            // Reporting Phase, Ticket 4: two authoritative calls, never page-local math.
+            // summarizeAccountPerformance gives the raw ledger/baseline evidence (effectiveBaseline,
+            // fundingCoverageStatus, netContributions) this evidence page needs and
+            // AccountReportingSummary does not itself re-expose. summarizeAccountReporting gives the
+            // same current-value/whole-account-gain/return fields Dashboard uses, fully evidence-gated
+            // with friendly reasons - never recomputed here. No `fallbackTradingPL` is passed since
+            // this page never shows Confirmed Trading P/L or Trading Cash Flow (Dashboard's/Tracker's
+            // job) - it plays no role in current value or whole-account gain (see the Account Gain
+            // Rule, PROJECT_HANDOFF.md).
             const performance = summarizeAccountPerformance({
               ledgerEntries: account.ledgerEntries,
               brokerRecords: account.brokerRecords,
-              fallbackTradingPL: realized,
             });
+            const report = summarizeAccountReporting({
+              accounts: [{ ledgerEntries: account.ledgerEntries, brokerRecords: account.brokerRecords }],
+            });
+            const coverage = fundingCoverageBadge(performance.fundingCoverageStatus);
+            const coverageMessage = fundingCoverageMessage(performance.fundingCoverageStatus);
+            const gainBadge = wholeAccountGainStatusBadge(report);
+            const baseline = baselineExplanation(performance);
+            const currentBaselineId = performance.ledger.effectiveBaseline?.entry.id ?? null;
+            const baselineHistory = [...account.ledgerEntries]
+              .filter((entry) => entry.type === "STARTING_VALUE")
+              .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+            const ledgerHistory = [...account.ledgerEntries]
+              .filter((entry) => entry.type !== "STARTING_VALUE")
+              .sort((left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime());
+
             return (
               <div key={account.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
+                {/* Section 1: header / current value */}
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-zinc-50">{account.name}</span>
-                    <Badge tone={account.source === "SCHWAB" ? "info" : "neutral"}>{account.source}</Badge>
+                    <Badge tone={account.source === "SCHWAB" ? "info" : "neutral"}>{account.source === "SCHWAB" ? "Schwab" : "Manual"}</Badge>
                     <Badge tone={account.visibility === "PRIVATE" ? "warn" : "good"}>{account.visibility}</Badge>
                   </div>
-                  {performance.currentValue === null ? (
-                    <span className="text-sm text-zinc-500">No value yet</span>
-                  ) : (
-                    <span className="font-medium text-zinc-100">
-                      {money(performance.currentValue)}{" "}
-                      <span className="text-xs text-zinc-500">
-                        ({performance.currentValueSource === "SCHWAB" ? "Schwab snapshot" : "manual + trading"})
-                      </span>
-                    </span>
-                  )}
-                </div>
-                <div className="mt-2 grid grid-cols-2 gap-3 text-sm text-zinc-400 sm:grid-cols-4">
-                  <div>Starting: {performance.startingCapital === null ? "UNKNOWN" : money(performance.startingCapital)}</div>
-                  <div>Contributions: {performance.netContributions === null ? "UNKNOWN" : signedMoney(performance.netContributions)}</div>
-                  <div>Trading Cash Flow: {performance.tradingPL === null ? "UNKNOWN" : signedMoney(performance.tradingPL)}</div>
-                  <div>Other income/expense: {performance.otherIncome === null ? "UNKNOWN" : signedMoney(performance.otherIncome)}</div>
-                  <div>Total gain: {performance.totalGain === null ? "UNKNOWN" : signedMoney(performance.totalGain)}</div>
-                  <div>Total return: {performance.totalReturnPercent === null ? "N/A" : `${performance.totalReturnPercent.toFixed(2)}%`}</div>
-                  <div>Cash: {performance.ledger.latestBrokerSnapshot?.cash === null || performance.ledger.latestBrokerSnapshot?.cash === undefined ? "N/A" : money(performance.ledger.latestBrokerSnapshot.cash)}</div>
-                  <div>Source: {accountSourceLabel(performance.currentValueSource)}</div>
+                  <div className="text-right">
+                    {report.currentAccountValue === null ? (
+                      <>
+                        <div className="font-medium text-zinc-100">Unavailable</div>
+                        <div className="max-w-56 text-xs text-amber-300">{accountValueUnavailableReason(report)}</div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="font-medium text-zinc-100">{money(report.currentAccountValue)}</div>
+                        <div className="max-w-56 text-xs text-zinc-500">
+                          {report.currentAccountValueSource === "SCHWAB" ? "Schwab snapshot" : "Manual + trading"}
+                          {accountValueDetail(report) ? ` - ${accountValueDetail(report)}` : ""}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
 
+                {/* Section 2: performance measurement status */}
+                <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/50 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-zinc-200">Performance measurement</span>
+                    <Badge tone={gainBadge.tone}>{gainBadge.label}</Badge>
+                  </div>
+                  <div className="mt-2 grid gap-3 text-sm sm:grid-cols-2">
+                    <div>
+                      <div className="text-xs uppercase tracking-normal text-zinc-500">Whole-Account Gain</div>
+                      <div className={`mt-0.5 font-medium ${report.wholeAccountGainStatus === "OK" ? toneClass(report.wholeAccountGain) : "text-zinc-100"}`}>
+                        {report.wholeAccountGainStatus === "OK" ? signedMoney(report.wholeAccountGain!) : "Unavailable"}
+                      </div>
+                      {report.wholeAccountGainUnavailableMessage ? (
+                        <div className="mt-0.5 text-xs text-amber-300">{report.wholeAccountGainUnavailableMessage}</div>
+                      ) : null}
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-normal text-zinc-500">Whole-Account Return</div>
+                      <div className="mt-0.5 font-medium text-zinc-100">
+                        {report.wholeAccountReturnPercent === null ? "Unavailable" : `${report.wholeAccountReturnPercent.toFixed(2)}%`}
+                      </div>
+                      {report.wholeAccountReturnMessage ? (
+                        <div className="mt-0.5 text-xs text-zinc-500">{report.wholeAccountReturnMessage}</div>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+                    <span>Measurement start: {report.wholeAccountGainPeriodStart ? shortDate(report.wholeAccountGainPeriodStart) : "Unavailable"}</span>
+                    <span>Measurement end: {report.wholeAccountGainPeriodEnd ? shortDateTime(report.wholeAccountGainPeriodEnd) : "Unavailable"}</span>
+                  </div>
+                </div>
+
+                {/* Section 3 & 4: baseline evidence + create/correct workflow */}
                 <div className="mt-3 border-t border-zinc-800 pt-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-sm font-medium text-zinc-200">Measurement baseline</span>
-                    <Badge tone={performance.fundingCoverageStatus === "COMPLETE" ? "good" : "warn"}>
-                      {fundingCoverageLabel(performance.fundingCoverageStatus)}
-                    </Badge>
+                    <span className="text-sm font-medium text-zinc-200">Baseline</span>
+                    <Badge tone={coverage.tone}>{coverage.label}</Badge>
                   </div>
-                  {performance.ledger.effectiveBaseline ? (
-                    <div className="mt-1 text-sm text-zinc-400">
-                      {money(performance.ledger.effectiveBaseline.value)} as of{" "}
-                      {shortDate(performance.ledger.effectiveBaseline.occurredAt)} (end of day America/New_York) - explicit
-                      {performance.ledger.effectiveBaseline.revisionCount > 1
-                        ? ` - corrected ${performance.ledger.effectiveBaseline.revisionCount - 1} time${performance.ledger.effectiveBaseline.revisionCount - 1 === 1 ? "" : "s"}; earlier entries preserved below`
-                        : ""}
-                    </div>
-                  ) : performance.startingCapital !== null ? (
-                    <div className="mt-1 text-sm text-zinc-400">
-                      {money(performance.startingCapital)} inferred from broker transfer activity - provisional, not a
-                      confirmed original-funding date.
-                    </div>
+                  {baseline ? (
+                    <>
+                      <div className="mt-1 text-sm text-zinc-300">{baseline.label}</div>
+                      <div className="mt-0.5 text-xs text-zinc-500">
+                        {baseline.detail}
+                        {performance.ledger.effectiveBaseline && performance.ledger.effectiveBaseline.revisionCount > 1
+                          ? ` Corrected ${performance.ledger.effectiveBaseline.revisionCount - 1} time${performance.ledger.effectiveBaseline.revisionCount - 1 === 1 ? "" : "s"}; earlier entries preserved below.`
+                          : ""}
+                      </div>
+                    </>
                   ) : (
-                    <div className="mt-1 text-sm text-zinc-500">No baseline set yet - account-level gain/return stay unavailable until one is.</div>
+                    <div className="mt-1 text-sm text-zinc-500">No baseline set yet - Whole-Account Gain/Return stay unavailable until one is.</div>
                   )}
-                  <div className="mt-1 text-xs text-zinc-500">
-                    Account-level dollar gain: {performance.totalGain === null ? "unavailable" : "available"}. Percentage return:{" "}
-                    {performance.totalReturnStatus === "OK" ? "available" : "unavailable (see PROJECT_HANDOFF.md - a future ticket adds cash-flow-aware return)"}.
-                  </div>
+                  {coverageMessage ? <div className="mt-1 text-xs text-amber-300">{coverageMessage}</div> : null}
 
                   <form action={setAccountBaselineAction} className="mt-3 grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto]">
                     <input type="hidden" name="accountId" value={account.id} />
                     <input type="hidden" name="returnTo" value="/account" />
-                    <input type="hidden" name="expectedRevisionId" value={performance.ledger.effectiveBaseline?.entry.id ?? ""} />
+                    <input type="hidden" name="expectedRevisionId" value={currentBaselineId ?? ""} />
                     <input
                       name="baselineDate"
                       type="date"
@@ -213,41 +261,95 @@ export default async function AccountPage({
                     <input
                       name="reason"
                       type="text"
-                      required={Boolean(performance.ledger.effectiveBaseline)}
-                      placeholder={performance.ledger.effectiveBaseline ? "Correction reason (required)" : "Reason (optional)"}
+                      required={Boolean(currentBaselineId)}
+                      placeholder={currentBaselineId ? "Correction reason (required)" : "Reason (optional)"}
                       className="min-h-10 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100"
                     />
                     <button type="submit" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300 hover:border-emerald-400/60">
                       <Plus className="size-4" aria-hidden />
-                      {performance.ledger.effectiveBaseline ? "Correct" : "Set"}
+                      {currentBaselineId ? "Correct" : "Set"}
                     </button>
                   </form>
                   <p className="mt-1 text-xs text-zinc-500">
-                    Value is the whole account&apos;s worth at the end of that America/New_York date, not cash alone. A
-                    correction never erases the prior entry - it stays below as history.
+                    Account value at the end of the selected date. A correction never erases the prior entry - it stays
+                    below as history.
                   </p>
 
-                  {(() => {
-                    const baselineHistory = account.ledgerEntries
-                      .filter((entry) => entry.type === "STARTING_VALUE")
-                      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
-                    return baselineHistory.length ? (
-                      <ul className="mt-2 space-y-1 text-xs text-zinc-500">
-                        {baselineHistory.map((entry) => (
-                          <li key={entry.id}>
-                            {money(Number(entry.amount))} as of {shortDate(entry.occurredAt)} - recorded {shortDateTime(entry.createdAt)}
-                            {entry.notes ? ` - ${entry.notes}` : ""}
-                          </li>
-                        ))}
+                  {/* Section 5: baseline history / audit trail */}
+                  {baselineHistory.length ? (
+                    <details className="group mt-3 rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium uppercase tracking-normal text-zinc-400 [&::-webkit-details-marker]:hidden">
+                        Baseline history ({baselineHistory.length})
+                        <ChevronDown className="size-3.5 transition group-open:rotate-180" aria-hidden />
+                      </summary>
+                      <ul className="mt-2 space-y-2 border-t border-zinc-800 pt-2 text-xs text-zinc-400">
+                        {baselineHistory.map((entry) => {
+                          const isCurrent = entry.id === currentBaselineId;
+                          const note = parseBaselineNote(entry.notes);
+                          return (
+                            <li key={entry.id} className="flex flex-wrap items-start justify-between gap-2 rounded-md bg-zinc-900/60 px-2 py-1.5">
+                              <div className="min-w-0">
+                                <div className={isCurrent ? "font-medium text-zinc-200" : "text-zinc-400"}>
+                                  {money(Number(entry.amount))} as of {shortDate(entry.occurredAt)}
+                                </div>
+                                <div className="text-zinc-500">recorded {shortDateTime(entry.createdAt)}</div>
+                                {note ? <div className="mt-0.5 text-zinc-500">{note}</div> : null}
+                              </div>
+                              <Badge tone={isCurrent ? "good" : "neutral"}>{isCurrent ? "Current" : "Superseded"}</Badge>
+                            </li>
+                          );
+                        })}
                       </ul>
-                    ) : null;
-                  })()}
+                    </details>
+                  ) : null}
                 </div>
 
+                {/* Sections 6 & 9: funding history + ledger/audit history */}
+                <div className="mt-3 border-t border-zinc-800 pt-3">
+                  <details className="group">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-zinc-200 [&::-webkit-details-marker]:hidden">
+                      Funding &amp; ledger history ({ledgerHistory.length})
+                      <ChevronDown className="size-4 text-zinc-500 transition group-open:rotate-180" aria-hidden />
+                    </summary>
+                    {ledgerHistory.length ? (
+                      <ul className="mt-2 max-h-72 space-y-1.5 overflow-y-auto border-t border-zinc-800 pt-2 text-xs text-zinc-400">
+                        {ledgerHistory.map((entry) => {
+                          const amount = entry.amount === null ? null : Number(entry.amount);
+                          return (
+                            <li key={entry.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-md bg-zinc-900/60 px-2 py-1.5">
+                              <span className="min-w-0">
+                                <span className="font-medium text-zinc-200">{ledgerEntryLabel(entry.type)}</span>{" "}
+                                <span className="text-zinc-500">
+                                  {shortDate(entry.occurredAt)} - {ledgerEntrySourceLabel(entry.source)}
+                                </span>
+                                {entry.notes ? <span className="ml-2 break-words text-zinc-500">{entry.notes}</span> : null}
+                              </span>
+                              <span className="font-medium text-zinc-200">
+                                {amount !== null
+                                  ? signedMoney(signedLedgerAmount(entry.type, amount))
+                                  : entry.accountValue !== null
+                                    ? money(Number(entry.accountValue))
+                                    : "-"}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-xs text-zinc-500">No funding or ledger activity recorded yet.</p>
+                    )}
+                  </details>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+                    <span>Contributions: {performance.netContributions === null ? "UNKNOWN" : signedMoney(performance.netContributions)}</span>
+                    <span>Cash: {performance.ledger.latestBrokerSnapshot?.cash == null ? "N/A" : money(performance.ledger.latestBrokerSnapshot.cash)}</span>
+                  </div>
+                </div>
+
+                {/* Sections 11 & 14: manual funding actions - Schwab accounts never see this form */}
                 {account.source === "MANUAL" ? (
                   <form action={addAccountLedgerEntryAction} className="mt-3 grid gap-2 border-t border-zinc-800 pt-3 sm:grid-cols-[1fr_1fr_1fr_auto]">
                     <input type="hidden" name="accountId" value={account.id} />
-                    <input type="hidden" name="returnTo" value="/positions" />
+                    <input type="hidden" name="returnTo" value="/account" />
                     <select name="type" className="min-h-10 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100">
                       <option value="DEPOSIT">Deposit</option>
                       <option value="WITHDRAWAL">Withdrawal</option>
@@ -262,7 +364,8 @@ export default async function AccountPage({
                   </form>
                 ) : (
                   <p className="mt-3 border-t border-zinc-800 pt-3 text-xs text-zinc-500">
-                    This account&apos;s funding is tracked from Schwab activity - manual deposits/withdrawals aren&apos;t available here.
+                    This account&apos;s funding is tracked from Schwab activity - manual deposits, withdrawals, and
+                    adjustments aren&apos;t available here.
                   </p>
                 )}
               </div>
@@ -860,31 +963,19 @@ function signedMoney(value: number) {
   return `${value > 0 ? "+" : ""}${money(value)}`;
 }
 
-function accountSourceLabel(source: "SCHWAB" | "MANUAL" | "MIXED" | null) {
-  if (source === "SCHWAB") {
-    return "Schwab snapshot";
+function toneClass(value: number | null) {
+  if (value === null) {
+    return "text-zinc-100";
   }
-  if (source === "MANUAL") {
-    return "Manual ledger";
+  if (value > 0) {
+    return "text-emerald-300";
   }
-  if (source === "MIXED") {
-    return "Mixed";
+  if (value < 0) {
+    return "text-red-300";
   }
-  return "N/A";
+  return "text-zinc-100";
 }
 
-function fundingCoverageLabel(status: FundingCoverageStatus | null) {
-  switch (status) {
-    case "COMPLETE":
-      return "Funding coverage complete";
-    case "INCOMPLETE_INFERRED_BASELINE":
-      return "Baseline inferred - set an explicit one";
-    case "INCOMPLETE_MIXED_SOURCES":
-      return "Mixed funding sources - review needed";
-    default:
-      return "No baseline set";
-  }
-}
 
 function schwabMessage(status: string | undefined) {
   switch (status) {
