@@ -465,9 +465,12 @@ describe("Section 7: Friendly Availability Reasons", () => {
       "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY",
       "CONTRIBUTIONS_NEED_ADVANCED_RETURN",
       "NO_CLOSED_CAMPAIGNS",
+      "INCOMPLETE_RESULT_EVIDENCE",
+      "INCOMPLETE_CAPITAL_EVIDENCE",
       "PENDING_FEE_EVIDENCE",
-      "INCOMPLETE_EVIDENCE",
+      "NO_SECURED_CAPITAL",
       "NO_ACCOUNT_VALUE",
+      "UNKNOWN_EXPOSURE",
     ] as const;
     for (const code of codes) {
       const message = friendlyReportingReason(code);
@@ -475,6 +478,21 @@ describe("Section 7: Friendly Availability Reasons", () => {
       expect(message).not.toBe(code);
       expect(message).not.toMatch(/^[A-Z_]+$/); // never a bare SCREAMING_SNAKE_CASE code
     }
+  });
+
+  it("33. fees, incomplete results, incomplete collateral, and unknown exposure each get their own distinct, truthful message", () => {
+    const feeMessage = friendlyReportingReason("PENDING_FEE_EVIDENCE")!;
+    const incompleteResultMessage = friendlyReportingReason("INCOMPLETE_RESULT_EVIDENCE")!;
+    const incompleteCapitalMessage = friendlyReportingReason("INCOMPLETE_CAPITAL_EVIDENCE")!;
+    const unknownExposureMessage = friendlyReportingReason("UNKNOWN_EXPOSURE")!;
+
+    const messages = [feeMessage, incompleteResultMessage, incompleteCapitalMessage, unknownExposureMessage];
+    expect(new Set(messages).size).toBe(messages.length); // all four are distinct sentences
+
+    expect(feeMessage).toMatch(/fee/i);
+    expect(incompleteResultMessage).not.toMatch(/fee/i);
+    expect(incompleteCapitalMessage).not.toMatch(/fee/i);
+    expect(unknownExposureMessage).toBe("Some current position exposure could not be verified.");
   });
 });
 
@@ -527,19 +545,19 @@ describe("Section 9: Multi-account / owner behavior", () => {
     expect(report.accountCount).toBe(2);
   });
 
-  it("30. trustworthy current values aggregate correctly across accounts", () => {
+  it("30. trustworthy current values aggregate correctly across accounts, exposing the true snapshot range rather than a false common instant (Astra corrective patch, Issue 5)", () => {
     const report = reportFor({
       accounts: [
         {
           ledgerEntries: [
             { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
-            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T09:00:00Z", accountValue: 10_300, cash: 10_300 },
           ],
         },
         {
           ledgerEntries: [
             { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 5_000 },
-            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-15T08:00:00Z", accountValue: 5_500, cash: 5_500 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T11:00:00Z", accountValue: 5_500, cash: 5_500 },
           ],
         },
       ],
@@ -547,8 +565,234 @@ describe("Section 9: Multi-account / owner behavior", () => {
 
     expect(report.currentAccountValue).toBe(15_800);
     expect(report.currentAccountValueSource).toBe("SCHWAB");
-    // The honest "as of" for the combined total is the OLDER of the two contributing snapshots.
-    expect(report.currentAccountValueAsOf).toEqual(new Date("2026-09-10T12:00:00Z"));
+    // The two accounts were snapshotted at genuinely different times - there is no single common
+    // "as of" instant for the combined $15,800, so the exact-instant field must be null rather
+    // than dishonestly pretending 09:00 (or any single time) is when the WHOLE total existed.
+    expect(report.currentAccountValueAsOf).toBeNull();
+    expect(report.currentAccountValueOldestSnapshotAsOf).toEqual(new Date("2026-09-10T09:00:00Z"));
+    expect(report.currentAccountValueNewestSnapshotAsOf).toEqual(new Date("2026-09-10T11:00:00Z"));
     expect(report.accountCount).toBe(2);
+  });
+
+  it("31. a single account's account-value timestamp remains an exact instant, not a range", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T09:00:00Z", accountValue: 10_300, cash: 10_300 },
+          ],
+        },
+      ],
+    });
+
+    expect(report.currentAccountValueAsOf).toEqual(new Date("2026-09-10T09:00:00Z"));
+    expect(report.currentAccountValueOldestSnapshotAsOf).toEqual(new Date("2026-09-10T09:00:00Z"));
+    expect(report.currentAccountValueNewestSnapshotAsOf).toEqual(new Date("2026-09-10T09:00:00Z"));
+  });
+
+  it("32. multiple accounts snapshotted at the exact same instant still report one common as-of", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T09:00:00Z", accountValue: 10_300, cash: 10_300 },
+          ],
+        },
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 5_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T09:00:00Z", accountValue: 5_500, cash: 5_500 },
+          ],
+        },
+      ],
+    });
+
+    expect(report.currentAccountValueAsOf).toEqual(new Date("2026-09-10T09:00:00Z"));
+  });
+});
+
+describe("Astra corrective patch - Issue 1 (blocker): trade return requires complete capital evidence", () => {
+  const asOf = new Date("2026-09-05T13:00:00Z");
+
+  it("two confirmed closed-this-week campaigns, one missing collateral -> trade return unavailable with an INCOMPLETE_CAPITAL_EVIDENCE status", () => {
+    // Exact Astra repro: $100 + $100 confirmed gain, one campaign's $1,000 collateral known, the
+    // other's unknown - must never report 200/1000 = 20%.
+    const report = reportFor({
+      accounts: [{ ledgerEntries: [] }],
+      completedCampaigns: [
+        completed({ campaignId: "known", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 100, collateralCommitted: 1_000 }),
+        completed({ campaignId: "unknown", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 100 }),
+      ],
+      asOf,
+    });
+
+    expect(report.tradeReturnPercent).toBeNull();
+    expect(report.tradeReturnGrossPercent).toBeNull();
+    expect(report.tradeReturnStatus).toBe("INCOMPLETE_CAPITAL_EVIDENCE");
+    expect(report.tradeReturnMessage).toMatch(/capital|collateral/i);
+    // Confirmed trading P/L is independently confirmed and must still show - the $200 is real.
+    expect(report.confirmedTradingPL).toBe(200);
+  });
+
+  it("all contributing campaigns have valid collateral -> trade return still calculates correctly", () => {
+    const report = reportFor({
+      accounts: [{ ledgerEntries: [] }],
+      completedCampaigns: [
+        completed({ campaignId: "APLD", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 28, collateralCommitted: 2_350 }),
+        completed({ campaignId: "CORZ", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 68, collateralCommitted: 1_650 }),
+      ],
+      asOf,
+    });
+
+    expect(report.tradeReturnStatus).toBe("OK");
+    expect(report.tradeReturnPercent).toBeCloseTo(2.4, 1);
+  });
+});
+
+describe("Astra corrective patch - Issue 2 (should-fix): incomplete result evidence is never mislabeled as a fee problem", () => {
+  const asOf = new Date("2026-09-05T13:00:00Z");
+
+  it("a confirmed campaign plus an incomplete-result campaign reports INCOMPLETE_RESULT_EVIDENCE, not a fee status", () => {
+    const report = reportFor({
+      accounts: [{ ledgerEntries: [] }],
+      completedCampaigns: [
+        completed({ campaignId: "confirmed", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 100, collateralCommitted: 1_000 }),
+        completed({ campaignId: "incomplete", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "UNKNOWN", pl: null }),
+      ],
+      asOf,
+    });
+
+    expect(report.tradeReturnStatus).toBe("INCOMPLETE_RESULT_EVIDENCE");
+    expect(report.tradeReturnMessage).not.toMatch(/fee/i);
+    expect(report.tradeReturnMessage).toMatch(/result/i);
+  });
+
+  it("a genuinely unresolved fee (no incomplete result, no missing collateral) still reports the fee-specific status/message", () => {
+    const report = reportFor({
+      accounts: [{ ledgerEntries: [] }],
+      completedCampaigns: [
+        completed({
+          campaignId: "CORZ",
+          closedAt: new Date("2026-09-04T21:00:00Z"),
+          finalResult: "GAIN",
+          pl: 68,
+          collateralCommitted: 1_650,
+          feesFullyKnown: false,
+        }),
+      ],
+      asOf,
+    });
+
+    expect(report.tradeReturnStatus).toBe("PENDING_FEE_EVIDENCE");
+    expect(report.tradeReturnMessage).toMatch(/fee/i);
+  });
+});
+
+describe("Astra corrective patch - Issue 3 (should-fix): unknown exposure must not produce a clean 0% utilization", () => {
+  it("unknown open-campaign collateral leaves utilization unavailable, never a false 0%/OK", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_000, cash: 10_000 },
+          ],
+        },
+      ],
+      openExposure: [exposureRow({ status: "OPEN", currentCollateralCommitted: null })], // evidence incomplete, not zero
+    });
+
+    expect(report.capitalUtilizationStatus).toBe("UNKNOWN_EXPOSURE");
+    expect(report.currentCapitalUtilizationPercent).toBeNull(); // never presented as 0% or complete
+    expect(report.capitalUtilizationHasUnknownExposure).toBe(true);
+    expect(report.capitalUtilizationMessage).toMatch(/could not be verified|unknown|unverified/i);
+    // The known committed-capital dollar figure ($0 here, genuinely nothing confirmed) is still a
+    // real, non-fabricated floor and stays available even though the percentage is withheld.
+    expect(report.currentCapitalCommitted).toBe(0);
+  });
+
+  it("an assigned campaign with an unknown share-cost basis also withholds the utilization percentage", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_000, cash: 10_000 },
+          ],
+        },
+      ],
+      openExposure: [exposureRow({ status: "ASSIGNED", remainingShareBasis: null })],
+    });
+
+    expect(report.capitalUtilizationStatus).toBe("UNKNOWN_EXPOSURE");
+    expect(report.currentCapitalUtilizationPercent).toBeNull();
+  });
+
+  it("known zero committed capital with fully-known, complete exposure remains a legitimate 0% (not confused with unknown exposure)", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_000, cash: 10_000 },
+          ],
+        },
+      ],
+      openExposure: [], // no open/assigned campaigns at all - nothing unknown, nothing committed
+    });
+
+    expect(report.capitalUtilizationHasUnknownExposure).toBe(false);
+    expect(report.capitalUtilizationStatus).toBe("OK");
+    expect(report.currentCapitalUtilizationPercent).toBe(0);
+  });
+});
+
+describe("Astra corrective patch - Issue 4 (should-fix): explicit period metadata per metric", () => {
+  it("trade return exposes the exact ISO week boundary summarizeThisWeek actually used", () => {
+    const asOf = new Date("2026-09-05T13:00:00Z"); // Saturday, week of 2026-08-31 (Mon) - 2026-09-06 (Sun)
+    const report = reportFor({ accounts: [{ ledgerEntries: [] }], completedCampaigns: [], asOf });
+
+    expect(report.tradeReturnPeriod).toBe("THIS_WEEK");
+    expect(report.tradeReturnPeriodStartUtc).toEqual(new Date("2026-08-31T00:00:00.000Z"));
+    expect(report.tradeReturnPeriodEndUtc).toEqual(new Date("2026-09-06T23:59:59.999Z"));
+    expect(report.tradeReturnAsOf).toEqual(asOf);
+  });
+
+  it("confirmed trading P/L clearly retains ALL_TIME/tracked-history period semantics, not a weekly one", () => {
+    const report = reportFor({
+      accounts: [{ ledgerEntries: [] }],
+      completedCampaigns: [completed({ campaignId: "old", closedAt: new Date("2025-01-01"), finalResult: "GAIN", pl: 50 })],
+    });
+
+    expect(report.confirmedTradingPLPeriod).toBe("ALL_TIME");
+    expect(report.confirmedTradingPLBasis.toLowerCase()).not.toContain("week");
+    expect(report.confirmedTradingPL).toBe(50); // a campaign closed over a year ago still counts
+  });
+
+  it("whole-account gain exposes the baseline-start and ending-valuation instants when available", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
+          ],
+          brokerTransactionCoverageStatus: "COMPLETE",
+        },
+      ],
+    });
+
+    expect(report.wholeAccountGainPeriod).toBe("SINCE_BASELINE");
+    expect(report.wholeAccountGainPeriodStart).toEqual(new Date("2026-06-16T03:59:59.999Z"));
+    expect(report.wholeAccountGainPeriodEnd).toEqual(new Date("2026-09-10T12:00:00Z"));
+  });
+
+  it("whole-account gain period metadata is null (not fabricated) when there is no baseline at all", () => {
+    const report = reportFor({ accounts: [{ ledgerEntries: [] }] });
+
+    expect(report.wholeAccountGainPeriodStart).toBeNull();
+    expect(report.wholeAccountGainPeriodEnd).toBeNull();
   });
 });

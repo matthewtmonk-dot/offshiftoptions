@@ -167,20 +167,47 @@ export type ThisWeekSummary = {
    * must show `netPL` as "pending"/not-yet-exact rather than a confirmed number in that case,
    * per the product rule that an unknown fee must never silently become a fake $0. */
   netPLExact: boolean;
-  /** Gross-basis return - always exact whenever gross P/L and secured capital are both known. */
+  /** Astra corrective patch (Issue 1, blocker): true only when EVERY campaign contributing to
+   * `grossPL`/`netPL` above (the full CONFIRMED+PENDING "known" set) also has a genuinely known
+   * `collateralCommitted`. False means at least one campaign's collateral is unknown - in that
+   * case BOTH return-on-secured-capital figures below are withheld entirely. Without this check,
+   * an unknown-collateral campaign silently contributed $0 to the denominator while its P/L still
+   * counted in the numerator, inflating the ratio (reproduced case: two $100-gain campaigns, one
+   * with $1,000 collateral and one with unknown collateral, wrongly returning 20% instead of
+   * being withheld). This is a whole-set completeness question, not a per-campaign one - the
+   * denominator is a SUM, so one unknown value corrupts the whole ratio, not just its own share. */
+  securedCapitalFullyKnown: boolean;
+  /** Gross-basis return - only non-null when `securedCapitalFullyKnown` and secured capital is a
+   * real positive total. Available even before every fee is confirmed (unlike the net figure). */
   grossReturnOnSecuredCapitalPercent: number | null;
-  /** Net-basis return - only non-null when `netPLExact` is true; never a rounded-off guess. */
+  /** Net-basis return - only non-null when both `netPLExact` and `securedCapitalFullyKnown` are
+   * true and secured capital is a real positive total; never a rounded-off guess. */
   returnOnSecuredCapitalPercent: number | null;
+  /**
+   * Astra corrective patch (Issue 4): the exact ISO 8601 calendar week (Monday 00:00:00.000 UTC
+   * through Sunday 23:59:59.999 UTC) `asOf` falls within - the SAME convention `isoWeekKey` (below)
+   * already uses to decide which campaigns count as "closed this week." Exposed so a caller can
+   * show the literal boundary instead of just the word "week," and so nobody has to guess whether
+   * this is UTC, America/New_York, or something else - it is UTC calendar days, deliberately
+   * unrelated to the baseline/funding module's America/New_York end-of-day convention
+   * (accountLedger.ts's `endOfNyCalendarDateUtc`) - the two conventions are not the same and this
+   * ticket does not attempt to unify them.
+   */
+  weekStartUtc: Date;
+  weekEndUtc: Date;
 };
 
 /**
  * "How did I do this week?" - the compact Tracker/Performance answer, distinct from
  * summarizeWeeklyReturns' fixed-account-baseline trend line below: this buckets only
- * campaigns that CLOSED in the current ISO week and returns their P/L against the actual
- * capital those specific campaigns secured, not the whole account. Never invents a value, and
- * never lets an unresolved fee masquerade as a confirmed net figure - see `netPLExact`. A
- * PENDING campaign (known result, unresolved fee) contributes to `grossPL`/`netPL` but never to
- * `wins`/`losses`/`confirmedCount`, matching `summarizeWinLoss`'s stricter confirmed denominator.
+ * campaigns that CLOSED in the current ISO week and returns their LIFETIME REALIZED result
+ * against the actual capital those specific campaigns secured, not the whole account. The concept
+ * is "return on campaigns closed this week," never "profit earned only during this calendar
+ * week" - a campaign open for a month that happens to close this week contributes its FULL
+ * lifetime P/L, not a pro-rated slice. Never invents a value, and never lets an unresolved fee
+ * masquerade as a confirmed net figure - see `netPLExact`. A PENDING campaign (known result,
+ * unresolved fee) contributes to `grossPL`/`netPL` but never to `wins`/`losses`/`confirmedCount`,
+ * matching `summarizeWinLoss`'s stricter confirmed denominator.
  */
 export function summarizeThisWeek(completed: CompletedCampaignResult[], asOf: Date = new Date()): ThisWeekSummary {
   const currentWeekKey = isoWeekKey(asOf);
@@ -194,7 +221,9 @@ export function summarizeThisWeek(completed: CompletedCampaignResult[], asOf: Da
   const netPLExact = pending.length === 0 && known.length === thisWeek.length;
   const grossPL = known.length ? round(known.reduce((sum, c) => sum + (c.grossPL ?? c.pl ?? 0), 0), 2) : null;
   const netPL = known.length ? round(known.reduce((sum, c) => sum + (c.pl ?? 0), 0), 2) : null;
+  const securedCapitalFullyKnown = known.every((c) => c.collateralCommitted !== null && c.collateralCommitted !== undefined);
   const securedCapitalTotal = known.reduce((sum, c) => sum + (c.collateralCommitted ?? 0), 0);
+  const { start: weekStartUtc, end: weekEndUtc } = isoWeekBoundsUtc(asOf);
 
   return {
     completedCount: thisWeek.length,
@@ -206,9 +235,15 @@ export function summarizeThisWeek(completed: CompletedCampaignResult[], asOf: Da
     grossPL,
     netPL,
     netPLExact,
-    grossReturnOnSecuredCapitalPercent: grossPL !== null && securedCapitalTotal > 0 ? round((grossPL / securedCapitalTotal) * 100, 2) : null,
+    securedCapitalFullyKnown,
+    grossReturnOnSecuredCapitalPercent:
+      securedCapitalFullyKnown && grossPL !== null && securedCapitalTotal > 0 ? round((grossPL / securedCapitalTotal) * 100, 2) : null,
     returnOnSecuredCapitalPercent:
-      netPLExact && netPL !== null && securedCapitalTotal > 0 ? round((netPL / securedCapitalTotal) * 100, 2) : null,
+      securedCapitalFullyKnown && netPLExact && netPL !== null && securedCapitalTotal > 0
+        ? round((netPL / securedCapitalTotal) * 100, 2)
+        : null,
+    weekStartUtc,
+    weekEndUtc,
   };
 }
 
@@ -622,6 +657,20 @@ function isoWeekKey(date: Date): string {
   const firstThursday = new Date(Date.UTC(utc.getUTCFullYear(), 0, 4));
   const week = 1 + Math.round(((utc.getTime() - firstThursday.getTime()) / 86_400_000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
   return `${utc.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+/**
+ * The exact Monday-through-Sunday UTC calendar-day boundary `isoWeekKey` uses to bucket a date
+ * into "this week" - same underlying day-of-week arithmetic, just returning the instants
+ * themselves instead of a label. Used by `summarizeThisWeek` to expose its own period boundary
+ * (Astra corrective patch, Issue 4) rather than leaving a caller to guess or re-derive it.
+ */
+function isoWeekBoundsUtc(date: Date): { start: Date; end: Date } {
+  const start = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNumber = (start.getUTCDay() + 6) % 7; // Monday = 0
+  start.setUTCDate(start.getUTCDate() - dayNumber);
+  const end = new Date(start.getTime() + 7 * MS_PER_DAY - 1);
+  return { start, end };
 }
 
 /**

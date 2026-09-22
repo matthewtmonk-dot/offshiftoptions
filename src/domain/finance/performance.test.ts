@@ -112,8 +112,29 @@ describe("this week's summary", () => {
     expect(summary.netPL).toBe(124);
     expect(summary.netPLExact).toBe(true); // zero-fee fixture - fees are known ($0), not merely assumed
     expect(summary.grossPL).toBe(124); // gross equals net here since there are no fees at all
+    expect(summary.securedCapitalFullyKnown).toBe(true);
     expect(summary.returnOnSecuredCapitalPercent).toBeCloseTo(2.16, 1); // 124 / 5750
     expect(summary.grossReturnOnSecuredCapitalPercent).toBeCloseTo(2.16, 1);
+    // Astra corrective patch (Issue 4): the exact ISO week boundary this fixture's asOf falls in.
+    expect(summary.weekStartUtc).toEqual(new Date("2026-08-31T00:00:00.000Z"));
+    expect(summary.weekEndUtc).toEqual(new Date("2026-09-06T23:59:59.999Z"));
+  });
+
+  it("Astra corrective patch (Issue 1, blocker): one confirmed campaign with unknown collateral withholds BOTH return percentages, never treating it as $0 secured", () => {
+    // Exact Astra repro: two $100-gain campaigns, one with $1,000 collateral and one with unknown
+    // collateral - must never wrongly report 200/1000 = 20%.
+    const summary = summarizeThisWeek(
+      [
+        { campaignId: "known", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 100, daysActive: 7, collateralCommitted: 1_000 },
+        { campaignId: "unknown", closedAt: new Date("2026-09-04T21:00:00Z"), finalResult: "GAIN", pl: 100, daysActive: 7 }, // collateralCommitted omitted - genuinely unknown, not zero
+      ],
+      asOf,
+    );
+
+    expect(summary.netPL).toBe(200); // the P/L itself is still fully reported
+    expect(summary.securedCapitalFullyKnown).toBe(false);
+    expect(summary.grossReturnOnSecuredCapitalPercent).toBeNull(); // never 20%
+    expect(summary.returnOnSecuredCapitalPercent).toBeNull();
   });
 
   it("shows gross P/L as exact but withholds a confirmed net figure when a completed campaign has an unresolved fee", () => {
@@ -137,6 +158,7 @@ describe("this week's summary", () => {
     expect(summary.completedCount).toBe(2);
     expect(summary.netPLExact).toBe(false);
     expect(summary.grossPL).toBe(96); // 28 + 68 - always exact, doesn't depend on fee resolution
+    expect(summary.securedCapitalFullyKnown).toBe(true); // an unresolved FEE is not the same as unknown collateral
     expect(summary.grossReturnOnSecuredCapitalPercent).not.toBeNull();
     // The net figures are still computed (so a caller COULD inspect them) but netPLExact tells
     // the UI not to present them as a confirmed "Net P/L."
@@ -158,7 +180,9 @@ describe("this week's summary", () => {
       asOf,
     );
     expect(summary.netPL).toBe(20);
+    expect(summary.securedCapitalFullyKnown).toBe(false);
     expect(summary.returnOnSecuredCapitalPercent).toBeNull();
+    expect(summary.grossReturnOnSecuredCapitalPercent).toBeNull();
   });
 
   it("counts a loss this week without dressing it up", () => {
