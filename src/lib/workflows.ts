@@ -26,6 +26,7 @@ import {
   type Visibility,
 } from "./privacy";
 import { prisma } from "./prisma";
+import { Prisma } from "@/generated/prisma/client";
 import { requireTicker, ValidationError } from "./tickers";
 import { notifyInApp, NOTIFICATIONS_PAGE_VISIBLE_TYPES } from "./notifications";
 import type { AccountLedgerEntryType } from "@/generated/prisma/enums";
@@ -501,15 +502,20 @@ export async function addAccountLedgerEntryForUser(
  * replaced revision's id and the correction reason are recorded in `notes` (the existing field -
  * no new schema).
  *
- * Concurrency: the caller must pass `expectedRevisionId` - the id of the baseline revision it
- * last saw as effective (or the sentinel "" when it believes no baseline exists yet). Immediately
- * before writing, the current effective revision is re-selected inside the same transaction; a
- * mismatch means another correction was already recorded and this request is stale, so it is
- * rejected outright rather than silently appending a conflicting revision. This is the same level
- * of protection as Ticket 7's settings-revision guard (a re-check-then-write inside one
- * transaction) - it narrows the race window to the transaction's own duration, not eliminates it
- * under arbitrary concurrent load, which would need serializable isolation this ticket does not
- * add.
+ * Concurrency (Astra corrective patch, Issue 6): the caller must pass `expectedRevisionId` - the
+ * id of the baseline revision it last saw as effective (or the sentinel "" when it believes no
+ * baseline exists yet). Immediately before writing, the current effective revision is re-selected
+ * inside the same transaction; a mismatch means another correction was already recorded and this
+ * request is stale, so it is rejected outright rather than silently appending a conflicting
+ * revision. The transaction itself now runs at Serializable isolation - Postgres detects the
+ * read-then-write race (two concurrent corrections both reading revision X, both passing
+ * expectedRevisionId === X, both trying to append a replacement) as a write conflict and aborts
+ * the loser with SQLSTATE 40001 (Prisma error code P2034), which is caught below and surfaced as a
+ * user-safe "reload and try again" validation error rather than a raw transaction failure.
+ *
+ * Correction reason (Astra corrective patch, Issue 9): a CORRECTION (an existing effective
+ * baseline being replaced) must supply a non-empty reason for auditability. The very first
+ * baseline for an account has no prior revision to explain replacing, so its reason stays optional.
  */
 export async function setAccountBaselineForUser(
   userId: string,
@@ -537,34 +543,45 @@ export async function setAccountBaselineForUser(
   const reason = trimText(reasonInput, 300);
   const expectedRevisionId = trimText(expectedRevisionIdInput, 200);
 
-  return prisma.$transaction(async (tx) => {
-    const existing = await tx.accountLedgerEntry.findMany({
-      where: { accountId, type: "STARTING_VALUE" },
-      select: { id: true, occurredAt: true, createdAt: true, amount: true },
-    });
-    const currentEffective = selectEffectiveBaseline(
-      existing.map((entry): AccountLedgerEntryInput => ({ id: entry.id, type: "STARTING_VALUE", occurredAt: entry.occurredAt, createdAt: entry.createdAt, amount: entry.amount })),
-    );
-    const currentEffectiveId = currentEffective?.entry.id ?? "";
-    if (expectedRevisionId !== currentEffectiveId) {
-      throw new ValidationError("This baseline was already updated elsewhere. Reload and try again.");
-    }
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        const existing = await tx.accountLedgerEntry.findMany({
+          where: { accountId, type: "STARTING_VALUE" },
+          select: { id: true, occurredAt: true, createdAt: true, amount: true },
+        });
+        const currentEffective = selectEffectiveBaseline(
+          existing.map((entry): AccountLedgerEntryInput => ({ id: entry.id, type: "STARTING_VALUE", occurredAt: entry.occurredAt, createdAt: entry.createdAt, amount: entry.amount })),
+        );
+        const currentEffectiveId = currentEffective?.entry.id ?? "";
+        if (expectedRevisionId !== currentEffectiveId) {
+          throw new ValidationError("This baseline was already updated elsewhere. Reload and try again.");
+        }
+        if (currentEffective && !reason) {
+          throw new ValidationError("Enter a reason for this correction.");
+        }
 
-    const notes = currentEffective
-      ? `Replaces STARTING_VALUE ${currentEffective.entry.id}${reason ? ` - ${reason}` : ""}`
-      : reason || null;
+        const notes = currentEffective ? `Replaces STARTING_VALUE ${currentEffective.entry.id} - ${reason}` : reason || null;
 
-    return tx.accountLedgerEntry.create({
-      data: {
-        accountId,
-        type: "STARTING_VALUE",
-        occurredAt,
-        amount: accountValue,
-        source: "MANUAL",
-        notes,
+        return tx.accountLedgerEntry.create({
+          data: {
+            accountId,
+            type: "STARTING_VALUE",
+            occurredAt,
+            amount: accountValue,
+            source: "MANUAL",
+            notes,
+          },
+        });
       },
-    });
-  });
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
+      throw new ValidationError("This baseline was updated at the same time elsewhere. Reload and try again.");
+    }
+    throw error;
+  }
 }
 
 export async function saveSchwabDeveloperCredentialsForUser(

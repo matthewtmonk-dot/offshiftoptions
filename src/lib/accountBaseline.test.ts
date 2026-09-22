@@ -12,6 +12,7 @@ vi.mock("./prisma", () => ({ prisma: db }));
 
 import { addAccountLedgerEntryForUser, setAccountBaselineForUser } from "./workflows";
 import { ValidationError } from "./tickers";
+import { Prisma } from "@/generated/prisma/client";
 
 function manualAccount(overrides: Partial<{ id: string; userId: string }> = {}) {
   return { id: "acct-1", userId: "matt", source: "MANUAL", ...overrides };
@@ -152,5 +153,58 @@ describe("setAccountBaselineForUser (Account Baseline & Funding Boundaries)", ()
     expect(db.$transaction).toHaveBeenCalledTimes(1);
     expect(db.accountLedgerEntry.findMany).toHaveBeenCalledTimes(1);
     expect(db.accountLedgerEntry.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a correction with no reason, before any write (Astra corrective patch, Issue 9)", async () => {
+    db.tradingAccount.findFirst.mockResolvedValue(manualAccount());
+    db.accountLedgerEntry.findMany.mockResolvedValue([
+      { id: "baseline-1", occurredAt: new Date("2026-06-16T03:59:59.999Z"), createdAt: new Date("2026-06-16T04:00:00Z"), amount: 10_000 },
+    ]);
+
+    await expect(setAccountBaselineForUser("matt", "acct-1", "2026-06-20", "10500", "", "baseline-1")).rejects.toThrow(
+      /reason/i,
+    );
+    expect(db.accountLedgerEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("allows the very first baseline with no reason - there is no prior revision to explain replacing", async () => {
+    db.tradingAccount.findFirst.mockResolvedValue(manualAccount());
+    db.accountLedgerEntry.findMany.mockResolvedValue([]);
+    db.accountLedgerEntry.create.mockResolvedValue({ id: "baseline-1" });
+
+    await expect(setAccountBaselineForUser("matt", "acct-1", "2026-06-15", "10000", "", "")).resolves.toBeDefined();
+  });
+
+  it("runs the correction transaction at Serializable isolation (Astra corrective patch, Issue 6)", async () => {
+    db.tradingAccount.findFirst.mockResolvedValue(manualAccount());
+    db.accountLedgerEntry.findMany.mockResolvedValue([]);
+    db.accountLedgerEntry.create.mockResolvedValue({ id: "baseline-1" });
+
+    await setAccountBaselineForUser("matt", "acct-1", "2026-06-15", "10000", "", "");
+
+    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
+  });
+
+  it("translates a Postgres serialization/write-conflict failure (P2034) into a user-safe stale/reload error", async () => {
+    db.tradingAccount.findFirst.mockResolvedValue(manualAccount());
+    // Simulates two concurrent corrections both reading the same effective revision and both
+    // passing the transaction's internal re-check - only Serializable isolation catches this at
+    // the database level, surfacing as Prisma error code P2034 when the transaction commits.
+    db.$transaction.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Transaction failed due to a write conflict or a deadlock. Please retry your transaction", {
+        code: "P2034",
+        clientVersion: "test",
+      }),
+    );
+
+    await expect(setAccountBaselineForUser("matt", "acct-1", "2026-06-15", "10000", "", "")).rejects.toThrow(ValidationError);
+    await expect(setAccountBaselineForUser("matt", "acct-1", "2026-06-15", "10000", "", "")).rejects.toThrow(/reload and try again/i);
+  });
+
+  it("does not swallow an unrelated transaction failure as if it were a stale-revision conflict", async () => {
+    db.tradingAccount.findFirst.mockResolvedValue(manualAccount());
+    db.$transaction.mockRejectedValueOnce(new Error("connection lost"));
+
+    await expect(setAccountBaselineForUser("matt", "acct-1", "2026-06-15", "10000", "", "")).rejects.toThrow("connection lost");
   });
 });

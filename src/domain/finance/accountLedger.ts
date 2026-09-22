@@ -83,18 +83,36 @@ export type AccountCashFlowEvent = {
 };
 
 /**
- * COMPLETE: an explicit STARTING_VALUE exists and every contribution event in the measurement
- * interval traces unambiguously to one funding authority - dollar gain may be shown.
+ * COMPLETE: an explicit STARTING_VALUE exists, every contribution event in the measurement
+ * interval traces unambiguously to one funding authority, and (for a Schwab-evidenced account) the
+ * measurement interval fits inside the trailing window Schwab sync actually re-fetches each time -
+ * dollar gain may be shown.
  * INCOMPLETE_INFERRED_BASELINE: no explicit STARTING_VALUE - startingCapital (if any) comes from
  * the broker-transfer heuristic, which cannot prove original funding (see canUseTransferAsStartingCapital's
  * bounded 90-day-import-window limitation) - labeled provisional, not blocked (existing,
- * already-tested behavior is preserved), but never "COMPLETE" evidence.
+ * already-tested behavior is preserved), but never "COMPLETE" evidence, and never a confirmed gain
+ * (Astra corrective patch, Issue 4: an inferred baseline can never prove it captured original funding).
  * INCOMPLETE_MIXED_SOURCES: both a manual ledger contribution and a broker-transfer contribution
  * were recorded inside the same measurement interval - since matching date/amount alone is not
  * proof they are the same real-world event (see isSameManualStartingTransfer's narrower,
  * baseline-only use), this account's contribution history is ambiguous - dollar gain is withheld.
+ * INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY (Astra corrective patch, Issue 3): the account has Schwab
+ * evidence (a BROKER_SNAPSHOT), but the measurement interval (baseline to ending valuation) is
+ * longer than SCHWAB_TRANSACTION_LOOKBACK_DAYS (workflows.ts) - every Schwab sync only ever
+ * re-fetches that trailing window of transactions, so "no broker transfer found" outside it means
+ * "never observed," not "confirmed absent." Never invents a transfer to fill the gap; never expands
+ * the import window here - that would require a new importer, out of scope for this fix.
  */
-export type FundingCoverageStatus = "COMPLETE" | "INCOMPLETE_INFERRED_BASELINE" | "INCOMPLETE_MIXED_SOURCES";
+export type FundingCoverageStatus =
+  | "COMPLETE"
+  | "INCOMPLETE_INFERRED_BASELINE"
+  | "INCOMPLETE_MIXED_SOURCES"
+  | "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY";
+
+/** Mirrors SCHWAB_TRANSACTION_LOOKBACK_DAYS in workflows.ts - every Schwab sync (not just the
+ * first) only ever re-fetches this trailing window of transactions, so this function has no way to
+ * affirmatively prove funding coverage further back than this without a new importer (Issue 3). */
+const SCHWAB_TRANSACTION_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
 
 export type AccountPerformanceSummary = {
   ledger: AccountLedgerSummary;
@@ -213,8 +231,15 @@ export function selectEffectiveBaseline(entries: AccountLedgerEntryInput[]): Eff
  * are always on the same side of any transition. A general-purpose implementation for arbitrary
  * times of day would need to re-check the offset at the corrected instant too; end-of-day never
  * needs that.
+ *
+ * Astra corrective patch (Issue 7): validates the calendar components themselves before
+ * conversion - `Date.UTC` silently normalizes an impossible date (e.g. 2026-02-30 rolls into
+ * March), which would otherwise accept a baseline date that never existed. Also rejects a baseline
+ * instant that is still in the future relative to `referenceNow` (defaults to the real "now";
+ * overridable only for deterministic testing) - a baseline records the account's value at a point
+ * that has already happened, never a value not yet knowable.
  */
-export function endOfNyCalendarDateUtc(nyDateInput: string): Date {
+export function endOfNyCalendarDateUtc(nyDateInput: string, referenceNow: Date = new Date()): Date {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(nyDateInput.trim());
   if (!match) {
     throw new RangeError(`Expected a YYYY-MM-DD date, got "${nyDateInput}".`);
@@ -224,14 +249,31 @@ export function endOfNyCalendarDateUtc(nyDateInput: string): Date {
   const month = Number(monthText);
   const day = Number(dayText);
 
+  if (month < 1 || month > 12) {
+    throw new RangeError(`"${nyDateInput}" has an invalid month.`);
+  }
+  // new Date(Date.UTC(year, month, 0)) is day 0 of the (0-indexed) month after `month` - i.e. the
+  // last day of `month` itself (1-indexed) - the standard idiom for "days in a 1-indexed month"
+  // that automatically accounts for leap years without a separate leap-year formula.
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (day < 1 || day > daysInMonth) {
+    throw new RangeError(`"${nyDateInput}" is not a real calendar date.`);
+  }
+
   // The offset is computed from a whole-second guess (no ms) - nyOffsetMillisAt reads NY's wall
   // clock via Intl.DateTimeFormat, which truncates sub-second precision. Feeding it a guess that
   // already has .999ms would make that truncation silently drop the fractional second from one
   // side of the subtraction but not the other, corrupting the offset by up to 999ms. The trailing
-  // ", 999" is added back afterward, once the offset itself is exact.
+  // 999ms is added back afterward, once the offset itself is exact.
   const guess = Date.UTC(year, month - 1, day, 23, 59, 59);
   const offsetMs = nyOffsetMillisAt(new Date(guess));
-  return new Date(guess + offsetMs + 999);
+  const result = new Date(guess + offsetMs + 999);
+
+  if (result.getTime() > referenceNow.getTime()) {
+    throw new RangeError(`"${nyDateInput}" is a future date - a baseline can only record a value that has already happened.`);
+  }
+
+  return result;
 }
 
 /** The number of milliseconds to ADD to "NY wall-clock digits read as if they were UTC" to reach
@@ -342,12 +384,33 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
     })
     .sort((left, right) => left.occurredAt.getTime() - right.occurredAt.getTime());
 
-  // Measurement-interval upper bound: funding dated after the account's own ending valuation
-  // instant hasn't been reflected in currentValue yet, so it must not be subtracted from gain
-  // prematurely. A Schwab account's ending instant is its own latest snapshot's timestamp
-  // (currentValue IS that dated reading); a manual account has no such reading, so "now" (or a
-  // caller-supplied asOf, e.g. for deterministic tests) is the only available anchor.
-  const endingAt = ledger.latestBrokerSnapshot?.asOf ?? input.asOf ?? new Date();
+  const transferRecords = brokerRecords.filter(isExternalTransfer);
+  const firstPositiveTransfer = transferRecords.find((record) => record.amount > 0) ?? null;
+  // Broker-transfer baseline INFERENCE only ever runs when there is no explicit baseline - an
+  // explicit STARTING_VALUE always wins (see the ACCOUNT GAIN RULE / explicit-vs-inferred
+  // precedence this ticket establishes). The underlying transfer record itself is never deleted
+  // or altered either way - only whether it is TREATED as the baseline is affected. Computed here
+  // (before endingAt) purely so baselineInstant below can see it - this doesn't change its value.
+  const baselineTransfer =
+    !explicitBaseline && firstPositiveTransfer && canUseTransferAsStartingCapital(firstPositiveTransfer, brokerRecords, input.ledgerEntries)
+      ? firstPositiveTransfer
+      : null;
+  // The one instant that starts the measurement interval, whichever baseline (explicit or
+  // inferred) is in effect - used to bound every reconstructed value/funding figure below to the
+  // same interval (Astra corrective patch, Issues 2 & 5: valuation and funding must agree).
+  const baselineInstant = explicitBaseline?.occurredAt ?? baselineTransfer?.occurredAt ?? null;
+
+  // A BROKER_SNAPSHOT dated BEFORE the baseline is not a valid ending valuation for this interval
+  // - it describes the account before the measurement period even began (Astra corrective patch,
+  // Issue 2's second repro: a stale pre-baseline snapshot must never produce a fabricated negative
+  // "gain"). When it's invalid, fall back to input.asOf/now for interval-filtering purposes so a
+  // real post-baseline ledger deposit still isn't silently discarded just because the only known
+  // snapshot predates the interval - see snapshotIsValidEnding's use in currentValue below, which
+  // is the thing that actually gates whether a value is trusted for gain.
+  const snapshotIsValidEnding =
+    ledger.latestBrokerSnapshot !== null &&
+    (baselineInstant === null || ledger.latestBrokerSnapshot.asOf.getTime() >= baselineInstant.getTime());
+  const endingAt = snapshotIsValidEnding ? ledger.latestBrokerSnapshot!.asOf : (input.asOf ?? new Date());
 
   // Only the EFFECTIVE baseline revision ever becomes a cash-flow event - a superseded
   // correction must never be summed alongside it (Astra: summarizeAccountPerformance may sum
@@ -380,23 +443,20 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
     })
     .filter((event): event is AccountCashFlowEvent => event !== null);
 
-  // Kept for the legacy same-day/same-amount baseline-transfer dedup below (isSameManualStartingTransfer)
-  // - it deliberately still looks at every raw STARTING_VALUE entry, not just the effective one,
-  // since a broker transfer can match whichever revision it was originally entered against.
-  const manualStartingEvents = input.ledgerEntries
-    .filter((entry) => entry.type === "STARTING_VALUE" && numeric(entry.amount) !== null)
-    .map((entry): AccountCashFlowEvent => ({ type: "STARTING_VALUE", occurredAt: toDate(entry.occurredAt), amount: numeric(entry.amount)!, source: "LEDGER" }));
+  // Astra corrective patch (Issue 1, blocker): once an explicit baseline exists, ONLY that
+  // effective revision may define "the baseline-establishing transfer" for the dedup below - a
+  // SUPERSEDED STARTING_VALUE revision (replaced by a correction) must never suppress a genuine
+  // later broker deposit just because it happens to share that stale revision's date/amount.
+  // Reproduced case: superseded $500 STARTING_VALUE dated Aug 2, corrected effective baseline
+  // $10,000 dated July, a genuine $500 broker deposit ALSO on Aug 2 - the old code matched the
+  // deposit against the superseded revision and silently dropped it as a "duplicate," when it was
+  // real, uncounted funding. (Every STARTING_VALUE entry has a numeric amount by construction here
+  // - selectEffectiveBaseline already filtered out non-numeric ones - so explicitBaseline.value is
+  // never used to look up a discarded value.)
+  const manualStartingEvents: AccountCashFlowEvent[] = explicitBaseline
+    ? [{ type: "STARTING_VALUE", occurredAt: explicitBaseline.occurredAt, amount: explicitBaseline.value, source: "LEDGER" }]
+    : [];
 
-  const transferRecords = brokerRecords.filter(isExternalTransfer);
-  const firstPositiveTransfer = transferRecords.find((record) => record.amount > 0) ?? null;
-  // Broker-transfer baseline INFERENCE only ever runs when there is no explicit baseline - an
-  // explicit STARTING_VALUE always wins (see the ACCOUNT GAIN RULE / explicit-vs-inferred
-  // precedence this ticket establishes). The underlying transfer record itself is never deleted
-  // or altered either way - only whether it is TREATED as the baseline is affected.
-  const baselineTransfer =
-    !explicitBaseline && firstPositiveTransfer && canUseTransferAsStartingCapital(firstPositiveTransfer, brokerRecords, input.ledgerEntries)
-      ? firstPositiveTransfer
-      : null;
   const brokerCashFlows = transferRecords
     .filter((record) => {
       if (baselineTransfer && record === baselineTransfer) {
@@ -460,16 +520,42 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
   // this (see the ticket's explicit rule), so this is surfaced as ambiguous rather than guessed.
   const contributionSources = new Set(contributionEvents.map((event) => event.source));
   const hasMixedFundingSources = contributionSources.has("LEDGER") && contributionSources.has("BROKER_TRANSFER");
+  // Astra corrective patch (Issue 3, blocker): a Schwab sync only ever re-fetches a trailing
+  // SCHWAB_TRANSACTION_LOOKBACK_DAYS window of transactions (see workflows.ts) - "no transfer found"
+  // outside that window means "never observed," not "confirmed absent." An explicit baseline whose
+  // measurement interval is longer than that window can never affirmatively prove complete funding
+  // coverage from Schwab evidence alone, so it must not be labeled COMPLETE.
+  const hasSchwabEvidence = ledger.latestBrokerSnapshot !== null;
+  const intervalExceedsSchwabLookback =
+    explicitBaseline !== null &&
+    hasSchwabEvidence &&
+    baselineInstant !== null &&
+    endingAt.getTime() - baselineInstant.getTime() > SCHWAB_TRANSACTION_LOOKBACK_MS;
   const fundingCoverageStatus: FundingCoverageStatus | null =
     startingCapital === null
       ? null
       : hasMixedFundingSources
         ? "INCOMPLETE_MIXED_SOURCES"
-        : explicitBaseline
-          ? "COMPLETE"
-          : "INCOMPLETE_INFERRED_BASELINE";
+        : !explicitBaseline
+          ? "INCOMPLETE_INFERRED_BASELINE"
+          : intervalExceedsSchwabLookback
+            ? "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY"
+            : "COMPLETE";
 
-  const brokerTradeRecords = brokerRecords.filter((record) => OPTION_TRADING_ACTIVITY_KINDS.has(record.activityKind));
+  // Astra corrective patch (Issues 2 & 5, blockers): trading P/L that has its own per-event dates
+  // (broker transaction records) is bounded to the SAME measurement interval as every other
+  // reconstructed figure here - a pre-baseline trade is already reflected in the starting value
+  // (double-counting it would inflate gain), and a post-endingAt trade hasn't been reflected in the
+  // ending valuation yet.
+  const brokerTradeRecords = brokerRecords.filter((record) => {
+    if (!OPTION_TRADING_ACTIVITY_KINDS.has(record.activityKind)) {
+      return false;
+    }
+    if (baselineInstant !== null && record.occurredAt.getTime() <= baselineInstant.getTime()) {
+      return false;
+    }
+    return record.occurredAt.getTime() <= endingAt.getTime();
+  });
   const brokerTradingPL = brokerTradeRecords.length
     ? round(brokerTradeRecords.reduce((sum, record) => sum + record.amount, 0), 2)
     : null;
@@ -491,17 +577,51 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
       )
     : null;
 
-  const current = currentAccountValue(ledger, tradingPL ?? 0);
-  const currentValue = current.value;
-  const currentValueSource = currentValue === null ? null : current.source;
-  // ACCOUNT GAIN RULE: ending - beginning - deposits + withdrawals, exposed only when funding
-  // coverage is complete (an explicit baseline, no mixed-source ambiguity) - never a cash-flow-
-  // weighted percentage (that stays future work), and never computed from ambiguous evidence.
+  // Astra corrective patch (Issues 2 & 5, blockers): the "current value" used for whole-account
+  // gain must itself be a genuine, interval-bounded ending valuation - never the legacy
+  // currentAccountValue() helper's MANUAL fallback, which derives from ledger.netContributions
+  // (only lower-bounded by the baseline, with NO upper bound at all - a deposit dated after
+  // endingAt used to leak straight through into currentValue even though this function's OWN,
+  // separately-bounded `netContributions` above correctly excluded it, producing a phantom "gain"
+  // equal to the leaked deposit). Two cases:
+  //  - A BROKER_SNAPSHOT is trusted only when it is dated at/after the baseline (snapshotIsValidEnding,
+  //    computed above) - a snapshot from before the baseline describes a different, earlier state
+  //    of the account and must never be diffed against the baseline as if it were the ending value.
+  //  - Absent a valid snapshot, a MANUAL reconstruction (startingCapital + bounded netContributions
+  //    + tradingPL) is trusted only when tradingPL itself is NOT the undated, lifetime CAMPAIGNS
+  //    aggregate - that number carries no per-trade dates, so it can never be proven to fall
+  //    entirely after the baseline (Issue 5's exact repro: a dated baseline that already includes
+  //    lifetime trading gains, with those same gains added again from the fallback total).
+  let currentValue: number | null;
+  let currentValueSource: "SCHWAB" | "MANUAL" | null;
+  if (snapshotIsValidEnding) {
+    currentValue = ledger.latestBrokerSnapshot!.accountValue;
+    currentValueSource = "SCHWAB";
+  } else if (
+    // The MANUAL reconstruction fallback is only for an account with NO broker snapshot at all. An
+    // account that HAS a snapshot but it's invalid (before the baseline) must not fall through to
+    // this branch - that would silently assume zero trading/valuation change since the baseline,
+    // which is exactly as unproven as the CAMPAIGNS-P/L case this branch already guards against.
+    ledger.latestBrokerSnapshot === null &&
+    startingCapital !== null &&
+    (baselineInstant === null || tradingPLSource !== "CAMPAIGNS")
+  ) {
+    currentValue = round(startingCapital + (netContributions ?? 0) + (tradingPL ?? 0), 2);
+    currentValueSource = "MANUAL";
+  } else {
+    currentValue = null;
+    currentValueSource = null;
+  }
+
+  // ACCOUNT GAIN RULE: ending - beginning - deposits + withdrawals, exposed only when there is a
+  // trustworthy ending valuation (currentValue above) AND funding coverage is affirmatively
+  // complete - never a cash-flow-weighted percentage (that stays future work), and never computed
+  // from ambiguous or unproven evidence.
   const totalGain =
-    currentValue !== null && startingCapital !== null && netContributions !== null && !hasMixedFundingSources
+    currentValue !== null && startingCapital !== null && netContributions !== null && fundingCoverageStatus === "COMPLETE"
       ? round(currentValue - startingCapital - netContributions, 2)
       : null;
-  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount: contributionEvents.length, hasMixedFundingSources });
+  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount: contributionEvents.length, fundingCoverageStatus });
   const totalReturnPercent =
     totalReturnStatus === "OK" && totalGain !== null && startingCapital !== null && startingCapital > 0
       ? round((totalGain / startingCapital) * 100, 4)
@@ -548,22 +668,27 @@ export function summarizeAccountsPerformance(accounts: AccountPerformanceInput[]
   const otherIncome = hasAccounts && summaries.every((summary) => summary.otherIncome !== null)
     ? round(summaries.reduce((sum, summary) => sum + (summary.otherIncome ?? 0), 0), 2)
     : null;
-  // Aggregate funding coverage is only as good as its weakest account - one ambiguous account
-  // must withhold the combined dollar gain the same way it withholds its own.
+  // Aggregate funding coverage is only as good as its weakest account - one ambiguous or
+  // unverifiable account must withhold the combined dollar gain the same way it withholds its own.
+  // Ranked most-to-least severe so the aggregate always reports the worst reason present.
   const hasMixedFundingSources = summaries.some((summary) => summary.fundingCoverageStatus === "INCOMPLETE_MIXED_SOURCES");
+  const hasUnverifiedSchwabHistory = summaries.some((summary) => summary.fundingCoverageStatus === "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
+  const hasInferredBaseline = summaries.some((summary) => summary.fundingCoverageStatus === "INCOMPLETE_INFERRED_BASELINE");
   const fundingCoverageStatus: FundingCoverageStatus | null = !hasAccounts
     ? null
     : hasMixedFundingSources
       ? "INCOMPLETE_MIXED_SOURCES"
-      : summaries.some((summary) => summary.fundingCoverageStatus !== "COMPLETE")
-        ? "INCOMPLETE_INFERRED_BASELINE"
-        : "COMPLETE";
+      : hasUnverifiedSchwabHistory
+        ? "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY"
+        : hasInferredBaseline
+          ? "INCOMPLETE_INFERRED_BASELINE"
+          : "COMPLETE";
   const totalGain =
-    currentValue !== null && startingCapital !== null && netContributions !== null && !hasMixedFundingSources
+    currentValue !== null && startingCapital !== null && netContributions !== null && fundingCoverageStatus === "COMPLETE"
       ? round(currentValue - startingCapital - netContributions, 2)
       : null;
   const contributionEventCount = summaries.reduce((sum, summary) => sum + summary.contributionEventCount, 0);
-  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount, hasMixedFundingSources });
+  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount, fundingCoverageStatus });
   const totalReturnPercent =
     totalReturnStatus === "OK" && totalGain !== null && startingCapital !== null && startingCapital > 0
       ? round((totalGain / startingCapital) * 100, 4)
@@ -807,12 +932,15 @@ function totalReturnStatusFor({
   startingCapital,
   currentValue,
   contributionEventCount,
-  hasMixedFundingSources,
+  fundingCoverageStatus,
 }: {
   startingCapital: number | null;
   currentValue: number | null;
   contributionEventCount: number;
-  hasMixedFundingSources?: boolean;
+  /** Astra corrective patch (Issues 3 & 4): any non-"COMPLETE" status - mixed sources, an inferred
+   * (unproven) baseline, or Schwab evidence that can't be verified back to the baseline - withholds
+   * a confirmed return the same way, so this checks the whole status rather than one narrow cause. */
+  fundingCoverageStatus?: FundingCoverageStatus | null;
 }): AccountPerformanceSummary["totalReturnStatus"] {
   if (startingCapital === null || startingCapital <= 0) {
     return "NO_BASELINE";
@@ -820,7 +948,7 @@ function totalReturnStatusFor({
   if (currentValue === null) {
     return "NO_CURRENT_VALUE";
   }
-  if (hasMixedFundingSources) {
+  if (fundingCoverageStatus !== null && fundingCoverageStatus !== undefined && fundingCoverageStatus !== "COMPLETE") {
     return "INCOMPLETE_FUNDING_EVIDENCE";
   }
   if (contributionEventCount > 0) {

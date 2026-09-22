@@ -213,7 +213,8 @@ export default async function AccountPage({
                     <input
                       name="reason"
                       type="text"
-                      placeholder={performance.ledger.effectiveBaseline ? "Correction reason" : "Reason (optional)"}
+                      required={Boolean(performance.ledger.effectiveBaseline)}
+                      placeholder={performance.ledger.effectiveBaseline ? "Correction reason (required)" : "Reason (optional)"}
                       className="min-h-10 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100"
                     />
                     <button type="submit" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300 hover:border-emerald-400/60">

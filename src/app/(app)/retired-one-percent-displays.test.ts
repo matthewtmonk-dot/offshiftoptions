@@ -23,6 +23,16 @@ describe("positions page no longer renders the 1% Goal Tracker", () => {
   it("shows the neutral rebuild-in-progress copy instead", () => {
     expect(text).toContain("Trade-return goal reporting is being rebuilt from verified account and trade data.");
   });
+
+  // Astra corrective patch (Issue 8, should-fix): a second, previously-missed 1%-target display -
+  // the "Performance vs 1% Target" chart - was still rendering after the first pass retired the
+  // GoalTracker component and metric card above.
+  it("has no remaining 'Performance vs 1% Target' chart (Astra corrective patch, Issue 8)", () => {
+    expect(text).not.toContain("Performance vs 1% Target");
+    expect(text).not.toMatch(/function PerformanceGoalChart/);
+    expect(text).not.toContain("<PerformanceGoalChart");
+    expect(text).not.toMatch(/function goalTone/);
+  });
 });
 
 describe("dashboard page no longer renders the weekly 1% target block", () => {

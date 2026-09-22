@@ -113,9 +113,12 @@ describe("account ledger", () => {
     expect(summary.startingCapital).toBe(10_000);
     expect(summary.netContributions).toBe(1_250);
     expect(summary.tradingPL).toBe(50);
-    expect(summary.totalGain).toBe(0);
+    // Astra corrective patch (Issue 4): an inferred (never explicit) baseline can never prove it
+    // captured original funding, so it can no longer produce a confirmed dollar gain either -
+    // this account has no STARTING_VALUE entry at all, only an inferred broker-transfer baseline.
+    expect(summary.totalGain).toBeNull();
     expect(summary.totalReturnPercent).toBeNull();
-    expect(summary.totalReturnStatus).toBe("CONTRIBUTIONS_NEED_ADVANCED_RETURN");
+    expect(summary.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
   });
 
   it("reconciles the Schwab acceptance example into trading P/L, other income, total gain, and simple return", () => {
@@ -137,9 +140,13 @@ describe("account ledger", () => {
     expect(summary.otherIncome).toBe(0.07);
     expect(summary.netContributions).toBe(0);
     expect(summary.currentValue).toBe(10_123.77);
-    expect(summary.totalGain).toBe(123.77);
-    expect(summary.unexplainedGain).toBe(0);
-    expect(summary.totalReturnPercent).toBeCloseTo(1.2377, 4);
+    // Astra corrective patch (Issue 4): this baseline is inferred from broker-transfer activity,
+    // never an explicit STARTING_VALUE - it cannot prove original funding, so whole-account gain
+    // and simple return stay unavailable even with zero detected contributions.
+    expect(summary.totalGain).toBeNull();
+    expect(summary.unexplainedGain).toBeNull();
+    expect(summary.totalReturnPercent).toBeNull();
+    expect(summary.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
   });
 
   it("keeps option trade fees inside trading P/L instead of other income", () => {
@@ -161,8 +168,9 @@ describe("account ledger", () => {
     expect(summary.tradingPL).toBe(27.34);
     expect(summary.tradingPLSource).toBe("BROKER_TRANSACTIONS");
     expect(summary.otherIncome).toBe(0);
-    expect(summary.totalGain).toBe(27.34);
-    expect(summary.unexplainedGain).toBe(0);
+    // Astra corrective patch (Issue 4): inferred (not explicit) baseline - gain stays unavailable.
+    expect(summary.totalGain).toBeNull();
+    expect(summary.unexplainedGain).toBeNull();
   });
 
   it("keeps standalone account fees in other income and out of trading P/L", () => {
@@ -177,8 +185,9 @@ describe("account ledger", () => {
 
     expect(summary.tradingPL).toBe(27.34);
     expect(summary.otherIncome).toBe(-5);
-    expect(summary.totalGain).toBe(22.34);
-    expect(summary.unexplainedGain).toBe(0);
+    // Astra corrective patch (Issue 4): inferred (not explicit) baseline - gain stays unavailable.
+    expect(summary.totalGain).toBeNull();
+    expect(summary.unexplainedGain).toBeNull();
   });
 
   it("prefers Schwab trade records over campaign fallback for a broker-backed account to avoid double counting", () => {
@@ -330,9 +339,11 @@ describe("account ledger", () => {
     });
 
     expect(laterDeposit.netContributions).toBe(2_000);
-    expect(laterDeposit.totalGain).toBe(100);
+    // Astra corrective patch (Issue 4): inferred (not explicit) baseline - gain stays unavailable
+    // regardless of the separate contributions-need-advanced-return limitation.
+    expect(laterDeposit.totalGain).toBeNull();
     expect(laterDeposit.totalReturnPercent).toBeNull();
-    expect(laterDeposit.totalReturnStatus).toBe("CONTRIBUTIONS_NEED_ADVANCED_RETURN");
+    expect(laterDeposit.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
 
     const laterWithdrawal = summarizeAccountPerformance({
       ledgerEntries: [{ type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 9_100, cash: 9_100 }],
@@ -344,9 +355,9 @@ describe("account ledger", () => {
     });
 
     expect(laterWithdrawal.netContributions).toBe(-1_000);
-    expect(laterWithdrawal.totalGain).toBe(100);
+    expect(laterWithdrawal.totalGain).toBeNull();
     expect(laterWithdrawal.totalReturnPercent).toBeNull();
-    expect(laterWithdrawal.totalReturnStatus).toBe("CONTRIBUTIONS_NEED_ADVANCED_RETURN");
+    expect(laterWithdrawal.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
   });
 
   it("uses broker current value as authoritative and exposes unexplained divergence", () => {
@@ -361,10 +372,13 @@ describe("account ledger", () => {
 
     expect(summary.currentValue).toBe(10_010);
     expect(summary.currentValueSource).toBe("SCHWAB");
-    expect(summary.totalGain).toBe(10);
+    // Astra corrective patch (Issue 4): inferred (not explicit) baseline - gain stays unavailable,
+    // so the unexplained-divergence figure derived from it does too (currentValue/tradingPL/
+    // otherIncome themselves are unaffected - they don't depend on funding-coverage confidence).
+    expect(summary.totalGain).toBeNull();
     expect(summary.tradingPL).toBe(50);
     expect(summary.otherIncome).toBe(0.07);
-    expect(summary.unexplainedGain).toBe(-40.07);
+    expect(summary.unexplainedGain).toBeNull();
   });
 
   it("aggregates multiple accounts without mixing source labels", () => {
@@ -382,11 +396,49 @@ describe("account ledger", () => {
       },
     ]);
 
+    // startingCapital/tradingPL are reported regardless of gain-trustworthiness - both accounts
+    // have SOME number for each, so the sums and MIXED source labels still aggregate normally.
     expect(summary.startingCapital).toBe(15_000);
-    expect(summary.currentValue).toBe(15_150);
     expect(summary.tradingPL).toBe(150);
     expect(summary.startingCapitalSource).toBe("MIXED");
     expect(summary.tradingPLSource).toBe("MIXED");
+    // Astra corrective patch (Issues 4 & 5): account 1 has an explicit baseline but NO broker
+    // snapshot and only an undated lifetime CAMPAIGNS trading P/L to reconstruct a value from -
+    // that can never be proven to fall entirely after the baseline (Issue 5), so its own
+    // currentValue/totalGain are unavailable. Account 2's baseline is inferred, not explicit
+    // (Issue 4), so its gain is also unavailable even though its currentValue (Schwab-snapshot-
+    // backed) is fine. The aggregate must not silently sum a null account's contribution as zero.
+    expect(summary.currentValue).toBeNull();
+    expect(summary.totalGain).toBeNull();
+    expect(summary.fundingCoverageStatus).toBe("INCOMPLETE_INFERRED_BASELINE");
+  });
+
+  it("suppresses aggregate gain when only one of several accounts has incomplete funding coverage", () => {
+    const summary = summarizeAccountsPerformance([
+      {
+        // Clean, complete account: explicit baseline, no contributions, valid snapshot.
+        ledgerEntries: [
+          { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+          { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
+        ],
+      },
+      {
+        // A second, otherwise-fine account whose contributions are ambiguous (mixed sources).
+        ledgerEntries: [
+          { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 5_000 },
+          { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 500 },
+          { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 6_800, cash: 6_800 },
+        ],
+        brokerRecords: [brokerRecord({ action: "MoneyLink Transfer", amount: 1_000, occurredAt: "2026-08-01" })],
+      },
+    ]);
+
+    expect(summary.currentValue).toBe(17_100);
+    expect(summary.startingCapital).toBe(15_000);
+    // Both accounts have a real currentValue/startingCapital, but the second account's ambiguous
+    // funding must still withhold the COMBINED gain - one bad account spoils the aggregate.
+    expect(summary.totalGain).toBeNull();
+    expect(summary.fundingCoverageStatus).toBe("INCOMPLETE_MIXED_SOURCES");
   });
 });
 
@@ -436,16 +488,58 @@ describe("selectEffectiveBaseline (Account Baseline & Funding Boundaries)", () =
 });
 
 describe("endOfNyCalendarDateUtc (Account Baseline & Funding Boundaries)", () => {
-  it("converts an EDT calendar date to the exact end-of-day UTC instant", () => {
-    expect(endOfNyCalendarDateUtc("2026-06-15").toISOString()).toBe("2026-06-16T03:59:59.999Z");
+  it("converts a normal EST calendar date to the exact end-of-day UTC instant", () => {
+    expect(endOfNyCalendarDateUtc("2026-01-15").toISOString()).toBe("2026-01-16T04:59:59.999Z");
   });
 
-  it("converts an EST calendar date to the exact end-of-day UTC instant", () => {
-    expect(endOfNyCalendarDateUtc("2026-01-15").toISOString()).toBe("2026-01-16T04:59:59.999Z");
+  it("converts a normal EDT calendar date to the exact end-of-day UTC instant", () => {
+    expect(endOfNyCalendarDateUtc("2026-06-15").toISOString()).toBe("2026-06-16T03:59:59.999Z");
   });
 
   it("rejects a malformed date string", () => {
     expect(() => endOfNyCalendarDateUtc("06/15/2026")).toThrow(RangeError);
+  });
+
+  // Astra corrective patch (Issue 7, should-fix): Date.UTC silently normalizes an impossible date
+  // (e.g. month 13 rolls into the next year, day 30 of February rolls into March) instead of
+  // rejecting it - endOfNyCalendarDateUtc must validate the calendar components itself first.
+  describe("calendar validation (Issue 7)", () => {
+    const wellAfter2026 = new Date("2027-01-01T00:00:00Z");
+
+    it("2026 DST spring-transition date (America/New_York springs forward at 2am on 2026-03-08) still converts correctly", () => {
+      expect(endOfNyCalendarDateUtc("2026-03-08", wellAfter2026).toISOString()).toBe("2026-03-09T03:59:59.999Z");
+    });
+
+    it("2026 DST fall-transition date (America/New_York falls back at 2am on 2026-11-01) still converts correctly", () => {
+      expect(endOfNyCalendarDateUtc("2026-11-01", wellAfter2026).toISOString()).toBe("2026-11-02T04:59:59.999Z");
+    });
+
+    it("accepts Feb 29 in a real leap year", () => {
+      // 2024 is a leap year and is safely in the past relative to any real "now" during this ticket.
+      expect(() => endOfNyCalendarDateUtc("2024-02-29")).not.toThrow();
+      expect(endOfNyCalendarDateUtc("2024-02-29").toISOString()).toBe("2024-03-01T04:59:59.999Z");
+    });
+
+    it("rejects Feb 29 in a non-leap year", () => {
+      expect(() => endOfNyCalendarDateUtc("2023-02-29")).toThrow(RangeError);
+    });
+
+    it("rejects Feb 30 in any year", () => {
+      expect(() => endOfNyCalendarDateUtc("2024-02-30")).toThrow(RangeError);
+      expect(() => endOfNyCalendarDateUtc("2023-02-30")).toThrow(RangeError);
+    });
+
+    it("rejects an impossible month", () => {
+      expect(() => endOfNyCalendarDateUtc("2026-13-01")).toThrow(RangeError);
+      expect(() => endOfNyCalendarDateUtc("2026-00-01")).toThrow(RangeError);
+    });
+
+    it("rejects a future baseline instant relative to the supplied reference time", () => {
+      const referenceNow = new Date("2026-06-15T12:00:00Z");
+      expect(() => endOfNyCalendarDateUtc("2026-06-16", referenceNow)).toThrow(RangeError);
+      // The boundary itself (a date whose end-of-day instant is still before referenceNow) is fine.
+      expect(() => endOfNyCalendarDateUtc("2026-06-14", referenceNow)).not.toThrow();
+    });
   });
 });
 
@@ -540,15 +634,18 @@ describe("funding authority and mixed-source detection (Account Baseline & Fundi
     expect(performance.totalReturnPercent).toBeCloseTo(3, 4);
   });
 
-  it("labels an inferred (never explicit) baseline as INCOMPLETE_INFERRED_BASELINE, not COMPLETE", () => {
+  it("labels an inferred (never explicit) baseline as INCOMPLETE_INFERRED_BASELINE and withholds gain", () => {
     const performance = summarizeAccountPerformance({
       ledgerEntries: [{ type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_123.77, cash: 10_123.77 }],
       brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20" })],
     });
 
     expect(performance.fundingCoverageStatus).toBe("INCOMPLETE_INFERRED_BASELINE");
-    // Still allowed (pre-existing behavior) - only the label changes, not availability.
-    expect(performance.totalGain).toBe(123.77);
+    // Astra corrective patch (Issue 4, blocker): an inferred baseline can never prove it captured
+    // original funding - a confirmed dollar gain must not be shown from it, even with zero
+    // detected contributions. (Previously this was allowed; that was exactly the bug Astra found.)
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
   });
 
   it("withholds dollar gain and reports INCOMPLETE_MIXED_SOURCES when both a manual and a broker-transfer contribution land in the same interval", () => {
@@ -595,5 +692,178 @@ describe("percentage return stays unavailable pending the TWR/XIRR ticket (Accou
     expect(performance.totalGain).toBe(100);
     expect(performance.totalReturnPercent).toBeNull();
     expect(performance.totalReturnStatus).toBe("CONTRIBUTIONS_NEED_ADVANCED_RETURN");
+  });
+});
+
+describe("Astra corrective patch - superseded baselines must not suppress real funding (Issue 1, blocker)", () => {
+  it("a superseded STARTING_VALUE's date/amount must never suppress a genuine later broker deposit", () => {
+    // Exact Astra repro: superseded $500 STARTING_VALUE dated Aug 2, corrected effective baseline
+    // $10,000 dated in July, and a GENUINE $500 broker deposit also on Aug 2. The old code matched
+    // the deposit against the superseded revision's date/amount and silently dropped it.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { id: "superseded", type: "STARTING_VALUE", occurredAt: "2026-08-02T00:00:00Z", createdAt: "2026-07-01T00:00:00Z", amount: 500 },
+        { id: "effective", type: "STARTING_VALUE", occurredAt: "2026-07-01T00:00:00Z", createdAt: "2026-07-05T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_500, cash: 10_500 },
+      ],
+      brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 500, occurredAt: "2026-08-02T00:00:00Z" })],
+    });
+
+    expect(performance.startingCapital).toBe(10_000);
+    expect(performance.netContributions).toBe(500);
+    expect(performance.fundingCoverageStatus).toBe("COMPLETE");
+    expect(performance.totalGain).toBe(0); // 10,500 - 10,000 - 500 = 0, never 500
+  });
+
+  it("still dedupes a broker transfer that matches the CURRENT effective baseline's own date/amount", () => {
+    // The legacy same-day/same-amount dedup remains valid for the baseline actually in effect -
+    // this is not a general "never dedupe" rule, only "never dedupe against a stale revision."
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { id: "effective", type: "STARTING_VALUE", occurredAt: "2026-07-20T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_000, cash: 10_000 },
+      ],
+      brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20T14:00:00Z" })],
+    });
+
+    expect(performance.netContributions).toBe(0);
+    expect(performance.cashFlowEvents.filter((event) => event.type !== "STARTING_VALUE")).toHaveLength(0);
+  });
+});
+
+describe("Astra corrective patch - valuation and funding share one measurement interval (Issue 2, blocker)", () => {
+  it("a manual deposit dated after asOf never leaks into currentValue or gain, even without a broker snapshot", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 300 }, // inside the interval
+        { type: "DEPOSIT", occurredAt: "2026-09-15T00:00:00Z", amount: 999 }, // after asOf - must not leak
+      ],
+      asOf: new Date("2026-09-01T00:00:00Z"),
+    });
+
+    expect(performance.netContributions).toBe(300);
+    // Exact Astra repro: currentValue used to become 11,299 (10,000 + 300 + the leaked 999) via the
+    // legacy currentAccountValue() helper's own unbounded netContributions, even though this
+    // function's OWN netContributions above correctly excluded the post-asOf deposit.
+    expect(performance.currentValue).toBe(10_300);
+    // No trading occurred - a deposit is funding, never profit, so gain is 0, never the leaked 999
+    // (the old bug) and never the deposit amount itself.
+    expect(performance.totalGain).toBe(0);
+  });
+
+  it("a withdrawal dated after asOf never leaks into currentValue or gain", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "WITHDRAWAL", occurredAt: "2026-09-15T00:00:00Z", amount: 400 }, // after asOf
+      ],
+      asOf: new Date("2026-09-01T00:00:00Z"),
+    });
+
+    expect(performance.netContributions).toBe(0);
+    expect(performance.currentValue).toBe(10_000);
+    expect(performance.totalGain).toBe(0);
+  });
+
+  it("a BROKER_SNAPSHOT dated before the baseline cannot serve as the ending valuation", () => {
+    // Exact Astra repro: baseline $10,000, the ONLY broker snapshot is $9,000 from before the
+    // baseline - must never produce gain = -$1,000. The snapshot describes a different, earlier
+    // state of the account than the one the baseline started measuring.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-05-01T00:00:00Z", accountValue: 9_000, cash: 9_000 },
+      ],
+    });
+
+    expect(performance.currentValue).toBeNull();
+    expect(performance.currentValueSource).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
+  });
+});
+
+describe("Astra corrective patch - affirmative funding-coverage evidence required (Issue 3, blocker)", () => {
+  it("an explicit baseline whose interval exceeds the Schwab transaction lookback window cannot claim complete coverage", () => {
+    // Every Schwab sync only ever re-fetches a trailing 90-day window of transactions - a snapshot
+    // more than 90 days after the baseline can never affirmatively prove no transfer was missed
+    // in between, since anything older than the last sync's lookback was simply never observed.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-01-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-06-01T00:00:00Z", accountValue: 10_300, cash: 10_300 }, // 151 days later
+      ],
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
+    // The current value reading itself is still shown - Schwab's own balance is accurate
+    // regardless of whether we can prove complete historical transfer coverage.
+    expect(performance.currentValue).toBe(10_300);
+  });
+
+  it("an explicit baseline whose interval fits inside the lookback window is still COMPLETE", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-01-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-03-01T00:00:00Z", accountValue: 10_300, cash: 10_300 }, // 59 days later
+      ],
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("COMPLETE");
+    expect(performance.totalGain).toBe(300);
+  });
+
+  it("a MANUAL account with no Schwab evidence at all is never subject to the Schwab-lookback check", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-01-01T00:00:00Z", amount: 10_000 },
+        { type: "DEPOSIT", occurredAt: "2026-06-01T00:00:00Z", amount: 500 }, // 151 days after baseline
+      ],
+      asOf: new Date("2026-06-02T00:00:00Z"),
+    });
+
+    // A manual deposit is funding, not profit - no trading occurred, so gain is legitimately 0,
+    // never withheld as "unverified Schwab history" (there is no Schwab evidence here at all).
+    expect(performance.fundingCoverageStatus).toBe("COMPLETE");
+    expect(performance.totalGain).toBe(0);
+    expect(performance.currentValue).toBe(10_500);
+  });
+});
+
+describe("Astra corrective patch - lifetime trading P/L is never added onto a dated baseline (Issue 5, blocker)", () => {
+  it("does not add undated lifetime CAMPAIGNS trading P/L onto an explicit baseline's reconstructed value", () => {
+    // Exact Astra repro: baseline on Sep 1 = $10,000 that ALREADY includes $500 of earlier trading
+    // gains; the old fallback added the lifetime +$500 again, producing a fabricated $10,500.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      fallbackTradingPL: 500, // undated, lifetime campaign P/L - may have happened before OR after Sep 1
+      asOf: new Date("2026-09-15T00:00:00Z"),
+    });
+
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
+    // tradingPL itself is still reported (informational figure, e.g. a "Trading Cash Flow" stat) -
+    // only the WHOLE-ACCOUNT reconstructed value/gain is withheld.
+    expect(performance.tradingPL).toBe(500);
+    expect(performance.tradingPLSource).toBe("CAMPAIGNS");
+  });
+
+  it("dated broker-transaction trading P/L before the baseline is excluded from the reconstructed value, not double-counted", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      brokerRecords: [
+        brokerRecord({ action: "Sell to Open", amount: 500, occurredAt: "2026-08-01", fingerprint: "BEFORE_BASELINE" }), // already in the $10,000
+        brokerRecord({ action: "Sell to Open", amount: 75, occurredAt: "2026-09-15", fingerprint: "AFTER_BASELINE" }),
+      ],
+      asOf: new Date("2026-10-01T00:00:00Z"),
+    });
+
+    expect(performance.tradingPL).toBe(75); // the pre-baseline $500 trade is excluded entirely
+    expect(performance.currentValue).toBe(10_075);
+    expect(performance.totalGain).toBe(75);
   });
 });

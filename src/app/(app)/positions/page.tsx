@@ -9,7 +9,6 @@ import {
   Flag,
   Gauge,
   History,
-  LineChart,
   Lock,
   Plus,
   Repeat2,
@@ -1949,19 +1948,7 @@ function PerformanceSection({
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[0.72fr_1.28fr]">
-        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
-          <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
-            <LineChart className="size-4 text-sky-300" aria-hidden />
-            Performance vs 1% Target
-            <InfoTip label="Performance vs target" align="start" testId="help-target-comparison">
-              {HELP.targetComparison}
-            </InfoTip>
-          </div>
-          <PerformanceGoalChart goal={goal} />
-          {projectedOtmPartial ? <p className="mt-2 text-xs text-amber-300">OTM projection includes partial or pending results.</p> : null}
-        </div>
-
+      <div className="grid gap-4">
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
           <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
             <BarChart3 className="size-4 text-emerald-300" aria-hidden />
@@ -2095,40 +2082,6 @@ function totalReturnDetail(status: AccountPerformanceSummary["totalReturnStatus"
     return "No current account value";
   }
   return "No starting baseline";
-}
-
-function PerformanceGoalChart({ goal }: { goal: ContributionAdjustedGoalSummary }) {
-  const rows = [
-    { label: "Target", value: goal.targetProfit, tone: "bg-sky-300" },
-    { label: "Trading now", value: goal.tradingPLNow, tone: goalTone(goal.tradingPLNow) },
-    { label: "If open CSPs expire OTM", value: goal.projectedOtmPL, tone: goalTone(goal.projectedOtmPL) },
-  ];
-  const max = Math.max(1, ...rows.map((row) => Math.abs(row.value ?? 0)));
-
-  return (
-    <div className="space-y-3">
-      <div className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
-        Color guide
-        <InfoTip label="Performance color guide" align="start" testId="help-color-guide">
-          {HELP.colorLegend}
-        </InfoTip>
-      </div>
-      {rows.map((row) => {
-        const width = row.value === null ? 0 : Math.max(4, Math.min(100, (Math.abs(row.value) / max) * 100));
-        return (
-          <div key={row.label}>
-            <div className="mb-1 flex items-center justify-between gap-3 text-xs text-zinc-500">
-              <span>{row.label}</span>
-              <span className={toneClass(row.value)}>{row.value === null ? "Unavailable" : signedMoney(row.value)}</span>
-            </div>
-            <div className="h-3 rounded-full bg-zinc-900">
-              <div className={`h-3 rounded-full ${row.tone}`} style={{ width: `${width}%` }} />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 function CampaignPerformanceTable({ rows }: { rows: PerformanceCampaignViewRow[] }) {
@@ -2535,13 +2488,6 @@ function entrySnapshotText(value: unknown) {
 function sumKnown(values: Array<number | null>) {
   const known = values.filter((value): value is number => value !== null);
   return known.length ? roundMoney(known.reduce((sum, value) => sum + value, 0)) : null;
-}
-
-function goalTone(value: number | null) {
-  if (value === null) {
-    return "bg-zinc-700";
-  }
-  return value >= 0 ? "bg-emerald-300" : "bg-red-300";
 }
 
 function firstParam(value: string | string[] | undefined) {
