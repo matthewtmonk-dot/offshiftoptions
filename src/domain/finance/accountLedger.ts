@@ -623,37 +623,39 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
       )
     : null;
 
-  // Astra corrective patch (Issues 2 & 5, first pass; Issue 3, second pass - all blockers): the
-  // "current value" used for whole-account gain must itself be a genuine, SUPPORTED ending account
-  // valuation - never the legacy currentAccountValue() helper's MANUAL fallback, which derives
-  // from ledger.netContributions (only lower-bounded by the baseline, with NO upper bound at all -
-  // a deposit dated after endingAt used to leak straight through into currentValue even though this
-  // function's OWN, separately-bounded `netContributions` above correctly excluded it).
+  // Astra corrective patch (Issues 2 & 5, first pass; Issue 3, second pass; Issue "no unsupported
+  // valuation path", third pass - all blockers): the "current value" used for whole-account gain
+  // must itself be a genuine, SUPPORTED ending account valuation - never the legacy
+  // currentAccountValue() helper's MANUAL fallback, which derives from ledger.netContributions
+  // (only lower-bounded by the baseline, with NO upper bound at all - a deposit dated after
+  // endingAt used to leak straight through into currentValue even though this function's OWN,
+  // separately-bounded `netContributions` above correctly excluded it).
   //
-  // Second-pass finding (Issue 3): a BROKER_SNAPSHOT dated at/after the baseline
-  // (snapshotIsValidEnding, above) is the ONLY supported account-value reading this function
-  // recognizes - a snapshot from before the baseline describes a different, earlier state and must
-  // never be diffed against the baseline. Trading cash flows (dated broker option transactions,
-  // undated lifetime CAMPAIGNS P/L, or anything derived from them) are NEVER a substitute for a
-  // real account valuation, no matter how well-dated: receiving option premium also creates an
-  // offsetting short-option liability, so "cash received" is not the same fact as "whole-account
-  // value increased by that amount." Astra's exact repro: baseline $10,000 + a $75 Sell to Open
-  // premium + no broker snapshot at all used to produce currentValue $10,075 / gain $75 - there was
-  // no supported ending valuation involved anywhere in that reconstruction.
+  // A BROKER_SNAPSHOT dated at/after the baseline (snapshotIsValidEnding, above) is the ONLY
+  // supported account-value reading this function recognizes - a snapshot from before the baseline
+  // describes a different, earlier state and must never be diffed against the baseline. Trading
+  // cash flows (dated broker option transactions, undated lifetime CAMPAIGNS P/L, or anything
+  // derived from them) are NEVER a substitute for a real account valuation, no matter how
+  // well-dated: receiving option premium also creates an offsetting short-option liability, so
+  // "cash received" is not the same fact as "whole-account value increased by that amount." Astra's
+  // repro: baseline $10,000 + a $75 Sell to Open premium + no broker snapshot at all used to
+  // produce currentValue $10,075 / gain $75 - there was no supported ending valuation anywhere.
   //
-  // The one narrow exception: when NO trading activity of any kind occurred in the interval
-  // (tradingPL === null - no broker option records AND no campaign fallback), contributions
-  // (deposits/withdrawals) are the ONLY thing that could have changed the account's value, and
-  // unlike option premium they are dollar-for-dollar, liability-free cash movements - starting
-  // capital + those contributions is then a genuine supported valuation, not a synthesized one.
+  // Third-pass finding: a prior version of this fix still allowed startingCapital + contributions
+  // to stand in as the ending valuation whenever tradingPL === null, reasoning that "no trading
+  // activity" meant contributions were the only possible value driver. That is unsafe -
+  // tradingPL === null proves only that this function found no dated broker option records and no
+  // campaign fallback; it proves nothing about interest, fees, dividends (otherIncome, which is
+  // computed separately from tradingPL - see below), or unknown changes to pre-existing holdings.
+  // Astra's exact repro: baseline $10,000, $25 of recorded interest, no ending snapshot - this
+  // fallback produced currentValue $10,000 / gain $0 / return 0% / status OK, silently treating the
+  // $25 interest as if it never happened. Removed entirely: a baseline plus ledger funding events
+  // alone is never an ending valuation, with or without trading evidence.
   let currentValue: number | null;
   let currentValueSource: "SCHWAB" | "MANUAL" | null;
   if (snapshotIsValidEnding) {
     currentValue = ledger.latestBrokerSnapshot!.accountValue;
     currentValueSource = "SCHWAB";
-  } else if (ledger.latestBrokerSnapshot === null && startingCapital !== null && tradingPL === null) {
-    currentValue = round(startingCapital + (netContributions ?? 0), 2);
-    currentValueSource = "MANUAL";
   } else {
     currentValue = null;
     currentValueSource = null;

@@ -773,7 +773,7 @@ describe("Astra corrective patch - superseded baselines must not suppress real f
 });
 
 describe("Astra corrective patch - valuation and funding share one measurement interval (Issue 2, blocker)", () => {
-  it("a manual deposit dated after asOf never leaks into currentValue or gain, even without a broker snapshot", () => {
+  it("a manual deposit dated after asOf never leaks into netContributions, and with no ending snapshot the whole-account gain stays unavailable regardless (Astra corrective patch, third pass)", () => {
     const performance = summarizeAccountPerformance({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
@@ -783,17 +783,18 @@ describe("Astra corrective patch - valuation and funding share one measurement i
       asOf: new Date("2026-09-01T00:00:00Z"),
     });
 
+    // netContributions itself is still correctly bounded - the post-asOf $999 deposit is excluded.
     expect(performance.netContributions).toBe(300);
-    // Exact Astra repro: currentValue used to become 11,299 (10,000 + 300 + the leaked 999) via the
-    // legacy currentAccountValue() helper's own unbounded netContributions, even though this
-    // function's OWN netContributions above correctly excluded the post-asOf deposit.
-    expect(performance.currentValue).toBe(10_300);
-    // No trading occurred - a deposit is funding, never profit, so gain is 0, never the leaked 999
-    // (the old bug) and never the deposit amount itself.
-    expect(performance.totalGain).toBe(0);
+    // Astra corrective patch, third pass: baseline + contributions is never a supported ending
+    // valuation on its own (no way to rule out interest/fees/dividends/other unrecorded changes) -
+    // there is no broker snapshot here, so currentValue/gain are unavailable regardless of how
+    // correctly netContributions itself is bounded.
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
   });
 
-  it("a withdrawal dated after asOf never leaks into currentValue or gain", () => {
+  it("a withdrawal dated after asOf never leaks into netContributions, and with no ending snapshot the whole-account gain stays unavailable regardless (Astra corrective patch, third pass)", () => {
     const performance = summarizeAccountPerformance({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
@@ -803,8 +804,8 @@ describe("Astra corrective patch - valuation and funding share one measurement i
     });
 
     expect(performance.netContributions).toBe(0);
-    expect(performance.currentValue).toBe(10_000);
-    expect(performance.totalGain).toBe(0);
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
   });
 
   it("a BROKER_SNAPSHOT dated before the baseline cannot serve as the ending valuation", () => {
@@ -870,7 +871,7 @@ describe("Astra corrective patch - affirmative funding-coverage evidence require
     expect(performance.totalGain).toBe(300);
   });
 
-  it("a MANUAL account with no Schwab evidence at all is never subject to the Schwab-lookback check", () => {
+  it("a MANUAL account with no Schwab evidence at all is never subject to the Schwab-lookback check, even though its funding coverage is otherwise complete", () => {
     const performance = summarizeAccountPerformance({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-01-01T00:00:00Z", amount: 10_000 },
@@ -879,11 +880,15 @@ describe("Astra corrective patch - affirmative funding-coverage evidence require
       asOf: new Date("2026-06-02T00:00:00Z"),
     });
 
-    // A manual deposit is funding, not profit - no trading occurred, so gain is legitimately 0,
-    // never withheld as "unverified Schwab history" (there is no Schwab evidence here at all).
+    // Funding coverage is COMPLETE - a manual account's own ledger entries are its funding
+    // authority, and there is no Schwab evidence here to be "unverified" against. But funding
+    // coverage is orthogonal to whether a SUPPORTED ENDING VALUATION exists (Astra corrective
+    // patch, third pass): with no broker snapshot at all, currentValue/gain stay unavailable
+    // regardless - a baseline plus ledger funding events alone is never an ending valuation.
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
-    expect(performance.totalGain).toBe(0);
-    expect(performance.currentValue).toBe(10_500);
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
   });
 });
 
@@ -1124,5 +1129,116 @@ describe("Astra corrective patch, second pass - option/trading cash flows are no
     expect(summary.startingCapital).toBe(15_000); // both accounts have a starting capital figure
     expect(summary.currentValue).toBeNull(); // the second account has no supported ending valuation
     expect(summary.totalGain).toBeNull();
+  });
+});
+
+describe("Astra corrective patch, third pass - baseline + contributions is never a supported ending valuation, with or without trading evidence (blocker)", () => {
+  it("1. baseline + no ending snapshot + no trading evidence at all -> gain and return unavailable", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      asOf: new Date("2026-09-20T00:00:00Z"),
+    });
+
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnPercent).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
+  });
+
+  it("2. baseline + recorded interest + no ending snapshot -> gain and return unavailable", () => {
+    // Exact Astra repro: baseline $10,000, $25 of recorded interest, no ending snapshot. The prior
+    // fallback treated tradingPL === null (interest is otherIncome, not tradingPL) as proof nothing
+    // had changed, producing currentValue $10,000 / gain $0 / return 0% / status OK - silently
+    // discarding the $25. tradingPL === null never proves zero interest, fees, dividends, or any
+    // other valuation change - only a real account snapshot can.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      brokerRecords: [brokerRecord({ action: "Bank Interest", amount: 25, occurredAt: "2026-09-10", fingerprint: "INTEREST_25" })],
+      asOf: new Date("2026-09-20T00:00:00Z"),
+    });
+
+    expect(performance.otherIncome).toBe(25); // the interest is still reported as its own figure
+    expect(performance.tradingPL).toBeNull(); // no trading occurred - tradingPL alone proves nothing
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnPercent).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
+  });
+
+  it("3. baseline + a standalone fee + no ending snapshot -> gain unavailable", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      brokerRecords: [brokerRecord({ action: "Service Fee", amount: -5, occurredAt: "2026-09-10", fingerprint: "FEE_5" })],
+      asOf: new Date("2026-09-20T00:00:00Z"),
+    });
+
+    expect(performance.otherIncome).toBe(-5);
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+  });
+
+  it("4. baseline + ledger contributions only + no ending snapshot -> gain unavailable", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "DEPOSIT", occurredAt: "2026-09-10T00:00:00Z", amount: 1_000 },
+      ],
+      asOf: new Date("2026-09-20T00:00:00Z"),
+    });
+
+    expect(performance.netContributions).toBe(1_000);
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+  });
+
+  it("5. aggregate account summary also stays unavailable when one account has interest but no supported ending valuation", () => {
+    const summary = summarizeAccountsPerformance([
+      {
+        ledgerEntries: [
+          { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+          { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_300, cash: 10_300 },
+        ],
+        brokerTransactionCoverageStatus: "COMPLETE",
+      },
+      {
+        // Only interest recorded, no account snapshot at all - no supported ending valuation.
+        ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 5_000 }],
+        brokerRecords: [brokerRecord({ action: "Bank Interest", amount: 25, occurredAt: "2026-09-10" })],
+        asOf: new Date("2026-09-20T00:00:00Z"),
+      },
+    ]);
+
+    expect(summary.startingCapital).toBe(15_000);
+    expect(summary.currentValue).toBeNull();
+    expect(summary.totalGain).toBeNull();
+  });
+
+  it("6. baseline + a valid ending snapshot at/after the baseline still produces a confirmed gain (existing valid path unaffected)", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_300, cash: 10_300 },
+      ],
+      brokerTransactionCoverageStatus: "COMPLETE",
+    });
+
+    expect(performance.currentValue).toBe(10_300);
+    expect(performance.currentValueSource).toBe("SCHWAB");
+    expect(performance.totalGain).toBe(300);
+    expect(performance.totalReturnStatus).toBe("OK");
+  });
+
+  it("7. a snapshot dated before the baseline remains invalid as an ending valuation", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-08-01T00:00:00Z", accountValue: 9_500, cash: 9_500 },
+      ],
+    });
+
+    expect(performance.currentValue).toBeNull();
+    expect(performance.currentValueSource).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
   });
 });
