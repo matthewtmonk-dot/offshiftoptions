@@ -45,8 +45,12 @@ describe("dashboard page no longer renders the weekly 1% target block", () => {
     expect(text).not.toMatch(/of\s*\{WEEKLY_TARGET_PERCENT\}%\s*target/);
   });
 
-  it("still shows the win/loss record and the neutral rebuild-in-progress copy", () => {
-    expect(text).toContain("Trade-return goal reporting is being rebuilt from verified account and trade data.");
+  // Reporting Phase Ticket 2: the neutral "being rebuilt" placeholder is superseded by the real
+  // "Return on campaigns closed this week" card (reporting.ts's tradeReturn* fields) - it must not
+  // reappear once the card that fulfills that promise exists. The win/loss record remains, moved
+  // to a secondary line beneath the five reporting cards rather than the old placeholder section.
+  it("no longer shows the rebuild-in-progress placeholder, and still shows the win/loss record", () => {
+    expect(text).not.toContain("Trade-return goal reporting is being rebuilt from verified account and trade data.");
     expect(text).toMatch(/W-L \{winLoss\.wins\}-\{winLoss\.losses\}/);
   });
 });

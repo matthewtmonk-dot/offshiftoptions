@@ -11,9 +11,21 @@ import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { getLinkedCampaignIdsBySymbolForUser, brokerPositionLinkKey } from "@/lib/broker-reconciliation";
-import { summarizeAccountPerformance, summarizeAccountsPerformance } from "@/domain/finance/accountLedger";
+import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
+import { summarizeAccountReporting } from "@/domain/finance/reporting";
+import {
+  accountValueDetail,
+  accountValueUnavailableReason,
+  capitalCommittedDetail,
+  capitalCommittedValue,
+  confirmedTradingPLNote,
+  dashboardHasEvidenceGap,
+  tradeReturnReason,
+  tradeReturnValue,
+  wholeAccountGainDetail,
+} from "./reporting-cards";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
-import { describeBrokerPositionForDisplay, summarizeCampaignExposure, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
+import { describeBrokerPositionForDisplay, summarizeCampaignExposure, summarizeCspSecuredCapital, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { matchDashboardPositions, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import { summarizeWinLoss } from "@/domain/finance/performance";
@@ -107,6 +119,10 @@ export default async function DashboardPage() {
       pl,
       feesFullyKnown: !unknownFeeCampaignIds.has(campaign.id),
       daysActive: summary.daysActive,
+      // Reporting Phase Ticket 2: without this, summarizeThisWeek/summarizeAccountReporting could
+      // never tell "collateral genuinely unknown" apart from "not supplied here" - every campaign
+      // would look like INCOMPLETE_CAPITAL_EVIDENCE even when the collateral is fully known.
+      collateralCommitted: summary.collateralCommitted,
     };
   });
 
@@ -119,15 +135,6 @@ export default async function DashboardPage() {
     });
     return { account, ledger: performance.ledger, realized, current: { value: performance.currentValue }, performance };
   });
-  const accountPerformance = summarizeAccountsPerformance(
-    data.ownAccounts.map((account) => ({
-      ledgerEntries: account.ledgerEntries,
-      brokerRecords: account.brokerRecords,
-      fallbackTradingPL: completedPLByAccount.get(account.id) ?? 0,
-    })),
-  );
-  const totalValue = accountPerformance.currentValue ?? 0;
-  const hasAnyAccountValue = accountPerformance.currentValue !== null;
   const totalCash = accountRows.reduce((sum, row) => sum + (row.ledger.latestBrokerSnapshot?.cash ?? 0), 0);
   const hasAnyCash = accountRows.some((row) => row.ledger.latestBrokerSnapshot);
   const latestBrokerSnapshotAt = latestSnapshotAt(
@@ -150,27 +157,30 @@ export default async function DashboardPage() {
   // three explicitly separate facts - see summarizeCampaignExposure (brokerPositions.ts) for the
   // real bug this fixes (an ASSIGNED campaign's historical put collateral no longer silently
   // stays inside "Secured (CSP)" after the put is gone).
-  const exposure = summarizeCampaignExposure(
-    campaignSummaries.map(({ campaign, summary }) => ({
-      status: campaign.status,
-      currentCollateralCommitted: summary.currentCollateralCommitted,
-      remainingShareBasis: summary.remainingShareBasis,
-      hasOpenCoveredCall: campaign.status === "ASSIGNED" && getCurrentOpenCall(campaign.events) !== null,
-    })),
-  );
+  const campaignExposureInputs: CampaignExposureInput[] = campaignSummaries.map(({ campaign, summary }) => ({
+    status: campaign.status,
+    currentCollateralCommitted: summary.currentCollateralCommitted,
+    remainingShareBasis: summary.remainingShareBasis,
+    hasOpenCoveredCall: campaign.status === "ASSIGNED" && getCurrentOpenCall(campaign.events) !== null,
+  }));
+  const exposure = summarizeCampaignExposure(campaignExposureInputs);
   const campaignSecuredCapital = exposure.securedPutCollateral;
   const openCampaignCount = data.openCampaigns.length;
   const winLoss = summarizeWinLoss(completedForPerformance);
 
-  const hasManualAccountData = accountRows.some((row) => row.performance.currentValueSource === "MANUAL");
-  const hasSchwabAccountData = accountRows.some((row) => row.account.source === "SCHWAB" || row.performance.currentValueSource === "SCHWAB");
-  const accountDataSource: "SCHWAB" | "MANUAL" | "MIXED" | null = hasSchwabAccountData
-    ? hasManualAccountData
-      ? "MIXED"
-      : "SCHWAB"
-    : hasManualAccountData
-      ? "MANUAL"
-      : null;
+  // Reporting Phase Ticket 2: the ONE authoritative source for account value, confirmed trading
+  // P/L, trade return, capital utilization, and whole-account gain - see reporting.ts. This page
+  // must not recompute any of those formulas itself, only format this summary's fields.
+  const report = summarizeAccountReporting({
+    accounts: data.ownAccounts.map((account) => ({
+      ledgerEntries: account.ledgerEntries,
+      brokerRecords: account.brokerRecords,
+      fallbackTradingPL: completedPLByAccount.get(account.id) ?? 0,
+    })),
+    completedCampaigns: completedForPerformance,
+    openExposure: campaignExposureInputs,
+  });
+  const hasEvidenceGap = dashboardHasEvidenceGap(report);
 
   const scannedSetups = (data.latestScanRun?.results ?? []).map((result) => {
     const summary = toDomainSummary(result);
@@ -242,13 +252,56 @@ export default async function DashboardPage() {
         )}
       </div>
 
+      <section className="space-y-2" aria-label="How am I doing?">
+        <h2 className="text-sm font-semibold text-zinc-300">How am I doing?</h2>
+        {hasEvidenceGap ? (
+          <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-300">
+            Some performance metrics are unavailable until account history is fully verified.
+          </div>
+        ) : null}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5" data-testid="dashboard-performance-cards">
+          <Stat
+            label="Account Value"
+            value={report.currentAccountValue === null ? "Unavailable" : money(report.currentAccountValue)}
+            detail={accountValueDetail(report) ?? undefined}
+            reason={report.currentAccountValue === null ? accountValueUnavailableReason(report) : null}
+          />
+          <Stat
+            label="Confirmed Trading P/L"
+            value={money(report.confirmedTradingPL)}
+            tone={report.confirmedTradingPL}
+            detail="Since tracked campaign history"
+            reason={confirmedTradingPLNote(report)}
+          />
+          <Stat
+            label="Return on campaigns closed this week"
+            value={tradeReturnValue(report)}
+            tone={report.tradeReturnStatus === "OK" ? report.tradeReturnPercent ?? undefined : undefined}
+            detail={report.tradeReturnStatus === "OK" ? "Net, on capital those campaigns secured" : undefined}
+            reason={tradeReturnReason(report)}
+          />
+          <Stat
+            label="LST Capital Committed"
+            value={capitalCommittedValue(report)}
+            detail={capitalCommittedDetail(report)}
+            reason={report.capitalUtilizationStatus !== "OK" ? report.capitalUtilizationMessage : null}
+          />
+          <Stat
+            label="Whole-Account Gain"
+            value={report.wholeAccountGainStatus === "OK" ? money(report.wholeAccountGain) : "Unavailable"}
+            tone={report.wholeAccountGainStatus === "OK" ? report.wholeAccountGain ?? undefined : undefined}
+            detail={wholeAccountGainDetail(report) ?? undefined}
+            reason={report.wholeAccountGainStatus === "UNAVAILABLE" ? report.wholeAccountGainUnavailableMessage : null}
+          />
+        </div>
+        <div className="text-xs text-zinc-500">
+          W-L {winLoss.wins}-{winLoss.losses}
+          {winLoss.breakevens ? `-${winLoss.breakevens}` : ""}
+          {winLoss.pendingCount > 0 ? ` (+${winLoss.pendingCount} pending)` : ""}
+        </div>
+      </section>
+
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        <Stat
-          label="Account value"
-          value={hasAnyAccountValue ? money(totalValue) : "No data"}
-          badge={accountDataSource}
-          detail={latestBrokerSnapshotAt ? `Schwab snapshot ${formatAge(latestBrokerSnapshotAt)}` : undefined}
-        />
         <Stat
           label="Cash"
           value={hasAnyCash ? money(totalCash) : "No data"}
@@ -269,23 +322,6 @@ export default async function DashboardPage() {
             unknownCampaignCollateral={exposure.openCampaignsWithUnknownCollateral}
           />
         </Suspense>
-        <Stat
-          label="Trading Cash Flow"
-          value={accountPerformance.tradingPL === null ? "No data" : money(accountPerformance.tradingPL)}
-          tone={accountPerformance.tradingPL ?? undefined}
-          detail={dashboardTradingDetail(accountPerformance.tradingPLSource, winLoss.realizedTradingPLExact)}
-        />
-      </section>
-
-      <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-          <span className="text-zinc-400">Trade-return goal reporting is being rebuilt from verified account and trade data.</span>
-          <span className="text-zinc-500">
-            W-L {winLoss.wins}-{winLoss.losses}
-            {winLoss.breakevens ? `-${winLoss.breakevens}` : ""}
-            {winLoss.pendingCount > 0 ? ` (+${winLoss.pendingCount} pending)` : ""}
-          </span>
-        </div>
       </section>
 
       <div className="grid gap-4 xl:grid-cols-3">
@@ -751,12 +787,17 @@ function Stat({
   tone,
   badge,
   detail,
+  reason,
 }: {
   label: string;
   value: string;
   tone?: number;
   badge?: "SCHWAB" | "MANUAL" | "MIXED" | null;
   detail?: string;
+  /** A short, already-friendly evidence-gap sentence (e.g. from reporting.ts's friendlyReportingReason
+   * / pre-translated `*Message` fields) - rendered distinctly from `detail` so an unavailable/partial
+   * metric reads as a data-evidence note, not an error. */
+  reason?: string | null;
 }) {
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   return (
@@ -779,6 +820,7 @@ function Stat({
       </div>
       <div className={`mt-1 text-xl font-semibold ${toneClass}`}>{value}</div>
       {detail ? <div className="mt-1 text-xs text-zinc-500">{detail}</div> : null}
+      {reason ? <div className="mt-1 text-xs text-amber-300">{reason}</div> : null}
     </div>
   );
 }
@@ -813,18 +855,6 @@ function dashboardOpenCampaignsDetail(awaitingExpirationCount: number, exposure:
   return parts.length > 0 ? parts.join(" · ") : "Tracker lifecycle count";
 }
 
-function dashboardTradingDetail(source: string | null, exact: boolean) {
-  if (source === "BROKER_TRANSACTIONS") {
-    return "Schwab option trade cashflow";
-  }
-  if (source === "MIXED") {
-    return exact ? "Schwab trades + manual campaigns" : "Schwab trades + campaigns with pending or incomplete results";
-  }
-  if (source === "CAMPAIGNS") {
-    return exact ? "Closed campaigns only" : "Closed campaigns only - partial or pending";
-  }
-  return undefined;
-}
 
 function formatAge(date: Date) {
   const elapsedMs = Math.max(0, Date.now() - date.getTime());
