@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   currentAccountValue,
+  endOfNyCalendarDateUtc,
+  selectEffectiveBaseline,
   summarizeAccountLedger,
   summarizeAccountPerformance,
   summarizeAccountsPerformance,
@@ -385,5 +387,213 @@ describe("account ledger", () => {
     expect(summary.tradingPL).toBe(150);
     expect(summary.startingCapitalSource).toBe("MIXED");
     expect(summary.tradingPLSource).toBe("MIXED");
+  });
+});
+
+describe("selectEffectiveBaseline (Account Baseline & Funding Boundaries)", () => {
+  it("returns null when there is no STARTING_VALUE entry", () => {
+    expect(selectEffectiveBaseline([{ type: "DEPOSIT", occurredAt: "2026-01-01", amount: 100 }])).toBeNull();
+  });
+
+  it("picks the STARTING_VALUE with the latest createdAt, never the latest occurredAt", () => {
+    const effective = selectEffectiveBaseline([
+      // Recorded first, but its occurredAt is LATER than the correction below - occurredAt must
+      // never be used to pick the winner, since a correction can deliberately move its own date.
+      { id: "first", type: "STARTING_VALUE", occurredAt: "2026-06-30", createdAt: "2026-07-01T00:00:00Z", amount: 10_000 },
+      { id: "correction", type: "STARTING_VALUE", occurredAt: "2026-01-01", createdAt: "2026-07-02T00:00:00Z", amount: 9_500 },
+    ]);
+
+    expect(effective?.entry.id).toBe("correction");
+    expect(effective?.value).toBe(9_500);
+    expect(effective?.occurredAt).toEqual(new Date("2026-01-01"));
+    expect(effective?.revisionCount).toBe(2);
+  });
+
+  it("breaks an exact createdAt tie deterministically by id (descending)", () => {
+    const tiedCreatedAt = "2026-07-01T00:00:00Z";
+    const effective = selectEffectiveBaseline([
+      { id: "aaa", type: "STARTING_VALUE", occurredAt: "2026-01-01", createdAt: tiedCreatedAt, amount: 1 },
+      { id: "zzz", type: "STARTING_VALUE", occurredAt: "2026-01-01", createdAt: tiedCreatedAt, amount: 2 },
+    ]);
+
+    expect(effective?.entry.id).toBe("zzz");
+  });
+
+  it("ignores STARTING_VALUE entries with a non-numeric amount", () => {
+    const effective = selectEffectiveBaseline([
+      { id: "bad", type: "STARTING_VALUE", occurredAt: "2026-01-01", createdAt: "2026-01-02T00:00:00Z", amount: null },
+      { id: "good", type: "STARTING_VALUE", occurredAt: "2026-01-01", createdAt: "2026-01-01T00:00:00Z", amount: 5_000 },
+    ]);
+
+    expect(effective?.entry.id).toBe("good");
+    expect(effective?.revisionCount).toBe(1);
+  });
+
+  it("falls back to occurredAt as createdAt for legacy entries that never recorded a createdAt", () => {
+    const effective = selectEffectiveBaseline([{ id: "legacy", type: "STARTING_VALUE", occurredAt: "2026-01-01", amount: 10_000 }]);
+    expect(effective?.createdAt).toEqual(new Date("2026-01-01"));
+  });
+});
+
+describe("endOfNyCalendarDateUtc (Account Baseline & Funding Boundaries)", () => {
+  it("converts an EDT calendar date to the exact end-of-day UTC instant", () => {
+    expect(endOfNyCalendarDateUtc("2026-06-15").toISOString()).toBe("2026-06-16T03:59:59.999Z");
+  });
+
+  it("converts an EST calendar date to the exact end-of-day UTC instant", () => {
+    expect(endOfNyCalendarDateUtc("2026-01-15").toISOString()).toBe("2026-01-16T04:59:59.999Z");
+  });
+
+  it("rejects a malformed date string", () => {
+    expect(() => endOfNyCalendarDateUtc("06/15/2026")).toThrow(RangeError);
+  });
+});
+
+describe("baseline correction and audit (Account Baseline & Funding Boundaries)", () => {
+  it("an appended correction becomes effective while the prior revision remains in the raw entry list", () => {
+    const entries = [
+      { id: "original", type: "STARTING_VALUE" as const, occurredAt: "2026-06-16T03:59:59.999Z", createdAt: "2026-06-16T04:00:00Z", amount: 10_000 },
+      {
+        id: "correction",
+        type: "STARTING_VALUE" as const,
+        occurredAt: "2026-06-20T03:59:59.999Z",
+        createdAt: "2026-06-21T04:00:00Z",
+        amount: 10_500,
+        notes: "Replaces STARTING_VALUE original - found an old statement",
+      },
+    ];
+
+    const ledger = summarizeAccountLedger(entries);
+    expect(ledger.effectiveBaseline?.entry.id).toBe("correction");
+    expect(ledger.startingValue).toBe(10_500);
+    // The prior revision is untouched in the input - nothing here mutates or removes it.
+    expect(entries.find((entry) => entry.id === "original")?.amount).toBe(10_000);
+  });
+
+  it("summarizeAccountLedger and summarizeAccountPerformance agree on the same effective revision", () => {
+    const entries = [
+      { id: "original", type: "STARTING_VALUE" as const, occurredAt: "2026-06-16T03:59:59.999Z", createdAt: "2026-06-16T04:00:00Z", amount: 10_000 },
+      { id: "correction", type: "STARTING_VALUE" as const, occurredAt: "2026-06-20T03:59:59.999Z", createdAt: "2026-06-21T04:00:00Z", amount: 10_500 },
+    ];
+
+    const ledger = summarizeAccountLedger(entries);
+    const performance = summarizeAccountPerformance({ ledgerEntries: entries, asOf: new Date("2026-09-01") });
+
+    expect(performance.ledger.effectiveBaseline?.entry.id).toBe(ledger.effectiveBaseline?.entry.id);
+    expect(performance.startingCapital).toBe(10_500);
+    // The superseded revision must never also be summed as a cash-flow event.
+    expect(performance.cashFlowEvents.filter((event) => event.type === "STARTING_VALUE")).toHaveLength(1);
+  });
+});
+
+describe("measurement interval (Account Baseline & Funding Boundaries)", () => {
+  it("excludes funding at or before the baseline instant from netContributions - it is already inside the starting value", () => {
+    const ledger = summarizeAccountLedger([
+      { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+      { type: "DEPOSIT", occurredAt: "2026-06-16T03:59:59.999Z", amount: 500 }, // exactly at the boundary
+      { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 300 }, // after the boundary
+    ]);
+
+    expect(ledger.netContributions).toBe(300);
+  });
+
+  it("excludes funding dated after the ending valuation instant from account performance", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 300 }, // inside the interval
+        { type: "DEPOSIT", occurredAt: "2026-09-15T00:00:00Z", amount: 999 }, // after asOf
+      ],
+      asOf: new Date("2026-09-01T00:00:00Z"),
+    });
+
+    expect(performance.netContributions).toBe(300);
+    expect(performance.contributionEventCount).toBe(1);
+  });
+
+  it("uses the account's own latest broker snapshot as the ending instant instead of asOf when one exists", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-08-01T00:00:00Z", accountValue: 10_300, cash: 10_300 },
+        { type: "DEPOSIT", occurredAt: "2026-08-15T00:00:00Z", amount: 500 }, // after the snapshot's asOf
+      ],
+      asOf: new Date("2026-12-01T00:00:00Z"), // an asOf far in the future must not override the snapshot's own date
+    });
+
+    expect(performance.netContributions).toBe(0);
+  });
+});
+
+describe("funding authority and mixed-source detection (Account Baseline & Funding Boundaries)", () => {
+  it("reports COMPLETE funding coverage and an available dollar gain when there is an explicit baseline and no contributions", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
+      ],
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("COMPLETE");
+    expect(performance.totalGain).toBe(300);
+    expect(performance.totalReturnStatus).toBe("OK");
+    expect(performance.totalReturnPercent).toBeCloseTo(3, 4);
+  });
+
+  it("labels an inferred (never explicit) baseline as INCOMPLETE_INFERRED_BASELINE, not COMPLETE", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_123.77, cash: 10_123.77 }],
+      brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20" })],
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("INCOMPLETE_INFERRED_BASELINE");
+    // Still allowed (pre-existing behavior) - only the label changes, not availability.
+    expect(performance.totalGain).toBe(123.77);
+  });
+
+  it("withholds dollar gain and reports INCOMPLETE_MIXED_SOURCES when both a manual and a broker-transfer contribution land in the same interval", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 500 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 12_800, cash: 12_800 },
+      ],
+      brokerRecords: [brokerRecord({ action: "MoneyLink Transfer", amount: 2_000, occurredAt: "2026-08-01" })],
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("INCOMPLETE_MIXED_SOURCES");
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
+    // Historical entries are never deleted just because coverage became ambiguous.
+    expect(performance.cashFlowEvents).toHaveLength(3);
+  });
+
+  it("does not treat unknown/no contribution history as zero - a null netContributions leaves totalGain null too", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 2_000, cash: 2_000 }],
+      brokerRecords: [brokerRecord({ action: "MoneyLink Transfer", amount: 2_000, occurredAt: "2026-08-01" })],
+    });
+
+    expect(performance.startingCapital).toBeNull();
+    expect(performance.netContributions).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.fundingCoverageStatus).toBeNull();
+  });
+});
+
+describe("percentage return stays unavailable pending the TWR/XIRR ticket (Account Baseline & Funding Boundaries)", () => {
+  it("keeps totalReturnPercent null when contributions exist even though funding coverage is otherwise complete", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+        { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 2_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 12_100, cash: 12_100 },
+      ],
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("COMPLETE");
+    expect(performance.totalGain).toBe(100);
+    expect(performance.totalReturnPercent).toBeNull();
+    expect(performance.totalReturnStatus).toBe("CONTRIBUTIONS_NEED_ADVANCED_RETURN");
   });
 });

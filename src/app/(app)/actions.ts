@@ -34,6 +34,7 @@ import {
   sellCoveredCallForUser,
   sellStockForUser,
   sendChatMessageForUser,
+  setAccountBaselineForUser,
   setResearchStatusForUser,
   syncSchwabAccountForUser,
   toggleCampaignVisibilityForUser,
@@ -1322,6 +1323,31 @@ export async function addAccountLedgerEntryAction(formData: FormData) {
     throw error;
   }
 
+  revalidatePath("/positions");
+  revalidatePath("/dashboard");
+}
+
+export async function setAccountBaselineAction(formData: FormData) {
+  const user = await requireCurrentUser();
+  const returnTo = actionReturnPath(formData, "/account");
+
+  try {
+    await setAccountBaselineForUser(
+      user.id,
+      String(formData.get("accountId") ?? ""),
+      formData.get("baselineDate"),
+      formData.get("accountValue"),
+      formData.get("reason"),
+      String(formData.get("expectedRevisionId") ?? ""),
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      redirectWithError(returnTo, error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/account");
   revalidatePath("/positions");
   revalidatePath("/dashboard");
 }

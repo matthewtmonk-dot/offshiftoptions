@@ -1935,27 +1935,17 @@ function PerformanceSection({
               help={HELP.projectedOtm}
               helpTestId="help-projected-otm-pl"
             />
-            <PerformanceMetric
-              icon={<Flag className="size-4" aria-hidden />}
-              label="1% Goal Pace"
-              value={goal.actualWeeklyPacePercent === null ? "No baseline" : percent(goal.actualWeeklyPacePercent)}
-              detail={`${goal.targetWeeklyPercent}% weekly target`}
-              tone={goal.aheadBehindDollars}
-              help={HELP.currentPace}
-              helpTestId="help-current-pace"
-            />
           </dl>
         </div>
 
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
           <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
             <Target className="size-4 text-emerald-300" aria-hidden />
-            1% Goal Tracker
-            <InfoTip label="1% weekly target" align="start" testId="help-one-percent-target">
-              {HELP.onePercentTarget}
-            </InfoTip>
+            Trade-Return Goal
           </div>
-          <GoalTracker goal={goal} />
+          <p className="text-sm text-zinc-400">
+            Trade-return goal reporting is being rebuilt from verified account and trade data.
+          </p>
         </div>
       </div>
 
@@ -2105,63 +2095,6 @@ function totalReturnDetail(status: AccountPerformanceSummary["totalReturnStatus"
     return "No current account value";
   }
   return "No starting baseline";
-}
-
-function GoalTracker({ goal }: { goal: ContributionAdjustedGoalSummary }) {
-  if (goal.status === "NO_STARTING_VALUE") {
-    return <EmptyState>Add a starting value in the Account ledger to activate the 1% goal.</EmptyState>;
-  }
-
-  return (
-    <div className="space-y-3 text-sm">
-      <div className="grid grid-cols-2 gap-3">
-        <ResultItem
-          label="Starting"
-          value={goal.startingCapital === null ? "No data" : money(goal.startingCapital)}
-          help={HELP.startingValue}
-          helpTestId="help-starting-value"
-        />
-        <ResultItem
-          label="Net contributions"
-          value={money(goal.netContributions)}
-          tone={goal.netContributions}
-          help={HELP.netContributions}
-          helpTestId="help-net-contributions"
-        />
-        <ResultItem
-          label="Target profit"
-          value={goal.targetProfit === null ? "No data" : money(goal.targetProfit)}
-          help={HELP.onePercentTarget}
-        />
-        <ResultItem
-          label="Ahead / behind"
-          value={goal.aheadBehindDollars === null ? "No data" : signedMoney(goal.aheadBehindDollars)}
-          tone={goal.aheadBehindDollars}
-          help={HELP.targetComparison}
-          helpTestId="help-ahead-behind"
-        />
-      </div>
-      <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
-        <div className="mb-2 flex items-center justify-between gap-3 text-xs uppercase tracking-normal text-zinc-500">
-          <HelpLabel label="Actual pace" help={HELP.currentPace} testId="help-actual-pace" />
-          <span className={toneClass(goal.aheadBehindDollars)}>{goal.percentOfTarget === null ? "N/A" : `${goal.percentOfTarget.toFixed(1)}%`}</span>
-        </div>
-        <Meter value={goal.percentOfTarget} />
-        <div className="mt-2 flex items-center justify-between gap-3 text-xs text-zinc-500">
-          <span>{goal.actualWeeklyPacePercent === null ? "No baseline" : percent(goal.actualWeeklyPacePercent)}</span>
-          <span>Target {percent(goal.targetWeeklyPercent)}</span>
-        </div>
-      </div>
-      <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
-        <div className="mb-2 flex items-center justify-between gap-3 text-xs uppercase tracking-normal text-zinc-500">
-          <HelpLabel label="Projected if OTM" help={HELP.projectedOtmPace} testId="help-projected-otm-pace" />
-          <span className={toneClass(goal.projectedOtmPL)}>{goal.projectedPercentOfTarget === null ? "N/A" : `${goal.projectedPercentOfTarget.toFixed(1)}%`}</span>
-        </div>
-        <Meter value={goal.projectedPercentOfTarget} />
-        <div className="mt-2 text-xs text-zinc-500">{goal.projectedWeeklyPacePercent === null ? "No projection" : `${percent(goal.projectedWeeklyPacePercent)} weekly pace`}</div>
-      </div>
-    </div>
-  );
 }
 
 function PerformanceGoalChart({ goal }: { goal: ContributionAdjustedGoalSummary }) {
@@ -2335,17 +2268,6 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
         </div>
       </div>
     </details>
-  );
-}
-
-function Meter({ value }: { value: number | null }) {
-  const width = value === null ? 0 : Math.max(4, Math.min(100, value));
-  const tone = value === null ? "bg-zinc-700" : value >= 100 ? "bg-emerald-300" : value >= 60 ? "bg-amber-300" : "bg-red-300";
-
-  return (
-    <div className="h-2.5 rounded-full bg-zinc-950">
-      <div className={`h-2.5 rounded-full ${tone}`} style={{ width: `${width}%` }} />
-    </div>
   );
 }
 

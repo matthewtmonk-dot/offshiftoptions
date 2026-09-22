@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { endOfNyCalendarDateUtc, selectEffectiveBaseline, type AccountLedgerEntryInput } from "@/domain/finance/accountLedger";
 import { getCurrentOpenCall, isPastExpiration, summarizeCampaign } from "@/domain/finance/campaigns";
 import type { SchwabReconciliationEvidence, TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
 import { compareStockStageCandidates, evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
@@ -455,6 +456,16 @@ export async function addAccountLedgerEntryForUser(
     throw new ValidationError("Choose one of your accounts.");
   }
 
+  // Funding authority (Account Baseline & Funding Boundaries ticket): a Schwab account's funding
+  // record of truth is its own imported broker-transfer activity, not a manually-typed number -
+  // mixing both sources for the same account is exactly the ambiguity
+  // summarizeAccountPerformance now has to detect and withhold gain/return for (see
+  // fundingCoverageStatus, accountLedger.ts). This is based on the account's persisted `source`,
+  // never live Schwab connection status, so it stays blocked even while temporarily disconnected.
+  if (account.source === "SCHWAB") {
+    throw new ValidationError("This account's funding is tracked from Schwab activity - manual deposits/withdrawals aren't available here.");
+  }
+
   const type = String(typeInput ?? "").toUpperCase() as AccountLedgerEntryType;
   if (!MANUAL_LEDGER_ENTRY_TYPES.has(type)) {
     throw new ValidationError("Choose deposit, withdrawal, or adjustment.");
@@ -475,6 +486,84 @@ export async function addAccountLedgerEntryForUser(
       source: "MANUAL",
       notes: notes || null,
     },
+  });
+}
+
+/**
+ * Account Baseline & Funding Boundaries: the missing workflow that lets ANY existing account
+ * (manual or Schwab) receive a STARTING_VALUE - see PROJECT_HANDOFF.md's reconnaissance finding
+ * that the GoalTracker's own "add a starting value in the Account ledger" message pointed at a
+ * workflow that could not actually do this for any account. Never gated by account.source.
+ *
+ * Append-only: a correction NEVER updates or deletes the prior STARTING_VALUE row - it inserts a
+ * new one. selectEffectiveBaseline (accountLedger.ts) alone decides which revision is effective
+ * (by createdAt, never occurredAt), so every accounting consumer agrees automatically. The
+ * replaced revision's id and the correction reason are recorded in `notes` (the existing field -
+ * no new schema).
+ *
+ * Concurrency: the caller must pass `expectedRevisionId` - the id of the baseline revision it
+ * last saw as effective (or the sentinel "" when it believes no baseline exists yet). Immediately
+ * before writing, the current effective revision is re-selected inside the same transaction; a
+ * mismatch means another correction was already recorded and this request is stale, so it is
+ * rejected outright rather than silently appending a conflicting revision. This is the same level
+ * of protection as Ticket 7's settings-revision guard (a re-check-then-write inside one
+ * transaction) - it narrows the race window to the transaction's own duration, not eliminates it
+ * under arbitrary concurrent load, which would need serializable isolation this ticket does not
+ * add.
+ */
+export async function setAccountBaselineForUser(
+  userId: string,
+  accountId: string,
+  nyDateInput: unknown,
+  accountValueInput: unknown,
+  reasonInput: unknown,
+  expectedRevisionIdInput: unknown,
+) {
+  const account = await prisma.tradingAccount.findFirst({ where: { id: accountId, userId } });
+  if (!account) {
+    throw new ValidationError("Choose one of your accounts.");
+  }
+
+  const nyDate = String(nyDateInput ?? "").trim();
+  let occurredAt: Date;
+  try {
+    occurredAt = endOfNyCalendarDateUtc(nyDate);
+  } catch {
+    throw new ValidationError("Enter a valid baseline date.");
+  }
+  // The baseline must represent the WHOLE account valuation at that instant, never cash alone -
+  // see the ticket's explicit requirement; the input field itself is labeled accordingly.
+  const accountValue = parseNonNegativeNumber(accountValueInput, "account value");
+  const reason = trimText(reasonInput, 300);
+  const expectedRevisionId = trimText(expectedRevisionIdInput, 200);
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.accountLedgerEntry.findMany({
+      where: { accountId, type: "STARTING_VALUE" },
+      select: { id: true, occurredAt: true, createdAt: true, amount: true },
+    });
+    const currentEffective = selectEffectiveBaseline(
+      existing.map((entry): AccountLedgerEntryInput => ({ id: entry.id, type: "STARTING_VALUE", occurredAt: entry.occurredAt, createdAt: entry.createdAt, amount: entry.amount })),
+    );
+    const currentEffectiveId = currentEffective?.entry.id ?? "";
+    if (expectedRevisionId !== currentEffectiveId) {
+      throw new ValidationError("This baseline was already updated elsewhere. Reload and try again.");
+    }
+
+    const notes = currentEffective
+      ? `Replaces STARTING_VALUE ${currentEffective.entry.id}${reason ? ` - ${reason}` : ""}`
+      : reason || null;
+
+    return tx.accountLedgerEntry.create({
+      data: {
+        accountId,
+        type: "STARTING_VALUE",
+        occurredAt,
+        amount: accountValue,
+        source: "MANUAL",
+        notes,
+      },
+    });
   });
 }
 

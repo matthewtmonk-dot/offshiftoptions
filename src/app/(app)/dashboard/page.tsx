@@ -5,7 +5,7 @@ import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
 import { RollStatusBadge, RollStatusUnavailableBadge } from "@/components/roll-status-badge";
 import { getDashboardData } from "@/lib/app-data";
-import { money, percent } from "@/lib/format";
+import { money } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
 import { getLiveQuotePricesForUser } from "@/lib/live-quotes";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
@@ -16,7 +16,7 @@ import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { describeBrokerPositionForDisplay, summarizeCampaignExposure, summarizeCspSecuredCapital } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
 import { matchDashboardPositions, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
-import { summarizeWeeklyReturns, summarizeWinLoss } from "@/domain/finance/performance";
+import { summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { computeRollStatus, DEFAULT_ROLL_BUFFER_PERCENT, isRollGuidanceApplicable } from "@/domain/finance/rollStatus";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
@@ -26,7 +26,6 @@ import { addReactionAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
-const WEEKLY_TARGET_PERCENT = 1;
 const ruleKeyByName = new Map(SCANNER_RULE_DEFINITIONS.map((definition) => [definition.name, definition.key]));
 
 type DashboardAccount = Awaited<ReturnType<typeof getDashboardData>>["ownAccounts"][number];
@@ -162,7 +161,6 @@ export default async function DashboardPage() {
   const campaignSecuredCapital = exposure.securedPutCollateral;
   const openCampaignCount = data.openCampaigns.length;
   const winLoss = summarizeWinLoss(completedForPerformance);
-  const weekly = summarizeWeeklyReturns(completedForPerformance, hasAnyAccountValue ? totalValue : null, WEEKLY_TARGET_PERCENT);
 
   const hasManualAccountData = accountRows.some((row) => row.performance.currentValueSource === "MANUAL");
   const hasSchwabAccountData = accountRows.some((row) => row.account.source === "SCHWAB" || row.performance.currentValueSource === "SCHWAB");
@@ -280,35 +278,15 @@ export default async function DashboardPage() {
       </section>
 
       <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        {weekly.status === "INSUFFICIENT_HISTORY" ? (
-          <p className="text-sm text-zinc-400">
-            <span className="font-medium text-zinc-200">INSUFFICIENT HISTORY</span> - complete at least one campaign to
-            start tracking weekly return against the {WEEKLY_TARGET_PERCENT}% target.
-          </p>
-        ) : (
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-            <span className="text-zinc-300">
-              This week <span className={weeklyToneClass(weekly.thisWeekPercent)}>{percent(weekly.thisWeekPercent ?? 0)}</span> of{" "}
-              {WEEKLY_TARGET_PERCENT}% target
-            </span>
-            <span className="text-zinc-500">
-              4-wk avg {weekly.trailing4WeekAveragePercent === null ? "N/A" : percent(weekly.trailing4WeekAveragePercent)}
-            </span>
-            <span className="text-zinc-500">
-              {weekly.weeksAtOrAboveTarget ?? 0} of {weekly.totalWeeksTracked ?? 0} weeks at target
-            </span>
-            <span className="text-zinc-500">
-              W-L {winLoss.wins}-{winLoss.losses}
-              {winLoss.breakevens ? `-${winLoss.breakevens}` : ""}
-              {winLoss.pendingCount > 0 ? ` (+${winLoss.pendingCount} pending)` : ""}
-            </span>
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          <span className="text-zinc-400">Trade-return goal reporting is being rebuilt from verified account and trade data.</span>
+          <span className="text-zinc-500">
+            W-L {winLoss.wins}-{winLoss.losses}
+            {winLoss.breakevens ? `-${winLoss.breakevens}` : ""}
+            {winLoss.pendingCount > 0 ? ` (+${winLoss.pendingCount} pending)` : ""}
+          </span>
+        </div>
       </section>
-
-      {weekly.excludedCount > 0 ? (
-        <p className="text-sm text-amber-300">Weekly returns use confirmed results only - {weekly.excludedCount} pending or incomplete result(s) excluded.</p>
-      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Panel
@@ -867,12 +845,6 @@ function formatAge(date: Date) {
   return `${elapsedDays}d ago`;
 }
 
-function weeklyToneClass(percentValue: number | null) {
-  if (percentValue === null) {
-    return "text-zinc-400";
-  }
-  return percentValue >= WEEKLY_TARGET_PERCENT ? "text-emerald-300" : "text-amber-300";
-}
 
 function dedupeActivities<T extends { actorId: string; type: string; ticker: string | null; title: string }>(activities: T[]) {
   const seen = new Set<string>();

@@ -13,11 +13,33 @@ export type AccountLedgerEntryKind =
   | "NOTE";
 
 export type AccountLedgerEntryInput = {
+  id?: string | null;
   type: AccountLedgerEntryKind;
   occurredAt: Date | string;
+  /** Row insertion time - distinct from `occurredAt` (the date the entry is ABOUT). Required to
+   * pick the effective STARTING_VALUE revision correctly (see selectEffectiveBaseline): a
+   * correction may deliberately move `occurredAt` backward or forward, so only `createdAt` can
+   * tell which revision was recorded most recently. Optional for backward compatibility with
+   * callers/fixtures that only ever have zero or one STARTING_VALUE entry, where it cannot matter. */
+  createdAt?: Date | string;
   amount?: unknown;
   accountValue?: unknown;
   cash?: unknown;
+  notes?: string | null;
+};
+
+/**
+ * The one authoritative STARTING_VALUE revision for an account - see selectEffectiveBaseline.
+ * `entry` keeps the original input object (by reference) so callers can re-identify it, e.g. to
+ * exclude it from a raw cash-flow-event list or to read its `id`/`notes` for display/audit.
+ */
+export type EffectiveBaseline = {
+  entry: AccountLedgerEntryInput;
+  value: number;
+  occurredAt: Date;
+  createdAt: Date;
+  /** Total number of STARTING_VALUE entries considered (1 = never corrected). */
+  revisionCount: number;
 };
 
 export type AccountLedgerSummary = {
@@ -33,6 +55,11 @@ export type AccountLedgerSummary = {
    * so a deposit is never mistaken for profit and vice versa.
    */
   ledgerDerivedValue: number | null;
+  /** The single authoritative STARTING_VALUE revision this summary used, or null if none exists.
+   * `startingValue`/`startingValueAt` above are always derived from this - never a separate
+   * interpretation (see selectEffectiveBaseline; Astra: two competing baseline interpretations
+   * is exactly the bug this centralizes away). */
+  effectiveBaseline: EffectiveBaseline | null;
 };
 
 export type AccountBrokerRecordInput = {
@@ -55,12 +82,29 @@ export type AccountCashFlowEvent = {
   source: "LEDGER" | "BROKER_TRANSFER";
 };
 
+/**
+ * COMPLETE: an explicit STARTING_VALUE exists and every contribution event in the measurement
+ * interval traces unambiguously to one funding authority - dollar gain may be shown.
+ * INCOMPLETE_INFERRED_BASELINE: no explicit STARTING_VALUE - startingCapital (if any) comes from
+ * the broker-transfer heuristic, which cannot prove original funding (see canUseTransferAsStartingCapital's
+ * bounded 90-day-import-window limitation) - labeled provisional, not blocked (existing,
+ * already-tested behavior is preserved), but never "COMPLETE" evidence.
+ * INCOMPLETE_MIXED_SOURCES: both a manual ledger contribution and a broker-transfer contribution
+ * were recorded inside the same measurement interval - since matching date/amount alone is not
+ * proof they are the same real-world event (see isSameManualStartingTransfer's narrower,
+ * baseline-only use), this account's contribution history is ambiguous - dollar gain is withheld.
+ */
+export type FundingCoverageStatus = "COMPLETE" | "INCOMPLETE_INFERRED_BASELINE" | "INCOMPLETE_MIXED_SOURCES";
+
 export type AccountPerformanceSummary = {
   ledger: AccountLedgerSummary;
   cashFlowEvents: AccountCashFlowEvent[];
   startingCapital: number | null;
   startingCapitalAt: Date | null;
   startingCapitalSource: "LEDGER" | "BROKER_TRANSFER" | "MIXED" | null;
+  /** Whether startingCapital came from an explicit user-entered baseline or was inferred from
+   * broker-transfer activity - see FundingCoverageStatus's INCOMPLETE_INFERRED_BASELINE case. */
+  fundingCoverageStatus: FundingCoverageStatus | null;
   netContributions: number | null;
   contributionEventCount: number;
   tradingPL: number | null;
@@ -68,9 +112,12 @@ export type AccountPerformanceSummary = {
   otherIncome: number | null;
   currentValue: number | null;
   currentValueSource: "SCHWAB" | "MANUAL" | "MIXED" | null;
+  /** Whole-account dollar gain (ending value - beginning value - deposits + withdrawals) - only
+   * ever populated when fundingCoverageStatus is "COMPLETE" (see the ACCOUNT GAIN RULE this
+   * ticket introduces). Never a cash-flow-weighted figure - that is explicitly future work. */
   totalGain: number | null;
   totalReturnPercent: number | null;
-  totalReturnStatus: "OK" | "NO_BASELINE" | "NO_CURRENT_VALUE" | "CONTRIBUTIONS_NEED_ADVANCED_RETURN";
+  totalReturnStatus: "OK" | "NO_BASELINE" | "NO_CURRENT_VALUE" | "CONTRIBUTIONS_NEED_ADVANCED_RETURN" | "INCOMPLETE_FUNDING_EVIDENCE";
   unexplainedGain: number | null;
 };
 
@@ -78,6 +125,11 @@ export type AccountPerformanceInput = {
   ledgerEntries: AccountLedgerEntryInput[];
   brokerRecords?: AccountBrokerRecordInput[];
   fallbackTradingPL?: number | null;
+  /** The measurement interval's ending instant - funding dated after this is excluded (it
+   * hasn't been reflected in `currentValue` yet). Defaults to "now"; a Schwab account's own
+   * latest BROKER_SNAPSHOT time is used instead whenever one exists, since that snapshot IS the
+   * dated valuation currentValue reflects. */
+  asOf?: Date;
 };
 
 type StartingCapitalSource = NonNullable<AccountPerformanceSummary["startingCapitalSource"]>;
@@ -100,18 +152,119 @@ type NormalizedAccountBrokerRecord = AccountBrokerRecordInput & {
 };
 
 /**
+ * The one authoritative rule for picking which STARTING_VALUE entry is "the baseline" when more
+ * than one exists (a correction). Every accounting consumer in this file goes through this - see
+ * Astra's finding that summarizeAccountLedger and summarizeAccountPerformance previously used two
+ * different (and both wrong once corrections exist) interpretations: occurredAt-effective-date
+ * ordering, and summing every STARTING_VALUE entry found.
+ *
+ * Selection is by (createdAt desc, id desc) - deliberately NEVER occurredAt. A correction may
+ * intentionally move its own occurredAt earlier OR later than the revision it replaces (the
+ * measurement period's start date is being corrected, not just its value), so occurredAt cannot
+ * tell which entry is the more recent correction. `id` only breaks an exact createdAt tie
+ * deterministically - it carries no temporal meaning beyond that.
+ */
+export function selectEffectiveBaseline(entries: AccountLedgerEntryInput[]): EffectiveBaseline | null {
+  const candidates = entries
+    .map((entry) => {
+      if (entry.type !== "STARTING_VALUE") {
+        return null;
+      }
+      const value = numeric(entry.amount);
+      if (value === null) {
+        return null;
+      }
+      const occurredAt = toDate(entry.occurredAt);
+      const createdAt = entry.createdAt !== undefined ? toDate(entry.createdAt) : occurredAt;
+      return { entry, value, occurredAt, createdAt, id: entry.id ?? "" };
+    })
+    .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  const winner = [...candidates].sort((left, right) => {
+    const createdDiff = right.createdAt.getTime() - left.createdAt.getTime();
+    if (createdDiff !== 0) {
+      return createdDiff;
+    }
+    if (left.id === right.id) {
+      return 0;
+    }
+    return left.id < right.id ? 1 : -1;
+  })[0]!;
+
+  return { entry: winner.entry, value: winner.value, occurredAt: winner.occurredAt, createdAt: winner.createdAt, revisionCount: candidates.length };
+}
+
+/**
+ * Ticket "Account Baseline & Funding Boundaries": converts a baseline date input ("YYYY-MM-DD",
+ * meant as an America/New_York calendar date) into the UTC instant for the END of that NY day
+ * (23:59:59.999 America/New_York) - the documented, exact convention for what a baseline date
+ * input means: "Account value at the end of the selected America/New_York date." Funding dated
+ * strictly after this instant belongs to the measurement period; funding at or before it does not
+ * (its economic effect is already inside the starting value).
+ *
+ * Implementation note: this guesses the true UTC instant by treating the target NY wall-clock
+ * time as if it were already UTC, then corrects by the NY UTC offset AT THAT GUESS instant. This
+ * is exact for essentially every real date because US DST transitions happen at 2 AM local time,
+ * many hours away from the end-of-day instant being computed here - the guess and the true value
+ * are always on the same side of any transition. A general-purpose implementation for arbitrary
+ * times of day would need to re-check the offset at the corrected instant too; end-of-day never
+ * needs that.
+ */
+export function endOfNyCalendarDateUtc(nyDateInput: string): Date {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(nyDateInput.trim());
+  if (!match) {
+    throw new RangeError(`Expected a YYYY-MM-DD date, got "${nyDateInput}".`);
+  }
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+
+  // The offset is computed from a whole-second guess (no ms) - nyOffsetMillisAt reads NY's wall
+  // clock via Intl.DateTimeFormat, which truncates sub-second precision. Feeding it a guess that
+  // already has .999ms would make that truncation silently drop the fractional second from one
+  // side of the subtraction but not the other, corrupting the offset by up to 999ms. The trailing
+  // ", 999" is added back afterward, once the offset itself is exact.
+  const guess = Date.UTC(year, month - 1, day, 23, 59, 59);
+  const offsetMs = nyOffsetMillisAt(new Date(guess));
+  return new Date(guess + offsetMs + 999);
+}
+
+/** The number of milliseconds to ADD to "NY wall-clock digits read as if they were UTC" to reach
+ * the true UTC instant - i.e. how far behind UTC New York currently is (+4h EDT, +5h EST). */
+function nyOffsetMillisAt(instant: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(instant);
+  const value = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0);
+  const hour = value("hour") % 24; // some locales format midnight as "24"
+  const wallClockAsUtc = Date.UTC(value("year"), value("month") - 1, value("day"), hour, value("minute"), value("second"));
+  return instant.getTime() - wallClockAsUtc;
+}
+
+/**
  * Summarizes an account's cash-flow history, keeping external contributions
  * (deposits/withdrawals/adjustments) strictly separate from trading performance.
  * A BROKER_SNAPSHOT entry never contributes to netContributions - it is a fact
  * reported by Schwab, not a cash flow the user made.
  */
 export function summarizeAccountLedger(entries: AccountLedgerEntryInput[]): AccountLedgerSummary {
+  const effectiveBaseline = selectEffectiveBaseline(entries);
   const ordered = [...entries].sort(
     (left, right) => toDate(left.occurredAt).getTime() - toDate(right.occurredAt).getTime(),
   );
 
-  let startingValue: number | null = null;
-  let startingValueAt: Date | null = null;
   let netContributions = 0;
   let latestBrokerSnapshot: AccountLedgerSummary["latestBrokerSnapshot"] = null;
 
@@ -119,25 +272,25 @@ export function summarizeAccountLedger(entries: AccountLedgerEntryInput[]): Acco
     const amount = numeric(entry.amount);
 
     if (entry.type === "STARTING_VALUE") {
-      if (amount !== null) {
-        startingValue = amount;
-        startingValueAt = toDate(entry.occurredAt);
+      // Handled entirely by effectiveBaseline above - a superseded revision must never also
+      // contribute here, and the effective one is not a "contribution" either.
+      continue;
+    }
+
+    if (entry.type === "DEPOSIT" || entry.type === "WITHDRAWAL" || entry.type === "MANUAL_ADJUSTMENT") {
+      if (amount === null) {
+        continue;
       }
-      continue;
-    }
-
-    if (entry.type === "DEPOSIT" && amount !== null) {
-      netContributions += amount;
-      continue;
-    }
-
-    if (entry.type === "WITHDRAWAL" && amount !== null) {
-      netContributions -= amount;
-      continue;
-    }
-
-    if (entry.type === "MANUAL_ADJUSTMENT" && amount !== null) {
-      netContributions += amount;
+      // Measurement-interval lower bound: funding at or before the baseline instant is already
+      // included in the starting value - counting it again would double it.
+      if (effectiveBaseline && toDate(entry.occurredAt).getTime() <= effectiveBaseline.occurredAt.getTime()) {
+        continue;
+      }
+      if (entry.type === "WITHDRAWAL") {
+        netContributions -= amount;
+      } else {
+        netContributions += amount;
+      }
       continue;
     }
 
@@ -154,14 +307,16 @@ export function summarizeAccountLedger(entries: AccountLedgerEntryInput[]): Acco
   }
 
   netContributions = round(netContributions, 2);
+  const startingValue = effectiveBaseline?.value ?? null;
   const ledgerDerivedValue = startingValue === null ? null : round(startingValue + netContributions, 2);
 
   return {
     startingValue,
-    startingValueAt,
+    startingValueAt: effectiveBaseline?.occurredAt ?? null,
     netContributions,
     latestBrokerSnapshot,
     ledgerDerivedValue,
+    effectiveBaseline,
   };
 }
 
@@ -173,6 +328,7 @@ export function summarizeAccountLedger(entries: AccountLedgerEntryInput[]): Acco
  */
 export function summarizeAccountPerformance(input: AccountPerformanceInput): AccountPerformanceSummary {
   const ledger = summarizeAccountLedger(input.ledgerEntries);
+  const explicitBaseline = ledger.effectiveBaseline; // the ONE authoritative selector - see selectEffectiveBaseline
   const brokerRecords = uniqueBrokerRecords(input.brokerRecords ?? [])
     .filter((record) => record.kind === "TRANSACTION" && (record.status ?? "CONFIRMED") === "CONFIRMED")
     .map((record) => ({
@@ -186,24 +342,59 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
     })
     .sort((left, right) => left.occurredAt.getTime() - right.occurredAt.getTime());
 
+  // Measurement-interval upper bound: funding dated after the account's own ending valuation
+  // instant hasn't been reflected in currentValue yet, so it must not be subtracted from gain
+  // prematurely. A Schwab account's ending instant is its own latest snapshot's timestamp
+  // (currentValue IS that dated reading); a manual account has no such reading, so "now" (or a
+  // caller-supplied asOf, e.g. for deterministic tests) is the only available anchor.
+  const endingAt = ledger.latestBrokerSnapshot?.asOf ?? input.asOf ?? new Date();
+
+  // Only the EFFECTIVE baseline revision ever becomes a cash-flow event - a superseded
+  // correction must never be summed alongside it (Astra: summarizeAccountPerformance may sum
+  // multiple STARTING_VALUE entries - unsafe once corrections exist).
   const ledgerCashFlows = input.ledgerEntries
     .map((entry): AccountCashFlowEvent | null => {
       const amount = numeric(entry.amount);
       if (amount === null) {
         return null;
       }
-      if (entry.type === "STARTING_VALUE" || entry.type === "DEPOSIT" || entry.type === "WITHDRAWAL" || entry.type === "MANUAL_ADJUSTMENT") {
-        return { type: entry.type, occurredAt: toDate(entry.occurredAt), amount, source: "LEDGER" };
+      if (entry.type === "STARTING_VALUE") {
+        if (!explicitBaseline || entry !== explicitBaseline.entry) {
+          return null;
+        }
+        return { type: "STARTING_VALUE", occurredAt: explicitBaseline.occurredAt, amount: explicitBaseline.value, source: "LEDGER" };
+      }
+      if (entry.type === "DEPOSIT" || entry.type === "WITHDRAWAL" || entry.type === "MANUAL_ADJUSTMENT") {
+        const occurredAt = toDate(entry.occurredAt);
+        // Measurement interval: excluded if at-or-before baseline (already in the starting
+        // value) or after the ending valuation instant (not yet reflected in currentValue).
+        if (explicitBaseline && occurredAt.getTime() <= explicitBaseline.occurredAt.getTime()) {
+          return null;
+        }
+        if (occurredAt.getTime() > endingAt.getTime()) {
+          return null;
+        }
+        return { type: entry.type, occurredAt, amount, source: "LEDGER" };
       }
       return null;
     })
     .filter((event): event is AccountCashFlowEvent => event !== null);
 
-  const manualStartingEvents = ledgerCashFlows.filter((event) => event.type === "STARTING_VALUE");
+  // Kept for the legacy same-day/same-amount baseline-transfer dedup below (isSameManualStartingTransfer)
+  // - it deliberately still looks at every raw STARTING_VALUE entry, not just the effective one,
+  // since a broker transfer can match whichever revision it was originally entered against.
+  const manualStartingEvents = input.ledgerEntries
+    .filter((entry) => entry.type === "STARTING_VALUE" && numeric(entry.amount) !== null)
+    .map((entry): AccountCashFlowEvent => ({ type: "STARTING_VALUE", occurredAt: toDate(entry.occurredAt), amount: numeric(entry.amount)!, source: "LEDGER" }));
+
   const transferRecords = brokerRecords.filter(isExternalTransfer);
   const firstPositiveTransfer = transferRecords.find((record) => record.amount > 0) ?? null;
+  // Broker-transfer baseline INFERENCE only ever runs when there is no explicit baseline - an
+  // explicit STARTING_VALUE always wins (see the ACCOUNT GAIN RULE / explicit-vs-inferred
+  // precedence this ticket establishes). The underlying transfer record itself is never deleted
+  // or altered either way - only whether it is TREATED as the baseline is affected.
   const baselineTransfer =
-    ledger.startingValue === null && firstPositiveTransfer && canUseTransferAsStartingCapital(firstPositiveTransfer, brokerRecords, input.ledgerEntries)
+    !explicitBaseline && firstPositiveTransfer && canUseTransferAsStartingCapital(firstPositiveTransfer, brokerRecords, input.ledgerEntries)
       ? firstPositiveTransfer
       : null;
   const brokerCashFlows = transferRecords
@@ -214,10 +405,15 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
       if (isSameManualStartingTransfer(record, manualStartingEvents)) {
         return false;
       }
-      if (ledger.startingValueAt) {
-        return record.occurredAt > ledger.startingValueAt;
+      if (explicitBaseline) {
+        // Measurement interval, same bounds as ledger entries above. No date/amount fuzzy
+        // matching here - a transfer strictly after the baseline instant is a real contribution.
+        return record.occurredAt.getTime() > explicitBaseline.occurredAt.getTime() && record.occurredAt.getTime() <= endingAt.getTime();
       }
-      return baselineTransfer ? record.occurredAt > baselineTransfer.occurredAt : firstPositiveTransfer !== null;
+      if (baselineTransfer) {
+        return record.occurredAt > baselineTransfer.occurredAt && record.occurredAt.getTime() <= endingAt.getTime();
+      }
+      return firstPositiveTransfer !== null && record.occurredAt.getTime() <= endingAt.getTime();
     })
     .map((record): AccountCashFlowEvent => ({
       type: record.amount >= 0 ? "DEPOSIT" : "WITHDRAWAL",
@@ -239,7 +435,10 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
   );
 
   const starts = cashFlowEvents.filter((event) => event.type === "STARTING_VALUE");
-  const startingCapital = starts.length ? round(starts.reduce((sum, event) => sum + event.amount, 0), 2) : null;
+  // At most one of these can ever exist by construction: ledgerCashFlows contributes only the
+  // single effective revision (or none), and derivedBaseline only exists when there is no
+  // explicit baseline at all - so this is never a sum of competing interpretations.
+  const startingCapital = starts.length ? round(starts[0]!.amount, 2) : null;
   const startingCapitalAt = starts[0]?.occurredAt ?? null;
   const startingCapitalSource = sourceSummary(starts.map((event) => event.source));
   const contributionEvents = cashFlowEvents.filter((event) => event.type !== "STARTING_VALUE");
@@ -255,6 +454,20 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
           }, 0),
           2,
         );
+
+  // Mixed-source funding: a manual ledger contribution AND a broker-transfer contribution both
+  // recorded inside the same measurement interval. Matching date/amount alone never resolves
+  // this (see the ticket's explicit rule), so this is surfaced as ambiguous rather than guessed.
+  const contributionSources = new Set(contributionEvents.map((event) => event.source));
+  const hasMixedFundingSources = contributionSources.has("LEDGER") && contributionSources.has("BROKER_TRANSFER");
+  const fundingCoverageStatus: FundingCoverageStatus | null =
+    startingCapital === null
+      ? null
+      : hasMixedFundingSources
+        ? "INCOMPLETE_MIXED_SOURCES"
+        : explicitBaseline
+          ? "COMPLETE"
+          : "INCOMPLETE_INFERRED_BASELINE";
 
   const brokerTradeRecords = brokerRecords.filter((record) => OPTION_TRADING_ACTIVITY_KINDS.has(record.activityKind));
   const brokerTradingPL = brokerTradeRecords.length
@@ -281,11 +494,14 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
   const current = currentAccountValue(ledger, tradingPL ?? 0);
   const currentValue = current.value;
   const currentValueSource = currentValue === null ? null : current.source;
+  // ACCOUNT GAIN RULE: ending - beginning - deposits + withdrawals, exposed only when funding
+  // coverage is complete (an explicit baseline, no mixed-source ambiguity) - never a cash-flow-
+  // weighted percentage (that stays future work), and never computed from ambiguous evidence.
   const totalGain =
-    currentValue !== null && startingCapital !== null && netContributions !== null
+    currentValue !== null && startingCapital !== null && netContributions !== null && !hasMixedFundingSources
       ? round(currentValue - startingCapital - netContributions, 2)
       : null;
-  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount: contributionEvents.length });
+  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount: contributionEvents.length, hasMixedFundingSources });
   const totalReturnPercent =
     totalReturnStatus === "OK" && totalGain !== null && startingCapital !== null && startingCapital > 0
       ? round((totalGain / startingCapital) * 100, 4)
@@ -299,6 +515,7 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
     startingCapital,
     startingCapitalAt,
     startingCapitalSource,
+    fundingCoverageStatus,
     netContributions,
     contributionEventCount: contributionEvents.length,
     tradingPL,
@@ -331,12 +548,22 @@ export function summarizeAccountsPerformance(accounts: AccountPerformanceInput[]
   const otherIncome = hasAccounts && summaries.every((summary) => summary.otherIncome !== null)
     ? round(summaries.reduce((sum, summary) => sum + (summary.otherIncome ?? 0), 0), 2)
     : null;
+  // Aggregate funding coverage is only as good as its weakest account - one ambiguous account
+  // must withhold the combined dollar gain the same way it withholds its own.
+  const hasMixedFundingSources = summaries.some((summary) => summary.fundingCoverageStatus === "INCOMPLETE_MIXED_SOURCES");
+  const fundingCoverageStatus: FundingCoverageStatus | null = !hasAccounts
+    ? null
+    : hasMixedFundingSources
+      ? "INCOMPLETE_MIXED_SOURCES"
+      : summaries.some((summary) => summary.fundingCoverageStatus !== "COMPLETE")
+        ? "INCOMPLETE_INFERRED_BASELINE"
+        : "COMPLETE";
   const totalGain =
-    currentValue !== null && startingCapital !== null && netContributions !== null
+    currentValue !== null && startingCapital !== null && netContributions !== null && !hasMixedFundingSources
       ? round(currentValue - startingCapital - netContributions, 2)
       : null;
   const contributionEventCount = summaries.reduce((sum, summary) => sum + summary.contributionEventCount, 0);
-  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount });
+  const totalReturnStatus = totalReturnStatusFor({ startingCapital, currentValue, contributionEventCount, hasMixedFundingSources });
   const totalReturnPercent =
     totalReturnStatus === "OK" && totalGain !== null && startingCapital !== null && startingCapital > 0
       ? round((totalGain / startingCapital) * 100, 4)
@@ -350,11 +577,13 @@ export function summarizeAccountsPerformance(accounts: AccountPerformanceInput[]
       netContributions: netContributions ?? 0,
       latestBrokerSnapshot: null,
       ledgerDerivedValue: startingCapital === null || netContributions === null ? null : round(startingCapital + netContributions, 2),
+      effectiveBaseline: null, // Multi-account aggregation has no single ledger's baseline revision to point to.
     },
     cashFlowEvents: summaries.flatMap((summary) => summary.cashFlowEvents).sort((left, right) => left.occurredAt.getTime() - right.occurredAt.getTime()),
     startingCapital,
     startingCapitalAt: summaries.map((summary) => summary.startingCapitalAt).filter((date): date is Date => date !== null)[0] ?? null,
     startingCapitalSource: sourceSummary(summaries.map((summary) => summary.startingCapitalSource).filter((source): source is "LEDGER" | "BROKER_TRANSFER" | "MIXED" => source !== null)),
+    fundingCoverageStatus,
     netContributions,
     contributionEventCount,
     tradingPL,
@@ -578,16 +807,21 @@ function totalReturnStatusFor({
   startingCapital,
   currentValue,
   contributionEventCount,
+  hasMixedFundingSources,
 }: {
   startingCapital: number | null;
   currentValue: number | null;
   contributionEventCount: number;
+  hasMixedFundingSources?: boolean;
 }): AccountPerformanceSummary["totalReturnStatus"] {
   if (startingCapital === null || startingCapital <= 0) {
     return "NO_BASELINE";
   }
   if (currentValue === null) {
     return "NO_CURRENT_VALUE";
+  }
+  if (hasMixedFundingSources) {
+    return "INCOMPLETE_FUNDING_EVIDENCE";
   }
   if (contributionEventCount > 0) {
     return "CONTRIBUTIONS_NEED_ADVANCED_RETURN";
