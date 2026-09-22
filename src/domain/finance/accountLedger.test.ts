@@ -209,12 +209,17 @@ describe("account ledger", () => {
   });
 
   it("uses campaign fallback only while broker trade facts are unavailable", () => {
+    // Both fixtures have a valid Schwab snapshot after the baseline, so totalGain is reachable here
+    // only with explicit proof of transaction coverage (Astra corrective patch, Issue 2) - this
+    // test is about tradingPL SOURCE selection (CAMPAIGNS vs BROKER_TRANSACTIONS), not funding
+    // coverage, so that proof is supplied to keep exercising totalGain's downstream value.
     const withoutBrokerFacts = summarizeAccountPerformance({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-07-20", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_069.02, cash: 10_069.02 },
       ],
       fallbackTradingPL: 69.02,
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(withoutBrokerFacts.tradingPL).toBe(69.02);
@@ -235,6 +240,7 @@ describe("account ledger", () => {
         brokerRecord({ action: "Sell to Open", amount: 67.34, occurredAt: "2026-08-28", fingerprint: "CORZ_STO_2" }),
       ],
       fallbackTradingPL: 69.02,
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(withBrokerFacts.tradingPL).toBe(123.7);
@@ -308,16 +314,24 @@ describe("account ledger", () => {
     expect(journalOnly.cashFlowEvents).toHaveLength(0);
   });
 
-  it("does not replace a manual starting value or double count the matching initial funding transfer", () => {
+  it("does not double count a same-day funding transfer that landed before the baseline's own end-of-day instant", () => {
+    // Astra corrective patch, second pass (Issue 1): a real baseline's occurredAt is always an
+    // America/New_York END-OF-DAY instant (endOfNyCalendarDateUtc), never midnight - so a transfer
+    // that establishes the baseline is normally dated BEFORE that instant, and the plain interval
+    // boundary excludes it correctly with no date/amount matching needed at all. (The old version
+    // of this test used an unrealistic midnight-UTC baseline timestamp specifically to exercise the
+    // now-removed date/amount dedup - see the sibling "still counts a later transfer..." test below
+    // for why that dedup was actually unsafe.)
     const summary = summarizeAccountPerformance({
       ledgerEntries: [
-        { type: "STARTING_VALUE", occurredAt: "2026-07-20T00:00:00Z", amount: 10_000 },
+        { type: "STARTING_VALUE", occurredAt: "2026-07-20T23:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_100, cash: 10_100 },
       ],
       brokerRecords: [
-        brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20T14:00:00Z" }),
+        brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20T14:00:00Z" }), // before the EOD baseline instant
         brokerRecord({ action: "Sell to Open", amount: 100, occurredAt: "2026-08-31" }),
       ],
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(summary.startingCapital).toBe(10_000);
@@ -620,12 +634,16 @@ describe("measurement interval (Account Baseline & Funding Boundaries)", () => {
 });
 
 describe("funding authority and mixed-source detection (Account Baseline & Funding Boundaries)", () => {
-  it("reports COMPLETE funding coverage and an available dollar gain when there is an explicit baseline and no contributions", () => {
+  it("reports COMPLETE funding coverage and an available dollar gain when there is an explicit baseline, no contributions, and proven Schwab transaction coverage", () => {
     const performance = summarizeAccountPerformance({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
       ],
+      // Astra corrective patch, second pass (Issue 2): a short interval alone is no longer
+      // sufficient for a Schwab-evidenced account - the caller must also affirmatively prove
+      // transaction fetch+persistence succeeded.
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
@@ -686,6 +704,7 @@ describe("percentage return stays unavailable pending the TWR/XIRR ticket (Accou
         { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 2_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 12_100, cash: 12_100 },
       ],
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
@@ -707,6 +726,7 @@ describe("Astra corrective patch - superseded baselines must not suppress real f
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_500, cash: 10_500 },
       ],
       brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 500, occurredAt: "2026-08-02T00:00:00Z" })],
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(performance.startingCapital).toBe(10_000);
@@ -715,15 +735,36 @@ describe("Astra corrective patch - superseded baselines must not suppress real f
     expect(performance.totalGain).toBe(0); // 10,500 - 10,000 - 500 = 0, never 500
   });
 
-  it("still dedupes a broker transfer that matches the CURRENT effective baseline's own date/amount", () => {
-    // The legacy same-day/same-amount dedup remains valid for the baseline actually in effect -
-    // this is not a general "never dedupe" rule, only "never dedupe against a stale revision."
+  it("a transfer strictly after the baseline's exact timestamp is always a contribution, regardless of matching the baseline's own date/amount (Astra corrective patch, second pass)", () => {
+    // Exact new Astra repro: an explicit baseline of $10,000 at end of Sep 1 America/New_York, and
+    // a GENUINE $10,000 broker deposit on Sep 2 afternoon. The baseline's own occurredAt (an NY
+    // end-of-day instant) lands on Sep 2 in UTC - the same UTC calendar date as the afternoon
+    // deposit - so the old same-day/same-amount dedup wrongly matched and suppressed it. There is
+    // no such dedup left: only the exact timestamp boundary decides, and matching amount/date is
+    // irrelevant.
     const performance = summarizeAccountPerformance({
       ledgerEntries: [
-        { id: "effective", type: "STARTING_VALUE", occurredAt: "2026-07-20T00:00:00Z", amount: 10_000 },
+        { type: "STARTING_VALUE", occurredAt: endOfNyCalendarDateUtc("2026-09-01", new Date("2026-09-03T00:00:00Z")), amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 20_000, cash: 20_000 },
+      ],
+      brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-09-02T18:00:00Z" })],
+      brokerTransactionCoverageStatus: "COMPLETE",
+    });
+
+    expect(performance.startingCapital).toBe(10_000);
+    expect(performance.netContributions).toBe(10_000); // the genuine Sep 2 deposit, never suppressed
+    expect(performance.totalGain).toBe(0); // 20,000 - 10,000 - 10,000 = 0, never the old wrong 10,000
+    expect(performance.totalReturnPercent).toBeNull(); // a real contribution exists in the interval
+  });
+
+  it("a transfer at/before the baseline's exact timestamp is still excluded by the interval boundary alone, with no date/amount matching needed", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { id: "effective", type: "STARTING_VALUE", occurredAt: "2026-07-20T23:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_000, cash: 10_000 },
       ],
       brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20T14:00:00Z" })],
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(performance.netContributions).toBe(0);
@@ -804,12 +845,25 @@ describe("Astra corrective patch - affirmative funding-coverage evidence require
     expect(performance.currentValue).toBe(10_300);
   });
 
-  it("an explicit baseline whose interval fits inside the lookback window is still COMPLETE", () => {
+  it("an explicit baseline whose interval fits inside the lookback window is COMPLETE only with proven transaction coverage (Astra corrective patch, second pass)", () => {
+    // Fitting inside the 90-day window is necessary but no longer sufficient on its own (Issue 2,
+    // second pass): "we asked Schwab for 90 days" is not proof we successfully received and
+    // persisted them - the caller must also affirmatively vouch for this account's coverage.
+    const withoutProof = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-01-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-03-01T00:00:00Z", accountValue: 10_300, cash: 10_300 }, // 59 days later
+      ],
+    });
+    expect(withoutProof.fundingCoverageStatus).toBe("INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
+    expect(withoutProof.totalGain).toBeNull();
+
     const performance = summarizeAccountPerformance({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-01-01T00:00:00Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-03-01T00:00:00Z", accountValue: 10_300, cash: 10_300 }, // 59 days later
       ],
+      brokerTransactionCoverageStatus: "COMPLETE",
     });
 
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
@@ -852,7 +906,7 @@ describe("Astra corrective patch - lifetime trading P/L is never added onto a da
     expect(performance.tradingPLSource).toBe("CAMPAIGNS");
   });
 
-  it("dated broker-transaction trading P/L before the baseline is excluded from the reconstructed value, not double-counted", () => {
+  it("dated broker-transaction trading P/L before the baseline is excluded from tradingPL, but option cash flow still cannot reconstruct a whole-account valuation (Astra corrective patch, second pass, Issue 3)", () => {
     const performance = summarizeAccountPerformance({
       ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
       brokerRecords: [
@@ -862,8 +916,213 @@ describe("Astra corrective patch - lifetime trading P/L is never added onto a da
       asOf: new Date("2026-10-01T00:00:00Z"),
     });
 
-    expect(performance.tradingPL).toBe(75); // the pre-baseline $500 trade is excluded entirely
-    expect(performance.currentValue).toBe(10_075);
-    expect(performance.totalGain).toBe(75);
+    // The pre-baseline $500 trade is still excluded from tradingPL entirely - that part of Issue 5's
+    // fix stands. But per Issue 3 (second pass), even the remaining $75 post-baseline option
+    // premium can never reconstruct a whole-account valuation on its own - it's a cash flow with an
+    // offsetting short-option liability, not a supported account-value reading. With no broker
+    // snapshot at all, there is no supported ending valuation here, so currentValue/gain are null.
+    expect(performance.tradingPL).toBe(75);
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
+  });
+});
+
+describe("Astra corrective patch, second pass - proven Schwab transaction coverage required (Issue 2, blocker)", () => {
+  it("1. recent baseline + successful complete transaction coverage -> coverage may be COMPLETE", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 12_000, cash: 12_000 },
+      ],
+      brokerTransactionCoverageStatus: "COMPLETE",
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("COMPLETE");
+    expect(performance.totalGain).toBe(2_000);
+  });
+
+  it("2. recent baseline + balance snapshot exists + transaction fetch failed -> coverage INCOMPLETE, gain unavailable", () => {
+    // Exact Astra repro: syncSchwabAccountForUser writes the BROKER_SNAPSHOT unconditionally, then
+    // the transaction fetch is a separate, independently-failable step - a fresh, accurate balance
+    // reading proves nothing about whether the deposit/transfer history behind it was ever fetched.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 12_000, cash: 12_000 },
+      ],
+      brokerTransactionCoverageStatus: "FAILED",
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
+    // The balance reading itself is still shown - it is accurate regardless of transaction history.
+    expect(performance.currentValue).toBe(12_000);
+  });
+
+  it("3. recent baseline + transaction fetch succeeded but persistence failed/partial -> coverage INCOMPLETE, gain unavailable", () => {
+    // A successful fetch that was never durably persisted is just as unproven as a failed fetch -
+    // reconcileSchwabActivityForUser and this function both read from BrokerRecord, so an activity
+    // that was fetched but not stored is invisible to funding-coverage checks either way.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 12_000, cash: 12_000 },
+      ],
+      brokerTransactionCoverageStatus: "PARTIAL",
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
+    expect(performance.totalGain).toBeNull();
+  });
+
+  it("4. recent baseline + no affirmative coverage evidence supplied at all -> coverage INCOMPLETE, gain unavailable", () => {
+    // The honest default: no caller in this codebase can supply real evidence today (see
+    // BrokerTransactionCoverageStatus's doc comment), so omitting the field entirely is what every
+    // production call site actually does - it must never silently default to trusting coverage.
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 12_000, cash: 12_000 },
+      ],
+    });
+
+    expect(performance.fundingCoverageStatus).toBe("INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnStatus).toBe("INCOMPLETE_FUNDING_EVIDENCE");
+  });
+
+  it("5. aggregate account performance withholds gain if any required account's coverage is incomplete", () => {
+    const summary = summarizeAccountsPerformance([
+      {
+        ledgerEntries: [
+          { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+          { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 11_000, cash: 11_000 },
+        ],
+        brokerTransactionCoverageStatus: "COMPLETE",
+      },
+      {
+        // Second account has a proven-COMPLETE-looking short interval, but no coverage proof.
+        ledgerEntries: [
+          { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 5_000 },
+          { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 5_500, cash: 5_500 },
+        ],
+      },
+    ]);
+
+    expect(summary.currentValue).toBe(16_500); // both accounts have a real snapshot-based value
+    expect(summary.startingCapital).toBe(15_000);
+    expect(summary.fundingCoverageStatus).toBe("INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
+    expect(summary.totalGain).toBeNull(); // one unproven account withholds the combined gain
+  });
+});
+
+describe("Astra corrective patch, second pass - option/trading cash flows are not a whole-account valuation (Issue 3, blocker)", () => {
+  it("1. $10,000 baseline + $75 Sell to Open + no valid ending valuation -> gain and return unavailable", () => {
+    // Exact Astra repro: receiving option premium also creates an offsetting short-option
+    // liability - "cash in" is not the same fact as "whole-account value increased by that amount."
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      brokerRecords: [brokerRecord({ action: "Sell to Open", amount: 75, occurredAt: "2026-09-05" })],
+      asOf: new Date("2026-09-10T00:00:00Z"),
+    });
+
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+    expect(performance.totalReturnPercent).toBeNull();
+    expect(performance.totalReturnStatus).toBe("NO_CURRENT_VALUE");
+  });
+
+  it("2. baseline + option premium + a valid Schwab ending snapshot -> the snapshot governs valuation; the premium is never added on top again", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_050, cash: 10_050 },
+      ],
+      brokerRecords: [brokerRecord({ action: "Sell to Open", amount: 75, occurredAt: "2026-09-05" })],
+      brokerTransactionCoverageStatus: "COMPLETE",
+    });
+
+    // If the $75 premium were wrongly added on top of the snapshot, currentValue would read
+    // 10,125 (10,050 + 75) instead of the snapshot's own, real 10,050.
+    expect(performance.currentValue).toBe(10_050);
+    expect(performance.currentValueSource).toBe("SCHWAB");
+    expect(performance.totalGain).toBe(50);
+  });
+
+  it("3. baseline + campaign P/L only + no ending valuation -> gain unavailable", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      fallbackTradingPL: 500,
+      asOf: new Date("2026-09-20T00:00:00Z"),
+    });
+
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+  });
+
+  it("4. baseline + dated broker option cash flows + no account snapshot -> gain unavailable", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 }],
+      brokerRecords: [
+        brokerRecord({ action: "Sell to Open", amount: 30, occurredAt: "2026-09-05", fingerprint: "STO1" }),
+        brokerRecord({ action: "Buy to Close", amount: -10, occurredAt: "2026-09-08", fingerprint: "BTC1" }),
+      ],
+      asOf: new Date("2026-09-20T00:00:00Z"),
+    });
+
+    expect(performance.tradingPL).toBe(20);
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+  });
+
+  it("5. a valid ending account snapshot dated before the baseline is invalid as an ending valuation", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-08-01T00:00:00Z", accountValue: 9_000, cash: 9_000 },
+      ],
+    });
+
+    expect(performance.currentValue).toBeNull();
+    expect(performance.totalGain).toBeNull();
+  });
+
+  it("6. a valid ending account snapshot dated at/after the baseline is an eligible valuation source", () => {
+    const performance = summarizeAccountPerformance({
+      ledgerEntries: [
+        { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+        { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-01T00:00:00Z", accountValue: 10_000, cash: 10_000 }, // exactly at the baseline instant
+      ],
+      brokerTransactionCoverageStatus: "COMPLETE",
+    });
+
+    expect(performance.currentValue).toBe(10_000);
+    expect(performance.currentValueSource).toBe("SCHWAB");
+    expect(performance.totalGain).toBe(0);
+  });
+
+  it("7. aggregate summaries preserve the unavailable status when one account's ending valuation is unsupported", () => {
+    const summary = summarizeAccountsPerformance([
+      {
+        // Fully supported: explicit baseline, valid snapshot, proven coverage.
+        ledgerEntries: [
+          { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
+          { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_300, cash: 10_300 },
+        ],
+        brokerTransactionCoverageStatus: "COMPLETE",
+      },
+      {
+        // Only option premium, no account snapshot at all - no supported ending valuation.
+        ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 5_000 }],
+        brokerRecords: [brokerRecord({ action: "Sell to Open", amount: 40, occurredAt: "2026-09-05" })],
+        asOf: new Date("2026-09-20T00:00:00Z"),
+      },
+    ]);
+
+    expect(summary.startingCapital).toBe(15_000); // both accounts have a starting capital figure
+    expect(summary.currentValue).toBeNull(); // the second account has no supported ending valuation
+    expect(summary.totalGain).toBeNull();
   });
 });

@@ -93,15 +93,18 @@ export type AccountCashFlowEvent = {
  * already-tested behavior is preserved), but never "COMPLETE" evidence, and never a confirmed gain
  * (Astra corrective patch, Issue 4: an inferred baseline can never prove it captured original funding).
  * INCOMPLETE_MIXED_SOURCES: both a manual ledger contribution and a broker-transfer contribution
- * were recorded inside the same measurement interval - since matching date/amount alone is not
- * proof they are the same real-world event (see isSameManualStartingTransfer's narrower,
- * baseline-only use), this account's contribution history is ambiguous - dollar gain is withheld.
- * INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY (Astra corrective patch, Issue 3): the account has Schwab
- * evidence (a BROKER_SNAPSHOT), but the measurement interval (baseline to ending valuation) is
- * longer than SCHWAB_TRANSACTION_LOOKBACK_DAYS (workflows.ts) - every Schwab sync only ever
- * re-fetches that trailing window of transactions, so "no broker transfer found" outside it means
- * "never observed," not "confirmed absent." Never invents a transfer to fill the gap; never expands
- * the import window here - that would require a new importer, out of scope for this fix.
+ * were recorded inside the same measurement interval - since matching date/amount alone is never
+ * proof they are the same real-world event, this account's contribution history is ambiguous -
+ * dollar gain is withheld.
+ * INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY: the account has Schwab evidence (a BROKER_SNAPSHOT), but
+ * either (a) the measurement interval (baseline to ending valuation) is longer than
+ * SCHWAB_TRANSACTION_LOOKBACK_DAYS (workflows.ts) - every Schwab sync only ever re-fetches that
+ * trailing window of transactions, so a gap older than it was simply never observed - or (b) no
+ * affirmative proof was supplied that the LATEST sync's transaction fetch AND persistence both
+ * actually succeeded (see BrokerTransactionCoverageStatus below - Astra corrective patch, second
+ * pass, Issue 2: a short interval alone is not proof anything was successfully fetched or stored).
+ * Never invents a transfer to fill the gap; never expands the import window here - that would
+ * require a new importer, out of scope for this fix.
  */
 export type FundingCoverageStatus =
   | "COMPLETE"
@@ -113,6 +116,34 @@ export type FundingCoverageStatus =
  * first) only ever re-fetches this trailing window of transactions, so this function has no way to
  * affirmatively prove funding coverage further back than this without a new importer (Issue 3). */
 const SCHWAB_TRANSACTION_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * Astra corrective patch, second pass (Issue 2, blocker): "the measurement interval fits inside
+ * the 90-day lookback we ASKED Schwab for" is not proof we actually RECEIVED and PERSISTED that
+ * transaction history - syncSchwabAccountForUser (workflows.ts) writes the BROKER_SNAPSHOT first,
+ * then fetches and persists transactions as later, independently-failable steps (see
+ * SchwabAccountSyncResult.accounts[].evidence). This type is the caller's own affirmative
+ * determination, for THIS specific account's most recent sync, that BOTH the transaction fetch AND
+ * its persistence into BrokerRecord succeeded in full. Only "COMPLETE" can ever unlock
+ * fundingCoverageStatus === "COMPLETE" for a Schwab-evidenced account; "PARTIAL", "FAILED", or
+ * simply omitting the field (the honest default - see AccountPerformanceInput) always leaves it
+ * INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY.
+ *
+ * IMPORTANT ARCHITECTURE NOTE: as of this patch, NO caller in this codebase can honestly supply
+ * "COMPLETE" here, because no per-account, per-sync evidence of this kind is persisted anywhere.
+ * `activity.evidence` (workflows.ts) is computed fresh on every sync but lives only in memory for
+ * that one request (consumed by campaign reconciliation, then discarded). The one thing that IS
+ * persisted, `BrokerConnection.metadata.lastSyncDiagnostics` (broker-connections.ts), is a
+ * CONNECTION-level aggregate across every Schwab account the user has linked under that connection
+ * - it is not scoped to one account or to a measurement interval, so treating it as proof for a
+ * specific account would be exactly the kind of unsafe guess this fix exists to prevent. Wiring up
+ * genuine per-account, per-interval evidence would need a new persisted, account-scoped field (a
+ * schema change) - deliberately not done in this patch. Until then, every Schwab-evidenced
+ * account's funding coverage stays INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY unconditionally in
+ * production; this type exists so the domain logic is ready the day that evidence exists, and so
+ * it can be exercised directly in tests.
+ */
+export type BrokerTransactionCoverageStatus = "COMPLETE" | "PARTIAL" | "FAILED";
 
 export type AccountPerformanceSummary = {
   ledger: AccountLedgerSummary;
@@ -148,6 +179,11 @@ export type AccountPerformanceInput = {
    * latest BROKER_SNAPSHOT time is used instead whenever one exists, since that snapshot IS the
    * dated valuation currentValue reflects. */
   asOf?: Date;
+  /** See BrokerTransactionCoverageStatus - omit unless the caller has genuine, account-scoped
+   * proof that this account's most recent Schwab transaction fetch AND its persistence both fully
+   * succeeded. No caller in this codebase can honestly supply this today (see that type's doc
+   * comment) - omitting it is the correct, conservative default. */
+  brokerTransactionCoverageStatus?: BrokerTransactionCoverageStatus | null;
 };
 
 type StartingCapitalSource = NonNullable<AccountPerformanceSummary["startingCapitalSource"]>;
@@ -443,26 +479,25 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
     })
     .filter((event): event is AccountCashFlowEvent => event !== null);
 
-  // Astra corrective patch (Issue 1, blocker): once an explicit baseline exists, ONLY that
-  // effective revision may define "the baseline-establishing transfer" for the dedup below - a
-  // SUPERSEDED STARTING_VALUE revision (replaced by a correction) must never suppress a genuine
-  // later broker deposit just because it happens to share that stale revision's date/amount.
-  // Reproduced case: superseded $500 STARTING_VALUE dated Aug 2, corrected effective baseline
-  // $10,000 dated July, a genuine $500 broker deposit ALSO on Aug 2 - the old code matched the
-  // deposit against the superseded revision and silently dropped it as a "duplicate," when it was
-  // real, uncounted funding. (Every STARTING_VALUE entry has a numeric amount by construction here
-  // - selectEffectiveBaseline already filtered out non-numeric ones - so explicitBaseline.value is
-  // never used to look up a discarded value.)
-  const manualStartingEvents: AccountCashFlowEvent[] = explicitBaseline
-    ? [{ type: "STARTING_VALUE", occurredAt: explicitBaseline.occurredAt, amount: explicitBaseline.value, source: "LEDGER" }]
-    : [];
-
+  // Astra corrective patch, second pass (Issue 1, blocker): once an explicit baseline exists, no
+  // date/amount matching against it is ever used to suppress a broker transfer - only the
+  // measurement interval's exact timestamp boundary decides. The prior version of this fix (first
+  // pass) restricted the old same-day/same-amount dedup to only the CURRENT effective baseline
+  // revision (fixing the superseded-revision case), but that dedup itself remained unsafe even
+  // against the correct revision: a baseline's occurredAt is an America/New_York END-OF-DAY
+  // instant, which lands on the NEXT UTC calendar date - so a genuinely NEW, coincidentally
+  // same-amount deposit the following NY afternoon can share the SAME UTC calendar date as the
+  // baseline's own occurredAt and get wrongly matched as "the same event." Reproduced case:
+  // baseline $10,000 at end of Sep 1 NY, a genuine $10,000 broker deposit on Sep 2 afternoon - both
+  // land on the same UTC date, and the old date/amount dedup silently dropped the real deposit.
+  // The baseline represents the account's value at its EXACT opening timestamp: any external
+  // funding strictly after that timestamp is a contribution, full stop, regardless of its amount or
+  // calendar date. (A transfer that TRULY is the same real-world event the baseline was set from is
+  // still excluded correctly - not by matching, but because it is normally dated at/before the
+  // baseline's end-of-day instant, so the interval boundary alone excludes it.)
   const brokerCashFlows = transferRecords
     .filter((record) => {
       if (baselineTransfer && record === baselineTransfer) {
-        return false;
-      }
-      if (isSameManualStartingTransfer(record, manualStartingEvents)) {
         return false;
       }
       if (explicitBaseline) {
@@ -520,17 +555,28 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
   // this (see the ticket's explicit rule), so this is surfaced as ambiguous rather than guessed.
   const contributionSources = new Set(contributionEvents.map((event) => event.source));
   const hasMixedFundingSources = contributionSources.has("LEDGER") && contributionSources.has("BROKER_TRANSFER");
-  // Astra corrective patch (Issue 3, blocker): a Schwab sync only ever re-fetches a trailing
-  // SCHWAB_TRANSACTION_LOOKBACK_DAYS window of transactions (see workflows.ts) - "no transfer found"
-  // outside that window means "never observed," not "confirmed absent." An explicit baseline whose
-  // measurement interval is longer than that window can never affirmatively prove complete funding
-  // coverage from Schwab evidence alone, so it must not be labeled COMPLETE.
+  // Astra corrective patch (Issue 3, first pass): a Schwab sync only ever re-fetches a trailing
+  // SCHWAB_TRANSACTION_LOOKBACK_DAYS window of transactions (see workflows.ts) - a measurement
+  // interval longer than that window can never be proven complete from Schwab evidence alone,
+  // no matter what the latest sync's own outcome was.
   const hasSchwabEvidence = ledger.latestBrokerSnapshot !== null;
   const intervalExceedsSchwabLookback =
     explicitBaseline !== null &&
     hasSchwabEvidence &&
     baselineInstant !== null &&
     endingAt.getTime() - baselineInstant.getTime() > SCHWAB_TRANSACTION_LOOKBACK_MS;
+  // Astra corrective patch, second pass (Issue 2, blocker): fitting inside that window is
+  // NECESSARY but not SUFFICIENT - "we asked Schwab for 90 days" is not proof "we successfully
+  // received and persisted 90 days." syncSchwabAccountForUser writes the BROKER_SNAPSHOT first,
+  // then fetches and persists transactions as later, independently-failable steps - a snapshot can
+  // exist and be perfectly current while the transaction history behind it silently never arrived.
+  // COMPLETE now additionally requires the caller's own affirmative proof (see
+  // BrokerTransactionCoverageStatus) that THIS account's fetch+persistence both fully succeeded -
+  // no caller in this codebase can honestly supply that today (see that type's doc comment), so a
+  // Schwab-evidenced account's coverage is unconditionally INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY in
+  // production until a future ticket adds real per-account evidence tracking.
+  const hasProvenSchwabTransactionCoverage =
+    !intervalExceedsSchwabLookback && (input.brokerTransactionCoverageStatus ?? null) === "COMPLETE";
   const fundingCoverageStatus: FundingCoverageStatus | null =
     startingCapital === null
       ? null
@@ -538,7 +584,7 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
         ? "INCOMPLETE_MIXED_SOURCES"
         : !explicitBaseline
           ? "INCOMPLETE_INFERRED_BASELINE"
-          : intervalExceedsSchwabLookback
+          : hasSchwabEvidence && !hasProvenSchwabTransactionCoverage
             ? "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY"
             : "COMPLETE";
 
@@ -577,36 +623,36 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
       )
     : null;
 
-  // Astra corrective patch (Issues 2 & 5, blockers): the "current value" used for whole-account
-  // gain must itself be a genuine, interval-bounded ending valuation - never the legacy
-  // currentAccountValue() helper's MANUAL fallback, which derives from ledger.netContributions
-  // (only lower-bounded by the baseline, with NO upper bound at all - a deposit dated after
-  // endingAt used to leak straight through into currentValue even though this function's OWN,
-  // separately-bounded `netContributions` above correctly excluded it, producing a phantom "gain"
-  // equal to the leaked deposit). Two cases:
-  //  - A BROKER_SNAPSHOT is trusted only when it is dated at/after the baseline (snapshotIsValidEnding,
-  //    computed above) - a snapshot from before the baseline describes a different, earlier state
-  //    of the account and must never be diffed against the baseline as if it were the ending value.
-  //  - Absent a valid snapshot, a MANUAL reconstruction (startingCapital + bounded netContributions
-  //    + tradingPL) is trusted only when tradingPL itself is NOT the undated, lifetime CAMPAIGNS
-  //    aggregate - that number carries no per-trade dates, so it can never be proven to fall
-  //    entirely after the baseline (Issue 5's exact repro: a dated baseline that already includes
-  //    lifetime trading gains, with those same gains added again from the fallback total).
+  // Astra corrective patch (Issues 2 & 5, first pass; Issue 3, second pass - all blockers): the
+  // "current value" used for whole-account gain must itself be a genuine, SUPPORTED ending account
+  // valuation - never the legacy currentAccountValue() helper's MANUAL fallback, which derives
+  // from ledger.netContributions (only lower-bounded by the baseline, with NO upper bound at all -
+  // a deposit dated after endingAt used to leak straight through into currentValue even though this
+  // function's OWN, separately-bounded `netContributions` above correctly excluded it).
+  //
+  // Second-pass finding (Issue 3): a BROKER_SNAPSHOT dated at/after the baseline
+  // (snapshotIsValidEnding, above) is the ONLY supported account-value reading this function
+  // recognizes - a snapshot from before the baseline describes a different, earlier state and must
+  // never be diffed against the baseline. Trading cash flows (dated broker option transactions,
+  // undated lifetime CAMPAIGNS P/L, or anything derived from them) are NEVER a substitute for a
+  // real account valuation, no matter how well-dated: receiving option premium also creates an
+  // offsetting short-option liability, so "cash received" is not the same fact as "whole-account
+  // value increased by that amount." Astra's exact repro: baseline $10,000 + a $75 Sell to Open
+  // premium + no broker snapshot at all used to produce currentValue $10,075 / gain $75 - there was
+  // no supported ending valuation involved anywhere in that reconstruction.
+  //
+  // The one narrow exception: when NO trading activity of any kind occurred in the interval
+  // (tradingPL === null - no broker option records AND no campaign fallback), contributions
+  // (deposits/withdrawals) are the ONLY thing that could have changed the account's value, and
+  // unlike option premium they are dollar-for-dollar, liability-free cash movements - starting
+  // capital + those contributions is then a genuine supported valuation, not a synthesized one.
   let currentValue: number | null;
   let currentValueSource: "SCHWAB" | "MANUAL" | null;
   if (snapshotIsValidEnding) {
     currentValue = ledger.latestBrokerSnapshot!.accountValue;
     currentValueSource = "SCHWAB";
-  } else if (
-    // The MANUAL reconstruction fallback is only for an account with NO broker snapshot at all. An
-    // account that HAS a snapshot but it's invalid (before the baseline) must not fall through to
-    // this branch - that would silently assume zero trading/valuation change since the baseline,
-    // which is exactly as unproven as the CAMPAIGNS-P/L case this branch already guards against.
-    ledger.latestBrokerSnapshot === null &&
-    startingCapital !== null &&
-    (baselineInstant === null || tradingPLSource !== "CAMPAIGNS")
-  ) {
-    currentValue = round(startingCapital + (netContributions ?? 0) + (tradingPL ?? 0), 2);
+  } else if (ledger.latestBrokerSnapshot === null && startingCapital !== null && tradingPL === null) {
+    currentValue = round(startingCapital + (netContributions ?? 0), 2);
     currentValueSource = "MANUAL";
   } else {
     currentValue = null;
@@ -877,21 +923,6 @@ function earliestBrokerSnapshotAt(entries: AccountLedgerEntryInput[]) {
     return null;
   }
   return new Date(Math.min(...snapshotTimes));
-}
-
-function isSameManualStartingTransfer(record: NormalizedAccountBrokerRecord, manualStarts: AccountCashFlowEvent[]) {
-  return (
-    record.amount > 0 &&
-    manualStarts.some((start) => sameUtcDate(record.occurredAt, start.occurredAt) && moneyEqual(record.amount, start.amount))
-  );
-}
-
-function sameUtcDate(left: Date, right: Date) {
-  return left.toISOString().slice(0, 10) === right.toISOString().slice(0, 10);
-}
-
-function moneyEqual(left: number, right: number) {
-  return Math.abs(round(left - right, 2)) < 0.01;
 }
 
 function brokerRecordText(record: Pick<AccountBrokerRecordInput, "action" | "description">) {
