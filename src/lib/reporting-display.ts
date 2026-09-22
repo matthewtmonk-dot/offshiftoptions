@@ -2,17 +2,20 @@ import { money, percent, shortDate, shortDateTime } from "@/lib/format";
 import type { AccountReportingSummary } from "@/domain/finance/reporting";
 
 /**
- * Reporting Phase Ticket 2 - the five "How am I doing?" cards' presentation-only helpers, kept out
- * of dashboard/page.tsx so they can be unit-tested directly without touching a Next.js special
- * file's export surface (page.tsx may only export a small, framework-recognized set of names).
- * Every value/status these read comes straight from AccountReportingSummary (reporting.ts); none
- * of these functions compute P/L, return, capital, or gain - they only format already-decided
+ * Reporting Phase, Ticket 2 (Dashboard) and Ticket 3 (Tracker) - the shared presentation-only
+ * helpers for AccountReportingSummary, used by both Dashboard's "How am I doing?" cards and
+ * Tracker's own trade-focused summaries, so the two pages can never independently invent or drift
+ * apart on wording for the same underlying reporting-contract field. Originally lived under
+ * dashboard/ (kept out of page.tsx itself so it could be unit-tested without touching a Next.js
+ * special file's restricted export surface); moved here once Tracker needed the same functions,
+ * since a second page depending on a path under another page's directory is an architecture smell.
+ * None of these functions compute P/L, return, capital, or gain - they only format already-decided
  * numbers and choose which already-translated message to show.
  */
 
 /** "Major metric unavailable due to evidence limitations" - deliberately excludes the neutral
- * NO_CLOSED_CAMPAIGNS state (nothing closed this week is not a data problem) so the compact banner
- * never fires just because it's a quiet week. */
+ * NO_CLOSED_CAMPAIGNS state (nothing closed this week is not a data problem) so a compact banner
+ * built from this never fires just because it's a quiet week. */
 export function dashboardHasEvidenceGap(report: AccountReportingSummary): boolean {
   return (
     report.currentAccountValue === null ||
@@ -38,18 +41,13 @@ export function accountValueDetail(report: AccountReportingSummary): string | nu
 }
 
 /**
- * currentAccountValue is null only when the underlying accounting summary's ending-valuation gate
- * (Gate A, accountLedger.ts) failed - the exact same condition that makes wholeAccountGainStatus
- * "UNAVAILABLE" with reason NO_BASELINE or NO_CURRENT_VALUE (never one of the funding-coverage
- * reasons, which by construction only apply once a current value already exists - see reporting.ts's
- * totalReturnStatusFor ordering). Reusing that already-translated message here is safe for that
- * reason, not a new formula; the fallback below is defensive only and should be unreachable.
+ * Reporting Phase, Ticket 3 (Section 12): reads the reporting contract's own dedicated
+ * currentAccountValueUnavailableMessage field directly - no longer borrows
+ * wholeAccountGainUnavailableMessage for this. The fallback string is defensive only (the contract
+ * populates this message whenever currentAccountValue is null) and should be unreachable.
  */
 export function accountValueUnavailableReason(report: AccountReportingSummary): string | null {
-  if (report.wholeAccountGainUnavailableReason === "NO_BASELINE" || report.wholeAccountGainUnavailableReason === "NO_CURRENT_VALUE") {
-    return report.wholeAccountGainUnavailableMessage;
-  }
-  return "No supported account value is available yet.";
+  return report.currentAccountValueUnavailableMessage ?? "No supported account value is available yet.";
 }
 
 export function confirmedTradingPLNote(report: AccountReportingSummary): string | null {

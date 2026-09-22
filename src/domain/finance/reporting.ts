@@ -45,6 +45,16 @@ export type WholeAccountGainUnavailableReason =
   | "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY";
 
 /**
+ * Reporting Phase, Ticket 3 (Section 12 follow-up): the only two reasons `currentAccountValue`
+ * itself (Section 1) can ever be null - narrower than `WholeAccountGainUnavailableReason` because
+ * a funding-coverage reason (INCOMPLETE_*) can only occur once a current value already exists (see
+ * `totalReturnStatusFor`'s ordering in accountLedger.ts: it returns "NO_BASELINE" before ever
+ * checking `currentValue`, then "NO_CURRENT_VALUE" if that's still null, and only reaches a funding
+ * status afterward). This is a truthful re-statement of that same already-computed status, not new
+ * accounting semantics. */
+export type CurrentAccountValueUnavailableReason = "NO_BASELINE" | "NO_CURRENT_VALUE";
+
+/**
  * Astra corrective patch (Issues 1 & 2): distinguishes every genuinely different reason "Return on
  * campaigns closed this week" can be unavailable, so none of them is ever mislabeled as another.
  * - NO_CLOSED_CAMPAIGNS: nothing closed in the current week at all.
@@ -181,6 +191,11 @@ export type AccountReportingSummary = {
    * caller can present "values updated between X and Y" from this pair when they differ. */
   currentAccountValueNewestSnapshotAsOf: Date | null;
   currentAccountValueSource: AccountPerformanceSummary["currentValueSource"];
+  /** Astra corrective patch (Reporting Phase, Ticket 3, Section 12): why `currentAccountValue` is
+   * null, so a caller no longer has to borrow `wholeAccountGainUnavailableReason` for a question
+   * that field wasn't scoped to answer. Null whenever `currentAccountValue` is itself available. */
+  currentAccountValueUnavailableReason: CurrentAccountValueUnavailableReason | null;
+  currentAccountValueUnavailableMessage: string | null;
 
   // ---- Section 2: Confirmed Trading P/L ("How much confirmed trading profit/loss?") ----
   /** summarizeWinLoss's CONFIRMED-only realized P/L (confirmedRealizedTradingPL) - the one
@@ -362,6 +377,8 @@ export function summarizeAccountReporting(input: AccountReportingInput): Account
     currentAccountValueOldestSnapshotAsOf.getTime() === currentAccountValueNewestSnapshotAsOf.getTime()
       ? currentAccountValueOldestSnapshotAsOf
       : null;
+  const currentAccountValueUnavailableReason: CurrentAccountValueUnavailableReason | null =
+    currentAccountValue !== null ? null : accounting.totalReturnStatus === "NO_BASELINE" ? "NO_BASELINE" : "NO_CURRENT_VALUE";
 
   // Section 2
   const winLoss = summarizeWinLoss(completedCampaigns);
@@ -425,6 +442,8 @@ export function summarizeAccountReporting(input: AccountReportingInput): Account
     currentAccountValueOldestSnapshotAsOf,
     currentAccountValueNewestSnapshotAsOf,
     currentAccountValueSource,
+    currentAccountValueUnavailableReason,
+    currentAccountValueUnavailableMessage: friendlyReportingReason(currentAccountValueUnavailableReason),
 
     confirmedTradingPL: winLoss.confirmedRealizedTradingPL,
     confirmedTradingPLPeriod: "ALL_TIME",

@@ -10,14 +10,15 @@ import {
   tradeReturnReason,
   tradeReturnValue,
   wholeAccountGainDetail,
-} from "./reporting-cards";
+} from "./reporting-display";
 import type { AccountReportingSummary } from "@/domain/finance/reporting";
 import { shortDate, shortDateTime } from "@/lib/format";
 
-// Reporting Phase, Ticket 2 ("How am I doing?"): these helpers are the ONLY thing dashboard/page.tsx
-// does with AccountReportingSummary - format already-decided fields into card text, never
-// recompute P/L/return/capital/gain. Testing them directly (rather than the page's JSX) is the
-// practical substitute for a component-render harness, which this repo does not have.
+// Reporting Phase, Ticket 2 ("How am I doing?") and Ticket 3 (Tracker reuse): these helpers are
+// the ONLY thing dashboard/page.tsx and positions/page.tsx do with AccountReportingSummary -
+// format already-decided fields into card text, never recompute P/L/return/capital/gain. Testing
+// them directly (rather than the pages' JSX) is the practical substitute for a component-render
+// harness, which this repo does not have.
 
 // These are genuine instants (a snapshot capture time, a baseline-set time) - shortDate/
 // shortDateTime render them in the runner's local timezone by design (see format.ts's own
@@ -38,6 +39,8 @@ function baseReport(overrides: Partial<AccountReportingSummary> = {}): AccountRe
     currentAccountValueOldestSnapshotAsOf: commonInstant,
     currentAccountValueNewestSnapshotAsOf: commonInstant,
     currentAccountValueSource: "SCHWAB",
+    currentAccountValueUnavailableReason: null,
+    currentAccountValueUnavailableMessage: null,
 
     confirmedTradingPL: 500,
     confirmedTradingPLPeriod: "ALL_TIME",
@@ -116,20 +119,25 @@ describe("Card 1: Account Value", () => {
       currentAccountValueAsOf: null,
       currentAccountValueOldestSnapshotAsOf: null,
       currentAccountValueNewestSnapshotAsOf: null,
+      currentAccountValueUnavailableReason: "NO_BASELINE",
+      currentAccountValueUnavailableMessage: "Set a starting account value to measure account performance.",
+      // Deliberately a DIFFERENT wholeAccountGainUnavailableMessage than this reason - proves this
+      // helper reads its own dedicated field (Reporting Phase Ticket 3, Section 12) rather than
+      // borrowing the whole-account-gain message.
       wholeAccountGainStatus: "UNAVAILABLE",
       wholeAccountGainUnavailableReason: "NO_BASELINE",
-      wholeAccountGainUnavailableMessage: "Set a starting account value to measure account performance.",
+      wholeAccountGainUnavailableMessage: "DIFFERENT MESSAGE - should never appear here",
     });
     expect(accountValueUnavailableReason(report)).toBe("Set a starting account value to measure account performance.");
     expect(accountValueUnavailableReason(report)).not.toContain("NO_BASELINE");
+    expect(accountValueUnavailableReason(report)).not.toContain("DIFFERENT MESSAGE");
   });
 
   it("4. unavailable (no current value) shows the friendly NO_CURRENT_VALUE reason", () => {
     const report = baseReport({
       currentAccountValue: null,
-      wholeAccountGainStatus: "UNAVAILABLE",
-      wholeAccountGainUnavailableReason: "NO_CURRENT_VALUE",
-      wholeAccountGainUnavailableMessage: "An ending account value is not available for this period.",
+      currentAccountValueUnavailableReason: "NO_CURRENT_VALUE",
+      currentAccountValueUnavailableMessage: "An ending account value is not available for this period.",
     });
     expect(accountValueUnavailableReason(report)).toBe("An ending account value is not available for this period.");
   });
@@ -149,7 +157,7 @@ describe("Card 2: Confirmed Trading P/L", () => {
   });
 
   it("7. dashboard page labels this card 'Confirmed Trading P/L' and never as a this-week figure", () => {
-    const text = source("./page.tsx");
+    const text = source("../app/(app)/dashboard/page.tsx");
     expect(text).toContain('label="Confirmed Trading P/L"');
     expect(text).toContain("Since tracked campaign history");
     expect(text).not.toMatch(/Confirmed Trading P\/L[\s\S]{0,120}This Week/);
@@ -218,7 +226,7 @@ describe("Card 3: Return on campaigns closed this week", () => {
   });
 
   it("14. dashboard page does not revive the retired 1% weekly target on this card", () => {
-    const text = source("./page.tsx");
+    const text = source("../app/(app)/dashboard/page.tsx");
     expect(text).not.toContain("1%");
     expect(text).not.toContain("WEEKLY_TARGET_PERCENT");
   });
@@ -319,7 +327,7 @@ describe("Data-warning banner", () => {
 });
 
 describe("Dashboard page structure (source-level - no component-render harness in this repo)", () => {
-  const text = source("./page.tsx");
+  const text = source("../app/(app)/dashboard/page.tsx");
 
   it("27. uses the authoritative reporting contract instead of the retired per-page account aggregate", () => {
     expect(text).toContain("summarizeAccountReporting(");

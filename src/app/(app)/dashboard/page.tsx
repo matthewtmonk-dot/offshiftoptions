@@ -23,7 +23,7 @@ import {
   tradeReturnReason,
   tradeReturnValue,
   wholeAccountGainDetail,
-} from "./reporting-cards";
+} from "@/lib/reporting-display";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { describeBrokerPositionForDisplay, summarizeCampaignExposure, summarizeCspSecuredCapital, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";

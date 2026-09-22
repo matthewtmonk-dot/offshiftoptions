@@ -92,6 +92,52 @@ describe("Section 1: Account Value", () => {
     expect(withTrading.currentAccountValue).toBe(withoutTrading.currentAccountValue);
     expect(withTrading.currentAccountValue).toBe(10_050); // never 10,050 + 75
   });
+
+  // Reporting Phase, Ticket 3 (Section 12 follow-up): a dedicated reason/message for why
+  // currentAccountValue itself is unavailable, rather than a caller borrowing
+  // wholeAccountGainUnavailableMessage (a field scoped to a different question).
+  it("5. unavailable with no baseline at all reports NO_BASELINE, not a borrowed whole-account-gain reason", () => {
+    const report = reportFor({
+      accounts: [{ ledgerEntries: [] }],
+    });
+
+    expect(report.currentAccountValue).toBeNull();
+    expect(report.currentAccountValueUnavailableReason).toBe("NO_BASELINE");
+    expect(report.currentAccountValueUnavailableMessage).toBe("Set a starting account value to measure account performance.");
+  });
+
+  it("6. unavailable with a baseline but no ending valuation reports NO_CURRENT_VALUE", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 }],
+          fallbackTradingPL: 500,
+          asOf: new Date("2026-09-20T00:00:00Z"),
+        },
+      ],
+    });
+
+    expect(report.currentAccountValue).toBeNull();
+    expect(report.currentAccountValueUnavailableReason).toBe("NO_CURRENT_VALUE");
+    expect(report.currentAccountValueUnavailableMessage).toBe("An ending account value is not available for this period.");
+  });
+
+  it("7. available account value reports no unavailable reason or message", () => {
+    const report = reportFor({
+      accounts: [
+        {
+          ledgerEntries: [
+            { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
+            { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 3_000 },
+          ],
+        },
+      ],
+    });
+
+    expect(report.currentAccountValue).not.toBeNull();
+    expect(report.currentAccountValueUnavailableReason).toBeNull();
+    expect(report.currentAccountValueUnavailableMessage).toBeNull();
+  });
 });
 
 describe("Section 2: Confirmed Trading P/L", () => {

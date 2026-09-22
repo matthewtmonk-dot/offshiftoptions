@@ -328,12 +328,21 @@ export async function getPositionsPageData(userId: string) {
 
 type TrackerPageDataOptions = {
   includeLegacyTrades?: boolean;
-  includePerformanceCampaigns?: boolean;
+  /** Reporting Phase, Ticket 3: the viewer's own open+closed campaigns (`ownPerformanceCampaigns`/
+   * `ownCompletedCampaigns`) now feed the Tracker top-summary's authoritative reporting figures on
+   * EVERY view, not just the Performance tab - so this defaults to true and is only a plain,
+   * bounded query (one `campaign.findMany` scoped to the viewer). See `includeOptionMarks` for the
+   * separate, pricier per-campaign option-mark lookup that genuinely is Performance-tab-only. */
+  includeOwnCampaigns?: boolean;
+  /** Drives `loadLatestOptionMarksForCampaigns` - only the Performance tab's per-campaign
+   * current/projected P&L needs live option marks; the top-summary reporting figures do not. */
+  includeOptionMarks?: boolean;
 };
 
 export async function getTrackerPageData(userId: string, scope: TrackerScope, options: TrackerPageDataOptions = {}) {
   const includeLegacyTrades = options.includeLegacyTrades ?? true;
-  const includePerformanceCampaigns = options.includePerformanceCampaigns ?? true;
+  const includeOwnCampaigns = options.includeOwnCampaigns ?? true;
+  const includeOptionMarks = options.includeOptionMarks ?? includeOwnCampaigns;
   const buddyCampaignWhere = {
     ownerId: { not: userId },
     OR: [{ visibility: "SHARED" as const }, { visibility: "INHERIT" as const, account: { visibility: "SHARED" as const } }],
@@ -409,7 +418,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
         events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] },
       },
     }),
-    includePerformanceCampaigns
+    includeOwnCampaigns
       ? prisma.campaign.findMany({
           // ALWAYS scoped to the current user regardless of `scope` - performance/win-rate must
           // never silently combine Matt and Eric's results into one figure (see PROJECT_HANDOFF.md).
@@ -446,7 +455,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
     }),
   ]);
 
-  const optionMarksForPerformance = includePerformanceCampaigns
+  const optionMarksForPerformance = includeOptionMarks
     ? await loadLatestOptionMarksForCampaigns(ownPerformanceCampaigns)
     : [];
   const ownCompletedCampaigns = ownPerformanceCampaigns.filter((campaign) => campaign.status === "CLOSED");

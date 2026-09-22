@@ -20,10 +20,6 @@ describe("positions page no longer renders the 1% Goal Tracker", () => {
     expect(text).not.toContain("1% Goal Tracker");
   });
 
-  it("shows the neutral rebuild-in-progress copy instead", () => {
-    expect(text).toContain("Trade-return goal reporting is being rebuilt from verified account and trade data.");
-  });
-
   // Astra corrective patch (Issue 8, should-fix): a second, previously-missed 1%-target display -
   // the "Performance vs 1% Target" chart - was still rendering after the first pass retired the
   // GoalTracker component and metric card above.
@@ -32,6 +28,25 @@ describe("positions page no longer renders the 1% Goal Tracker", () => {
     expect(text).not.toMatch(/function PerformanceGoalChart/);
     expect(text).not.toContain("<PerformanceGoalChart");
     expect(text).not.toMatch(/function goalTone/);
+  });
+
+  // Reporting Phase Ticket 3: the neutral "being rebuilt" placeholder is superseded by the real
+  // "Return on campaigns closed this week" card (reporting.ts's tradeReturn* fields, same
+  // authoritative value Dashboard uses) - it must not reappear once the card that fulfills that
+  // promise exists.
+  it("no longer shows the rebuild-in-progress placeholder", () => {
+    expect(text).not.toContain("Trade-return goal reporting is being rebuilt from verified account and trade data.");
+  });
+
+  // Reporting Phase Ticket 3 (Section 11): campaign-level "Goal Need" was found to be the same
+  // retired 1%-per-week benchmark (WEEKLY_TARGET_PERCENT) reapplied per campaign against a
+  // PROJECTED (not realized) return - removed rather than kept, since it was merely the retired
+  // concept leaking into campaigns, not a genuinely distinct decision aid.
+  it("has no campaign-level 'Goal Need' column left", () => {
+    expect(text).not.toContain("Goal Need");
+    expect(text).not.toContain("goalDelta");
+    expect(text).not.toContain("WEEKLY_TARGET_PERCENT");
+    expect(text).not.toContain("requiredReturnPercent");
   });
 });
 
