@@ -74,6 +74,22 @@ export type TradeReturnStatus =
  */
 export type CapitalUtilizationStatus = "OK" | "NO_ACCOUNT_VALUE" | "UNKNOWN_EXPOSURE";
 
+/**
+ * Astra corrective patch (second pass): the three-state honesty model for a period boundary
+ * (baseline start or ending valuation) that may be aggregated across multiple accounts.
+ * - COMMON: every contributing account genuinely shares the same instant - safe to show as one
+ *   date (e.g. "Since Aug 1").
+ * - MIXED: contributing accounts have genuinely different instants - a single date must never be
+ *   shown; a future UI should say something like "Accounts have different performance start
+ *   dates" or use the exposed oldest/newest range ("Performance periods begin between Aug 1 and
+ *   Sep 1").
+ * - UNAVAILABLE: no contributing account has this instant at all (e.g. no baseline has ever been
+ *   set), independent of whether it would otherwise be common or mixed.
+ * This status is never itself UI copy - see friendlyReportingReason's pattern; a future ticket can
+ * add MIXED/UNAVAILABLE entries there if page-specific prose is needed beyond the examples above.
+ */
+export type PeriodBoundStatus = "COMMON" | "MIXED" | "UNAVAILABLE";
+
 /** Every internal status/reason code this module (or the accounting layer it wraps) can produce -
  * the only codes `friendlyReportingReason` accepts, so a typo or an unmapped future code is caught
  * at compile time rather than silently falling through to a generic message at runtime. */
@@ -268,17 +284,40 @@ export type AccountReportingSummary = {
    * the account's effective baseline was set (or last corrected) through the ending valuation
    * actually used. This is not a rolling window and this ticket does not add one. */
   wholeAccountGainPeriod: "SINCE_BASELINE";
-  /** The effective baseline's own `occurredAt` (accountLedger.ts's `startingCapitalAt`) - null
-   * when there is no baseline at all. For a multi-account aggregate whose accounts have different
-   * baseline dates, this reflects only the first account's baseline (an existing
-   * summarizeAccountsPerformance convention this module does not change) - not necessarily a
-   * single coherent instant for the whole portfolio, similar in spirit to the account-value
-   * timestamp range in Section 1. */
+  /**
+   * Astra corrective patch (second pass): the effective baseline's own `occurredAt` - but ONLY
+   * when every contributing account genuinely shares that same instant. For a single account this
+   * is always that account's own baseline date. For a multi-account aggregate whose accounts have
+   * DIFFERENT baseline dates, this is null - it must never arbitrarily report one account's
+   * baseline just because that account happened to be first in the input array (the exact defect
+   * found: `[A, B]` reported A's Aug 1 baseline, `[B, A]` reported B's Sep 1 baseline, for the
+   * identical $200 combined gain - the reported metadata must never depend on array order). See
+   * wholeAccountGainPeriodStartStatus/wholeAccountGainOldestPeriodStart/NewestPeriodStart for the
+   * honest picture when this is null.
+   */
   wholeAccountGainPeriodStart: Date | null;
+  /** "COMMON" when every contributing account's baseline start is the same instant (including the
+   * trivial single-account case) - wholeAccountGainPeriodStart is populated. "MIXED" when
+   * contributing accounts have genuinely different baseline starts - wholeAccountGainPeriodStart
+   * is null; see the oldest/newest fields for the range. "UNAVAILABLE" when no contributing
+   * account has any baseline at all. */
+  wholeAccountGainPeriodStartStatus: PeriodBoundStatus;
+  /** The EARLIEST baseline start among contributing accounts - null only when none has one at
+   * all. Equals wholeAccountGainPeriodStart when the status is "COMMON". */
+  wholeAccountGainOldestPeriodStart: Date | null;
+  /** The LATEST baseline start among contributing accounts - see wholeAccountGainOldestPeriodStart. */
+  wholeAccountGainNewestPeriodStart: Date | null;
   /** The ending valuation instant actually used for this measurement, when available - the same
    * value as currentAccountValueAsOf (null on a genuine multi-account timestamp spread; see that
-   * field's own doc comment and currentAccountValueOldestSnapshotAsOf/NewestSnapshotAsOf). */
+   * field's own doc comment and currentAccountValueOldestSnapshotAsOf/NewestSnapshotAsOf - this
+   * module does not reopen or duplicate that already-approved range, only points to it). */
   wholeAccountGainPeriodEnd: Date | null;
+  /** Same three-state honesty as wholeAccountGainPeriodStartStatus, but for the ending valuation
+   * instant - "MIXED" (not merely "UNAVAILABLE") when contributing accounts were snapshotted at
+   * different times, so a caller can tell "we don't know" apart from "these disagree." The range
+   * itself lives on currentAccountValueOldestSnapshotAsOf/NewestSnapshotAsOf (Section 1) - not
+   * duplicated here. */
+  wholeAccountGainPeriodEndStatus: PeriodBoundStatus;
 
   // ---- Section 6: Whole-Account Return % ----
   /** Passthrough of accountLedger.ts's totalReturnPercent/totalReturnStatus - no new return math.
@@ -351,6 +390,35 @@ export function summarizeAccountReporting(input: AccountReportingInput): Account
   const wholeAccountGain = accounting.totalGain;
   const wholeAccountGainUnavailableReason = wholeAccountGain === null ? wholeAccountGainReasonFor(accounting) : null;
 
+  // Astra corrective patch (second pass): the aggregate's own `startingCapitalAt` arbitrarily
+  // picks the FIRST account's baseline date, which made the reported period start depend on input
+  // array order for no financial reason - recompute the honest range ourselves instead of reusing
+  // that field for a multi-account summary.
+  const { oldest: wholeAccountGainOldestPeriodStart, newest: wholeAccountGainNewestPeriodStart } = wholeAccountGainPeriodStartRange(
+    input.accounts,
+    accounting,
+  );
+  const wholeAccountGainPeriodStart =
+    wholeAccountGainOldestPeriodStart !== null &&
+    wholeAccountGainNewestPeriodStart !== null &&
+    wholeAccountGainOldestPeriodStart.getTime() === wholeAccountGainNewestPeriodStart.getTime()
+      ? wholeAccountGainOldestPeriodStart
+      : null;
+  const wholeAccountGainPeriodStartStatus: PeriodBoundStatus =
+    wholeAccountGainOldestPeriodStart === null && wholeAccountGainNewestPeriodStart === null
+      ? "UNAVAILABLE"
+      : wholeAccountGainPeriodStart !== null
+        ? "COMMON"
+        : "MIXED";
+  // The ending side already has an honest range (Section 1's currentAccountValue*SnapshotAsOf) -
+  // this only adds the missing three-state status so "null" can be told apart from "mixed."
+  const wholeAccountGainPeriodEndStatus: PeriodBoundStatus =
+    currentAccountValueOldestSnapshotAsOf === null && currentAccountValueNewestSnapshotAsOf === null
+      ? "UNAVAILABLE"
+      : currentAccountValueAsOf !== null
+        ? "COMMON"
+        : "MIXED";
+
   return {
     currentAccountValue,
     currentAccountValueAsOf,
@@ -389,8 +457,12 @@ export function summarizeAccountReporting(input: AccountReportingInput): Account
     wholeAccountGainUnavailableReason,
     wholeAccountGainUnavailableMessage: friendlyReportingReason(wholeAccountGainUnavailableReason),
     wholeAccountGainPeriod: "SINCE_BASELINE",
-    wholeAccountGainPeriodStart: accounting.startingCapitalAt,
+    wholeAccountGainPeriodStart,
+    wholeAccountGainPeriodStartStatus,
+    wholeAccountGainOldestPeriodStart,
+    wholeAccountGainNewestPeriodStart,
     wholeAccountGainPeriodEnd: currentAccountValueAsOf,
+    wholeAccountGainPeriodEndStatus,
 
     wholeAccountReturnPercent: accounting.totalReturnPercent,
     wholeAccountReturnStatus: accounting.totalReturnStatus,
@@ -432,6 +504,36 @@ function accountValueSnapshotRange(
     return { oldest: null, newest: null };
   }
   const times = asOfTimes.map((date) => date.getTime());
+  return { oldest: new Date(Math.min(...times)), newest: new Date(Math.max(...times)) };
+}
+
+/**
+ * Astra corrective patch (second pass): the range of effective-baseline start instants across
+ * whichever contributing accounts have one at all - computed per account, never taken from the
+ * aggregate's own `startingCapitalAt` (accountLedger.ts), which arbitrarily reflects only the
+ * FIRST account found in summarizeAccountsPerformance's input array - the exact defect Astra
+ * reproduced (`[A, B]` reported A's baseline, `[B, A]` reported B's, for the identical combined
+ * gain). For a single account this is just that account's own baseline date (oldest === newest).
+ * An account with no baseline at all simply doesn't contribute to the range - its absence already
+ * surfaces separately via wholeAccountGainUnavailableReason === "NO_BASELINE" when it affects the
+ * aggregate gain; this function only answers "among accounts that DO have a baseline, do they
+ * agree on when it starts."
+ */
+function wholeAccountGainPeriodStartRange(
+  accounts: AccountPerformanceInput[],
+  aggregate: AccountPerformanceSummary,
+): { oldest: Date | null; newest: Date | null } {
+  if (accounts.length === 1) {
+    const start = aggregate.startingCapitalAt;
+    return { oldest: start, newest: start };
+  }
+  const starts = accounts
+    .map((account) => summarizeAccountPerformance(account).startingCapitalAt)
+    .filter((date): date is Date => date !== null);
+  if (starts.length === 0) {
+    return { oldest: null, newest: null };
+  }
+  const times = starts.map((date) => date.getTime());
   return { oldest: new Date(Math.min(...times)), newest: new Date(Math.max(...times)) };
 }
 
