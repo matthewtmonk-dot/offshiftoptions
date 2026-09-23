@@ -151,4 +151,56 @@ const now = new Date("2026-09-23T16:00:00Z");
     const run = await prisma.accountFundingSync.findFirst({ where: { accountId: account.id }, orderBy: { startedAt: "desc" } });
     expect(run).toMatchObject({ status: "FAILED", persistenceStatus: "FAILED" });
   });
+  it("a historical persisted superset cannot bless a later clean sync or change prior COMPLETE evidence", async () => {
+    const account = await fixture();
+    await prisma.accountLedgerEntry.create({ data: { accountId: account.id, type: "STARTING_VALUE", amount: 10000, occurredAt: new Date("2026-09-01") } });
+    const incoming: BrokerTransaction = { id: "t1", accountId: account.externalAccountId!, amount: 500, description: "Funds Received", occurredAt: now };
+    connectWithTransactions(account, [incoming], 10500);
+    await workflow.syncSchwabAccountForUser(owners[0]);
+    const prior = await prisma.accountFundingSync.findFirstOrThrow({ where: { accountId: account.id } });
+    expect(prior.status).toBe("COMPLETE");
+    // Fixture represents legacy merged history with two provider identities in one dollar row.
+    await prisma.brokerRecord.updateMany({ where: { accountId: account.id, kind: "TRANSACTION" },
+      data: { sourceIds: ["schwab-api-transaction:t1", "schwab-api-transaction:t2", "transactions-csv:legacy"] } });
+    vi.setSystemTime(new Date(now.getTime() + 1000));
+    await workflow.syncSchwabAccountForUser(owners[0]);
+    const loaded = (await appData.getAccountPageData(owners[0])).accounts.find((a) => a.id === account.id)!;
+    expect(loaded.fundingSyncs.find((r) => r.id === prior.id)?.status).toBe("COMPLETE");
+    expect(loaded.fundingSyncs.find((r) => r.id !== prior.id)).toMatchObject({ status: "FAILED", persistenceStatus: "FAILED" });
+    expect(summarizeAccountPerformance({ ledgerEntries: loaded.ledgerEntries, brokerRecords: loaded.brokerRecords,
+      fundingCoverage: { accountId: loaded.id, externalAccountId: loaded.externalAccountId, fundingSyncs: loaded.fundingSyncs } }).totalGain).toBeNull();
+  });
+  it("a real partial persistence write cannot finalize COMPLETE", async () => {
+    const account = await fixture();
+    const transactions: BrokerTransaction[] = [500, 600].map((amount, index) => ({ id: `partial-${index}`,
+      accountId: account.externalAccountId!, amount, description: "Funds Received", occurredAt: now }));
+    connectWithTransactions(account, transactions);
+    const imports = await import("./broker-import");
+    const persist = imports.persistNormalizedBrokerRecordsForUser;
+    vi.spyOn(imports, "persistNormalizedBrokerRecordsForUser").mockImplementationOnce(async (userId, accountId, records) => {
+      await persist(userId, accountId, records.slice(0, 1));
+      throw new Error("injected failure after first durable record");
+    });
+    await workflow.syncSchwabAccountForUser(owners[0]);
+    expect(await prisma.brokerRecord.count({ where: { accountId: account.id, kind: "TRANSACTION" } })).toBe(1);
+    expect(await prisma.accountFundingSync.findFirst({ where: { accountId: account.id } }))
+      .toMatchObject({ status: "FAILED", persistenceStatus: "FAILED" });
+  });
+  it("finalization rollback undoes the COMPLETE update while retaining durable snapshot/records", async () => {
+    const account = await fixture();
+    connectWithTransactions(account, [{ id: "rollback", accountId: account.externalAccountId!, amount: 500,
+      description: "Funds Received", occurredAt: now }]);
+    const transaction = prisma.$transaction.bind(prisma);
+    const failure = new Error("injected failure after finalization update");
+    vi.spyOn(prisma, "$transaction").mockImplementationOnce(async (callback, options) => {
+      if (typeof callback !== "function") throw new Error("Expected interactive finalization transaction");
+      return transaction(async (tx) => { await callback(tx); throw failure; }, options);
+    });
+    await expect(workflow.syncSchwabAccountForUser(owners[0])).rejects.toBe(failure);
+    expect(await prisma.accountFundingSync.findFirst({ where: { accountId: account.id } }))
+      .toMatchObject({ status: "IN_PROGRESS", completedAt: null, persistenceStatus: "PENDING" });
+    expect(await prisma.accountLedgerEntry.count({ where: { accountId: account.id, type: "BROKER_SNAPSHOT" } })).toBe(1);
+    expect(await prisma.brokerRecord.count({ where: { accountId: account.id, kind: "TRANSACTION" } })).toBe(1);
+  });
+
 });

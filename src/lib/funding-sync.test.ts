@@ -165,6 +165,30 @@ describe("Schwab funding evidence lifecycle", () => {
     await syncSchwabAccountForUser("matt");
     expect(finalized()).toMatchObject({ status: "FAILED", persistenceStatus: "FAILED" });
   });
+  it.each([
+    { ids: ["schwab-api-transaction:t1"], status: "COMPLETE" },
+    { ids: ["schwab-api-transaction:t1", "schwab-api-transaction:t2"], status: "FAILED" },
+    { ids: ["schwab-api-transaction:t2"], status: "FAILED" },
+    { ids: ["schwab-api-transaction:t1", "schwab-api-transaction:t1"], status: "COMPLETE" },
+    { ids: ["transactions-csv:import", "schwab-api-transaction:t1"], status: "COMPLETE" },
+    { ids: ["transactions-csv:import"], status: "FAILED" },
+    { ids: ["schwab-api-transaction:"], status: "FAILED" },
+  ])("one incoming identity requires exactly its singleton provider subset: $ids", async ({ ids, status }) => {
+    oneTransaction();
+    db.brokerRecord.findMany.mockImplementation(async (args) => args.where.fingerprint.in.map((fingerprint: string) => ({ fingerprint, sourceIds: ids })));
+    await syncSchwabAccountForUser("matt");
+    expect(finalized().status).toBe(status);
+  });
+  it("a later ambiguous historical row does not overwrite prior COMPLETE evidence", async () => {
+    oneTransaction();
+    db.accountFundingSync.create.mockResolvedValueOnce({ id: "valid-run" }).mockResolvedValueOnce({ id: "later-run" });
+    await syncSchwabAccountForUser("matt");
+    db.brokerRecord.findMany.mockImplementation(async (args) => args.where.fingerprint.in.map((fingerprint: string) => ({ fingerprint,
+      sourceIds: ["schwab-api-transaction:t1", "schwab-api-transaction:t2"] })));
+    await syncSchwabAccountForUser("matt");
+    expect(db.accountFundingSync.update.mock.calls.map(([args]) => [args.where.id, args.data.status]))
+      .toEqual([["valid-run", "COMPLETE"], ["later-run", "FAILED"]]);
+  });
   it("total fetch failure stays FAILED", async () => {
     provider.getTransactions = async () => { throw new Error("fetch failed"); };
     await syncSchwabAccountForUser("matt"); expect(finalized().status).toBe("FAILED");

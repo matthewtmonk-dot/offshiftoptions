@@ -446,7 +446,11 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       // fingerprint), so a same-fingerprint collision between distinct provider ids can never be
       // proven fully persisted as two rows - it fails closed instead of silently keeping only one
       // side's dollar amount.
-      const hasIdentityCollision = transactionRecords.some((record) => record.sourceIds.length > 1);
+      // normalizeSchwabApiTransaction uses this namespace; CSV/import identifiers use
+      // different prefixes. Only provider transaction identities participate in this proof.
+      const providerIdPrefix = "schwab-api-transaction:";
+      const providerIds = (sourceIds: string[]) => new Set(sourceIds.filter((id) => id.startsWith(providerIdPrefix)));
+      const hasIdentityCollision = transactionRecords.some((record) => providerIds(record.sourceIds).size !== 1);
       const fingerprints = [...new Set(transactionRecords.map((record) => record.fingerprint))];
       const persistedRecords = fingerprints.length === 0 ? [] : await tx.brokerRecord.findMany({
         where: {
@@ -456,7 +460,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         select: { fingerprint: true, sourceIds: true },
       });
       const persistedSourceIdsByFingerprint = new Map(
-        persistedRecords.map((record) => [record.fingerprint, new Set(record.sourceIds)]),
+        persistedRecords.map((record) => [record.fingerprint, providerIds(record.sourceIds)]),
       );
       // Every expected provider transaction id - not just every expected fingerprint - must be
       // durably represented on the matching persisted row. This also catches a cross-run
@@ -465,7 +469,10 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       // ever being recorded anywhere.
       const everyIdentityPersisted = transactionRecords.every((record) => {
         const persistedIds = persistedSourceIdsByFingerprint.get(record.fingerprint);
-        return persistedIds !== undefined && record.sourceIds.every((id) => persistedIds.has(id));
+        const expectedIds = providerIds(record.sourceIds);
+        const expectedId = [...expectedIds][0];
+        return expectedIds.size === 1 && expectedId !== providerIdPrefix &&
+          persistedIds?.size === 1 && persistedIds.has(expectedId);
       });
       const persistenceComplete = activity.evidence.persistenceStatus === "COMPLETE" &&
         !hasIdentityCollision && persistedRecords.length === fingerprints.length &&
