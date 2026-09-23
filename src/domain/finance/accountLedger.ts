@@ -1,3 +1,4 @@
+import { hasCompleteFundingCoverage, type FundingCoverageInput } from "./fundingCoverage";
 import { round } from "./calculations";
 import {
   classifyBrokerTransactionActivity,
@@ -46,7 +47,7 @@ export type AccountLedgerSummary = {
   startingValue: number | null;
   startingValueAt: Date | null;
   netContributions: number;
-  latestBrokerSnapshot: { accountValue: number; cash: number | null; asOf: Date } | null;
+  latestBrokerSnapshot: { id?: string | null; accountValue: number; cash: number | null; asOf: Date } | null;
   /**
    * Current value derived from the ledger alone: starting value + net contributions.
    * This intentionally does NOT include trading P/L - callers combine it with a
@@ -97,14 +98,10 @@ export type AccountCashFlowEvent = {
  * proof they are the same real-world event, this account's contribution history is ambiguous -
  * dollar gain is withheld.
  * INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY: the account has Schwab evidence (a BROKER_SNAPSHOT), but
- * either (a) the measurement interval (baseline to ending valuation) is longer than
- * SCHWAB_TRANSACTION_LOOKBACK_DAYS (workflows.ts) - every Schwab sync only ever re-fetches that
- * trailing window of transactions, so a gap older than it was simply never observed - or (b) no
- * affirmative proof was supplied that the LATEST sync's transaction fetch AND persistence both
- * actually succeeded (see BrokerTransactionCoverageStatus below - Astra corrective patch, second
- * pass, Issue 2: a short interval alone is not proof anything was successfully fetched or stored).
- * Never invents a transfer to fill the gap; never expands the import window here - that would
- * require a new importer, out of scope for this fix.
+ * the full measurement interval lacks persisted, identity-matched successful sync coverage
+ * associated with the selected ending ledger snapshot. A per-sync request window is not a
+ * maximum reporting period: multiple successful intervals can prove longer history.
+ * Never invents transfers or treats a caller-provided completion assertion as evidence.
  */
 export type FundingCoverageStatus =
   | "COMPLETE"
@@ -112,37 +109,7 @@ export type FundingCoverageStatus =
   | "INCOMPLETE_MIXED_SOURCES"
   | "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY";
 
-/** Mirrors SCHWAB_TRANSACTION_LOOKBACK_DAYS in workflows.ts - every Schwab sync (not just the
- * first) only ever re-fetches this trailing window of transactions, so this function has no way to
- * affirmatively prove funding coverage further back than this without a new importer (Issue 3). */
-const SCHWAB_TRANSACTION_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
-
-/**
- * Astra corrective patch, second pass (Issue 2, blocker): "the measurement interval fits inside
- * the 90-day lookback we ASKED Schwab for" is not proof we actually RECEIVED and PERSISTED that
- * transaction history - syncSchwabAccountForUser (workflows.ts) writes the BROKER_SNAPSHOT first,
- * then fetches and persists transactions as later, independently-failable steps (see
- * SchwabAccountSyncResult.accounts[].evidence). This type is the caller's own affirmative
- * determination, for THIS specific account's most recent sync, that BOTH the transaction fetch AND
- * its persistence into BrokerRecord succeeded in full. Only "COMPLETE" can ever unlock
- * fundingCoverageStatus === "COMPLETE" for a Schwab-evidenced account; "PARTIAL", "FAILED", or
- * simply omitting the field (the honest default - see AccountPerformanceInput) always leaves it
- * INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY.
- *
- * IMPORTANT ARCHITECTURE NOTE: as of this patch, NO caller in this codebase can honestly supply
- * "COMPLETE" here, because no per-account, per-sync evidence of this kind is persisted anywhere.
- * `activity.evidence` (workflows.ts) is computed fresh on every sync but lives only in memory for
- * that one request (consumed by campaign reconciliation, then discarded). The one thing that IS
- * persisted, `BrokerConnection.metadata.lastSyncDiagnostics` (broker-connections.ts), is a
- * CONNECTION-level aggregate across every Schwab account the user has linked under that connection
- * - it is not scoped to one account or to a measurement interval, so treating it as proof for a
- * specific account would be exactly the kind of unsafe guess this fix exists to prevent. Wiring up
- * genuine per-account, per-interval evidence would need a new persisted, account-scoped field (a
- * schema change) - deliberately not done in this patch. Until then, every Schwab-evidenced
- * account's funding coverage stays INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY unconditionally in
- * production; this type exists so the domain logic is ready the day that evidence exists, and so
- * it can be exercised directly in tests.
- */
+/** @deprecated Bare caller assertions never establish persisted funding coverage. */
 export type BrokerTransactionCoverageStatus = "COMPLETE" | "PARTIAL" | "FAILED";
 
 export type AccountPerformanceSummary = {
@@ -179,10 +146,9 @@ export type AccountPerformanceInput = {
    * latest BROKER_SNAPSHOT time is used instead whenever one exists, since that snapshot IS the
    * dated valuation currentValue reflects. */
   asOf?: Date;
-  /** See BrokerTransactionCoverageStatus - omit unless the caller has genuine, account-scoped
-   * proof that this account's most recent Schwab transaction fetch AND its persistence both fully
-   * succeeded. No caller in this codebase can honestly supply this today (see that type's doc
-   * comment) - omitting it is the correct, conservative default. */
+  /** Owner-scoped persisted records plus the current account/provider identity. */
+  fundingCoverage?: FundingCoverageInput;
+  /** @deprecated Ignored. Retained for source compatibility; cannot unlock gain. */
   brokerTransactionCoverageStatus?: BrokerTransactionCoverageStatus | null;
 };
 
@@ -376,6 +342,7 @@ export function summarizeAccountLedger(entries: AccountLedgerEntryInput[]): Acco
       const accountValue = numeric(entry.accountValue);
       if (accountValue !== null) {
         latestBrokerSnapshot = {
+          id: entry.id,
           accountValue,
           cash: numeric(entry.cash),
           asOf: toDate(entry.occurredAt),
@@ -555,28 +522,24 @@ export function summarizeAccountPerformance(input: AccountPerformanceInput): Acc
   // this (see the ticket's explicit rule), so this is surfaced as ambiguous rather than guessed.
   const contributionSources = new Set(contributionEvents.map((event) => event.source));
   const hasMixedFundingSources = contributionSources.has("LEDGER") && contributionSources.has("BROKER_TRANSFER");
-  // Astra corrective patch (Issue 3, first pass): a Schwab sync only ever re-fetches a trailing
-  // SCHWAB_TRANSACTION_LOOKBACK_DAYS window of transactions (see workflows.ts) - a measurement
-  // interval longer than that window can never be proven complete from Schwab evidence alone,
-  // no matter what the latest sync's own outcome was.
   const hasSchwabEvidence = ledger.latestBrokerSnapshot !== null;
-  const intervalExceedsSchwabLookback =
-    explicitBaseline !== null &&
-    hasSchwabEvidence &&
-    baselineInstant !== null &&
-    endingAt.getTime() - baselineInstant.getTime() > SCHWAB_TRANSACTION_LOOKBACK_MS;
-  // Astra corrective patch, second pass (Issue 2, blocker): fitting inside that window is
-  // NECESSARY but not SUFFICIENT - "we asked Schwab for 90 days" is not proof "we successfully
-  // received and persisted 90 days." syncSchwabAccountForUser writes the BROKER_SNAPSHOT first,
-  // then fetches and persists transactions as later, independently-failable steps - a snapshot can
-  // exist and be perfectly current while the transaction history behind it silently never arrived.
-  // COMPLETE now additionally requires the caller's own affirmative proof (see
-  // BrokerTransactionCoverageStatus) that THIS account's fetch+persistence both fully succeeded -
-  // no caller in this codebase can honestly supply that today (see that type's doc comment), so a
-  // Schwab-evidenced account's coverage is unconditionally INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY in
-  // production until a future ticket adds real per-account evidence tracking.
-  const hasProvenSchwabTransactionCoverage =
-    !intervalExceedsSchwabLookback && (input.brokerTransactionCoverageStatus ?? null) === "COMPLETE";
+  // The request window is not a lifetime reporting limit. Only persisted interval evidence
+  // associated with the exact selected ending snapshot can establish coverage.
+  // Fetch/persist completeness does not resolve ambiguous funding facts. Inspect BEFORE the
+  // confirmed-record filter above, so an unresolved transfer cannot silently become zero funding.
+  const hasUnresolvedFundingEvidence = (input.brokerRecords ?? []).some((record) => {
+    if (record.kind !== "TRANSACTION") return false;
+    const kind = brokerActivityKind(record);
+    if (kind !== "TRANSFER" && kind !== "UNKNOWN") return false;
+    const occurredAt = record.occurredAt ? toDate(record.occurredAt) : null;
+    if (occurredAt && Number.isFinite(occurredAt.getTime()) && baselineInstant &&
+        (occurredAt <= baselineInstant || occurredAt > endingAt)) return false;
+    return kind === "UNKNOWN" || (record.status ?? "CONFIRMED") !== "CONFIRMED" ||
+      numeric(record.amount) === null || !occurredAt || !Number.isFinite(occurredAt.getTime());
+  });
+  const hasProvenSchwabTransactionCoverage = !hasUnresolvedFundingEvidence && !!input.fundingCoverage && baselineInstant !== null &&
+    snapshotIsValidEnding && hasCompleteFundingCoverage(input.fundingCoverage, baselineInstant,
+      endingAt, ledger.latestBrokerSnapshot?.id);
   const fundingCoverageStatus: FundingCoverageStatus | null =
     startingCapital === null
       ? null

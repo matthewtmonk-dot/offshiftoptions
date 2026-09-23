@@ -349,7 +349,12 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       },
     });
 
-    await prisma.accountLedgerEntry.create({
+    const fundingRun = await prisma.accountFundingSync.create({ data: {
+      accountId: tradingAccount.id, externalAccountId: brokerAccount.id,
+      provider: "SCHWAB", coverageStart: transactionsFrom, coverageEnd: syncedAt,
+      startedAt: new Date(),
+    } });
+    const balanceSnapshot = await prisma.accountLedgerEntry.create({
       data: {
         accountId: tradingAccount.id,
         type: "BROKER_SNAPSHOT",
@@ -389,6 +394,16 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       diagnostics.transactionsErrorCode = activity.transactionsErrorCode;
     }
 
+    const identityMatches = [...activity.positions, ...activity.transactions]
+      .every((record) => record.accountId === brokerAccount.id);
+    if (!identityMatches) {
+      activity.evidence.persistenceStatus = "FAILED";
+      await prisma.accountFundingSync.update({ where: { id: fundingRun.id }, data: {
+        status: "FAILED", persistenceStatus: "FAILED", completedAt: new Date(),
+        balanceSnapshotLedgerEntryId: balanceSnapshot.id,
+      } });
+      throw new ValidationError("Schwab returned inconsistent account identity. Sync was not verified.");
+    }
     const records = buildSchwabRecordsToPersist(activity.positions, activity.transactions, syncedAt);
     if (records.length > 0) {
       try {
@@ -408,6 +423,40 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         logSchwabSyncFailure("schwab_sync_persistence", userId, error);
       }
     }
+
+    // Finalize only after persistence returns. Recheck durable identity/snapshot and every
+    // transaction fingerprint (including duplicates) inside the final serializable transaction.
+    // A thrown error/crash leaves IN_PROGRESS evidence, which is never usable.
+    await prisma.$transaction(async (tx) => {
+      const account = await tx.tradingAccount.findFirst({ where: {
+        id: tradingAccount.id, userId, externalAccountId: brokerAccount.id,
+      } });
+      const snapshot = await tx.accountLedgerEntry.findFirst({ where: {
+        id: balanceSnapshot.id, accountId: tradingAccount.id, type: "BROKER_SNAPSHOT",
+        occurredAt: syncedAt, source: "SCHWAB",
+      } });
+      const fingerprints = [...new Set(records.filter((record) => record.kind === "TRANSACTION")
+        .map((record) => record.fingerprint))];
+      const persisted = fingerprints.length === 0 ? 0 : await tx.brokerRecord.count({ where: {
+        accountId: tradingAccount.id, userId, provider: "SCHWAB", kind: "TRANSACTION",
+        fingerprint: { in: fingerprints },
+      } });
+      const persistenceComplete = activity.evidence.persistenceStatus === "COMPLETE" &&
+        persisted === fingerprints.length && !!account && !!snapshot;
+      if (!persistenceComplete) activity.evidence.persistenceStatus = "FAILED";
+      const step = (category: "TRADE" | "RECEIVE_AND_DELIVER" | "DIVIDEND_OR_INTEREST") =>
+        activity.transactionCategories?.[category]?.status === "OK" ? "COMPLETE" as const : "FAILED" as const;
+      const fetchComplete = activity.evidence.transactions.status === "COMPLETE";
+      await tx.accountFundingSync.update({ where: { id: fundingRun.id }, data: {
+        balanceSnapshotLedgerEntryId: balanceSnapshot.id,
+        tradeStatus: step("TRADE"), receiveAndDeliverStatus: step("RECEIVE_AND_DELIVER"),
+        dividendOrInterestStatus: step("DIVIDEND_OR_INTEREST"),
+        persistenceStatus: persistenceComplete ? "COMPLETE" : "FAILED",
+        status: !persistenceComplete || activity.evidence.transactions.status === "FAILED" ? "FAILED" :
+          fetchComplete ? "COMPLETE" : "PARTIAL",
+        completedAt: new Date(),
+      } });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     accounts.push({ id: tradingAccount.id, name: tradingAccount.name, accountValue: brokerAccount.accountValue, cash: brokerAccount.cash, evidence: activity.evidence });
   }

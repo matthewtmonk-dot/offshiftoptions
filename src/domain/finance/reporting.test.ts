@@ -1,3 +1,4 @@
+import { withFundingSyncFixture } from "../../../test/fixtures/funding-sync";
 import { describe, expect, it } from "vitest";
 import { friendlyReportingReason, summarizeAccountReporting, type AccountReportingInput } from "./reporting";
 import type { AccountBrokerRecordInput, AccountPerformanceInput } from "./accountLedger";
@@ -380,13 +381,12 @@ describe("Section 5 & 6: Whole-Account Gain and Return %", () => {
   it("19. complete, supported accounting surfaces a confirmed gain", () => {
     const report = reportFor({
       accounts: [
-        {
+        withFundingSyncFixture({
           ledgerEntries: [
             { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
             { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
           ],
-          brokerTransactionCoverageStatus: "COMPLETE",
-        },
+        }),
       ],
     });
 
@@ -451,14 +451,13 @@ describe("Section 5 & 6: Whole-Account Gain and Return %", () => {
   it("24. a contribution-present period still surfaces a dollar gain but withholds percentage return", () => {
     const report = reportFor({
       accounts: [
-        {
+        withFundingSyncFixture({
           ledgerEntries: [
             { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
             { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 2_000 },
             { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 12_100, cash: 12_100 },
           ],
-          brokerTransactionCoverageStatus: "COMPLETE",
-        },
+        }),
       ],
     });
 
@@ -820,13 +819,12 @@ describe("Astra corrective patch - Issue 4 (should-fix): explicit period metadat
   it("1. a single account exposes its exact baseline period start, with COMMON status", () => {
     const report = reportFor({
       accounts: [
-        {
+        withFundingSyncFixture({
           ledgerEntries: [
             { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
             { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
           ],
-          brokerTransactionCoverageStatus: "COMPLETE",
-        },
+        }),
       ],
     });
 
@@ -851,33 +849,33 @@ describe("Astra corrective patch - Issue 4 (should-fix): explicit period metadat
 
 describe("Astra corrective patch, second pass - aggregate whole-account-gain period metadata must be input-order invariant", () => {
   function accountA(): AccountPerformanceInput {
-    return {
+    return withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-08-01T03:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_100, cash: 10_100 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    };
+
+    });
   }
   function accountB(): AccountPerformanceInput {
-    return {
+    return withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-09-01T03:59:59.999Z", amount: 5_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 5_100, cash: 5_100 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    };
+
+    });
   }
 
   it("2. two accounts with identical baseline starts expose a common start", () => {
     const identicalA = accountA();
-    const identicalB: AccountPerformanceInput = {
+    const identicalB: AccountPerformanceInput = withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-08-01T03:59:59.999Z", amount: 5_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 5_100, cash: 5_100 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    };
+
+    });
     const report = reportFor({ accounts: [identicalA, identicalB] });
 
     expect(report.wholeAccountGainPeriodStart).toEqual(new Date("2026-08-01T03:59:59.999Z"));
@@ -917,20 +915,20 @@ describe("Astra corrective patch, second pass - aggregate whole-account-gain per
   });
 
   it("7 & 8. different ending-valuation snapshot timestamps never imply a false common end, identically regardless of input order", () => {
-    const laterSnapshotA: AccountPerformanceInput = {
+    const laterSnapshotA: AccountPerformanceInput = withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-08-01T03:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T09:00:00Z", accountValue: 10_100, cash: 10_100 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    };
-    const laterSnapshotB: AccountPerformanceInput = {
+
+    });
+    const laterSnapshotB: AccountPerformanceInput = withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-08-01T03:59:59.999Z", amount: 5_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T11:00:00Z", accountValue: 5_100, cash: 5_100 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    };
+
+    });
 
     const forward = reportFor({ accounts: [laterSnapshotA, laterSnapshotB] });
     const reversed = reportFor({ accounts: [laterSnapshotB, laterSnapshotA] });

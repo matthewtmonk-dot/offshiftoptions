@@ -394,6 +394,7 @@ model TradingAccount {
   updatedAt           DateTime             @updatedAt
   user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   brokerConnection    BrokerConnection?    @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
+  fundingSyncs        AccountFundingSync[]
   snapshots           AccountSnapshot[]
   ledgerEntries       AccountLedgerEntry[]
   brokerRecords       BrokerRecord[]
@@ -434,6 +435,9 @@ model AccountLedgerEntry {
   createdAt    DateTime               @default(now())
   account      TradingAccount         @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
+  fundingSync AccountFundingSync?
+
+  @@unique([id, accountId])
   @@index([accountId, occurredAt])
   @@index([type])
 }
@@ -1352,4 +1356,40 @@ model TechnicalPreparationItem {
 
   @@unique([runId, ticker])
   @@index([runId, status, priority])
+}
+
+/// Fetch/persistence evidence, never a valuation timestamp or a trading result.
+enum FundingSyncStatus {
+  IN_PROGRESS
+  COMPLETE
+  PARTIAL
+  FAILED
+}
+
+enum FundingStepStatus {
+  PENDING
+  COMPLETE
+  FAILED
+}
+
+model AccountFundingSync {
+  id                           String              @id @default(cuid())
+  accountId                    String
+  externalAccountId            String
+  provider                     BrokerProvider      @default(SCHWAB)
+  coverageStart                DateTime
+  coverageEnd                  DateTime
+  startedAt                    DateTime            @default(now())
+  completedAt                  DateTime?
+  status                       FundingSyncStatus   @default(IN_PROGRESS)
+  tradeStatus                  FundingStepStatus   @default(PENDING)
+  receiveAndDeliverStatus      FundingStepStatus   @default(PENDING)
+  dividendOrInterestStatus     FundingStepStatus   @default(PENDING)
+  persistenceStatus            FundingStepStatus   @default(PENDING)
+  balanceSnapshotLedgerEntryId String?             @unique
+  account                      TradingAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  balanceSnapshot              AccountLedgerEntry? @relation(fields: [balanceSnapshotLedgerEntryId, accountId], references: [id, accountId], onDelete: Cascade)
+
+  @@unique([balanceSnapshotLedgerEntryId, accountId])
+  @@index([accountId, externalAccountId, status, coverageStart])
 }

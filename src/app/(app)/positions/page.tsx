@@ -326,6 +326,7 @@ export default async function PositionsPage({
   const ownReport = summarizeAccountReporting({
     accounts: data.ownAccounts.map((account) => ({
       ledgerEntries: account.ledgerEntries,
+      fundingCoverage: { accountId: account.id, externalAccountId: account.externalAccountId, fundingSyncs: account.fundingSyncs },
       brokerRecords: account.brokerRecords,
       fallbackTradingPL: ownRealizedByAccount.get(account.id) ?? 0,
     })),
@@ -1259,6 +1260,7 @@ function AccountsSection({
         const realized = realizedByAccount.get(account.id) ?? 0;
         const performance = summarizeAccountPerformance({
           ledgerEntries: account.ledgerEntries,
+          fundingCoverage: { accountId: account.id, externalAccountId: account.externalAccountId, fundingSyncs: account.fundingSyncs },
           brokerRecords: account.brokerRecords,
           fallbackTradingPL: realized,
         });

@@ -141,10 +141,14 @@ export default async function AccountPage({
             // Rule, PROJECT_HANDOFF.md).
             const performance = summarizeAccountPerformance({
               ledgerEntries: account.ledgerEntries,
+              fundingCoverage: { accountId: account.id, externalAccountId: account.externalAccountId, fundingSyncs: account.fundingSyncs },
               brokerRecords: account.brokerRecords,
             });
             const report = summarizeAccountReporting({
-              accounts: [{ ledgerEntries: account.ledgerEntries, brokerRecords: account.brokerRecords }],
+              accounts: [{ ledgerEntries: account.ledgerEntries,
+                fundingCoverage: { accountId: account.id, externalAccountId: account.externalAccountId, fundingSyncs: account.fundingSyncs },
+                brokerRecords: account.brokerRecords,
+              }],
             });
             const coverage = fundingCoverageBadge(performance.fundingCoverageStatus);
             const coverageMessage = fundingCoverageMessage(performance.fundingCoverageStatus);

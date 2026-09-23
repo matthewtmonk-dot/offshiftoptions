@@ -1,3 +1,4 @@
+import { withFundingSyncFixture } from "../../../test/fixtures/funding-sync";
 import { describe, expect, it } from "vitest";
 import {
   currentAccountValue,
@@ -213,21 +214,20 @@ describe("account ledger", () => {
     // only with explicit proof of transaction coverage (Astra corrective patch, Issue 2) - this
     // test is about tradingPL SOURCE selection (CAMPAIGNS vs BROKER_TRANSACTIONS), not funding
     // coverage, so that proof is supplied to keep exercising totalGain's downstream value.
-    const withoutBrokerFacts = summarizeAccountPerformance({
+    const withoutBrokerFacts = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-07-20", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_069.02, cash: 10_069.02 },
       ],
       fallbackTradingPL: 69.02,
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(withoutBrokerFacts.tradingPL).toBe(69.02);
     expect(withoutBrokerFacts.tradingPLSource).toBe("CAMPAIGNS");
     expect(withoutBrokerFacts.totalGain).toBe(69.02);
     expect(withoutBrokerFacts.otherIncome).toBeNull();
 
-    const withBrokerFacts = summarizeAccountPerformance({
+    const withBrokerFacts = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-07-20", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_123.7, cash: 10_123.7 },
@@ -240,8 +240,7 @@ describe("account ledger", () => {
         brokerRecord({ action: "Sell to Open", amount: 67.34, occurredAt: "2026-08-28", fingerprint: "CORZ_STO_2" }),
       ],
       fallbackTradingPL: 69.02,
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(withBrokerFacts.tradingPL).toBe(123.7);
     expect(withBrokerFacts.tradingPLSource).toBe("BROKER_TRANSACTIONS");
@@ -322,7 +321,7 @@ describe("account ledger", () => {
     // of this test used an unrealistic midnight-UTC baseline timestamp specifically to exercise the
     // now-removed date/amount dedup - see the sibling "still counts a later transfer..." test below
     // for why that dedup was actually unsafe.)
-    const summary = summarizeAccountPerformance({
+    const summary = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-07-20T23:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_100, cash: 10_100 },
@@ -331,8 +330,7 @@ describe("account ledger", () => {
         brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20T14:00:00Z" }), // before the EOD baseline instant
         brokerRecord({ action: "Sell to Open", amount: 100, occurredAt: "2026-08-31" }),
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(summary.startingCapital).toBe(10_000);
     expect(summary.startingCapitalSource).toBe("LEDGER");
@@ -635,7 +633,7 @@ describe("measurement interval (Account Baseline & Funding Boundaries)", () => {
 
 describe("funding authority and mixed-source detection (Account Baseline & Funding Boundaries)", () => {
   it("reports COMPLETE funding coverage and an available dollar gain when there is an explicit baseline, no contributions, and proven Schwab transaction coverage", () => {
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_300, cash: 10_300 },
@@ -643,8 +641,8 @@ describe("funding authority and mixed-source detection (Account Baseline & Fundi
       // Astra corrective patch, second pass (Issue 2): a short interval alone is no longer
       // sufficient for a Schwab-evidenced account - the caller must also affirmatively prove
       // transaction fetch+persistence succeeded.
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+
+    }));
 
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
     expect(performance.totalGain).toBe(300);
@@ -698,14 +696,13 @@ describe("funding authority and mixed-source detection (Account Baseline & Fundi
 
 describe("percentage return stays unavailable pending the TWR/XIRR ticket (Account Baseline & Funding Boundaries)", () => {
   it("keeps totalReturnPercent null when contributions exist even though funding coverage is otherwise complete", () => {
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-06-16T03:59:59.999Z", amount: 10_000 },
         { type: "DEPOSIT", occurredAt: "2026-07-01T00:00:00Z", amount: 2_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 12_100, cash: 12_100 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
     expect(performance.totalGain).toBe(100);
@@ -719,15 +716,14 @@ describe("Astra corrective patch - superseded baselines must not suppress real f
     // Exact Astra repro: superseded $500 STARTING_VALUE dated Aug 2, corrected effective baseline
     // $10,000 dated in July, and a GENUINE $500 broker deposit also on Aug 2. The old code matched
     // the deposit against the superseded revision's date/amount and silently dropped it.
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { id: "superseded", type: "STARTING_VALUE", occurredAt: "2026-08-02T00:00:00Z", createdAt: "2026-07-01T00:00:00Z", amount: 500 },
         { id: "effective", type: "STARTING_VALUE", occurredAt: "2026-07-01T00:00:00Z", createdAt: "2026-07-05T00:00:00Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_500, cash: 10_500 },
       ],
       brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 500, occurredAt: "2026-08-02T00:00:00Z" })],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.startingCapital).toBe(10_000);
     expect(performance.netContributions).toBe(500);
@@ -742,14 +738,13 @@ describe("Astra corrective patch - superseded baselines must not suppress real f
     // deposit - so the old same-day/same-amount dedup wrongly matched and suppressed it. There is
     // no such dedup left: only the exact timestamp boundary decides, and matching amount/date is
     // irrelevant.
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: endOfNyCalendarDateUtc("2026-09-01", new Date("2026-09-03T00:00:00Z")), amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 20_000, cash: 20_000 },
       ],
       brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-09-02T18:00:00Z" })],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.startingCapital).toBe(10_000);
     expect(performance.netContributions).toBe(10_000); // the genuine Sep 2 deposit, never suppressed
@@ -758,14 +753,13 @@ describe("Astra corrective patch - superseded baselines must not suppress real f
   });
 
   it("a transfer at/before the baseline's exact timestamp is still excluded by the interval boundary alone, with no date/amount matching needed", () => {
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { id: "effective", type: "STARTING_VALUE", occurredAt: "2026-07-20T23:59:59.999Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-10T12:00:00Z", accountValue: 10_000, cash: 10_000 },
       ],
       brokerRecords: [brokerRecord({ action: "Security Transfer", amount: 10_000, occurredAt: "2026-07-20T14:00:00Z" })],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.netContributions).toBe(0);
     expect(performance.cashFlowEvents.filter((event) => event.type !== "STARTING_VALUE")).toHaveLength(0);
@@ -859,13 +853,12 @@ describe("Astra corrective patch - affirmative funding-coverage evidence require
     expect(withoutProof.fundingCoverageStatus).toBe("INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY");
     expect(withoutProof.totalGain).toBeNull();
 
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-01-01T00:00:00Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-03-01T00:00:00Z", accountValue: 10_300, cash: 10_300 }, // 59 days later
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
     expect(performance.totalGain).toBe(300);
@@ -935,13 +928,12 @@ describe("Astra corrective patch - lifetime trading P/L is never added onto a da
 
 describe("Astra corrective patch, second pass - proven Schwab transaction coverage required (Issue 2, blocker)", () => {
   it("1. recent baseline + successful complete transaction coverage -> coverage may be COMPLETE", () => {
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 12_000, cash: 12_000 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.fundingCoverageStatus).toBe("COMPLETE");
     expect(performance.totalGain).toBe(2_000);
@@ -1000,13 +992,12 @@ describe("Astra corrective patch, second pass - proven Schwab transaction covera
 
   it("5. aggregate account performance withholds gain if any required account's coverage is incomplete", () => {
     const summary = summarizeAccountsPerformance([
-      {
+      withFundingSyncFixture({
         ledgerEntries: [
           { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
           { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 11_000, cash: 11_000 },
         ],
-        brokerTransactionCoverageStatus: "COMPLETE",
-      },
+      }),
       {
         // Second account has a proven-COMPLETE-looking short interval, but no coverage proof.
         ledgerEntries: [
@@ -1040,14 +1031,13 @@ describe("Astra corrective patch, second pass - option/trading cash flows are no
   });
 
   it("2. baseline + option premium + a valid Schwab ending snapshot -> the snapshot governs valuation; the premium is never added on top again", () => {
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_050, cash: 10_050 },
       ],
       brokerRecords: [brokerRecord({ action: "Sell to Open", amount: 75, occurredAt: "2026-09-05" })],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     // If the $75 premium were wrongly added on top of the snapshot, currentValue would read
     // 10,125 (10,050 + 75) instead of the snapshot's own, real 10,050.
@@ -1095,13 +1085,12 @@ describe("Astra corrective patch, second pass - option/trading cash flows are no
   });
 
   it("6. a valid ending account snapshot dated at/after the baseline is an eligible valuation source", () => {
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-01T00:00:00Z", accountValue: 10_000, cash: 10_000 }, // exactly at the baseline instant
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.currentValue).toBe(10_000);
     expect(performance.currentValueSource).toBe("SCHWAB");
@@ -1110,14 +1099,13 @@ describe("Astra corrective patch, second pass - option/trading cash flows are no
 
   it("7. aggregate summaries preserve the unavailable status when one account's ending valuation is unsupported", () => {
     const summary = summarizeAccountsPerformance([
-      {
+      withFundingSyncFixture({
         // Fully supported: explicit baseline, valid snapshot, proven coverage.
         ledgerEntries: [
           { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
           { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_300, cash: 10_300 },
         ],
-        brokerTransactionCoverageStatus: "COMPLETE",
-      },
+      }),
       {
         // Only option premium, no account snapshot at all - no supported ending valuation.
         ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 5_000 }],
@@ -1193,13 +1181,12 @@ describe("Astra corrective patch, third pass - baseline + contributions is never
 
   it("5. aggregate account summary also stays unavailable when one account has interest but no supported ending valuation", () => {
     const summary = summarizeAccountsPerformance([
-      {
+      withFundingSyncFixture({
         ledgerEntries: [
           { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
           { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_300, cash: 10_300 },
         ],
-        brokerTransactionCoverageStatus: "COMPLETE",
-      },
+      }),
       {
         // Only interest recorded, no account snapshot at all - no supported ending valuation.
         ledgerEntries: [{ type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 5_000 }],
@@ -1214,13 +1201,12 @@ describe("Astra corrective patch, third pass - baseline + contributions is never
   });
 
   it("6. baseline + a valid ending snapshot at/after the baseline still produces a confirmed gain (existing valid path unaffected)", () => {
-    const performance = summarizeAccountPerformance({
+    const performance = summarizeAccountPerformance(withFundingSyncFixture({
       ledgerEntries: [
         { type: "STARTING_VALUE", occurredAt: "2026-09-01T00:00:00Z", amount: 10_000 },
         { type: "BROKER_SNAPSHOT", occurredAt: "2026-09-20T00:00:00Z", accountValue: 10_300, cash: 10_300 },
       ],
-      brokerTransactionCoverageStatus: "COMPLETE",
-    });
+    }));
 
     expect(performance.currentValue).toBe(10_300);
     expect(performance.currentValueSource).toBe("SCHWAB");

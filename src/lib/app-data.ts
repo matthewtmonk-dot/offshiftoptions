@@ -37,6 +37,7 @@ export async function getDashboardData(userId: string) {
       prisma.tradingAccount.findMany({
         where: { userId },
         include: {
+          fundingSyncs: true,
           ledgerEntries: { orderBy: { occurredAt: "asc" } },
           brokerRecords: {
             where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
@@ -380,6 +381,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
       orderBy: { createdAt: "asc" },
       include: {
         snapshots: { orderBy: { capturedAt: "desc" }, take: 1 },
+        fundingSyncs: true,
         ledgerEntries: { orderBy: { occurredAt: "asc" } },
         brokerRecords: {
           where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
@@ -399,6 +401,7 @@ export async function getTrackerPageData(userId: string, scope: TrackerScope, op
           orderBy: { capturedAt: "desc" },
           take: 1,
         },
+        fundingSyncs: { where: { account: { userId } } },
         ledgerEntries: {
           where: { account: { userId } },
           orderBy: { occurredAt: "asc" },
@@ -574,6 +577,7 @@ export async function getAccountPageData(userId: string) {
     where: { userId },
     orderBy: [{ source: "asc" }, { createdAt: "asc" }],
     include: {
+      fundingSyncs: true,
       ledgerEntries: { orderBy: { occurredAt: "asc" } },
       brokerRecords: {
         where: { userId, provider: "SCHWAB", kind: "TRANSACTION" },
