@@ -317,12 +317,40 @@ describe("Data-warning banner", () => {
     expect(dashboardHasEvidenceGap(report)).toBe(false);
   });
 
-  it("25. an unavailable account value triggers the banner", () => {
+  // Post-Reporting-Phase polish ticket: the banner is reserved for SYSTEMIC (multi-card) evidence
+  // gaps - a single affected card already explains itself clearly, so a lone gap must not also
+  // trigger the generic page-level banner (that was the exact duplication production screenshots
+  // showed: Whole-Account Gain's own reason plus a redundant amber banner above it).
+  it("only Whole-Account Gain unavailable (the common production case - unverified Schwab funding history) does not show the generic banner", () => {
+    const report = baseReport({
+      wholeAccountGainStatus: "UNAVAILABLE",
+      wholeAccountGainUnavailableReason: "INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY",
+      wholeAccountGainUnavailableMessage: "Schwab funding history has not been fully verified for this period.",
+    });
+    expect(dashboardHasEvidenceGap(report)).toBe(false);
+  });
+
+  it("only unknown capital exposure (one card affected) does not show the generic banner", () => {
+    expect(dashboardHasEvidenceGap(baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE" }))).toBe(false);
+  });
+
+  it("only incomplete trade-return capital evidence (one card affected) does not show the generic banner", () => {
+    expect(dashboardHasEvidenceGap(baseReport({ tradeReturnStatus: "INCOMPLETE_CAPITAL_EVIDENCE", tradeReturnPercent: null }))).toBe(
+      false,
+    );
+  });
+
+  it("25. an unavailable account value (which always also makes Whole-Account Gain unavailable - two cards) still triggers the banner", () => {
     expect(dashboardHasEvidenceGap(baseReport({ currentAccountValue: null, wholeAccountGainStatus: "UNAVAILABLE" }))).toBe(true);
   });
 
-  it("26. unknown capital exposure triggers the banner", () => {
-    expect(dashboardHasEvidenceGap(baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE" }))).toBe(true);
+  it("26. two independent gaps (capital exposure unknown AND trade return incomplete) trigger the banner", () => {
+    const report = baseReport({
+      capitalUtilizationStatus: "UNKNOWN_EXPOSURE",
+      tradeReturnStatus: "INCOMPLETE_CAPITAL_EVIDENCE",
+      tradeReturnPercent: null,
+    });
+    expect(dashboardHasEvidenceGap(report)).toBe(true);
   });
 });
 

@@ -234,7 +234,10 @@ export default async function AccountPage({
                       </div>
                     </>
                   ) : (
-                    <div className="mt-1 text-sm text-zinc-500">No baseline set yet - Whole-Account Gain/Return stay unavailable until one is.</div>
+                    <div className="mt-1 text-sm text-zinc-500">
+                      No baseline set yet - Whole-Account Gain/Return stay unavailable until one is. Choose when you
+                      want performance tracking to begin, then enter the whole account value at the end of that date.
+                    </div>
                   )}
                   {coverageMessage ? <div className="mt-1 text-xs text-amber-300">{coverageMessage}</div> : null}
 
@@ -378,12 +381,12 @@ export default async function AccountPage({
       </Panel>
 
       <Panel title="Brokerage Connections">
-        <div id="brokerage-sync" className="scroll-mt-4 grid gap-4 lg:grid-cols-[1fr_0.85fr]">
-          <div className="flex items-start gap-3">
-            <div className="grid size-11 shrink-0 place-items-center rounded-md border border-sky-400/30 bg-sky-400/10">
-              <ShieldCheck className="size-5 text-sky-200" aria-hidden />
-            </div>
-            <div className="min-w-0 space-y-3">
+        <div id="brokerage-sync" className="scroll-mt-4 flex items-start gap-3">
+          <div className="grid size-11 shrink-0 place-items-center rounded-md border border-sky-400/30 bg-sky-400/10">
+            <ShieldCheck className="size-5 text-sky-200" aria-hidden />
+          </div>
+          <div className="min-w-0 flex-1 space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-lg font-semibold text-zinc-50">Charles Schwab</h2>
@@ -400,6 +403,60 @@ export default async function AccountPage({
                   preview, replace, or cancel orders.
                 </p>
               </div>
+
+              {/* Presentation-only layout change (post-Reporting-Phase polish ticket): the primary
+                  connect/reconnect/disconnect action moved from a large, mostly-empty right-hand
+                  column into a compact control beside the header - same four branches, same
+                  actions/forms/hrefs, unchanged OAuth/sync/credential behavior. */}
+              <div className="flex flex-wrap items-center gap-2">
+                {schwabPrimaryAction === "RECONNECT" ? (
+                  <>
+                    {schwabOauthReady ? (
+                      <Link
+                        href="/api/schwab/connect"
+                        prefetch={false}
+                        className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md border border-amber-400/60 bg-amber-400/10 px-3 text-xs font-semibold text-amber-200 transition hover:bg-amber-400/20"
+                      >
+                        <RefreshCw className="size-3.5" aria-hidden />
+                        Reconnect
+                      </Link>
+                    ) : (
+                      <span className="text-xs text-amber-200">Reconnect after developer app setup</span>
+                    )}
+                    <form action={disconnectSchwabAction}>
+                      <button
+                        type="submit"
+                        className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md border border-zinc-800 px-3 text-xs font-medium text-zinc-500 transition hover:border-red-400/60 hover:text-red-300"
+                      >
+                        <Unplug className="size-3.5" aria-hidden />
+                        Disconnect
+                      </button>
+                    </form>
+                  </>
+                ) : schwabPrimaryAction === "DISCONNECT" ? (
+                  <form action={disconnectSchwabAction}>
+                    <button
+                      type="submit"
+                      className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md border border-zinc-800 px-3 text-xs font-medium text-zinc-500 transition hover:border-red-400/60 hover:text-red-300"
+                    >
+                      <Unplug className="size-3.5" aria-hidden />
+                      Disconnect
+                    </button>
+                  </form>
+                ) : schwabOauthReady ? (
+                  <Link
+                    href="/api/schwab/connect"
+                    prefetch={false}
+                    className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md border border-emerald-400/60 bg-emerald-400/10 px-3 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-400/20"
+                  >
+                    <Link2 className="size-3.5" aria-hidden />
+                    Connect
+                  </Link>
+                ) : (
+                  <span className="text-xs text-zinc-500">Connect after developer app setup</span>
+                )}
+              </div>
+            </div>
 
               {schwabConnection?.connected ? (
                 <div className="space-y-3">
@@ -524,7 +581,7 @@ export default async function AccountPage({
               <details className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
                 <summary className="cursor-pointer font-medium text-zinc-300">Connection details</summary>
                 {schwabConnection ? (
-                  <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+                  <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
                     <ConnectionDatum label="Last token update" value={shortDateTime(schwabConnection.updatedAt)} />
                     <ConnectionDatum
                       label="Access token"
@@ -590,56 +647,6 @@ export default async function AccountPage({
               </details>
 
               <ConnectionHealthDetails health={schwabHealth} />
-            </div>
-          </div>
-
-          <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
-            {schwabPrimaryAction === "RECONNECT" ? (
-              <>
-                {schwabOauthReady ? (
-                  <Link
-                    href="/api/schwab/connect"
-                    prefetch={false}
-                    className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-amber-400/60 bg-amber-400/10 px-4 text-xs font-semibold text-amber-200 transition hover:bg-amber-400/20"
-                  >
-                    <RefreshCw className="size-4" aria-hidden />
-                    Reconnect Schwab
-                  </Link>
-                ) : (
-                  <p className="text-xs text-amber-200">Reconnect after developer app setup.</p>
-                )}
-                <form action={disconnectSchwabAction}>
-                  <button
-                    type="submit"
-                    className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-zinc-800 px-4 text-xs font-medium text-zinc-500 transition hover:border-red-400/60 hover:text-red-300"
-                  >
-                    <Unplug className="size-4" aria-hidden />
-                    Disconnect Schwab
-                  </button>
-                </form>
-              </>
-            ) : schwabPrimaryAction === "DISCONNECT" ? (
-              <form action={disconnectSchwabAction}>
-                <button
-                  type="submit"
-                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-zinc-800 px-4 text-xs font-medium text-zinc-500 transition hover:border-red-400/60 hover:text-red-300"
-                >
-                  <Unplug className="size-4" aria-hidden />
-                  Disconnect Schwab
-                </button>
-              </form>
-            ) : schwabOauthReady ? (
-              <Link
-                href="/api/schwab/connect"
-                prefetch={false}
-                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-emerald-400/60 bg-emerald-400/10 px-4 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-400/20"
-              >
-                <Link2 className="size-4" aria-hidden />
-                Connect Schwab
-              </Link>
-            ) : (
-              <p className="text-xs text-zinc-500">Connect after developer app setup.</p>
-            )}
           </div>
         </div>
       </Panel>
@@ -796,7 +803,7 @@ function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagno
   return (
     <details className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-sm">
       <summary className="cursor-pointer text-xs font-medium uppercase tracking-normal text-zinc-400">Last sync details</summary>
-      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-4">
         {rows.map((row) => (
           <div key={row.label}>
             <dt className="text-[11px] uppercase tracking-normal text-zinc-500">{row.label}</dt>
@@ -864,7 +871,7 @@ function ConnectionHealthDetails({ health }: { health: SchwabConnectionHealth })
   return (
     <details className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
       <summary className="cursor-pointer font-medium text-zinc-300">Schwab connection health</summary>
-      <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+      <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
         <ConnectionDatum label="Developer credential source" value={CREDENTIAL_SOURCE_LABEL[health.credentialSource]} />
         <div>
           <dt className="text-xs uppercase tracking-normal text-zinc-500">OAuth status</dt>

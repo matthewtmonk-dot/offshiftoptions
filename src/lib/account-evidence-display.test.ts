@@ -268,3 +268,52 @@ describe("Account page structure (source-level - no component-render harness in 
     expect(text).toMatch(/accounts:\s*\[\{\s*ledgerEntries: account\.ledgerEntries/);
   });
 });
+
+describe("Post-Reporting-Phase polish: Brokerage Connections layout", () => {
+  const text = source("../app/(app)/account/page.tsx");
+
+  it("6. Connect/Reconnect/Disconnect actions are all still wired to their existing server actions", () => {
+    expect(text).toContain("disconnectSchwabAction");
+    expect(text).toContain("/api/schwab/connect");
+    expect((text.match(/disconnectSchwabAction/g) ?? []).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("6. sync, developer-credential, and connection-detail panels remain present", () => {
+    expect(text).toContain("syncSchwabAccountAction");
+    expect(text).toContain("saveSchwabDeveloperCredentialsAction");
+    expect(text).toContain("removeSchwabDeveloperCredentialsAction");
+    expect(text).toContain("Configure developer app");
+    expect(text).toContain("Connection details");
+    expect(text).toContain("ConnectionHealthDetails");
+    expect(text).toContain("SyncDiagnosticsDetails");
+  });
+
+  it("the large mostly-empty two-column split is gone - the primary action moved beside the header instead of a separate wide column", () => {
+    expect(text).not.toContain("lg:grid-cols-[1fr_0.85fr]");
+  });
+
+  it("9 & 23. responsive: no new fixed-pixel-width container was introduced by the layout change", () => {
+    expect(text).not.toMatch(/min-w-\[\d+px\]/);
+    expect(text).not.toContain("overflow-x-auto");
+  });
+});
+
+describe("Post-Reporting-Phase polish: baseline call-to-action wording", () => {
+  const text = source("../app/(app)/account/page.tsx");
+
+  it("maintains the required 'Account value at the end of the selected date.' form caption verbatim", () => {
+    expect(text).toContain("Account value at the end of the selected date.");
+  });
+
+  it("7. the missing-baseline helper copy explains the next action without implying original account funding", () => {
+    expect(text).toMatch(/Choose when you[\s\S]{0,40}want performance tracking to begin/);
+    expect(text).not.toMatch(/original\s+(account\s+)?funding/i);
+  });
+
+  it("does not prefill or guess a baseline date or value", () => {
+    const formStart = text.indexOf('action={setAccountBaselineAction}');
+    const formEnd = text.indexOf("</form>", formStart);
+    const form = text.slice(formStart, formEnd);
+    expect(form).not.toContain("defaultValue");
+  });
+});

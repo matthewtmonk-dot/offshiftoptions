@@ -106,7 +106,7 @@ const HELP = {
   tradeReturnThisWeek:
     "The lifetime realized result of campaigns that closed this week, divided by the capital those campaigns secured - not profit earned only during this calendar week. Same figure as Dashboard's Return on campaigns closed this week.",
   netPremium:
-    "Credits received minus debits paid and applicable option fees. Premium collected on an open campaign is cash flow so far, not automatically realized profit.",
+    "Credits minus debits paid, including applicable option fees - cash flow, not realized profit. A campaign's collected premium counts here as soon as it's received, even before the campaign closes.",
   historyStatus:
     "Open means the campaign still has an active option leg. Assigned means shares were put to the account and the wheel can continue. Closed means OSO has a final campaign result.",
   startingValue:
@@ -420,9 +420,13 @@ export default async function PositionsPage({
         />
         <TrackerStat
           icon={<TrendingUp className="size-4" aria-hidden />}
-          label="Net option premium"
+          label="Option Cash Flow"
           value={signedMoney(premiumTotal)}
-          detail={premiumIncomplete ? "Credits minus debits - partial / pending fees or cash flows" : "Credits minus debits and option fees"}
+          detail={
+            premiumIncomplete
+              ? "Credits minus debits - cash flow, not realized profit (partial / pending)"
+              : "Credits minus debits - cash flow, not realized profit"
+          }
           tone={premiumTotal}
           help={HELP.netPremium}
           helpTestId="help-net-option-premium"
@@ -825,9 +829,9 @@ function CampaignCard({
               <p className="mt-1 max-w-48 text-xs text-zinc-500">{quoteSnapshot ? snapshotTime(quoteSnapshot.asOf) : summary.currentStage === "Expiration processing" ? "Awaiting brokerage evidence" : openPut ? "Refresh to check prices" : "No active put"}</p>
             </div>
             <div>
-              <SummaryCell label="Net premium" value={signedMoney(summary.netOptionPremium)} tone={summary.netOptionPremium}
+              <SummaryCell label="Option Cash Flow" value={signedMoney(summary.netOptionPremium)} tone={summary.netOptionPremium}
                 help={HELP.netPremium} helpTestId={`help-summary-premium-${campaign.ticker}`} />
-              <p className="mt-1 text-xs text-zinc-500">Cash flow · not realized{!netPLExact ? " · fees pending" : ""}</p>
+              <p className="mt-1 text-xs text-zinc-500">Cash flow · not realized profit{!netPLExact ? " · fees pending" : ""}</p>
             </div>
             <SummaryCell label="Days open" value={summary.daysActive ?? "UNKNOWN"} help="Campaign age since the first opening. DTE counts calendar days until the active put expires." />
             <ChevronDown className="absolute right-3 top-4 size-5 justify-self-end text-zinc-500 transition group-open:rotate-180 sm:static" aria-hidden />
@@ -851,7 +855,7 @@ function CampaignCard({
             helpTestId={`help-summary-realized-${campaign.ticker}`}
           />
           <SummaryCell
-            label="Premium"
+            label="Cash Flow"
             value={signedMoney(summary.netOptionPremium)}
             tone={summary.netOptionPremium}
             help={HELP.netPremium}

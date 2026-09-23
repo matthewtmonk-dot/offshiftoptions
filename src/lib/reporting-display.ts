@@ -13,18 +13,46 @@ import type { AccountReportingSummary } from "@/domain/finance/reporting";
  * numbers and choose which already-translated message to show.
  */
 
-/** "Major metric unavailable due to evidence limitations" - deliberately excludes the neutral
- * NO_CLOSED_CAMPAIGNS state (nothing closed this week is not a data problem) so a compact banner
- * built from this never fires just because it's a quiet week. */
-export function dashboardHasEvidenceGap(report: AccountReportingSummary): boolean {
-  return (
-    report.currentAccountValue === null ||
-    report.wholeAccountGainStatus === "UNAVAILABLE" ||
+/**
+ * Post-Reporting-Phase polish ticket: the compact page-level banner is for SYSTEMIC evidence
+ * problems (multiple cards affected), not a duplicate of a single card's own already-clear reason.
+ * In production, the single most common gap by far is Whole-Account Gain alone (every Schwab
+ * account's funding coverage is currently INCOMPLETE_UNVERIFIED_SCHWAB_HISTORY - see
+ * PROJECT_HANDOFF.md's architecture-gap note) while Account Value/Confirmed P/L/Trade
+ * Return/Capital Committed are all fine - Card 5 already explains that case clearly on its own, so
+ * a second, generic amber banner above it was pure duplication. Counting distinct gap conditions
+ * (rather than "any gap") naturally still shows the banner when currentAccountValue is itself null,
+ * since that always makes wholeAccountGainStatus unavailable too (see accountLedger.ts's Gate A) -
+ * two cards genuinely affected, not one - so a real systemic gap is never hidden.
+ */
+function dashboardEvidenceGapCount(report: AccountReportingSummary): number {
+  let count = 0;
+  if (report.currentAccountValue === null) {
+    count += 1;
+  }
+  if (report.wholeAccountGainStatus === "UNAVAILABLE") {
+    count += 1;
+  }
+  if (
     report.tradeReturnStatus === "INCOMPLETE_RESULT_EVIDENCE" ||
     report.tradeReturnStatus === "INCOMPLETE_CAPITAL_EVIDENCE" ||
-    report.tradeReturnStatus === "PENDING_FEE_EVIDENCE" ||
-    report.capitalUtilizationStatus === "UNKNOWN_EXPOSURE"
-  );
+    report.tradeReturnStatus === "PENDING_FEE_EVIDENCE"
+  ) {
+    count += 1;
+  }
+  if (report.capitalUtilizationStatus === "UNKNOWN_EXPOSURE") {
+    count += 1;
+  }
+  return count;
+}
+
+/** "Major metric unavailable due to evidence limitations" - deliberately excludes the neutral
+ * NO_CLOSED_CAMPAIGNS state (nothing closed this week is not a data problem) so a compact banner
+ * built from this never fires just because it's a quiet week. Requires MULTIPLE distinct gaps (see
+ * dashboardEvidenceGapCount) - a single affected card already explains itself, so the banner is
+ * reserved for genuinely systemic evidence problems. */
+export function dashboardHasEvidenceGap(report: AccountReportingSummary): boolean {
+  return dashboardEvidenceGapCount(report) >= 2;
 }
 
 export function accountValueDetail(report: AccountReportingSummary): string | null {

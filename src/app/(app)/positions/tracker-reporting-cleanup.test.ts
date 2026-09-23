@@ -107,3 +107,29 @@ describe("Section 9 & 13: compact rows, expandable detail, no fixed-width mobile
     expect(collapsedSummary).not.toContain("Rolls");
   });
 });
+
+describe("Post-Reporting-Phase polish: option cash flow is never presented as a second profit figure", () => {
+  it("3. the top summary uses 'Option Cash Flow' terminology instead of 'Net option premium'", () => {
+    expect(text).toContain('label="Option Cash Flow"');
+    expect(text).not.toContain('label="Net option premium"');
+  });
+
+  it("4. the top summary explicitly distinguishes cash flow from realized profit", () => {
+    expect(text).toMatch(/cash flow, not realized profit/);
+  });
+
+  it("5. Confirmed Trading P/L's label and authoritative-source wiring remain unchanged", () => {
+    expect(text).toContain('label="Confirmed Trading P/L (mine)"');
+    expect(text).toContain("ownReport.confirmedTradingPL");
+  });
+
+  it("the most prominent per-campaign cash-flow labels (Open/History collapsed rows) also avoid a bare 'Premium'/'Net premium' that reads like profit", () => {
+    expect(text).toContain('label="Option Cash Flow"');
+    expect(text).toContain('label="Cash Flow"');
+  });
+
+  it("8. no financial calculation changed - netOptionPremium/premiumTotal is still read and summed exactly as before, only the label text changed", () => {
+    expect(text).toContain("row.summary.netOptionPremium");
+    expect(text).toContain("const premiumTotal = rows.reduce((sum, row) => sum + row.summary.netOptionPremium, 0);");
+  });
+});
