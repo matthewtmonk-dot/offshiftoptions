@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { EmptyState, FieldLabel } from "@/components/ui";
 import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
-import { formatCriterionValue, type CriterionResult, type ExclusionDiagnostic } from "@/domain/scanner/scanner";
+import { formatCriterionValue, type CriterionResult, type ExclusionDiagnostic, type ScannerReadiness } from "@/domain/scanner/scanner";
 import { OPTION_CHAIN_ENRICHMENT_LIMIT } from "@/domain/scanner/live-scan";
 import {
   isNotOptionAssessed as isNotOptionAssessedState,
@@ -486,7 +486,7 @@ export function ScannerWorkspace({
                       </button>
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
-                      <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.scoreLabel)}`}>
+                      <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.readiness, result.scoreLabel)}`}>
                         {result.score}
                       </span>
                     </td>
@@ -602,7 +602,7 @@ function CandidateCard({
             <ResearchBadge status={result.researchStatus} />
           </div>
           <div className="flex items-center gap-2">
-            <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.scoreLabel)}`}>
+            <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.readiness, result.scoreLabel)}`}>
               {result.score}
             </span>
             <span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${status.tone}`}>
@@ -1021,7 +1021,23 @@ function statusInfo(result: ScannerViewResult): { word: string; tone: string } {
   return { word: "NEAR", tone: "border-amber-400/40 bg-amber-400/15 text-amber-100" };
 }
 
-function scoreChipClass(score: number, label?: string) {
+/**
+ * Post-Reporting-Phase Scanner polish (presentation only - see PROJECT_HANDOFF.md's Known Active
+ * Blockers note this fixes): a NEEDS_DATA row's option-chain evidence was never assessed
+ * (`isNotOptionAssessed`) or is still UNKNOWN across some criteria - the numeric score reflects
+ * only whatever criteria happen to be known, which can legitimately be high (e.g. a stock-screen-
+ * only candidate with just a "price" rule enabled). Checked first, ahead of every label/score
+ * branch below, so a NEEDS_DATA row's score always reads as "partial information", never as
+ * confident as an actionable PASS/NEAR/FAIL row - regardless of how high that partial score is or
+ * what `scoreLabel` says. This does not change `score` itself, `readiness`/classification, or
+ * which rows are actionable (`isActionableReadiness`) - purely which CSS classes the existing chip
+ * uses. NEAR/PASS/FAIL rows are unaffected: none of them can be NEEDS_DATA by construction
+ * (classifyReadiness, scanner.ts), so this new branch never fires for them.
+ */
+export function scoreChipClass(score: number, readiness: ScannerReadiness, label?: string) {
+  if (readiness === "NEEDS_DATA") {
+    return "border-zinc-600 bg-zinc-800 text-zinc-300";
+  }
   if (label === "Verify") {
     return "border-zinc-600 bg-zinc-800 text-zinc-300";
   }
