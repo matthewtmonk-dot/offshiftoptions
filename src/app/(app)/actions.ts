@@ -280,6 +280,7 @@ export async function recommendStockAction(formData: FormData) {
   revalidatePath("/research");
   revalidatePath("/scanner");
   revalidatePath("/dashboard");
+  revalidatePath("/chat");
 }
 
 export async function updateRecommendationStatusAction(formData: FormData) {

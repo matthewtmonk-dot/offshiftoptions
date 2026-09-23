@@ -13,7 +13,6 @@ import {
   ListChecks,
   LogOut,
   MessageSquareText,
-  Send,
   WalletCards,
 } from "lucide-react";
 import { Initials } from "@/components/ui";
@@ -26,16 +25,21 @@ type Appearance = "SYSTEM" | "LIGHT" | "DARK";
 // "Scanner Rules" (/scanner/settings) and "Install" (/install) are deliberately not top-level
 // destinations: both remain fully reachable - Scanner Rules via its own icon-button link inside
 // the Scanner page toolbar, Install via a link on the Account page - they just no longer compete
-// for primary sidebar space. See PROJECT_HANDOFF.md's navigation-trim audit for why Notifications
-// and Recs stay for now (each still carries functionality with no other current home).
-const navItems = [
+// for primary sidebar space.
+//
+// Navigation/Communication Cleanup ticket: Recs and Notifications were also trimmed from this
+// primary list. Recs (/recommendations) - the recommend-to-buddy workflow now lives inside Chat
+// (see chat/chat-recommend-panel.tsx); the route itself still exists unchanged as a compatibility
+// destination for its fuller incoming/outgoing/status/comment history, reachable from a link inside
+// Chat's Recommend panel. Notifications (/notifications) - still exists unchanged, but is reached
+// via the bell control in the user-area footer (desktop) / mobile header, not a primary nav slot,
+// since it's a secondary "check occasionally" surface rather than a primary destination.
+export const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/positions", label: "Tracker", icon: WalletCards },
   { href: "/scanner", label: "Scanner", icon: ChartNoAxesCombined },
   { href: "/research", label: "Research", icon: ListChecks },
-  { href: "/recommendations", label: "Recs", icon: Send },
   { href: "/chat", label: "Chat", icon: MessageSquareText },
-  { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/account", label: "Account", icon: KeyRound },
 ];
 
@@ -118,7 +122,7 @@ export function AppSidebar({
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = isActiveRoute(pathname, item.href);
-            const unreadCount = item.href === "/chat" ? unreadChat : item.href === "/notifications" ? unread : 0;
+            const unreadCount = item.href === "/chat" ? unreadChat : 0;
             return (
               <IntentPrefetchLink
                 key={item.href}
@@ -168,10 +172,12 @@ export function AppSidebar({
                 </div>
               ) : null}
             </div>
-            {/* The 3-option theme picker doesn't fit a ~72px rail - reachable by expanding
-                (the toggle above is always visible), not force-fit into the collapsed rail.
-                shrink-0 keeps it fully visible even when the name/email column truncates. */}
-            {!collapsed ? <AppearanceControl current={appearance} compact className="shrink-0" /> : null}
+            <div className={`flex shrink-0 items-center gap-2 ${collapsed ? "mt-1" : ""}`}>
+              <NotificationBellLink unread={unread} />
+              {/* The 3-option theme picker doesn't fit a ~72px rail - reachable by expanding
+                  (the toggle above is always visible), not force-fit into the collapsed rail. */}
+              {!collapsed ? <AppearanceControl current={appearance} compact /> : null}
+            </div>
           </div>
           <form action={signOutAction} className="mt-3">
             <button
@@ -193,15 +199,16 @@ export function AppSidebar({
             <HeartHandshake className="size-5 text-emerald-300" aria-hidden />
             <span className="font-semibold">Off Shift Options</span>
           </div>
-          <div className="flex items-center gap-2 text-sm text-zinc-300">
+          <div className="flex items-center gap-3 text-sm text-zinc-300">
+            <NotificationBellLink unread={unread} />
             <Initials name={userName} />
           </div>
         </div>
-        <nav className="grid grid-cols-4 gap-2">
+        <nav className="grid grid-cols-3 gap-2">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = isActiveRoute(pathname, item.href);
-            const unreadCount = item.href === "/chat" ? unreadChat : item.href === "/notifications" ? unread : 0;
+            const unreadCount = item.href === "/chat" ? unreadChat : 0;
             return (
               <IntentPrefetchLink
                 key={item.href}
@@ -220,5 +227,31 @@ export function AppSidebar({
         </nav>
       </header>
     </>
+  );
+}
+
+/**
+ * Navigation/Communication Cleanup ticket: Notifications is no longer a primary nav destination -
+ * this is its sole remaining entry point (desktop user-area footer, mobile header), reusing the
+ * same `unread` count `/notifications` used to show as a nav badge. The full history/mark-read
+ * page at `/notifications` is unchanged; this is purely a smaller, secondary access point to it.
+ */
+function NotificationBellLink({ unread }: { unread: number }) {
+  return (
+    <IntentPrefetchLink
+      href="/notifications"
+      aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
+      className="relative inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-zinc-700 text-zinc-300 transition hover:border-emerald-400/60 hover:text-emerald-200"
+    >
+      <Bell className="size-4" aria-hidden />
+      {unread > 0 ? (
+        <span
+          aria-hidden
+          className="absolute -right-1 -top-1 rounded-full bg-emerald-400 px-1 text-[10px] font-bold leading-tight text-black"
+        >
+          {unread > 99 ? "99+" : unread}
+        </span>
+      ) : null}
+    </IntentPrefetchLink>
   );
 }

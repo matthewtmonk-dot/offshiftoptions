@@ -462,7 +462,7 @@ export default async function DashboardPage() {
         <Panel
           title="Recommendations"
           action={
-            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/recommendations">
+            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat">
               Open
             </IntentPrefetchLink>
           }

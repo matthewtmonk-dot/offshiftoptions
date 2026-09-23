@@ -292,6 +292,18 @@ export async function getChatPageData(userId: string) {
   });
 }
 
+/**
+ * Navigation/Communication Cleanup ticket: the recipient list for Chat's own "Recommend" panel
+ * (see chat/chat-recommend-panel.tsx) - a standalone query rather than folding it into
+ * getChatPageData's return shape, since that shape is already relied on directly (not
+ * destructured) by existing integration tests (notifications-chat-cleanup.integration.test.ts,
+ * chat-attachments.integration.test.ts). Same query Recommendations/Research already use for their
+ * own buddy selectors.
+ */
+export async function getChatBuddies(userId: string) {
+  return prisma.user.findMany({ where: { id: { not: userId } }, orderBy: { name: "asc" }, select: { id: true, name: true } });
+}
+
 export function getUnreadChatCount(userId: string) {
   return prisma.chatMessage.count({
     where: {

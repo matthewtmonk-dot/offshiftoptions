@@ -3,17 +3,18 @@ import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireCurrentUser } from "@/lib/auth";
-import { getChatPageData } from "@/lib/app-data";
+import { getChatBuddies, getChatPageData } from "@/lib/app-data";
 import { shortDateTime } from "@/lib/format";
 import { markConversationReadAction } from "../actions";
 import { ChatAttachmentGallery } from "./chat-attachment-gallery";
 import { ChatComposer } from "./chat-composer";
+import { ChatRecommendPanel } from "./chat-recommend-panel";
 
 export const dynamic = "force-dynamic";
 
 export default async function ChatPage() {
   const user = await requireCurrentUser();
-  const conversation = await getChatPageData(user.id);
+  const [conversation, buddies] = await Promise.all([getChatPageData(user.id), getChatBuddies(user.id)]);
   const unreadCount =
     conversation?.messages.filter(
       (message) => message.senderId !== user.id && !message.reads.some((read) => read.userId === user.id),
@@ -95,6 +96,8 @@ export default async function ChatPage() {
           <EmptyState>No conversation is seeded for this user.</EmptyState>
         )}
       </Panel>
+
+      <ChatRecommendPanel buddies={buddies} />
     </div>
   );
 }
