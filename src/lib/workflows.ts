@@ -435,14 +435,41 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         id: balanceSnapshot.id, accountId: tradingAccount.id, type: "BROKER_SNAPSHOT",
         occurredAt: syncedAt, source: "SCHWAB",
       } });
-      const fingerprints = [...new Set(records.filter((record) => record.kind === "TRANSACTION")
-        .map((record) => record.fingerprint))];
-      const persisted = fingerprints.length === 0 ? 0 : await tx.brokerRecord.count({ where: {
-        accountId: tradingAccount.id, userId, provider: "SCHWAB", kind: "TRANSACTION",
-        fingerprint: { in: fingerprints },
-      } });
+      const transactionRecords = records.filter((record) => record.kind === "TRANSACTION");
+      // Two distinct provider transactions that coincidentally share a fingerprint (same
+      // date/amount/description) get merged into one candidate record by mergeBrokerRecords
+      // (csv.ts) - its sourceIds is the only place both provider identities still survive that
+      // merge. A fingerprint-count check alone can't tell "one real transaction observed under
+      // two fetch categories" (safe - same provider id, deduped by mergeBrokerRecords) apart
+      // from "two distinct transactions that collided on fingerprint" (unsafe) - both present as
+      // exactly one merged record. This schema's uniqueness is (userId, provider, kind,
+      // fingerprint), so a same-fingerprint collision between distinct provider ids can never be
+      // proven fully persisted as two rows - it fails closed instead of silently keeping only one
+      // side's dollar amount.
+      const hasIdentityCollision = transactionRecords.some((record) => record.sourceIds.length > 1);
+      const fingerprints = [...new Set(transactionRecords.map((record) => record.fingerprint))];
+      const persistedRecords = fingerprints.length === 0 ? [] : await tx.brokerRecord.findMany({
+        where: {
+          accountId: tradingAccount.id, userId, provider: "SCHWAB", kind: "TRANSACTION",
+          fingerprint: { in: fingerprints },
+        },
+        select: { fingerprint: true, sourceIds: true },
+      });
+      const persistedSourceIdsByFingerprint = new Map(
+        persistedRecords.map((record) => [record.fingerprint, new Set(record.sourceIds)]),
+      );
+      // Every expected provider transaction id - not just every expected fingerprint - must be
+      // durably represented on the matching persisted row. This also catches a cross-run
+      // collision: a different real transaction previously claimed this fingerprint, so this
+      // run's id was classified a duplicate and skipped (persistClassifiedBrokerRecords) without
+      // ever being recorded anywhere.
+      const everyIdentityPersisted = transactionRecords.every((record) => {
+        const persistedIds = persistedSourceIdsByFingerprint.get(record.fingerprint);
+        return persistedIds !== undefined && record.sourceIds.every((id) => persistedIds.has(id));
+      });
       const persistenceComplete = activity.evidence.persistenceStatus === "COMPLETE" &&
-        persisted === fingerprints.length && !!account && !!snapshot;
+        !hasIdentityCollision && persistedRecords.length === fingerprints.length &&
+        everyIdentityPersisted && !!account && !!snapshot;
       if (!persistenceComplete) activity.evidence.persistenceStatus = "FAILED";
       const step = (category: "TRADE" | "RECEIVE_AND_DELIVER" | "DIVIDEND_OR_INTEREST") =>
         activity.transactionCategories?.[category]?.status === "OK" ? "COMPLETE" as const : "FAILED" as const;
