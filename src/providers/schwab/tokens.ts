@@ -83,7 +83,7 @@ export async function refreshSchwabConnectionAccessToken(connectionId: string, f
 
 export async function getValidSchwabAccessTokenForConnection(
   connectionId: string,
-  options: { expectedUserId?: string; fetchFn?: SchwabFetch } = {},
+  options: { expectedUserId?: string; fetchFn?: SchwabFetch; allowRefresh?: boolean } = {},
 ) {
   const connection = await prisma.brokerConnection.findFirst({
     where: { id: connectionId, provider: "SCHWAB" },
@@ -99,6 +99,8 @@ export async function getValidSchwabAccessTokenForConnection(
     return decryptToken(connection.accessTokenCiphertext);
   }
 
+  // One-off read-only diagnostics must not refresh tokens or update connection state.
+  if (options.allowRefresh === false) return null;
   return refreshSchwabConnectionAccessToken(connection.id, options.fetchFn);
 }
 
