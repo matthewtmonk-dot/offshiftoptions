@@ -6,7 +6,7 @@ const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 
 describe("standalone account-structure diagnostic import", () => {
   it("imports the DB-only list helper under the production Node runtime shape without Next-only guards", () => {
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       NODE_ENV: "production",
       DATABASE_URL: process.env.DATABASE_URL ?? "postgresql://user:pass@127.0.0.1:5432/test",

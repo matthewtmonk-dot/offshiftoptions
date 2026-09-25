@@ -1,4 +1,5 @@
 import { prismaDiagnostic } from "@/lib/prisma-diagnostic";
+import { accountNumbersFromMetadata, findSchwabMarketDataConnectionForUser } from "./tokens";
 
 /** Trusted SSH operator only. No names, labels, emails or brokerage identifiers returned. */
 export async function listDiagnosticAccounts() {
@@ -10,19 +11,43 @@ export async function listDiagnosticAccounts() {
       name: true,
       source: true,
       accountType: true,
-      brokerConnectionId: true,
-      brokerConnection: { select: { userId: true } },
+      externalAccountId: true,
     },
     orderBy: [{ userId: "asc" }, { id: "asc" }],
   });
 
-  return accounts.map((account) => ({
-    ownerId: account.userId,
-    accountId: account.id,
-    appAccountName: account.name,
-    accountSource: account.source,
-    accountType: account.accountType,
-    hasSchwabConnection: Boolean(account.brokerConnectionId),
-    connectionOwnerMatchesAccount: Boolean(account.brokerConnection && account.brokerConnection.userId === account.userId),
-  }));
+  const owners = [...new Set(accounts.map((account) => account.userId))];
+  const ownerConnections = new Map(await Promise.all(owners.map(async (ownerId) => {
+    const connection = await findSchwabMarketDataConnectionForUser(ownerId);
+    const mappedExternalAccountIds = new Set(accountNumbersFromMetadata(connection?.metadata).map((value) => value.hashValue));
+    return [ownerId, {
+      hasOwnerSchwabConnection: Boolean(connection),
+      mappedExternalAccountIds,
+    }] as const;
+  })));
+
+  const provisional = accounts.map((account) => {
+    const connection = ownerConnections.get(account.userId);
+    const hasOwnerSchwabConnection = Boolean(connection?.hasOwnerSchwabConnection);
+    const isMappedToConnectedSchwabAccount = Boolean(
+      connection && account.externalAccountId && connection.mappedExternalAccountIds.has(account.externalAccountId),
+    );
+    return {
+      ownerId: account.userId,
+      accountId: account.id,
+      appAccountName: account.name,
+      accountSource: account.source,
+      accountType: account.accountType,
+      hasOwnerSchwabConnection,
+      isMappedToConnectedSchwabAccount,
+      diagnosticCaptureEligible: hasOwnerSchwabConnection && isMappedToConnectedSchwabAccount,
+    };
+  });
+
+  const eligibleCount = provisional.filter((row) => row.diagnosticCaptureEligible).length;
+  if (eligibleCount !== 1) {
+    return provisional.map((row) => ({ ...row, diagnosticCaptureEligible: false }));
+  }
+
+  return provisional;
 }

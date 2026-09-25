@@ -6,30 +6,137 @@ const mocks = vi.hoisted(() => ({ findMany: vi.fn(), connection: vi.fn(), token:
 vi.mock("@/lib/prisma", () => ({ prisma: { tradingAccount: { findMany: mocks.findMany } } }));
 vi.mock("@/lib/prisma-diagnostic", () => ({ prismaDiagnostic: { tradingAccount: { findMany: mocks.findMany } } }));
 vi.mock("./tokens", () => ({ findSchwabMarketDataConnectionForUser: mocks.connection, getValidSchwabAccessTokenForConnection: mocks.token,
-  accountNumbersFromMetadata: (metadata: unknown) => metadata }));
+  accountNumbersFromMetadata: (metadata: unknown) => Array.isArray(metadata) ? metadata : [] }));
 vi.mock("./account-structure-diagnostic", () => ({ captureAccountStructure: mocks.capture }));
 import { listDiagnosticAccounts, runSelectedAccountDiagnostic } from "./account-structure-preflight";
 
 describe("diagnostic account preflight", () => {
   beforeEach(() => vi.resetAllMocks());
-  it("lists only safe app-level metadata and excludes external financial identifiers", async () => {
-    mocks.findMany.mockResolvedValue([{ id: "internal-account", userId: "internal-owner", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-1", brokerConnection: { userId: "internal-owner" }, externalAccountId: "SECRET_HASH", balance: 12000 }]);
-    expect(await listDiagnosticAccounts()).toEqual([{ ownerId: "internal-owner", accountId: "internal-account", appAccountName: "Matt Demo", accountSource: "SCHWAB", accountType: "Brokerage", hasSchwabConnection: true, connectionOwnerMatchesAccount: true }]);
-    expect(mocks.findMany.mock.calls[0][0].select).toMatchObject({ id: true, userId: true, name: true, source: true, accountType: true, brokerConnectionId: true, brokerConnection: { select: { userId: true } } });
-    expect(mocks.findMany.mock.calls[0][0].select).not.toHaveProperty("externalAccountId");
+  it("lists only safe metadata while reusing owner-scoped Schwab connection mapping semantics", async () => {
+    mocks.findMany.mockResolvedValue([
+      { id: "internal-account", userId: "internal-owner", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_5106", balance: 12000 },
+    ]);
+    mocks.connection.mockResolvedValue({ id: "conn-1", metadata: [{ hashValue: "HASH_5106" }] });
+
+    expect(await listDiagnosticAccounts()).toEqual([
+      {
+        ownerId: "internal-owner",
+        accountId: "internal-account",
+        appAccountName: "CASH ...5106",
+        accountSource: "SCHWAB",
+        accountType: "Brokerage",
+        hasOwnerSchwabConnection: true,
+        isMappedToConnectedSchwabAccount: true,
+        diagnosticCaptureEligible: true,
+      },
+    ]);
+    expect(mocks.findMany.mock.calls[0][0].select).toMatchObject({ id: true, userId: true, name: true, source: true, accountType: true, externalAccountId: true });
+    expect(mocks.connection).toHaveBeenCalledWith("internal-owner");
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
-  it("uses the canonical project Prisma singleton path with no owner or account selection required", async () => {
-    mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-1", brokerConnection: { userId: "owner" } }]);
-    await expect(listDiagnosticAccounts()).resolves.toEqual([{ ownerId: "owner", accountId: "account", appAccountName: "Matt Demo", accountSource: "SCHWAB", accountType: "Brokerage", hasSchwabConnection: true, connectionOwnerMatchesAccount: true }]);
+  it("marks owner-scoped connection presence and connected-account mapping independently", async () => {
+    mocks.findMany.mockResolvedValue([
+      { id: "account-a", userId: "owner-a", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" },
+      { id: "account-b", userId: "owner-b", name: "CASH ...8239", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_B" },
+    ]);
+    mocks.connection.mockImplementation(async (ownerId: string) => {
+      if (ownerId === "owner-a") return { id: "conn-a", metadata: [{ hashValue: "HASH_A" }] };
+      return null;
+    });
+
+    await expect(listDiagnosticAccounts()).resolves.toEqual([
+      {
+        ownerId: "owner-a",
+        accountId: "account-a",
+        appAccountName: "CASH ...5106",
+        accountSource: "SCHWAB",
+        accountType: "Brokerage",
+        hasOwnerSchwabConnection: true,
+        isMappedToConnectedSchwabAccount: true,
+        diagnosticCaptureEligible: true,
+      },
+      {
+        ownerId: "owner-b",
+        accountId: "account-b",
+        appAccountName: "CASH ...8239",
+        accountSource: "SCHWAB",
+        accountType: "Brokerage",
+        hasOwnerSchwabConnection: false,
+        isMappedToConnectedSchwabAccount: false,
+        diagnosticCaptureEligible: false,
+      },
+    ]);
+
+    expect(mocks.findMany).toHaveBeenCalledTimes(1);
+    expect(mocks.connection).toHaveBeenCalledTimes(2);
+    expect(mocks.connection).toHaveBeenNthCalledWith(1, "owner-a");
+    expect(mocks.connection).toHaveBeenNthCalledWith(2, "owner-b");
+  });
+  it("rejects mismatched external mapping even when owner has an active connection", async () => {
+    mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" }]);
+    mocks.connection.mockResolvedValue({ id: "conn", metadata: [{ hashValue: "HASH_B" }] });
+
+    await expect(listDiagnosticAccounts()).resolves.toEqual([
+      {
+        ownerId: "owner",
+        accountId: "account",
+        appAccountName: "CASH ...5106",
+        accountSource: "SCHWAB",
+        accountType: "Brokerage",
+        hasOwnerSchwabConnection: true,
+        isMappedToConnectedSchwabAccount: false,
+        diagnosticCaptureEligible: false,
+      },
+    ]);
+
+    expect(mocks.token).not.toHaveBeenCalled();
+    expect(mocks.capture).not.toHaveBeenCalled();
+  });
+  it("fails closed by clearing eligibility when more than one row maps to active Schwab connections", async () => {
+    mocks.findMany.mockResolvedValue([
+      { id: "account-a", userId: "owner-a", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" },
+      { id: "account-b", userId: "owner-b", name: "CASH ...8239", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_B" },
+    ]);
+    mocks.connection.mockImplementation(async (ownerId: string) => ({
+      id: `conn-${ownerId}`,
+      metadata: ownerId === "owner-a" ? [{ hashValue: "HASH_A" }] : [{ hashValue: "HASH_B" }],
+    }));
+
+    await expect(listDiagnosticAccounts()).resolves.toEqual([
+      {
+        ownerId: "owner-a",
+        accountId: "account-a",
+        appAccountName: "CASH ...5106",
+        accountSource: "SCHWAB",
+        accountType: "Brokerage",
+        hasOwnerSchwabConnection: true,
+        isMappedToConnectedSchwabAccount: true,
+        diagnosticCaptureEligible: false,
+      },
+      {
+        ownerId: "owner-b",
+        accountId: "account-b",
+        appAccountName: "CASH ...8239",
+        accountSource: "SCHWAB",
+        accountType: "Brokerage",
+        hasOwnerSchwabConnection: true,
+        isMappedToConnectedSchwabAccount: true,
+        diagnosticCaptureEligible: false,
+      },
+    ]);
+  });
+  it("uses DB-only list query with no owner or account selection required", async () => {
+    mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" }]);
+    mocks.connection.mockResolvedValue({ id: "conn", metadata: [{ hashValue: "HASH_A" }] });
+    await listDiagnosticAccounts();
+
     expect(mocks.findMany).toHaveBeenCalledTimes(1);
     expect(mocks.findMany.mock.calls[0][0]).toMatchObject({
       where: { source: "SCHWAB", externalAccountId: { not: null } },
       orderBy: [{ userId: "asc" }, { id: "asc" }],
     });
-    expect(mocks.findMany.mock.calls[0][0].select).toMatchObject({ id: true, userId: true, name: true, source: true, accountType: true, brokerConnectionId: true });
-    expect(mocks.connection).not.toHaveBeenCalled();
+    expect(mocks.findMany.mock.calls[0][0].select).toMatchObject({ id: true, userId: true, name: true, source: true, accountType: true, externalAccountId: true });
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
@@ -81,7 +188,7 @@ describe("diagnostic account preflight", () => {
       process.stderr.write = originalStderrWrite;
     }
   });
-  it("refuses to print rows when safe metadata remains indistinguishable", async () => {
+  it("fails closed when eligibility is ambiguous or unavailable", async () => {
     const report = vi.fn();
     const failure = vi.fn();
     const originalStdoutWrite = process.stdout.write;
@@ -97,12 +204,53 @@ describe("diagnostic account preflight", () => {
 
     try {
       mocks.findMany.mockResolvedValue([
-        { id: "a", userId: "owner-1", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-1", brokerConnection: { userId: "owner-1" } },
-        { id: "b", userId: "owner-2", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-2", brokerConnection: { userId: "owner-2" } },
+        { id: "a", userId: "owner-1", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" },
+        { id: "b", userId: "owner-2", name: "CASH ...8239", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_B" },
       ]);
+      mocks.connection.mockImplementation(async (ownerId: string) => ({
+        id: `conn-${ownerId}`,
+        metadata: ownerId === "owner-1" ? [{ hashValue: "HASH_A" }] : [{ hashValue: "HASH_B" }],
+      }));
       await runListDiagnosticMode();
-      expect(failure).toHaveBeenCalledWith("Safe metadata is insufficient to identify a single account without exposing financial or external identifiers.\n");
+      expect(failure).toHaveBeenCalledWith("Diagnostic capture eligibility is ambiguous or unavailable from safe metadata.\n");
       expect(report).not.toHaveBeenCalled();
+    } finally {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    }
+  });
+  it("prints no sensitive identifiers in --list output", async () => {
+    const report = vi.fn();
+    const failure = vi.fn();
+    const originalStdoutWrite = process.stdout.write;
+    const originalStderrWrite = process.stderr.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      report(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      failure(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      mocks.findMany.mockResolvedValue([
+        { id: "account", userId: "owner", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "SECRET_HASH_5106", balance: 9999 },
+      ]);
+      mocks.connection.mockResolvedValue({ id: "conn", metadata: [{ hashValue: "SECRET_HASH_5106", accountNumberLast4: "5106" }] });
+      await runListDiagnosticMode();
+
+      expect(failure).not.toHaveBeenCalled();
+      const printed = report.mock.calls.map(([value]) => String(value)).join("");
+      expect(printed).toContain("\"ownerId\"");
+      expect(printed).toContain("\"accountId\"");
+      expect(printed).toContain("\"hasOwnerSchwabConnection\"");
+      expect(printed).toContain("\"isMappedToConnectedSchwabAccount\"");
+      expect(printed).toContain("\"diagnosticCaptureEligible\"");
+      expect(printed).not.toContain("externalAccountId");
+      expect(printed).not.toContain("SECRET_HASH_5106");
+      expect(printed).not.toContain("accountNumberLast4");
+      expect(printed).not.toContain("balance");
     } finally {
       process.stdout.write = originalStdoutWrite;
       process.stderr.write = originalStderrWrite;

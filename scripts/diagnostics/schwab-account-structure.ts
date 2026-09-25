@@ -12,12 +12,20 @@ export async function runListDiagnosticMode() {
       return;
     }
 
+    const eligibleCount = report.filter((row) => row.diagnosticCaptureEligible).length;
+    if (eligibleCount !== 1) {
+      process.stderr.write("Diagnostic capture eligibility is ambiguous or unavailable from safe metadata.\n");
+      process.exitCode = 1;
+      return;
+    }
+
     const uniqueSafeMetadata = new Set(report.map((row) => JSON.stringify({
       appAccountName: row.appAccountName,
       accountSource: row.accountSource,
       accountType: row.accountType,
-      hasSchwabConnection: row.hasSchwabConnection,
-      connectionOwnerMatchesAccount: row.connectionOwnerMatchesAccount,
+      hasOwnerSchwabConnection: row.hasOwnerSchwabConnection,
+      isMappedToConnectedSchwabAccount: row.isMappedToConnectedSchwabAccount,
+      diagnosticCaptureEligible: row.diagnosticCaptureEligible,
     })));
 
     if (uniqueSafeMetadata.size !== report.length) {

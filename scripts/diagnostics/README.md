@@ -4,7 +4,18 @@ Manual CLI only. No route, build/start hook, sync, token refresh, migration, or 
 
 Run from a checkout containing this script, `src/providers/schwab/account-structure-diagnostic.ts`, `src/providers/schwab/account-structure-preflight.ts`, and the `allowRefresh: false` token-helper support in `src/providers/schwab/tokens.ts`. These local files are not present in production baseline a50f3d4. Do not run with an older token helper. Dependencies and generated Prisma client must already be installed. Existing production DATABASE_URL and token encryption configuration must be available to the process; never paste them into a command or output.
 
-The `--list` mode prints only internal owner ID and TradingAccount ID pairs for linked Schwab accounts. It performs no OAuth/token retrieval or network request; listing is not a promise of a fresh eligible token. No account labels are printed because existing names may include brokerage identifiers. Choose the intended pair; no first-account or unique-account guessing occurs. If the operator cannot associate a listed owner ID with the intended owner using existing authorized administration, stop rather than guess.
+The `--list` mode prints only safe app-level selection metadata for linked Schwab accounts:
+
+- ownerId
+- accountId
+- appAccountName
+- accountSource
+- accountType
+- hasOwnerSchwabConnection
+- isMappedToConnectedSchwabAccount
+- diagnosticCaptureEligible
+
+It performs no OAuth/token refresh or network request. Listing is not a promise of a fresh eligible token for capture mode. Eligibility is fail-closed: exactly one row must be eligible, otherwise the command stops and prints a fixed non-sensitive error message.
 
 Using the trusted SSH operator's selected **internal** user ID and TradingAccount ID (not an account number/hash):
 
