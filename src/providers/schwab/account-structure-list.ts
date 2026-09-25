@@ -1,5 +1,3 @@
-import "server-only";
-
 import { prisma } from "@/lib/prisma";
 
 /** Trusted SSH operator only. No names, labels, emails or brokerage identifiers returned. */

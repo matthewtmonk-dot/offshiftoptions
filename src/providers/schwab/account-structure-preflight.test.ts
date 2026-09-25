@@ -18,9 +18,15 @@ describe("diagnostic account preflight", () => {
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
-  it("uses a DB-only list path with no owner or account selection required", async () => {
+  it("uses the canonical project Prisma singleton path with no owner or account selection required", async () => {
     mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner" }]);
     await expect(listDiagnosticAccounts()).resolves.toEqual([{ ownerId: "owner", accountId: "account" }]);
+    expect(mocks.findMany).toHaveBeenCalledTimes(1);
+    expect(mocks.findMany.mock.calls[0][0]).toMatchObject({
+      where: { source: "SCHWAB", externalAccountId: { not: null } },
+      select: { id: true, userId: true },
+      orderBy: [{ userId: "asc" }, { id: "asc" }],
+    });
     expect(mocks.connection).not.toHaveBeenCalled();
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
