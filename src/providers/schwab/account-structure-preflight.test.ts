@@ -12,22 +12,23 @@ import { listDiagnosticAccounts, runSelectedAccountDiagnostic } from "./account-
 
 describe("diagnostic account preflight", () => {
   beforeEach(() => vi.resetAllMocks());
-  it("lists only internal IDs even if returned rows contain extra sensitive columns", async () => {
-    mocks.findMany.mockResolvedValue([{ id: "internal-account", userId: "internal-owner", name: "SECRET_NAME", externalAccountId: "SECRET_HASH", balance: 12000 }]);
-    expect(await listDiagnosticAccounts()).toEqual([{ ownerId: "internal-owner", accountId: "internal-account" }]);
-    expect(mocks.findMany.mock.calls[0][0].select).toEqual({ id: true, userId: true });
+  it("lists only safe app-level metadata and excludes external financial identifiers", async () => {
+    mocks.findMany.mockResolvedValue([{ id: "internal-account", userId: "internal-owner", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-1", brokerConnection: { userId: "internal-owner" }, externalAccountId: "SECRET_HASH", balance: 12000 }]);
+    expect(await listDiagnosticAccounts()).toEqual([{ ownerId: "internal-owner", accountId: "internal-account", appAccountName: "Matt Demo", accountSource: "SCHWAB", accountType: "Brokerage", hasSchwabConnection: true, connectionOwnerMatchesAccount: true }]);
+    expect(mocks.findMany.mock.calls[0][0].select).toMatchObject({ id: true, userId: true, name: true, source: true, accountType: true, brokerConnectionId: true, brokerConnection: { select: { userId: true } } });
+    expect(mocks.findMany.mock.calls[0][0].select).not.toHaveProperty("externalAccountId");
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
   it("uses the canonical project Prisma singleton path with no owner or account selection required", async () => {
-    mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner" }]);
-    await expect(listDiagnosticAccounts()).resolves.toEqual([{ ownerId: "owner", accountId: "account" }]);
+    mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-1", brokerConnection: { userId: "owner" } }]);
+    await expect(listDiagnosticAccounts()).resolves.toEqual([{ ownerId: "owner", accountId: "account", appAccountName: "Matt Demo", accountSource: "SCHWAB", accountType: "Brokerage", hasSchwabConnection: true, connectionOwnerMatchesAccount: true }]);
     expect(mocks.findMany).toHaveBeenCalledTimes(1);
     expect(mocks.findMany.mock.calls[0][0]).toMatchObject({
       where: { source: "SCHWAB", externalAccountId: { not: null } },
-      select: { id: true, userId: true },
       orderBy: [{ userId: "asc" }, { id: "asc" }],
     });
+    expect(mocks.findMany.mock.calls[0][0].select).toMatchObject({ id: true, userId: true, name: true, source: true, accountType: true, brokerConnectionId: true });
     expect(mocks.connection).not.toHaveBeenCalled();
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
@@ -74,6 +75,33 @@ describe("diagnostic account preflight", () => {
       mocks.findMany.mockRejectedValue(new Error("raw prisma connection failure"));
       await runListDiagnosticMode();
       expect(failure).toHaveBeenCalledWith("Diagnostic database unavailable.\n");
+      expect(report).not.toHaveBeenCalled();
+    } finally {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    }
+  });
+  it("refuses to print rows when safe metadata remains indistinguishable", async () => {
+    const report = vi.fn();
+    const failure = vi.fn();
+    const originalStdoutWrite = process.stdout.write;
+    const originalStderrWrite = process.stderr.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      report(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      failure(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      mocks.findMany.mockResolvedValue([
+        { id: "a", userId: "owner-1", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-1", brokerConnection: { userId: "owner-1" } },
+        { id: "b", userId: "owner-2", name: "Matt Demo", source: "SCHWAB", accountType: "Brokerage", brokerConnectionId: "conn-2", brokerConnection: { userId: "owner-2" } },
+      ]);
+      await runListDiagnosticMode();
+      expect(failure).toHaveBeenCalledWith("Safe metadata is insufficient to identify a single account without exposing financial or external identifiers.\n");
       expect(report).not.toHaveBeenCalled();
     } finally {
       process.stdout.write = originalStdoutWrite;

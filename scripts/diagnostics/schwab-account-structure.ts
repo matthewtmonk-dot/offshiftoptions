@@ -11,6 +11,21 @@ export async function runListDiagnosticMode() {
       process.exitCode = 1;
       return;
     }
+
+    const uniqueSafeMetadata = new Set(report.map((row) => JSON.stringify({
+      appAccountName: row.appAccountName,
+      accountSource: row.accountSource,
+      accountType: row.accountType,
+      hasSchwabConnection: row.hasSchwabConnection,
+      connectionOwnerMatchesAccount: row.connectionOwnerMatchesAccount,
+    })));
+
+    if (uniqueSafeMetadata.size !== report.length) {
+      process.stderr.write("Safe metadata is insufficient to identify a single account without exposing financial or external identifiers.\n");
+      process.exitCode = 1;
+      return;
+    }
+
     process.stdout.write(JSON.stringify(report, null, 2) + "\n");
   } catch {
     process.stderr.write("Diagnostic database unavailable.\n");
