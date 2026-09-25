@@ -1,34 +1,72 @@
 // Manual only. Run with --conditions=react-server; never import into build/start/routes.
 
-const writeReport = process.stdout.write.bind(process.stdout);
-const writeFailure = process.stderr.write.bind(process.stderr);
+import { pathToFileURL } from "node:url";
 
-async function main() {
-  await import("dotenv/config");
-  if (process.argv.slice(2).some(arg => arg !== "--list") || process.argv.slice(2).length > 1) throw new Error("Invalid mode");
-  const ownerId = process.env.OSO_DIAGNOSTIC_OWNER_ID;
-  const accountId = process.env.OSO_DIAGNOSTIC_ACCOUNT_ID;
-  const listMode = process.argv[2] === "--list";
-  if (!listMode && (!ownerId || !accountId)) throw new Error("Selection missing");
-  const { prisma } = await import("../../src/lib/prisma");
-  // Prevent Prisma's default error logger from exposing connection/query details.
+export async function runListDiagnosticMode() {
   try {
-    const { listDiagnosticAccounts, runSelectedAccountDiagnostic } = await import("../../src/providers/schwab/account-structure-preflight");
-    const report = listMode ? await listDiagnosticAccounts() : await runSelectedAccountDiagnostic(ownerId, accountId);
-    writeReport(JSON.stringify(report, null, 2) + "\n");
+    const { listDiagnosticAccounts } = await import("../../src/providers/schwab/account-structure-list");
+    const report = await listDiagnosticAccounts();
+    if (report.length === 0) {
+      process.stdout.write("No eligible diagnostic accounts found.\n");
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+  } catch {
+    process.stderr.write("Diagnostic database unavailable.\n");
+    process.exitCode = 1;
+  }
+}
+
+export async function runCaptureDiagnosticMode(ownerId: string, accountId: string) {
+  const { prisma } = await import("../../src/lib/prisma");
+  try {
+    const { runSelectedAccountDiagnostic } = await import("../../src/providers/schwab/account-structure-preflight");
+    const report = await runSelectedAccountDiagnostic(ownerId, accountId);
+    process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+  } catch {
+    process.stderr.write("Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted.\n");
+    process.exitCode = 1;
   } finally {
     await prisma.$disconnect();
   }
 }
 
-// Imported library log/error paths must not print raw payloads, credentials or SQL.
-console.log = console.info = console.warn = console.error = console.debug = () => {};
-process.stdout.write = (() => true) as typeof process.stdout.write;
-process.stderr.write = (() => true) as typeof process.stderr.write;
-function fail() {
-  writeFailure("Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted.\n");
+async function main() {
+  await import("dotenv/config");
+
+  const args = process.argv.slice(2);
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--list")) {
+    throw new Error("Invalid mode");
+  }
+
+  const ownerId = process.env.OSO_DIAGNOSTIC_OWNER_ID;
+  const accountId = process.env.OSO_DIAGNOSTIC_ACCOUNT_ID;
+  const listMode = args[0] === "--list";
+
+  if (!listMode && (!ownerId || !accountId)) {
+    throw new Error("Selection missing");
+  }
+
+  if (listMode) {
+    await runListDiagnosticMode();
+    return;
+  }
+
+  await runCaptureDiagnosticMode(ownerId!, accountId!);
+}
+
+function fail(message: string) {
+  process.stderr.write(`${message}\n`);
   process.exitCode = 1;
 }
-process.on("uncaughtException", () => { fail(); process.exit(1); });
-process.on("unhandledRejection", () => { fail(); process.exit(1); });
-main().catch(fail);
+
+const isDirectExecution = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectExecution) {
+  process.on("uncaughtException", () => { fail("Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted."); process.exit(1); });
+  process.on("unhandledRejection", () => { fail("Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted."); process.exit(1); });
+  main().catch(() => {
+    fail("Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted.");
+  });
+}

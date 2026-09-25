@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runListDiagnosticMode } from "../../../scripts/diagnostics/schwab-account-structure";
+
 const mocks = vi.hoisted(() => ({ findMany: vi.fn(), connection: vi.fn(), token: vi.fn(), capture: vi.fn() }));
 // No write method exists in this mock: any attempted mutation fails the test.
 vi.mock("@/lib/prisma", () => ({ prisma: { tradingAccount: { findMany: mocks.findMany } } }));
@@ -15,6 +17,61 @@ describe("diagnostic account preflight", () => {
     expect(mocks.findMany.mock.calls[0][0].select).toEqual({ id: true, userId: true });
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
+  });
+  it("uses a DB-only list path with no owner or account selection required", async () => {
+    mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner" }]);
+    await expect(listDiagnosticAccounts()).resolves.toEqual([{ ownerId: "owner", accountId: "account" }]);
+    expect(mocks.connection).not.toHaveBeenCalled();
+    expect(mocks.token).not.toHaveBeenCalled();
+    expect(mocks.capture).not.toHaveBeenCalled();
+  });
+  it("emits a fixed non-sensitive message when no eligible rows are found", async () => {
+    const report = vi.fn();
+    const failure = vi.fn();
+    const originalStdoutWrite = process.stdout.write;
+    const originalStderrWrite = process.stderr.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      report(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      failure(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      mocks.findMany.mockResolvedValue([]);
+      await runListDiagnosticMode();
+      expect(report).toHaveBeenCalledWith("No eligible diagnostic accounts found.\n");
+      expect(failure).not.toHaveBeenCalled();
+    } finally {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    }
+  });
+  it("emits a fixed non-sensitive message when the database is unavailable", async () => {
+    const report = vi.fn();
+    const failure = vi.fn();
+    const originalStdoutWrite = process.stdout.write;
+    const originalStderrWrite = process.stderr.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      report(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      failure(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      mocks.findMany.mockRejectedValue(new Error("raw prisma connection failure"));
+      await runListDiagnosticMode();
+      expect(failure).toHaveBeenCalledWith("Diagnostic database unavailable.\n");
+      expect(report).not.toHaveBeenCalled();
+    } finally {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    }
   });
   it("refuses unspecified selection instead of guessing among listed accounts", async () => {
     await expect(runSelectedAccountDiagnostic()).rejects.toThrow("Explicit owner and account selection required.");
