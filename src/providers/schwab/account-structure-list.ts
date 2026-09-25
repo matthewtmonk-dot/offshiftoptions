@@ -44,10 +44,5 @@ export async function listDiagnosticAccounts() {
     };
   });
 
-  const eligibleCount = provisional.filter((row) => row.diagnosticCaptureEligible).length;
-  if (eligibleCount !== 1) {
-    return provisional.map((row) => ({ ...row, diagnosticCaptureEligible: false }));
-  }
-
   return provisional;
 }

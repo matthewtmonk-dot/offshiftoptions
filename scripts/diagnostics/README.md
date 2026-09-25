@@ -15,7 +15,7 @@ The `--list` mode prints only safe app-level selection metadata for linked Schwa
 - isMappedToConnectedSchwabAccount
 - diagnosticCaptureEligible
 
-It performs no OAuth/token refresh or network request. Listing is not a promise of a fresh eligible token for capture mode. Eligibility is fail-closed: exactly one row must be eligible, otherwise the command stops and prints a fixed non-sensitive error message.
+It performs no OAuth/token refresh or network request. Listing is not a promise of a fresh eligible token for capture mode. List mode always prints these safe rows plus `eligibleCount` so trusted operators can distinguish zero eligible mappings from multiple eligible mappings without exposing sensitive identifiers. Capture mode remains fail-closed and still requires an explicit valid owner/account selection.
 
 Using the trusted SSH operator's selected **internal** user ID and TradingAccount ID (not an account number/hash):
 

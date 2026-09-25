@@ -5,36 +5,9 @@ import { pathToFileURL } from "node:url";
 export async function runListDiagnosticMode() {
   try {
     const { listDiagnosticAccounts } = await import("../../src/providers/schwab/account-structure-list");
-    const report = await listDiagnosticAccounts();
-    if (report.length === 0) {
-      process.stdout.write("No eligible diagnostic accounts found.\n");
-      process.exitCode = 1;
-      return;
-    }
-
-    const eligibleCount = report.filter((row) => row.diagnosticCaptureEligible).length;
-    if (eligibleCount !== 1) {
-      process.stderr.write("Diagnostic capture eligibility is ambiguous or unavailable from safe metadata.\n");
-      process.exitCode = 1;
-      return;
-    }
-
-    const uniqueSafeMetadata = new Set(report.map((row) => JSON.stringify({
-      appAccountName: row.appAccountName,
-      accountSource: row.accountSource,
-      accountType: row.accountType,
-      hasOwnerSchwabConnection: row.hasOwnerSchwabConnection,
-      isMappedToConnectedSchwabAccount: row.isMappedToConnectedSchwabAccount,
-      diagnosticCaptureEligible: row.diagnosticCaptureEligible,
-    })));
-
-    if (uniqueSafeMetadata.size !== report.length) {
-      process.stderr.write("Safe metadata is insufficient to identify a single account without exposing financial or external identifiers.\n");
-      process.exitCode = 1;
-      return;
-    }
-
-    process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+    const accounts = await listDiagnosticAccounts();
+    const eligibleCount = accounts.filter((row) => row.diagnosticCaptureEligible).length;
+    process.stdout.write(JSON.stringify({ accounts, eligibleCount }, null, 2) + "\n");
   } catch {
     process.stderr.write("Diagnostic database unavailable.\n");
     process.exitCode = 1;

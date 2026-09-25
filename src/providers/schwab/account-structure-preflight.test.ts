@@ -93,7 +93,7 @@ describe("diagnostic account preflight", () => {
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
-  it("fails closed by clearing eligibility when more than one row maps to active Schwab connections", async () => {
+  it("marks each mapped row as eligible when more than one row maps to active Schwab connections", async () => {
     mocks.findMany.mockResolvedValue([
       { id: "account-a", userId: "owner-a", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" },
       { id: "account-b", userId: "owner-b", name: "CASH ...8239", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_B" },
@@ -112,7 +112,7 @@ describe("diagnostic account preflight", () => {
         accountType: "Brokerage",
         hasOwnerSchwabConnection: true,
         isMappedToConnectedSchwabAccount: true,
-        diagnosticCaptureEligible: false,
+        diagnosticCaptureEligible: true,
       },
       {
         ownerId: "owner-b",
@@ -122,7 +122,7 @@ describe("diagnostic account preflight", () => {
         accountType: "Brokerage",
         hasOwnerSchwabConnection: true,
         isMappedToConnectedSchwabAccount: true,
-        diagnosticCaptureEligible: false,
+        diagnosticCaptureEligible: true,
       },
     ]);
   });
@@ -140,7 +140,7 @@ describe("diagnostic account preflight", () => {
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
-  it("emits a fixed non-sensitive message when no eligible rows are found", async () => {
+  it("prints safe rows with eligibleCount=0 when no row is capture-eligible", async () => {
     const report = vi.fn();
     const failure = vi.fn();
     const originalStdoutWrite = process.stdout.write;
@@ -155,9 +155,26 @@ describe("diagnostic account preflight", () => {
     }) as typeof process.stderr.write;
 
     try {
-      mocks.findMany.mockResolvedValue([]);
+      mocks.findMany.mockResolvedValue([
+        { id: "account", userId: "owner", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" },
+      ]);
+      mocks.connection.mockResolvedValue({ id: "conn", metadata: [{ hashValue: "HASH_B" }] });
       await runListDiagnosticMode();
-      expect(report).toHaveBeenCalledWith("No eligible diagnostic accounts found.\n");
+      expect(report).toHaveBeenCalledWith(JSON.stringify({
+        accounts: [
+          {
+            ownerId: "owner",
+            accountId: "account",
+            appAccountName: "CASH ...5106",
+            accountSource: "SCHWAB",
+            accountType: "Brokerage",
+            hasOwnerSchwabConnection: true,
+            isMappedToConnectedSchwabAccount: false,
+            diagnosticCaptureEligible: false,
+          },
+        ],
+        eligibleCount: 0,
+      }, null, 2) + "\n");
       expect(failure).not.toHaveBeenCalled();
     } finally {
       process.stdout.write = originalStdoutWrite;
@@ -188,7 +205,7 @@ describe("diagnostic account preflight", () => {
       process.stderr.write = originalStderrWrite;
     }
   });
-  it("fails closed when eligibility is ambiguous or unavailable", async () => {
+  it("prints safe rows with eligibleCount>1 for ambiguous multi-eligible list results", async () => {
     const report = vi.fn();
     const failure = vi.fn();
     const originalStdoutWrite = process.stdout.write;
@@ -212,8 +229,87 @@ describe("diagnostic account preflight", () => {
         metadata: ownerId === "owner-1" ? [{ hashValue: "HASH_A" }] : [{ hashValue: "HASH_B" }],
       }));
       await runListDiagnosticMode();
-      expect(failure).toHaveBeenCalledWith("Diagnostic capture eligibility is ambiguous or unavailable from safe metadata.\n");
-      expect(report).not.toHaveBeenCalled();
+      expect(failure).not.toHaveBeenCalled();
+      expect(report).toHaveBeenCalledWith(JSON.stringify({
+        accounts: [
+          {
+            ownerId: "owner-1",
+            accountId: "a",
+            appAccountName: "CASH ...5106",
+            accountSource: "SCHWAB",
+            accountType: "Brokerage",
+            hasOwnerSchwabConnection: true,
+            isMappedToConnectedSchwabAccount: true,
+            diagnosticCaptureEligible: true,
+          },
+          {
+            ownerId: "owner-2",
+            accountId: "b",
+            appAccountName: "CASH ...8239",
+            accountSource: "SCHWAB",
+            accountType: "Brokerage",
+            hasOwnerSchwabConnection: true,
+            isMappedToConnectedSchwabAccount: true,
+            diagnosticCaptureEligible: true,
+          },
+        ],
+        eligibleCount: 2,
+      }, null, 2) + "\n");
+    } finally {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    }
+  });
+  it("prints safe rows with eligibleCount=1 when exactly one row is eligible", async () => {
+    const report = vi.fn();
+    const failure = vi.fn();
+    const originalStdoutWrite = process.stdout.write;
+    const originalStderrWrite = process.stderr.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      report(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      failure(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      mocks.findMany.mockResolvedValue([
+        { id: "a", userId: "owner-1", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" },
+        { id: "b", userId: "owner-2", name: "CASH ...8239", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_B" },
+      ]);
+      mocks.connection.mockImplementation(async (ownerId: string) => {
+        if (ownerId === "owner-1") return { id: "conn-1", metadata: [{ hashValue: "HASH_A" }] };
+        return { id: "conn-2", metadata: [{ hashValue: "HASH_C" }] };
+      });
+      await runListDiagnosticMode();
+      expect(failure).not.toHaveBeenCalled();
+      expect(report).toHaveBeenCalledWith(JSON.stringify({
+        accounts: [
+          {
+            ownerId: "owner-1",
+            accountId: "a",
+            appAccountName: "CASH ...5106",
+            accountSource: "SCHWAB",
+            accountType: "Brokerage",
+            hasOwnerSchwabConnection: true,
+            isMappedToConnectedSchwabAccount: true,
+            diagnosticCaptureEligible: true,
+          },
+          {
+            ownerId: "owner-2",
+            accountId: "b",
+            appAccountName: "CASH ...8239",
+            accountSource: "SCHWAB",
+            accountType: "Brokerage",
+            hasOwnerSchwabConnection: true,
+            isMappedToConnectedSchwabAccount: false,
+            diagnosticCaptureEligible: false,
+          },
+        ],
+        eligibleCount: 1,
+      }, null, 2) + "\n");
     } finally {
       process.stdout.write = originalStdoutWrite;
       process.stderr.write = originalStderrWrite;
@@ -247,6 +343,7 @@ describe("diagnostic account preflight", () => {
       expect(printed).toContain("\"hasOwnerSchwabConnection\"");
       expect(printed).toContain("\"isMappedToConnectedSchwabAccount\"");
       expect(printed).toContain("\"diagnosticCaptureEligible\"");
+      expect(printed).toContain("\"eligibleCount\"");
       expect(printed).not.toContain("externalAccountId");
       expect(printed).not.toContain("SECRET_HASH_5106");
       expect(printed).not.toContain("accountNumberLast4");
