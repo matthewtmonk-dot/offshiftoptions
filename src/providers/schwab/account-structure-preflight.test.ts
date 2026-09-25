@@ -4,6 +4,7 @@ import { runListDiagnosticMode } from "../../../scripts/diagnostics/schwab-accou
 const mocks = vi.hoisted(() => ({ findMany: vi.fn(), connection: vi.fn(), token: vi.fn(), capture: vi.fn() }));
 // No write method exists in this mock: any attempted mutation fails the test.
 vi.mock("@/lib/prisma", () => ({ prisma: { tradingAccount: { findMany: mocks.findMany } } }));
+vi.mock("@/lib/prisma-diagnostic", () => ({ prismaDiagnostic: { tradingAccount: { findMany: mocks.findMany } } }));
 vi.mock("./tokens", () => ({ findSchwabMarketDataConnectionForUser: mocks.connection, getValidSchwabAccessTokenForConnection: mocks.token,
   accountNumbersFromMetadata: (metadata: unknown) => metadata }));
 vi.mock("./account-structure-diagnostic", () => ({ captureAccountStructure: mocks.capture }));
