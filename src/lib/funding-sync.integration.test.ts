@@ -238,19 +238,7 @@ const now = new Date("2026-09-23T16:00:00Z");
     expect(await prisma.accountValuationObservation.count({ where: { accountId: a.id } })).toBe(0);
     expect(await prisma.accountValuationObservation.count({ where: { accountId: b.id } })).toBe(1);
   });
-  it("database rejects a VERIFIED_SESSION_CLOSE row lacking session/cutoff/value evidence", async () => {
-    const account = await fixture();
-    await expect(prisma.accountValuationObservation.create({ data: {
-      accountId: account.id, provider: "SCHWAB", currency: "USD", value: 10000,
-      valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE", provenanceStatus: "VERIFIED_SESSION_CLOSE",
-    } })).rejects.toThrow();
-  });
-  it("database rejects a fabricated zero standing in for an unavailable value", async () => {
-    const account = await fixture();
-    await expect(prisma.accountValuationObservation.create({ data: {
-      accountId: account.id, provider: "SCHWAB", currency: "USD", value: 0,
-      valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE", provenanceStatus: "UNAVAILABLE", captureStatus: "UNAVAILABLE",
-    } })).rejects.toThrow();
-  });
-
+  // Full AccountValuationObservation state-matrix CHECK coverage (allowed rows + every invalid
+  // combination, asserted against the actual named constraint) lives in the dedicated
+  // account-valuation-observation.integration.test.ts, not duplicated here.
 });

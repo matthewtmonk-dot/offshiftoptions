@@ -12,6 +12,20 @@ function stubProvider(securitiesAccount: Record<string, unknown>) {
   });
 }
 
+/** The /accounts LIST endpoint (getAccounts) returns an ARRAY of {securitiesAccount} records,
+ * unlike the singular /accounts/{id} shape stubProvider above models (used by getAccount/
+ * getPositions). Both are exercised for the liquidationValue evidence field below. */
+function stubAccountsListProvider(securitiesAccount: Record<string, unknown>) {
+  const fetchFn = async () =>
+    new Response(JSON.stringify([{ securitiesAccount }]), { status: 200, headers: { "content-type": "application/json" } });
+
+  return new SchwabBrokerReadProvider({
+    accessToken: "test-token",
+    accountNumbers: [{ accountNumberLast4: "1234", hashValue: "acct-hash-1" }],
+    fetchFn: fetchFn as typeof fetch,
+  });
+}
+
 function optionPosition(overrides: Record<string, unknown> = {}) {
   return {
     shortQuantity: 1,
@@ -801,5 +815,80 @@ describe("Schwab valuation presence", () => {
     const [position] = await stubProvider({ positions: [optionPosition({ marketValue: 0 })] }).getPositions("acct-hash-1");
     expect(position.marketValue).toBe(0);
     expect(position.valuationAsOf).toBeNull();
+  });
+});
+
+/** Raw Schwab-like JSON, exercising the actual HTTP-shaped adapter - never an already-normalized
+ * BrokerAccount fixture - so a regression in the strict parser itself would be caught here. */
+function accountWithLiquidationValue(liquidationValue: unknown, extraBalances: Record<string, unknown> = {}) {
+  return { currentBalances: { liquidationValue, ...extraBalances }, initialBalances: { accountValue: 9999 } };
+}
+
+describe("SchwabBrokerReadProvider - liquidationValue evidence field (strict, no fabricated zero)", () => {
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["empty string", ""],
+    ["whitespace-only string", " "],
+    ["boolean false", false],
+    ["boolean true", true],
+    ["empty object", {}],
+    ["array", []],
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    ["-Infinity", -Infinity],
+    ["nonnumeric string", "unavailable"],
+  ])("getAccounts: %s -> liquidationValue null (never fabricated as 0)", async (_label, raw) => {
+    const provider = stubAccountsListProvider(accountWithLiquidationValue(raw));
+    const [account] = await provider.getAccounts();
+    expect(account.liquidationValue).toBeNull();
+  });
+  it("getAccounts: a valid number is preserved", async () => {
+    const provider = stubAccountsListProvider(accountWithLiquidationValue(12_345.67));
+    const [account] = await provider.getAccounts();
+    expect(account.liquidationValue).toBe(12_345.67);
+  });
+  it("getAccounts: genuine zero is preserved, not treated as absent", async () => {
+    const provider = stubAccountsListProvider(accountWithLiquidationValue(0));
+    const [account] = await provider.getAccounts();
+    expect(account.liquidationValue).toBe(0);
+  });
+  it("getAccounts: a numeric string is accepted, including \"0\"", async () => {
+    const provider = stubAccountsListProvider(accountWithLiquidationValue("10500.25"));
+    expect((await provider.getAccounts())[0].liquidationValue).toBe(10500.25);
+    const zeroProvider = stubAccountsListProvider(accountWithLiquidationValue("0"));
+    expect((await zeroProvider.getAccounts())[0].liquidationValue).toBe(0);
+  });
+  it("getAccount: null liquidationValue never becomes 0", async () => {
+    const provider = stubProvider(accountWithLiquidationValue(null));
+    const account = await provider.getAccount("acct-hash-1");
+    expect(account!.liquidationValue).toBeNull();
+  });
+  it("getAccount: a valid number is preserved", async () => {
+    const provider = stubProvider(accountWithLiquidationValue(8_200));
+    const account = await provider.getAccount("acct-hash-1");
+    expect(account!.liquidationValue).toBe(8_200);
+  });
+  it("getAccount: genuine zero is preserved", async () => {
+    const provider = stubProvider(accountWithLiquidationValue(0));
+    const account = await provider.getAccount("acct-hash-1");
+    expect(account!.liquidationValue).toBe(0);
+  });
+  it("does not change legacy accountValue's existing fallback-chain behavior when liquidationValue is absent", async () => {
+    // accountValue's own legacy numberValue-based parsing is untouched by this fix: Number(null)
+    // is 0 (finite), so `numberValue(null) ?? numberValue(initialBalances.accountValue) ?? 0`
+    // short-circuits to 0 immediately (0 is not nullish) and never reaches the 9999 fallback -
+    // this is the OLD, pre-existing behavior for accountValue specifically, deliberately left
+    // exactly as-is per this ticket's scope (only the NEW liquidationValue field is hardened).
+    const provider = stubAccountsListProvider(accountWithLiquidationValue(null));
+    const [account] = await provider.getAccounts();
+    expect(account.accountValue).toBe(0);
+    expect(account.liquidationValue).toBeNull();
+  });
+  it("legacy accountValue still uses a real liquidationValue when present, same as before", async () => {
+    const provider = stubAccountsListProvider(accountWithLiquidationValue(15_000));
+    const [account] = await provider.getAccounts();
+    expect(account.accountValue).toBe(15_000);
+    expect(account.liquidationValue).toBe(15_000);
   });
 });

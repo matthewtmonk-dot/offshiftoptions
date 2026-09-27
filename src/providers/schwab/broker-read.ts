@@ -58,7 +58,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
           numberValue(objectValue(account.currentBalances)?.cashBalance) ??
           numberValue(objectValue(account.currentBalances)?.cashAvailableForTrading) ??
           0,
-        liquidationValue: numberValue(objectValue(account.currentBalances)?.liquidationValue),
+        liquidationValue: strictNullableValuationNumber(objectValue(account.currentBalances)?.liquidationValue),
       };
     });
   }
@@ -83,7 +83,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         numberValue(objectValue(account.currentBalances)?.cashBalance) ??
         numberValue(objectValue(account.currentBalances)?.cashAvailableForTrading) ??
         0,
-      liquidationValue: numberValue(objectValue(account.currentBalances)?.liquidationValue),
+      liquidationValue: strictNullableValuationNumber(objectValue(account.currentBalances)?.liquidationValue),
     };
   }
 
@@ -530,6 +530,21 @@ function optionalMarketValue(value: unknown): number | null {
 }
 
 function numberValue(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Strict nullable numeric parser for the valuation-evidence field ONLY (currentBalances.
+ * liquidationValue on BrokerAccount.liquidationValue) - deliberately NOT the legacy numberValue
+ * above, which is `Number(value)` with no type gate: null/""/" "/false all coerce to 0 there,
+ * which would fabricate CAPTURED/BROKER_VALUE_UNVERIFIED_SESSION evidence with a $0 value Schwab
+ * never actually supplied (Astra finding). Only a real finite number, or a numeric string, is
+ * accepted; everything else - null, undefined, blank/whitespace string, boolean, object, array,
+ * NaN, +-Infinity, a nonnumeric string - is null. Preserves genuine zero: 0 -> 0, "0" -> 0. Do not
+ * reuse this for accountValue/cash - their existing fallback-chain behavior is unchanged. */
+function strictNullableValuationNumber(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }

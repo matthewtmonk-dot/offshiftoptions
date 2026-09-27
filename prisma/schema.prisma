@@ -1400,7 +1400,10 @@ model AccountFundingSync {
 // -Account Gain: none of those are read or written by this model or its ingestion. A row here
 // never asserts a verified market-close valuation by itself - see isBenchmarkSessionEligible
 // (domain/finance/accountValuationProvenance.ts) for the one recognized gate. Benchmark
-// comparison is not implemented yet.
+// comparison is not implemented yet. A database CHECK (AccountValuationObservation_state_matrix
+// _check, in the migration - see it for the full rule) enforces the only four valid
+// (captureStatus, provenanceStatus) pairs and their exact required/forbidden fields; Astra-
+// reviewed to be NULL-safe (every branch resolves to an explicit boolean, never UNKNOWN).
 enum AccountValuationSource {
   CURRENT_BALANCES_LIQUIDATION_VALUE
 }

@@ -362,6 +362,9 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
       await prisma.accountValuationObservation.create({ data: {
         accountId: tradingAccount.id,
         provider: "SCHWAB",
+        // An application ASSUMPTION for currently-supported Schwab brokerage accounts (all USD
+        // today) - never provider-verified currency provenance. Schwab's account-balances response
+        // does not report a currency code here; do not invent supporting evidence for one.
         currency: "USD",
         value: brokerAccount.liquidationValue,
         valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE",
