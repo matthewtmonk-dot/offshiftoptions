@@ -378,29 +378,30 @@ model SharingPreferences {
 }
 
 model TradingAccount {
-  id                  String               @id @default(cuid())
-  userId              String
-  name                String
-  brokerName          String               @default("Manual")
-  accountType         String               @default("Demo")
-  currency            String               @default("USD")
-  startingBalance     Decimal?             @db.Decimal(14, 2)
-  manualBalance       Decimal?             @db.Decimal(14, 2)
-  visibility          Visibility           @default(PRIVATE)
-  source              AccountSource        @default(MANUAL)
-  brokerConnectionId  String?
-  externalAccountId   String?
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
-  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  brokerConnection    BrokerConnection?    @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
-  fundingSyncs        AccountFundingSync[]
-  snapshots           AccountSnapshot[]
-  ledgerEntries       AccountLedgerEntry[]
-  brokerRecords       BrokerRecord[]
-  brokerImportBatches BrokerImportBatch[]
-  trades              Trade[]
-  campaigns           Campaign[]
+  id                    String                        @id @default(cuid())
+  userId                String
+  name                  String
+  brokerName            String                        @default("Manual")
+  accountType           String                        @default("Demo")
+  currency              String                        @default("USD")
+  startingBalance       Decimal?                      @db.Decimal(14, 2)
+  manualBalance         Decimal?                      @db.Decimal(14, 2)
+  visibility            Visibility                    @default(PRIVATE)
+  source                AccountSource                 @default(MANUAL)
+  brokerConnectionId    String?
+  externalAccountId     String?
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+  user                  User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerConnection      BrokerConnection?             @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
+  fundingSyncs          AccountFundingSync[]
+  valuationObservations AccountValuationObservation[]
+  snapshots             AccountSnapshot[]
+  ledgerEntries         AccountLedgerEntry[]
+  brokerRecords         BrokerRecord[]
+  brokerImportBatches   BrokerImportBatch[]
+  trades                Trade[]
+  campaigns             Campaign[]
 
   @@unique([userId, externalAccountId])
   @@index([userId, visibility])
@@ -1392,4 +1393,77 @@ model AccountFundingSync {
 
   @@unique([balanceSnapshotLedgerEntryId, accountId])
   @@index([accountId, externalAccountId, status, coverageStart])
+}
+
+// Prospective account valuation provenance (evidence candidates only - see PROJECT_HANDOFF.md).
+// Semantically separate from AccountLedgerEntry's BROKER_SNAPSHOT, AccountFundingSync, and Whole
+// -Account Gain: none of those are read or written by this model or its ingestion. A row here
+// never asserts a verified market-close valuation by itself - see isBenchmarkSessionEligible
+// (domain/finance/accountValuationProvenance.ts) for the one recognized gate. Benchmark
+// comparison is not implemented yet.
+enum AccountValuationSource {
+  CURRENT_BALANCES_LIQUIDATION_VALUE
+}
+
+enum AccountValuationProvenanceStatus {
+  // Broker reported a value, but current evidence does not establish which trading session or
+  // cutoff it reflects. Retrieval time is not valuation time - never promoted automatically.
+  BROKER_VALUE_UNVERIFIED_SESSION
+  // Provider-documented session date + cutoff (or an equivalent established close convention)
+  // exist for this exact value. Not producible by today's ingestion - reserved for a future,
+  // authoritatively-sourced provenance rule.
+  VERIFIED_SESSION_CLOSE
+  // No broker value was available to observe (never fabricated as zero).
+  UNAVAILABLE
+}
+
+enum AccountValuationCaptureStatus {
+  // The observation attempt ran and (if a broker value existed) recorded it.
+  CAPTURED
+  // A scheduled/intended observation window was never attempted. Not producible by today's
+  // ingestion (an ordinary user-triggered Schwab sync, not a scheduler) - reserved for a future
+  // scheduled-capture harness.
+  MISSED
+  // The observation attempt ran but no broker value was available.
+  UNAVAILABLE
+}
+
+model AccountValuationObservation {
+  id               String                           @id @default(cuid())
+  accountId        String
+  provider         BrokerProvider                   @default(SCHWAB)
+  currency         String                           @default("USD")
+  value            Decimal?                         @db.Decimal(14, 2)
+  valueSource      AccountValuationSource           @default(CURRENT_BALANCES_LIQUIDATION_VALUE)
+  provenanceStatus AccountValuationProvenanceStatus @default(BROKER_VALUE_UNVERIFIED_SESSION)
+  captureStatus    AccountValuationCaptureStatus    @default(CAPTURED)
+
+  // Observation transport/provenance: when THIS app made/received the request. Never a valuation
+  // timestamp by itself - see the provider-established fields below.
+  requestStartedAt   DateTime?
+  responseReceivedAt DateTime?
+  transportDate      DateTime?
+
+  // Provider-established valuation provenance. Populated only when the provider actually
+  // supplies/documentably establishes them - never inferred from requestStartedAt/
+  // responseReceivedAt/transportDate above.
+  providerValuationTimestamp DateTime?
+  providerSessionDate        DateTime?
+  providerCutoff             DateTime?
+
+  // Scheduling/context - reserved for a future scheduled-capture harness. Today's ingestion
+  // leaves these null.
+  intendedSessionDate DateTime?
+  scheduledCaptureAt  DateTime?
+
+  provenanceEvidenceReference String?
+  provenanceRuleVersion       Int     @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account TradingAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, createdAt])
+  @@index([accountId, provenanceStatus])
 }

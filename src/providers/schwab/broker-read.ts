@@ -58,6 +58,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
           numberValue(objectValue(account.currentBalances)?.cashBalance) ??
           numberValue(objectValue(account.currentBalances)?.cashAvailableForTrading) ??
           0,
+        liquidationValue: numberValue(objectValue(account.currentBalances)?.liquidationValue),
       };
     });
   }
@@ -82,6 +83,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         numberValue(objectValue(account.currentBalances)?.cashBalance) ??
         numberValue(objectValue(account.currentBalances)?.cashAvailableForTrading) ??
         0,
+      liquidationValue: numberValue(objectValue(account.currentBalances)?.liquidationValue),
     };
   }
 

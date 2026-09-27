@@ -31,7 +31,7 @@ const now = new Date("2026-09-23T16:00:00Z");
   }
   function connect(account: { externalAccountId: string | null }, failed = false) {
     const provider: BrokerReadProvider = {
-      getAccounts: async () => [{ id: account.externalAccountId!, label: "Fixture", accountValue: 10500, cash: 10500 }],
+      getAccounts: async () => [{ id: account.externalAccountId!, label: "Fixture", accountValue: 10500, cash: 10500, liquidationValue: 10500 }],
       getAccount: async () => null, getPositions: async () => [], getOrders: async () => [],
       getTransactions: async () => { if (failed) throw new Error("failed fetch"); return { transactions: [], categories: {
         TRADE: { status: "OK", count: 0 }, RECEIVE_AND_DELIVER: { status: "OK", count: 0 }, DIVIDEND_OR_INTEREST: { status: "OK", count: 0 },
@@ -44,7 +44,7 @@ const now = new Date("2026-09-23T16:00:00Z");
     account: { externalAccountId: string | null }, transactions: BrokerTransaction[], accountValue = 11000,
   ) {
     const provider: BrokerReadProvider = {
-      getAccounts: async () => [{ id: account.externalAccountId!, label: "Fixture", accountValue, cash: accountValue }],
+      getAccounts: async () => [{ id: account.externalAccountId!, label: "Fixture", accountValue, cash: accountValue, liquidationValue: accountValue }],
       getAccount: async () => null, getPositions: async () => [], getOrders: async () => [],
       getTransactions: async () => ({ transactions, categories: {
         TRADE: { status: "OK", count: 0 }, RECEIVE_AND_DELIVER: { status: "OK", count: transactions.length }, DIVIDEND_OR_INTEREST: { status: "OK", count: 0 },
@@ -64,12 +64,20 @@ const now = new Date("2026-09-23T16:00:00Z");
     expect(summarizeAccountPerformance({ ledgerEntries: loaded.ledgerEntries, brokerRecords: loaded.brokerRecords,
       fundingCoverage: { accountId: loaded.id, externalAccountId: loaded.externalAccountId, fundingSyncs: loaded.fundingSyncs },
     }).totalGain).toBe(500);
+    // Whole-Account Gain is unaffected by the new, separate valuation-provenance evidence.
+    const observations = await prisma.accountValuationObservation.findMany({ where: { accountId: account.id } });
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({ provenanceStatus: "BROKER_VALUE_UNVERIFIED_SESSION", captureStatus: "CAPTURED",
+      valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE", currency: "USD" });
+    expect(observations[0]!.value?.toNumber()).toBe(10500);
     const eric = await fixture(owners[1]);
     expect((await appData.getAccountPageData(owners[1])).accounts.every((a) => a.id !== account.id)).toBe(true);
     const visible = await appData.getTrackerPageData(owners[1], "both");
     expect(visible.visibleAccounts.find((a) => a.id === account.id)?.fundingSyncs).toEqual([]);
     expect(visible.ownAccounts.every((a) => a.id !== account.id)).toBe(true);
     expect(eric.userId).not.toBe(account.userId);
+    // Ownership isolation: Eric's own (unrelated, unsynced) account has no observations of Matt's.
+    expect(await prisma.accountValuationObservation.findMany({ where: { accountId: eric.id } })).toEqual([]);
   });
   it("failed fetch preserves earlier successful evidence", async () => {
     const account = await fixture(); connect(account); await workflow.syncSchwabAccountForUser(owners[0]);
@@ -201,6 +209,48 @@ const now = new Date("2026-09-23T16:00:00Z");
       .toMatchObject({ status: "IN_PROGRESS", completedAt: null, persistenceStatus: "PENDING" });
     expect(await prisma.accountLedgerEntry.count({ where: { accountId: account.id, type: "BROKER_SNAPSHOT" } })).toBe(1);
     expect(await prisma.brokerRecord.count({ where: { accountId: account.id, kind: "TRANSACTION" } })).toBe(1);
+  });
+
+  // Prospective account valuation provenance regression coverage.
+  it("missing liquidationValue does not become zero - denies a value and marks UNAVAILABLE", async () => {
+    const account = await fixture();
+    const provider: BrokerReadProvider = {
+      getAccounts: async () => [{ id: account.externalAccountId!, label: "Fixture", accountValue: 0, cash: 0, liquidationValue: null }],
+      getAccount: async () => null, getPositions: async () => [], getOrders: async () => [],
+      getTransactions: async () => ({ transactions: [], categories: {
+        TRADE: { status: "OK", count: 0 }, RECEIVE_AND_DELIVER: { status: "OK", count: 0 }, DIVIDEND_OR_INTEREST: { status: "OK", count: 0 },
+      } }),
+    };
+    vi.spyOn(connections, "getSchwabBrokerReadProviderForUser").mockResolvedValue(provider);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(now);
+    await workflow.syncSchwabAccountForUser(owners[0]);
+    const observation = await prisma.accountValuationObservation.findFirst({ where: { accountId: account.id } });
+    expect(observation).toMatchObject({ provenanceStatus: "UNAVAILABLE", captureStatus: "UNAVAILABLE" });
+    expect(observation!.value).toBeNull();
+  });
+  it("cascade-deletes valuation observations with their account and never leaks across accounts", async () => {
+    const a = await fixture(); const b = await fixture(owners[1]);
+    connectWithTransactions(a, []); await workflow.syncSchwabAccountForUser(owners[0]);
+    connectWithTransactions(b, []); await workflow.syncSchwabAccountForUser(owners[1]);
+    expect(await prisma.accountValuationObservation.count({ where: { accountId: a.id } })).toBe(1);
+    expect(await prisma.accountValuationObservation.count({ where: { accountId: b.id } })).toBe(1);
+    await prisma.tradingAccount.delete({ where: { id: a.id } });
+    expect(await prisma.accountValuationObservation.count({ where: { accountId: a.id } })).toBe(0);
+    expect(await prisma.accountValuationObservation.count({ where: { accountId: b.id } })).toBe(1);
+  });
+  it("database rejects a VERIFIED_SESSION_CLOSE row lacking session/cutoff/value evidence", async () => {
+    const account = await fixture();
+    await expect(prisma.accountValuationObservation.create({ data: {
+      accountId: account.id, provider: "SCHWAB", currency: "USD", value: 10000,
+      valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE", provenanceStatus: "VERIFIED_SESSION_CLOSE",
+    } })).rejects.toThrow();
+  });
+  it("database rejects a fabricated zero standing in for an unavailable value", async () => {
+    const account = await fixture();
+    await expect(prisma.accountValuationObservation.create({ data: {
+      accountId: account.id, provider: "SCHWAB", currency: "USD", value: 0,
+      valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE", provenanceStatus: "UNAVAILABLE", captureStatus: "UNAVAILABLE",
+    } })).rejects.toThrow();
   });
 
 });

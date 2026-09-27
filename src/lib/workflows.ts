@@ -294,8 +294,11 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
   }
 
   let brokerAccounts;
+  const accountsRequestStartedAt = new Date();
+  let accountsResponseReceivedAt: Date;
   try {
     brokerAccounts = await provider.getAccounts();
+    accountsResponseReceivedAt = new Date();
   } catch (error) {
     logSchwabSyncFailure("schwab_sync_accounts", userId, error);
     await recordSchwabAccountSyncResult(userId, { failureReason: "fetch_failed" });
@@ -348,6 +351,28 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         visibility: "PRIVATE",
       },
     });
+
+    // Prospective valuation provenance - evidence candidate only, never Whole-Account Gain's
+    // BROKER_SNAPSHOT and never benchmark-eligible by itself (see accountValuationProvenance.ts).
+    // currentBalances.liquidationValue is broker-reported but session-unverified: this app's own
+    // request/response timestamps are observation transport evidence, never a valuation timestamp
+    // - provider-established session/cutoff fields stay null since Schwab does not supply them
+    // here. Isolated so an evidence-write hiccup can never fail the sync real data depends on.
+    try {
+      await prisma.accountValuationObservation.create({ data: {
+        accountId: tradingAccount.id,
+        provider: "SCHWAB",
+        currency: "USD",
+        value: brokerAccount.liquidationValue,
+        valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE",
+        provenanceStatus: brokerAccount.liquidationValue === null ? "UNAVAILABLE" : "BROKER_VALUE_UNVERIFIED_SESSION",
+        captureStatus: brokerAccount.liquidationValue === null ? "UNAVAILABLE" : "CAPTURED",
+        requestStartedAt: accountsRequestStartedAt,
+        responseReceivedAt: accountsResponseReceivedAt,
+      } });
+    } catch (error) {
+      logSchwabSyncFailure("schwab_sync_valuation_observation", userId, error);
+    }
 
     const fundingRun = await prisma.accountFundingSync.create({ data: {
       accountId: tradingAccount.id, externalAccountId: brokerAccount.id,

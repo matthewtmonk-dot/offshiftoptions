@@ -65,7 +65,7 @@ maybeDescribe("Schwab expiration safety through sync, persistence and reconcilia
   }
   function providerFor(f: Fixture, overrides: Partial<BrokerReadProvider> = {}): BrokerReadProvider {
     return {
-      getAccounts: async () => [{ id: f.account.externalAccountId!, label: "Fixture account", accountValue: 10000, cash: 10000 }],
+      getAccounts: async () => [{ id: f.account.externalAccountId!, label: "Fixture account", accountValue: 10000, cash: 10000, liquidationValue: 10000 }],
       getAccount: async () => null, getPositions: async () => [], getTransactions: async () => result(),
       getOrders: async () => { throw new Error("Sync must not request orders"); }, ...overrides,
     };
@@ -180,7 +180,7 @@ maybeDescribe("Schwab expiration safety through sync, persistence and reconcilia
     const fA = await fixture();
     const fB = await fixture();
     const provider = providerFor(fA, {
-      getAccounts: async () => [fA, fB].map((f) => ({ id: f.account.externalAccountId!, label: "Fixture account", accountValue: 10000, cash: 10000 })),
+      getAccounts: async () => [fA, fB].map((f) => ({ id: f.account.externalAccountId!, label: "Fixture account", accountValue: 10000, cash: 10000, liquidationValue: 10000 })),
       getPositions: async (accountId) => {
         if (accountId === fA.account.externalAccountId) throw new Error("one account failed");
         return [];

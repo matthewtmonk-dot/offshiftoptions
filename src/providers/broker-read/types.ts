@@ -3,6 +3,11 @@ export type BrokerAccount = {
   label: string;
   accountValue: number;
   cash: number;
+  /** Raw currentBalances.liquidationValue, with NO fallback chain applied - null when the
+   * provider genuinely did not report it. Distinct from accountValue above (which falls back to
+   * initialBalances/0 for display purposes) - never fabricate this one as zero. Session/cutoff
+   * provenance is separately established (or not) at ingestion; this field never implies either. */
+  liquidationValue: number | null;
 };
 
 export type BrokerPosition = {

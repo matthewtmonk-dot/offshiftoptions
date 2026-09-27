@@ -78,6 +78,7 @@ describe("withBrokerReadCache", () => {
       label: "Account A",
       accountValue: 100_000,
       cash: 12_500,
+      liquidationValue: 100_000,
     };
     const calls = { accounts: 0 };
     const provider = withBrokerReadCache(
@@ -110,6 +111,7 @@ describe("withBrokerReadCache", () => {
       label: "Account A",
       accountValue: 100_000,
       cash: 12_500,
+      liquidationValue: 100_000,
     };
     const resolvers: Array<(value: BrokerAccount[]) => void> = [];
     const calls = { accounts: 0 };
@@ -149,7 +151,7 @@ describe("withBrokerReadCache", () => {
     await expect(provider.getAccounts()).rejects.toBeInstanceOf(BrokerReadProviderError);
     fail = false;
     await expect(provider.getAccounts()).resolves.toEqual([
-      { id: "account-A", label: "Account A", accountValue: 100_000, cash: 12_500 },
+      { id: "account-A", label: "Account A", accountValue: 100_000, cash: 12_500, liquidationValue: 100_000 },
     ]);
     expect(fake.calls.accounts).toBe(2);
   });
@@ -161,6 +163,7 @@ function fakeBrokerReadProvider(label: string, shouldFail: () => boolean = () =>
     label: `Account ${label}`,
     accountValue: 100_000,
     cash: 12_500,
+    liquidationValue: 100_000,
   };
   const position: BrokerPosition = {
     accountId: account.id,

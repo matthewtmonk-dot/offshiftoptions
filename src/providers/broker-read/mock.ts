@@ -13,6 +13,7 @@ const accounts: BrokerAccount[] = [
     label: "Manual CSP demo",
     accountValue: 52_640,
     cash: 31_280,
+    liquidationValue: 52_640,
   },
 ];
 

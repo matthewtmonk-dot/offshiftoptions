@@ -4,7 +4,8 @@ import type { BrokerReadProvider, BrokerTransactionsResult } from "@/providers/b
 const mocks = vi.hoisted(() => ({
   db: { tradingAccount: { upsert: vi.fn(), findFirst: vi.fn() },
     accountLedgerEntry: { create: vi.fn(), findFirst: vi.fn() },
-    accountFundingSync: { create: vi.fn(), update: vi.fn() }, brokerRecord: { findMany: vi.fn() }, $transaction: vi.fn() },
+    accountFundingSync: { create: vi.fn(), update: vi.fn() }, brokerRecord: { findMany: vi.fn() },
+    accountValuationObservation: { create: vi.fn() }, $transaction: vi.fn() },
   provider: vi.fn(), persist: vi.fn(), record: vi.fn(),
 }));
 vi.mock("./prisma", () => ({ prisma: mocks.db }));
@@ -26,7 +27,7 @@ const db = mocks.db;
 const finalized = () => db.accountFundingSync.update.mock.calls.at(-1)?.[0].data;
 beforeEach(() => {
   vi.resetAllMocks(); vi.useFakeTimers(); vi.setSystemTime(now);
-  provider = { getAccounts: async () => [{ id: "matt-hash", label: "Matt", accountValue: 10000, cash: 10000 }],
+  provider = { getAccounts: async () => [{ id: "matt-hash", label: "Matt", accountValue: 10000, cash: 10000, liquidationValue: 10000 }],
     getAccount: async () => null, getPositions: async () => [], getTransactions: async () => empty(), getOrders: async () => [] };
   mocks.provider.mockResolvedValue(provider);
   db.tradingAccount.upsert.mockResolvedValue({ id: "matt-account", name: "Matt" });
@@ -35,6 +36,7 @@ beforeEach(() => {
   db.accountLedgerEntry.findFirst.mockResolvedValue({ id: "snapshot" });
   db.accountFundingSync.create.mockResolvedValue({ id: "run" });
   db.accountFundingSync.update.mockImplementation(async (args) => args.data);
+  db.accountValuationObservation.create.mockImplementation(async (args) => args.data);
   db.$transaction.mockImplementation(async (callback) => callback(db));
   // Default: everything the sync actually tried to persist (the exact records handed to the
   // mocked persist call, including each one's real sourceIds) faithfully exists in storage -
@@ -232,5 +234,42 @@ describe("Schwab funding evidence lifecycle", () => {
   it("missing/wrong snapshot cannot establish coverage", async () => {
     db.accountLedgerEntry.findFirst.mockResolvedValue(null);
     await syncSchwabAccountForUser("matt"); expect(finalized().status).toBe("FAILED");
+  });
+});
+
+describe("Prospective account valuation provenance (evidence candidates only)", () => {
+  const observed = () => db.accountValuationObservation.create.mock.calls.at(-1)?.[0].data;
+  it("persists currentBalances.liquidationValue as BROKER_VALUE_UNVERIFIED_SESSION, scoped to the correct account", async () => {
+    await syncSchwabAccountForUser("matt");
+    expect(observed()).toMatchObject({
+      accountId: "matt-account", provider: "SCHWAB", currency: "USD", value: 10000,
+      valueSource: "CURRENT_BALANCES_LIQUIDATION_VALUE", provenanceStatus: "BROKER_VALUE_UNVERIFIED_SESSION",
+      captureStatus: "CAPTURED",
+    });
+  });
+  it("stores retrieval timestamps only as observation/transport evidence, never invented provider provenance", async () => {
+    await syncSchwabAccountForUser("matt");
+    const data = observed();
+    expect(data.requestStartedAt).toBeInstanceOf(Date);
+    expect(data.responseReceivedAt).toBeInstanceOf(Date);
+    // Never copied into (or used to invent) provider-established provenance.
+    expect(data.providerValuationTimestamp).toBeUndefined();
+    expect(data.providerSessionDate).toBeUndefined();
+    expect(data.providerCutoff).toBeUndefined();
+  });
+  it("does not fabricate a value when liquidationValue is absent - denies zero, marks UNAVAILABLE", async () => {
+    provider.getAccounts = async () => [{ id: "matt-hash", label: "Matt", accountValue: 0, cash: 0, liquidationValue: null }];
+    await syncSchwabAccountForUser("matt");
+    expect(observed()).toMatchObject({ value: null, provenanceStatus: "UNAVAILABLE", captureStatus: "UNAVAILABLE" });
+    expect(observed().value).not.toBe(0);
+  });
+  it("an evidence-write failure never fails the sync or alters funding-sync finalization", async () => {
+    db.accountValuationObservation.create.mockRejectedValue(new Error("evidence write failed"));
+    await syncSchwabAccountForUser("matt");
+    expect(finalized()).toMatchObject({ status: "COMPLETE", persistenceStatus: "COMPLETE" });
+  });
+  it("does not alter AccountFundingSync creation", async () => {
+    await syncSchwabAccountForUser("matt");
+    expect(db.accountFundingSync.create.mock.calls[0][0].data).toMatchObject({ accountId: "matt-account", externalAccountId: "matt-hash" });
   });
 });
