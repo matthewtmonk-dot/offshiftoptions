@@ -105,9 +105,27 @@ const CONSTRAINT = "AccountValuationObservation_state_matrix_check";
       captureStatus: "CAPTURED", provenanceStatus: "VERIFIED_SESSION_CLOSE", value: 100,
       providerSessionDate: sessionStart, providerCutoff: now, provenanceEvidenceReference: null, provenanceRuleVersion: 1,
     }));
-    it("VERIFIED with a blank (whitespace-only) evidence reference", () => expectStateMatrixRejection({
+    it("VERIFIED with a blank (whitespace-only, spaces) evidence reference", () => expectStateMatrixRejection({
       captureStatus: "CAPTURED", provenanceStatus: "VERIFIED_SESSION_CLOSE", value: 100,
       providerSessionDate: sessionStart, providerCutoff: now, provenanceEvidenceReference: "   ", provenanceRuleVersion: 1,
+    }));
+    // btrim() with no explicit character set strips only ASCII space - these prove the CHECK uses
+    // a real whitespace-aware rule (`~ '\S'`), matching JS trim()'s behavior, not just btrim().
+    it("VERIFIED with a tab-only evidence reference", () => expectStateMatrixRejection({
+      captureStatus: "CAPTURED", provenanceStatus: "VERIFIED_SESSION_CLOSE", value: 100,
+      providerSessionDate: sessionStart, providerCutoff: now, provenanceEvidenceReference: "\t", provenanceRuleVersion: 1,
+    }));
+    it("VERIFIED with a newline-only evidence reference", () => expectStateMatrixRejection({
+      captureStatus: "CAPTURED", provenanceStatus: "VERIFIED_SESSION_CLOSE", value: 100,
+      providerSessionDate: sessionStart, providerCutoff: now, provenanceEvidenceReference: "\n", provenanceRuleVersion: 1,
+    }));
+    it("VERIFIED with a CRLF-only evidence reference", () => expectStateMatrixRejection({
+      captureStatus: "CAPTURED", provenanceStatus: "VERIFIED_SESSION_CLOSE", value: 100,
+      providerSessionDate: sessionStart, providerCutoff: now, provenanceEvidenceReference: "\r\n", provenanceRuleVersion: 1,
+    }));
+    it("VERIFIED with a mixed-whitespace-only evidence reference", () => expectStateMatrixRejection({
+      captureStatus: "CAPTURED", provenanceStatus: "VERIFIED_SESSION_CLOSE", value: 100,
+      providerSessionDate: sessionStart, providerCutoff: now, provenanceEvidenceReference: " \t\n ", provenanceRuleVersion: 1,
     }));
     it("VERIFIED without a valid (positive) rule version", () => expectStateMatrixRejection({
       captureStatus: "CAPTURED", provenanceStatus: "VERIFIED_SESSION_CLOSE", value: 100,

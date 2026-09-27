@@ -80,12 +80,24 @@ ALTER TABLE "AccountValuationObservation" ADD CONSTRAINT "AccountValuationObserv
   -- VERIFIED_SESSION_CLOSE requires complete, explicit, non-blank provenance evidence, and the
   -- cutoff can never precede the session it claims to close out (Astra repro: session Sep 25,
   -- cutoff Sep 20, wrongly accepted).
+  --
+  -- Non-blank check: btrim() with no explicit character set only strips ASCII space (0x20) - a
+  -- reference of only a tab/newline/CR (or any mix of those with spaces) passes length(btrim(...))
+  -- > 0 even though it has no real content, and JavaScript's trim() correctly rejects it (Astra
+  -- repro - SQL and domain-helper "nonblank" must agree). `~ '\S'` matches "contains at least one
+  -- non-whitespace character" under Postgres's regex engine, which recognizes the same whitespace
+  -- class (space, tab, newline, CR, vertical tab, form feed) as JS's \s/trim() - verified directly
+  -- against a real Postgres instance for "   ", tab, newline, CRLF, and mixed-whitespace inputs
+  -- before relying on it here. A NULL reference makes `~ '\S'` itself UNKNOWN, not FALSE, so the
+  -- explicit "IS NOT NULL AND" guard is still required for this clause to resolve to a boolean.
+  -- provenanceEvidenceReference is the only new "nonblank" string requirement this constraint
+  -- adds - no other field here needs the same treatment.
   ("provenanceStatus" <> 'VERIFIED_SESSION_CLOSE' OR (
     "value" IS NOT NULL AND
     "providerSessionDate" IS NOT NULL AND
     "providerCutoff" IS NOT NULL AND
     "providerCutoff" >= "providerSessionDate" AND
-    "provenanceEvidenceReference" IS NOT NULL AND length(btrim("provenanceEvidenceReference")) > 0 AND
+    "provenanceEvidenceReference" IS NOT NULL AND "provenanceEvidenceReference" ~ '\S' AND
     "provenanceRuleVersion" IS NOT NULL AND "provenanceRuleVersion" > 0
   ))
 );

@@ -59,6 +59,12 @@ describe("isBenchmarkSessionEligible", () => {
     expect(isBenchmarkSessionEligible(evidence({ provenanceEvidenceReference: "" }))).toBe(false);
     expect(isBenchmarkSessionEligible(evidence({ provenanceEvidenceReference: "   " }))).toBe(false);
   });
+  it("rejects a reference made only of tab/newline/CR whitespace - must agree with the SQL CHECK", () => {
+    expect(isBenchmarkSessionEligible(evidence({ provenanceEvidenceReference: "\t" }))).toBe(false);
+    expect(isBenchmarkSessionEligible(evidence({ provenanceEvidenceReference: "\n" }))).toBe(false);
+    expect(isBenchmarkSessionEligible(evidence({ provenanceEvidenceReference: "\r\n" }))).toBe(false);
+    expect(isBenchmarkSessionEligible(evidence({ provenanceEvidenceReference: " \t\n " }))).toBe(false);
+  });
   it("requires a valid, positive provenance rule version", () => {
     expect(isBenchmarkSessionEligible(evidence({ provenanceRuleVersion: null }))).toBe(false);
     expect(isBenchmarkSessionEligible(evidence({ provenanceRuleVersion: 0 }))).toBe(false);
