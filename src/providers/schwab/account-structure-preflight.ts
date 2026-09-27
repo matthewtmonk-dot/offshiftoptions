@@ -1,6 +1,6 @@
 import "server-only";
 
-import { prisma } from "@/lib/prisma";
+import { prismaDiagnostic as prisma } from "@/lib/prisma-diagnostic";
 import { assertCanMutateRecord } from "@/lib/privacy";
 
 export { listDiagnosticAccounts } from "./account-structure-list";
@@ -16,12 +16,12 @@ export async function runSelectedAccountDiagnostic(ownerId?: string, accountId?:
   const account = accounts[0];
   assertCanMutateRecord(ownerId, account.userId);
 
-  const { accountNumbersFromMetadata, findSchwabMarketDataConnectionForUser, getValidSchwabAccessTokenForConnection } = await import("./tokens");
-  const connection = await findSchwabMarketDataConnectionForUser(ownerId);
+  const { accountNumbersFromMetadata, findSchwabMarketDataConnectionForUser, getValidSchwabAccessTokenForConnection } = await import("./token-read");
+  const connection = await findSchwabMarketDataConnectionForUser(ownerId, prisma);
   if (!connection || !accountNumbersFromMetadata(connection.metadata).some((a) => a.hashValue === account.externalAccountId)) {
     throw new Error("Connection unavailable.");
   }
-  const token = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: ownerId, allowRefresh: false });
+  const token = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: ownerId, allowRefresh: false, db: prisma });
   if (!token) throw new Error("Fresh token unavailable.");
 
   const { captureAccountStructure } = await import("./account-structure-diagnostic");

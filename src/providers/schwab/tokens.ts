@@ -5,21 +5,10 @@ import { BrokerConnectionStatus } from "@/generated/prisma/enums";
 import { prisma } from "@/lib/prisma";
 import { SCHWAB_TOKEN_URL, getSchwabOAuthConfig } from "./config";
 import { decryptToken, encryptToken } from "./crypto";
-import { normalizeSchwabAccountNumbers, type SchwabAccountNumber } from "./broker-read";
+import { normalizeSchwabAccountNumbers } from "./broker-read";
 import { SCHWAB_TRADER_BASE_URL } from "./config";
 import { schwabGetJson, SchwabApiError, type SchwabFetch } from "./client";
 import { resolveSchwabOAuthConfigForConnection, type ResolvedSchwabOAuthConfig } from "./developer-credentials";
-
-type StoredConnection = {
-  id: string;
-  userId: string;
-  accessTokenCiphertext: string | null;
-  refreshTokenCiphertext: string | null;
-  expiresAt: Date | null;
-  scopes: string[];
-  metadata: unknown;
-  developerCredentialId?: string | null;
-};
 
 export type SchwabTokenResponse = {
   access_token: string;
@@ -81,42 +70,6 @@ export async function refreshSchwabConnectionAccessToken(connectionId: string, f
   }
 }
 
-export async function getValidSchwabAccessTokenForConnection(
-  connectionId: string,
-  options: { expectedUserId?: string; fetchFn?: SchwabFetch; allowRefresh?: boolean } = {},
-) {
-  const connection = await prisma.brokerConnection.findFirst({
-    where: { id: connectionId, provider: "SCHWAB" },
-  });
-  if (!connection || (options.expectedUserId && connection.userId !== options.expectedUserId)) {
-    return null;
-  }
-  if (!connection.accessTokenCiphertext || !connection.refreshTokenCiphertext || connection.status !== "CONNECTED") {
-    return null;
-  }
-
-  if (!needsRefresh(connection)) {
-    return decryptToken(connection.accessTokenCiphertext);
-  }
-
-  // One-off read-only diagnostics must not refresh tokens or update connection state.
-  if (options.allowRefresh === false) return null;
-  return refreshSchwabConnectionAccessToken(connection.id, options.fetchFn);
-}
-
-export async function findSchwabMarketDataConnectionForUser(userId: string) {
-  return prisma.brokerConnection.findFirst({
-    where: {
-      userId,
-      provider: "SCHWAB",
-      status: "CONNECTED",
-      accessTokenCiphertext: { not: null },
-      refreshTokenCiphertext: { not: null },
-    },
-    orderBy: { updatedAt: "desc" },
-  });
-}
-
 export async function saveSchwabTokensForUser(
   userId: string,
   tokenResponse: SchwabTokenResponse,
@@ -172,14 +125,6 @@ export async function saveSchwabTokensForUser(
       metadata,
     },
   });
-}
-
-export function needsRefresh(connection: Pick<StoredConnection, "expiresAt">, now = new Date()) {
-  if (!connection.expiresAt) {
-    return true;
-  }
-
-  return connection.expiresAt.getTime() - now.getTime() < 60_000;
 }
 
 export function tokenExpiresAt(tokenResponse: Pick<SchwabTokenResponse, "expires_in">, now = new Date()) {
@@ -257,26 +202,6 @@ function scopesFromTokenResponse(tokenResponse: Pick<SchwabTokenResponse, "scope
   return typeof tokenResponse.scope === "string" ? tokenResponse.scope.split(/\s+/).filter(Boolean) : [];
 }
 
-export function accountNumbersFromMetadata(metadata: unknown): SchwabAccountNumber[] {
-  const accountHashes = objectValue(metadata)?.accountHashes;
-  if (!Array.isArray(accountHashes)) {
-    return [];
-  }
-
-  return accountHashes.flatMap((value) => {
-    const account = objectValue(value);
-    const hashValue = typeof account?.hashValue === "string" ? account.hashValue : null;
-    if (!hashValue) {
-      return [];
-    }
-
-    return {
-      hashValue,
-      accountNumberLast4: typeof account?.accountNumberLast4 === "string" ? account.accountNumberLast4 : null,
-    };
-  });
-}
-
 function metadataWith(existing: unknown, patch: Record<string, unknown>): Prisma.InputJsonValue {
   return {
     ...(objectValue(existing) ?? {}),
@@ -287,3 +212,5 @@ function metadataWith(existing: unknown, patch: Record<string, unknown>): Prisma
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
+
+export { getValidSchwabAccessTokenForConnection, findSchwabMarketDataConnectionForUser, needsRefresh, accountNumbersFromMetadata } from "./token-read";

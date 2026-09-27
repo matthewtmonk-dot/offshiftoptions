@@ -1,5 +1,6 @@
 // Manual only. Run with --conditions=react-server; never import into build/start/routes.
 
+import { writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export async function runListDiagnosticMode() {
@@ -9,22 +10,19 @@ export async function runListDiagnosticMode() {
     const eligibleCount = accounts.filter((row) => row.diagnosticCaptureEligible).length;
     process.stdout.write(JSON.stringify({ accounts, eligibleCount }, null, 2) + "\n");
   } catch {
-    process.stderr.write("Diagnostic database unavailable.\n");
+    writeSync(2, "Diagnostic database unavailable.\n");
     process.exitCode = 1;
   }
 }
 
 export async function runCaptureDiagnosticMode(ownerId: string, accountId: string) {
-  const { prisma } = await import("../../src/lib/prisma");
   try {
     const { runSelectedAccountDiagnostic } = await import("../../src/providers/schwab/account-structure-preflight");
     const report = await runSelectedAccountDiagnostic(ownerId, accountId);
     process.stdout.write(JSON.stringify(report, null, 2) + "\n");
   } catch {
-    process.stderr.write("Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted.\n");
+    writeSync(2, "Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted.\n");
     process.exitCode = 1;
-  } finally {
-    await prisma.$disconnect();
   }
 }
 
@@ -44,16 +42,15 @@ async function main() {
     throw new Error("Selection missing");
   }
 
-  if (listMode) {
-    await runListDiagnosticMode();
-    return;
-  }
-
-  await runCaptureDiagnosticMode(ownerId!, accountId!);
+  const { prismaDiagnostic } = await import("../../src/lib/prisma-diagnostic");
+  try {
+    if (listMode) await runListDiagnosticMode();
+    else await runCaptureDiagnosticMode(ownerId!, accountId!);
+  } finally { await prismaDiagnostic.$disconnect(); }
 }
 
 function fail(message: string) {
-  process.stderr.write(`${message}\n`);
+  writeSync(2, `${message}\n`);
   process.exitCode = 1;
 }
 

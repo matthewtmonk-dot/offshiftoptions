@@ -1,17 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runListDiagnosticMode } from "../../../scripts/diagnostics/schwab-account-structure";
+import { runListDiagnosticMode, runCaptureDiagnosticMode } from "../../../scripts/diagnostics/schwab-account-structure";
 
+vi.mock("node:fs", async importOriginal => ({ ...await importOriginal<typeof import("node:fs")>(), writeSync: (_fd: number, value: string) => process.stderr.write(value) }));
 const mocks = vi.hoisted(() => ({ findMany: vi.fn(), connection: vi.fn(), token: vi.fn(), capture: vi.fn() }));
 // No write method exists in this mock: any attempted mutation fails the test.
-vi.mock("@/lib/prisma", () => ({ prisma: { tradingAccount: { findMany: mocks.findMany } } }));
+vi.mock("@/lib/prisma", () => { throw new Error("Diagnostic imported normal application Prisma"); });
 vi.mock("@/lib/prisma-diagnostic", () => ({ prismaDiagnostic: { tradingAccount: { findMany: mocks.findMany } } }));
-vi.mock("./tokens", () => ({ findSchwabMarketDataConnectionForUser: mocks.connection, getValidSchwabAccessTokenForConnection: mocks.token,
+vi.mock("./token-read", () => ({ findSchwabMarketDataConnectionForUser: mocks.connection, getValidSchwabAccessTokenForConnection: mocks.token,
   accountNumbersFromMetadata: (metadata: unknown) => Array.isArray(metadata) ? metadata : [] }));
 vi.mock("./account-structure-diagnostic", () => ({ captureAccountStructure: mocks.capture }));
 import { listDiagnosticAccounts, runSelectedAccountDiagnostic } from "./account-structure-preflight";
 
 describe("diagnostic account preflight", () => {
   beforeEach(() => vi.resetAllMocks());
+  it.each(["account", "token"])("capture %s read failure emits only fixed output", async stage => {
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const oldExit = process.exitCode;
+    try {
+      mocks.findMany.mockResolvedValue([{ userId: "owner", externalAccountId: "PRIVATE_HASH" }]);
+      mocks.connection.mockResolvedValue({ id: "connection", metadata: [{ hashValue: "PRIVATE_HASH" }] });
+      const failure = new Error("SELECT SECRET_SQL postgresql://PRIVATE_PASSWORD PRIVATE_HASH");
+      if (stage === "account") mocks.findMany.mockRejectedValue(failure);
+      else mocks.token.mockRejectedValue(failure);
+      await runCaptureDiagnosticMode("owner", "account");
+      expect(out).not.toHaveBeenCalled();
+      expect(err).toHaveBeenCalledExactlyOnceWith("Diagnostic unavailable. Check owner/account selection, environment and a fresh existing Schwab connection. No raw error details emitted.\n");
+      expect(mocks.capture).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+    } finally { out.mockRestore(); err.mockRestore(); process.exitCode = oldExit; }
+  });
   it("lists only safe metadata while reusing owner-scoped Schwab connection mapping semantics", async () => {
     mocks.findMany.mockResolvedValue([
       { id: "internal-account", userId: "internal-owner", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_5106", balance: 12000 },
@@ -31,7 +49,7 @@ describe("diagnostic account preflight", () => {
       },
     ]);
     expect(mocks.findMany.mock.calls[0][0].select).toMatchObject({ id: true, userId: true, name: true, source: true, accountType: true, externalAccountId: true });
-    expect(mocks.connection).toHaveBeenCalledWith("internal-owner");
+    expect(mocks.connection).toHaveBeenCalledWith("internal-owner", expect.anything());
     expect(mocks.token).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
@@ -70,8 +88,8 @@ describe("diagnostic account preflight", () => {
 
     expect(mocks.findMany).toHaveBeenCalledTimes(1);
     expect(mocks.connection).toHaveBeenCalledTimes(2);
-    expect(mocks.connection).toHaveBeenNthCalledWith(1, "owner-a");
-    expect(mocks.connection).toHaveBeenNthCalledWith(2, "owner-b");
+    expect(mocks.connection).toHaveBeenNthCalledWith(1, "owner-a", expect.anything());
+    expect(mocks.connection).toHaveBeenNthCalledWith(2, "owner-b", expect.anything());
   });
   it("rejects mismatched external mapping even when owner has an active connection", async () => {
     mocks.findMany.mockResolvedValue([{ id: "account", userId: "owner", name: "CASH ...5106", source: "SCHWAB", accountType: "Brokerage", externalAccountId: "HASH_A" }]);
@@ -382,7 +400,7 @@ describe("diagnostic account preflight", () => {
     mocks.capture.mockResolvedValue({ fields: [] });
     expect(await runSelectedAccountDiagnostic("owner", "account")).toEqual({ fields: [] });
     expect(mocks.findMany.mock.calls[0][0].where).toEqual({ id: "account", userId: "owner", source: "SCHWAB" });
-    expect(mocks.token).toHaveBeenCalledWith("connection", { expectedUserId: "owner", allowRefresh: false });
+    expect(mocks.token).toHaveBeenCalledWith("connection", { expectedUserId: "owner", allowRefresh: false, db: expect.anything() });
     expect(mocks.capture).toHaveBeenCalledExactlyOnceWith("TOKEN", "hash");
     mocks.token.mockResolvedValue(null);
     await expect(runSelectedAccountDiagnostic("owner", "account")).rejects.toThrow("Fresh token unavailable.");

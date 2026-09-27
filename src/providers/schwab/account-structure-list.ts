@@ -1,5 +1,5 @@
 import { prismaDiagnostic } from "@/lib/prisma-diagnostic";
-import { accountNumbersFromMetadata, findSchwabMarketDataConnectionForUser } from "./tokens";
+import { accountNumbersFromMetadata, findSchwabMarketDataConnectionForUser } from "./token-read";
 
 /** Trusted SSH operator only. No names, labels, emails or brokerage identifiers returned. */
 export async function listDiagnosticAccounts() {
@@ -18,7 +18,7 @@ export async function listDiagnosticAccounts() {
 
   const owners = [...new Set(accounts.map((account) => account.userId))];
   const ownerConnections = new Map(await Promise.all(owners.map(async (ownerId) => {
-    const connection = await findSchwabMarketDataConnectionForUser(ownerId);
+    const connection = await findSchwabMarketDataConnectionForUser(ownerId, prismaDiagnostic);
     const mappedExternalAccountIds = new Set(accountNumbersFromMetadata(connection?.metadata).map((value) => value.hashValue));
     return [ownerId, {
       hasOwnerSchwabConnection: Boolean(connection),
