@@ -73,33 +73,49 @@ export function wholeAccountGainCard(report: AccountReportingSummary): WholeAcco
 }
 
 export type ConfirmedTradingPLCard = {
+  /** "No confirmed results yet" when nothing has confirmed - never a de-emphasized $0.00 standing
+   * in for "no data." When at least one campaign has confirmed (even to an actual $0.00 net
+   * breakeven result), this is always the real money() figure - the empty-state text never hides
+   * a genuine confirmed zero. */
   value: string;
-  tone: number;
+  /** Undefined (neutral, no color) exactly when `value` is the empty-state text - a real
+   * confirmed amount, including a genuine $0, still gets its normal emerald/red/neutral tone. */
+  tone: number | undefined;
   /** Fixed period framing - deliberately distinct from the separate "Closed This Week" panel, so
    * this ALL_TIME figure (report.confirmedTradingPLPeriod) is never mistaken for a this-week
    * number sitting right next to a genuinely weekly one. */
   periodLabel: string;
   winRateLabel: string;
+  /** Empty string when nothing has confirmed yet (the empty state already lives in `value` -
+   * never duplicated here too). */
   sampleLabel: string;
   excludedNote: string | null;
 };
 
 /** Card C: confirmed completed-campaign trading P/L only - open campaigns, rolls-as-wins, and
  * assignment-as-outcome are never counted (see summarizeWinLoss's own CONFIRMED-only gate). No
- * confirmed outcomes reads as "N/A", never a fabricated 0%. */
+ * confirmed outcomes reads as "No confirmed results yet" as the PRIMARY display - never a
+ * de-emphasized $0.00 (Astra review) - while a genuine confirmed $0.00 (e.g. an all-breakeven
+ * confirmed set) still renders as $0.00, distinct from the empty state. */
 export function confirmedTradingPLCard(report: AccountReportingSummary, winLoss: WinLossSummary): ConfirmedTradingPLCard {
+  if (winLoss.confirmedCount === 0) {
+    return {
+      value: "No confirmed results yet",
+      tone: undefined,
+      periodLabel: "Since tracked campaign history",
+      winRateLabel: "N/A",
+      sampleLabel: "",
+      excludedNote: confirmedTradingPLNote(report),
+    };
+  }
   const sampleParts = [`${winLoss.wins}W-${winLoss.losses}L`];
   if (winLoss.breakevens > 0) sampleParts.push(`${winLoss.breakevens} breakeven`);
-  // $0.00 with zero confirmed outcomes is the domain's own honest empty-sum convention (never a
-  // fabricated value) - "No confirmed results yet" just communicates that empty state more
-  // clearly than "(0 confirmed)" would on its own.
-  const sampleLabel = winLoss.confirmedCount === 0 ? "No confirmed results yet" : `${sampleParts.join(", ")} (${winLoss.confirmedCount} confirmed)`;
   return {
     value: money(report.confirmedTradingPL),
     tone: report.confirmedTradingPL,
     periodLabel: "Since tracked campaign history",
     winRateLabel: winLoss.winRate === null ? "N/A" : `${winLoss.winRate}% win rate`,
-    sampleLabel,
+    sampleLabel: `${sampleParts.join(", ")} (${winLoss.confirmedCount} confirmed)`,
     excludedNote: confirmedTradingPLNote(report),
   };
 }
@@ -258,6 +274,20 @@ export function capitalPanelViewModel(report: AccountReportingSummary, exposure:
   const secured = exposureAmount(exposure.securedPutCollateral, exposure.openCampaignsWithKnownCollateral, exposure.openCampaignsWithUnknownCollateral);
   const assignedUnknownCount = exposure.assignedCampaignCount - exposure.assignedCampaignsWithKnownBasis;
   const assigned = exposureAmount(exposure.assignedShareCapital, exposure.assignedCampaignsWithKnownBasis, assignedUnknownCount);
+  // Aggregate uses the SAME known/unknown contributor evidence as the two components above (not
+  // just report.capitalUtilizationStatus's boolean) - Astra review finding: previously any
+  // UNKNOWN_EXPOSURE status rendered "$0.00 known subtotal - partial" even when EVERY applicable
+  // contributor (every open campaign's collateral, every assigned campaign's basis) was unknown,
+  // which is "Unavailable," not a qualified zero. exposureAmount already tells these three cases
+  // apart correctly: zero unknown contributors (including the trivial case of none at all) is a
+  // genuine amount, zero known contributors alongside at least one unknown is Unavailable, and a
+  // real mix of both is a labeled subtotal.
+  const knownContributors = exposure.openCampaignsWithKnownCollateral + exposure.assignedCampaignsWithKnownBasis;
+  const unknownContributors = exposure.openCampaignsWithUnknownCollateral + assignedUnknownCount;
+  const lstAggregate =
+    report.currentCapitalCommitted === null
+      ? { value: "Unavailable" }
+      : exposureAmount(report.currentCapitalCommitted, knownContributors, unknownContributors);
   return {
     securedPutCollateral: {
       value: secured.value,
@@ -275,14 +305,10 @@ export function capitalPanelViewModel(report: AccountReportingSummary, exposure:
     },
     // currentCapitalCommitted is a KNOWN FLOOR even under UNKNOWN_EXPOSURE (see reporting.ts) -
     // tagged "known subtotal - partial" here for the same reason as the two components above,
-    // never presented as if it were a complete total.
+    // never presented as if it were a complete total; "Unavailable" (never a bare $0.00) when
+    // every applicable contributor is unknown.
     lstCapitalCommitted: {
-      value:
-        report.currentCapitalCommitted === null
-          ? "Unavailable"
-          : report.capitalUtilizationStatus === "UNKNOWN_EXPOSURE"
-            ? `${money(report.currentCapitalCommitted)} known subtotal - partial`
-            : money(report.currentCapitalCommitted),
+      value: lstAggregate.value,
       detail: "Put collateral + assigned shares at cost - tracked campaigns only",
     },
     utilizationLabel: report.capitalUtilizationStatus === "OK" ? percent(report.currentCapitalUtilizationPercent, 0) : null,

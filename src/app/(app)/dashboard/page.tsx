@@ -207,7 +207,7 @@ export default async function DashboardPage() {
           href={TRACKER_PERFORMANCE_HREF}
           value={confirmedTradingPL.value}
           tone={confirmedTradingPL.tone}
-          detail={`${confirmedTradingPL.periodLabel} - ${confirmedTradingPL.winRateLabel} - ${confirmedTradingPL.sampleLabel}`}
+          detail={[confirmedTradingPL.periodLabel, confirmedTradingPL.winRateLabel, confirmedTradingPL.sampleLabel].filter(Boolean).join(" - ")}
           reason={confirmedTradingPL.excludedNote}
         />
         <SummaryCard

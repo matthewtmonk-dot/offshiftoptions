@@ -187,20 +187,31 @@ describe("confirmedTradingPLCard", () => {
     expect(card.sampleLabel).toBe("3W-1L (4 confirmed)");
   });
 
-  // Astra review gap: zero confirmed results (a real $0.00, per the domain's own empty-sum
-  // convention - never a fabricated value) should read as an explicit empty state, not "(0 confirmed)".
-  it("reads as an explicit empty state when nothing has confirmed yet, not a bare zero count", () => {
+  // Astra review (final pass): zero confirmed results must not de-emphasize a $0.00 as the
+  // PRIMARY display - the primary value itself becomes the empty-state text, with a neutral
+  // (uncolored) tone, and the sample label (which used to carry this same text) is left empty so
+  // it isn't duplicated.
+  it("shows the empty-state text as the PRIMARY value (never a de-emphasized $0.00) when nothing has confirmed yet", () => {
     const card = confirmedTradingPLCard(
       baseReport({ confirmedTradingPL: 0 }),
       baseWinLoss({ confirmedCount: 0, wins: 0, losses: 0, breakevens: 0, winRate: null }),
     );
-    expect(card.value).toBe("$0.00");
+    expect(card.value).toBe("No confirmed results yet");
+    expect(card.value).not.toBe("$0.00");
+    expect(card.tone).toBeUndefined();
     expect(card.winRateLabel).toBe("N/A");
-    expect(card.sampleLabel).toBe("No confirmed results yet");
+    expect(card.sampleLabel).toBe("");
   });
 
-  it("distinguishes a confirmed breakeven from zero confirmed results", () => {
-    const card = confirmedTradingPLCard(baseReport(), baseWinLoss({ confirmedCount: 1, wins: 0, losses: 0, breakevens: 1, winRate: 0 }));
+  // A genuine confirmed $0.00 (e.g. an all-breakeven confirmed set) is real evidence, not an
+  // empty state, and must keep showing the actual dollar figure with its normal tone.
+  it("keeps a genuine confirmed $0.00 as the primary value, distinct from the no-confirmed-results empty state", () => {
+    const card = confirmedTradingPLCard(
+      baseReport({ confirmedTradingPL: 0 }),
+      baseWinLoss({ confirmedCount: 1, wins: 0, losses: 0, breakevens: 1, winRate: 0 }),
+    );
+    expect(card.value).toBe("$0.00");
+    expect(card.tone).toBe(0);
     expect(card.sampleLabel).toBe("0W-0L, 1 breakeven (1 confirmed)");
   });
 });
@@ -256,18 +267,84 @@ describe("capitalPanelViewModel - unknown/partial/zero exposure (Astra review, P
     expect(panel.assignedShareCapital.hasUnknown).toBe(false);
   });
 
-  it("tags the overall LST capital committed floor as a known subtotal under UNKNOWN_EXPOSURE, not a bare figure", () => {
+  it("suppresses the utilization percentage whenever exposure is unknown", () => {
     const panel = capitalPanelViewModel(
-      baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE", currentCapitalCommitted: 3000, currentCapitalUtilizationPercent: null }),
-      baseExposure(),
+      baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE", currentCapitalUtilizationPercent: null }),
+      baseExposure({ openCampaignsWithUnknownCollateral: 1 }),
     );
-    expect(panel.lstCapitalCommitted.value).toBe("$3,000.00 known subtotal - partial");
     expect(panel.utilizationLabel).toBeNull();
   });
 
-  it("suppresses the utilization percentage whenever exposure is unknown", () => {
-    const panel = capitalPanelViewModel(baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE" }), baseExposure());
-    expect(panel.utilizationLabel).toBeNull();
+  // Astra review (final pass): the aggregate must use the SAME known/unknown contributor
+  // evidence as the two components, not just report.capitalUtilizationStatus's boolean - a
+  // fully-unknown aggregate is "Unavailable," never a bare/qualified $0.00.
+  describe("aggregate tracked LST capital committed", () => {
+    it("mixed aggregate: unknown put collateral only (assigned side fully known) reads as a known subtotal", () => {
+      const panel = capitalPanelViewModel(
+        baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE", currentCapitalCommitted: 1400, currentCapitalUtilizationPercent: null }),
+        baseExposure({ securedPutCollateral: 0, openCampaignsWithKnownCollateral: 0, openCampaignsWithUnknownCollateral: 1 }),
+      );
+      expect(panel.lstCapitalCommitted.value).toBe("$1,400.00 known subtotal - partial");
+    });
+
+    it("mixed aggregate: unknown assigned-share basis only (put side fully known) reads as a known subtotal", () => {
+      const panel = capitalPanelViewModel(
+        baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE", currentCapitalCommitted: 5000, currentCapitalUtilizationPercent: null }),
+        baseExposure({ assignedShareCapital: 0, assignedCampaignsWithKnownBasis: 0, assignedCampaignCount: 1 }),
+      );
+      expect(panel.lstCapitalCommitted.value).toBe("$5,000.00 known subtotal - partial");
+    });
+
+    it("entirely unknown aggregate (every applicable contributor unknown) reads Unavailable, never a bare or qualified $0.00", () => {
+      const panel = capitalPanelViewModel(
+        baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE", currentCapitalCommitted: 0, currentCapitalUtilizationPercent: null }),
+        baseExposure({
+          securedPutCollateral: 0, openCampaignsWithKnownCollateral: 0, openCampaignsWithUnknownCollateral: 1,
+          assignedShareCapital: 0, assignedCampaignsWithKnownBasis: 0, assignedCampaignCount: 1,
+        }),
+      );
+      expect(panel.lstCapitalCommitted.value).toBe("Unavailable");
+    });
+
+    it("mixed aggregate: some contributors known and some unknown across BOTH put and assigned sides reads as a known subtotal", () => {
+      const panel = capitalPanelViewModel(
+        baseReport({ capitalUtilizationStatus: "UNKNOWN_EXPOSURE", currentCapitalCommitted: 5000, currentCapitalUtilizationPercent: null }),
+        baseExposure({
+          securedPutCollateral: 5000, openCampaignsWithKnownCollateral: 1, openCampaignsWithUnknownCollateral: 1,
+          assignedShareCapital: 0, assignedCampaignsWithKnownBasis: 0, assignedCampaignCount: 1,
+        }),
+      );
+      expect(panel.lstCapitalCommitted.value).toBe("$5,000.00 known subtotal - partial");
+    });
+
+    it("fully known genuine zero (no open or assigned campaigns at all) reads as a plain $0.00, not Unavailable", () => {
+      const panel = capitalPanelViewModel(
+        baseReport({ currentCapitalCommitted: 0 }),
+        baseExposure({
+          securedPutCollateral: 0, openCampaignsWithKnownCollateral: 0, openCampaignsWithUnknownCollateral: 0,
+          assignedShareCapital: 0, assignedCampaignsWithKnownBasis: 0, assignedCampaignCount: 0,
+        }),
+      );
+      expect(panel.lstCapitalCommitted.value).toBe("$0.00");
+    });
+
+    it("fully known genuine zero with real (non-zero-count) but zero-value contributors still reads as a plain $0.00", () => {
+      // All contributors are KNOWN (none unknown) even though their combined value happens to be
+      // zero - a legitimate, fully-evidenced zero, never "Unavailable" or tagged "partial".
+      const panel = capitalPanelViewModel(
+        baseReport({ currentCapitalCommitted: 0 }),
+        baseExposure({
+          securedPutCollateral: 0, openCampaignsWithKnownCollateral: 2, openCampaignsWithUnknownCollateral: 0,
+          assignedShareCapital: 0, assignedCampaignsWithKnownBasis: 0, assignedCampaignCount: 0,
+        }),
+      );
+      expect(panel.lstCapitalCommitted.value).toBe("$0.00");
+    });
+
+    it("Unavailable when there is no valid account value to relate exposure to, regardless of exposure evidence", () => {
+      const panel = capitalPanelViewModel(baseReport({ currentCapitalCommitted: null, capitalUtilizationStatus: "NO_ACCOUNT_VALUE" }), baseExposure());
+      expect(panel.lstCapitalCommitted.value).toBe("Unavailable");
+    });
   });
 });
 
