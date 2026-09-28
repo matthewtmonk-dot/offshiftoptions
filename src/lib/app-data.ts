@@ -315,6 +315,19 @@ export function getUnreadChatCount(userId: string) {
   });
 }
 
+/** The owner's own personally-excluded tickers (Research/Scanner's NEVER_TRADE state) - the same
+ * WatchlistItem.researchStatus source and owner-scoping Scanner's own page query already uses
+ * (scanner/page.tsx), reused here so a Dashboard preview can apply Scanner's default exclusion
+ * filter (scanner-workspace.tsx: `researchStatus !== "NEVER_TRADE"`) instead of surfacing a
+ * candidate the owner has explicitly told Scanner to hide by default. */
+export async function getNeverTradeTickersForUser(userId: string): Promise<Set<string>> {
+  const items = await prisma.watchlistItem.findMany({
+    where: { ownerId: userId, researchStatus: "NEVER_TRADE" },
+    select: { ticker: true },
+  });
+  return new Set(items.map((item) => item.ticker));
+}
+
 export async function getNotificationsPageData(userId: string) {
   return prisma.notification.findMany({
     where: { recipientId: userId, type: { in: NOTIFICATIONS_PAGE_VISIBLE_TYPES } },

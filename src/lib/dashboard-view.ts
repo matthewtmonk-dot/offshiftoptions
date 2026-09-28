@@ -1,5 +1,5 @@
 import "server-only";
-import type { AccountReportingSummary } from "@/domain/finance/reporting";
+import { friendlyReportingReason, type AccountReportingSummary } from "@/domain/finance/reporting";
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignCurrentStage, type CampaignStatusInput } from "@/domain/finance/campaigns";
@@ -48,8 +48,15 @@ export function accountValueCard(report: AccountReportingSummary): AccountValueC
 export type WholeAccountGainCard = {
   value: string;
   tone: number | undefined;
-  returnLabel: string | null;
+  /** wholeAccountGainDetail already folds the return percentage in when it's available - render
+   * this alone; never also render a separately-computed percentage next to it (that would show
+   * the same number twice). */
   detail: string | null;
+  /** Set only when the dollar gain IS available but the percentage specifically is withheld (e.g.
+   * contributions during the period prevent a supported simple return, per
+   * AccountPerformanceSummary's own totalReturnStatus) - so that case is never silently dropped
+   * just because `detail` has nothing to say about it. */
+  returnUnavailableReason: string | null;
   unavailableReason: string | null;
 };
 
@@ -59,8 +66,8 @@ export function wholeAccountGainCard(report: AccountReportingSummary): WholeAcco
   return {
     value: ok ? money(report.wholeAccountGain) : "Unavailable",
     tone: ok ? (report.wholeAccountGain ?? undefined) : undefined,
-    returnLabel: ok && report.wholeAccountReturnPercent !== null ? percent(report.wholeAccountReturnPercent, 2) : null,
-    detail: wholeAccountGainDetail(report),
+    detail: ok ? wholeAccountGainDetail(report) : null,
+    returnUnavailableReason: ok && report.wholeAccountReturnPercent === null ? friendlyReportingReason(report.wholeAccountReturnStatus) : null,
     unavailableReason: ok ? null : report.wholeAccountGainUnavailableMessage,
   };
 }
@@ -83,12 +90,16 @@ export type ConfirmedTradingPLCard = {
 export function confirmedTradingPLCard(report: AccountReportingSummary, winLoss: WinLossSummary): ConfirmedTradingPLCard {
   const sampleParts = [`${winLoss.wins}W-${winLoss.losses}L`];
   if (winLoss.breakevens > 0) sampleParts.push(`${winLoss.breakevens} breakeven`);
+  // $0.00 with zero confirmed outcomes is the domain's own honest empty-sum convention (never a
+  // fabricated value) - "No confirmed results yet" just communicates that empty state more
+  // clearly than "(0 confirmed)" would on its own.
+  const sampleLabel = winLoss.confirmedCount === 0 ? "No confirmed results yet" : `${sampleParts.join(", ")} (${winLoss.confirmedCount} confirmed)`;
   return {
     value: money(report.confirmedTradingPL),
     tone: report.confirmedTradingPL,
     periodLabel: "Since tracked campaign history",
     winRateLabel: winLoss.winRate === null ? "N/A" : `${winLoss.winRate}% win rate`,
-    sampleLabel: `${sampleParts.join(", ")} (${winLoss.confirmedCount} confirmed)`,
+    sampleLabel,
     excludedNote: confirmedTradingPLNote(report),
   };
 }
@@ -182,6 +193,28 @@ export function positionsToReviewRows(
   });
 }
 
+export type PositionConfirmationStatus = "SCHWAB_CONFIRMED" | "AWAITING_CONFIRMATION" | "NOT_ASSESSED" | "BROKER_UNAVAILABLE";
+
+/**
+ * Astra review finding (non-blocking): the broker-position match (loadDashboardBrokerData,
+ * page.tsx) only ever attempts to corroborate a currently-OPEN put against live Schwab data
+ * (buildTrackedPuts) - an ASSIGNED row (with or without a covered call) is never a candidate for
+ * that match at all, and previously still showed "Awaiting confirmation," implying a check had
+ * been attempted and failed rather than "this row type isn't assessed by matching." Also keeps
+ * "we tried and found nothing" (AWAITING_CONFIRMATION) distinguishable from "Schwab data wasn't
+ * available to check against at all" (BROKER_UNAVAILABLE) - never imply reassurance from missing
+ * evidence in either case.
+ */
+export function positionConfirmationStatus(
+  row: { legType: "PUT" | "CALL" | null; campaignId: string },
+  confirmedCampaignIds: ReadonlySet<string>,
+  brokerDataAvailable: boolean,
+): PositionConfirmationStatus {
+  if (row.legType !== "PUT") return "NOT_ASSESSED";
+  if (!brokerDataAvailable) return "BROKER_UNAVAILABLE";
+  return confirmedCampaignIds.has(row.campaignId) ? "SCHWAB_CONFIRMED" : "AWAITING_CONFIRMATION";
+}
+
 // ---------------------------------------------------------------------------
 // Capital & Cash panel
 // ---------------------------------------------------------------------------
@@ -197,6 +230,23 @@ export type CapitalPanelViewModel = {
 };
 
 /**
+ * Astra review finding (P2, blocking): a component wholly derived from unknown campaigns must
+ * never render as a bare $0.00 - that reads as a confirmed zero, not "we don't know." When SOME
+ * but not all contributing campaigns are known, the known total is real money but not the whole
+ * picture, so it's labeled a subtotal rather than presented as complete. Only a component with
+ * zero unknown contributors ever renders as a plain, unqualified amount.
+ */
+function exposureAmount(knownTotal: number, knownCount: number, unknownCount: number): { value: string; hasUnknown: boolean } {
+  if (unknownCount === 0) {
+    return { value: money(knownTotal), hasUnknown: false };
+  }
+  if (knownCount === 0) {
+    return { value: "Unavailable", hasUnknown: true };
+  }
+  return { value: `${money(knownTotal)} known subtotal - partial`, hasUnknown: true };
+}
+
+/**
  * Phase 1 explicitly shows only these trustworthy tracked-exposure facts - never "Total account
  * deployed" (the reporting contract covers TRACKED campaign exposure, not necessarily every
  * dollar in the brokerage account), never a computed "available cash" (normalized cash may be
@@ -205,25 +255,34 @@ export type CapitalPanelViewModel = {
  * mutually exclusive balance-sheet slices.
  */
 export function capitalPanelViewModel(report: AccountReportingSummary, exposure: CampaignExposureSummary): CapitalPanelViewModel {
-  const securedHasUnknown = exposure.openCampaignsWithUnknownCollateral > 0;
-  const assignedHasUnknown = exposure.assignedCampaignCount > exposure.assignedCampaignsWithKnownBasis;
+  const secured = exposureAmount(exposure.securedPutCollateral, exposure.openCampaignsWithKnownCollateral, exposure.openCampaignsWithUnknownCollateral);
+  const assignedUnknownCount = exposure.assignedCampaignCount - exposure.assignedCampaignsWithKnownBasis;
+  const assigned = exposureAmount(exposure.assignedShareCapital, exposure.assignedCampaignsWithKnownBasis, assignedUnknownCount);
   return {
     securedPutCollateral: {
-      value: money(exposure.securedPutCollateral),
-      hasUnknown: securedHasUnknown,
-      detail: securedHasUnknown ? `${exposure.openCampaignsWithUnknownCollateral} open campaign(s) with unknown collateral` : null,
+      value: secured.value,
+      hasUnknown: secured.hasUnknown,
+      detail: secured.hasUnknown ? `${exposure.openCampaignsWithUnknownCollateral} open campaign(s) with unknown collateral` : null,
     },
     assignedShareCapital: {
-      value: money(exposure.assignedShareCapital),
-      hasUnknown: assignedHasUnknown,
-      detail: assignedHasUnknown
-        ? `${exposure.assignedCampaignCount - exposure.assignedCampaignsWithKnownBasis} of ${exposure.assignedCampaignCount} assigned campaign(s) missing cost basis`
+      value: assigned.value,
+      hasUnknown: assigned.hasUnknown,
+      detail: assigned.hasUnknown
+        ? `${assignedUnknownCount} of ${exposure.assignedCampaignCount} assigned campaign(s) missing cost basis`
         : exposure.assignedCampaignsWithCoveredCall > 0
           ? `${exposure.assignedCampaignsWithCoveredCall} covered by an open call`
           : null,
     },
+    // currentCapitalCommitted is a KNOWN FLOOR even under UNKNOWN_EXPOSURE (see reporting.ts) -
+    // tagged "known subtotal - partial" here for the same reason as the two components above,
+    // never presented as if it were a complete total.
     lstCapitalCommitted: {
-      value: report.currentCapitalCommitted === null ? "Unavailable" : money(report.currentCapitalCommitted),
+      value:
+        report.currentCapitalCommitted === null
+          ? "Unavailable"
+          : report.capitalUtilizationStatus === "UNKNOWN_EXPOSURE"
+            ? `${money(report.currentCapitalCommitted)} known subtotal - partial`
+            : money(report.currentCapitalCommitted),
       detail: "Put collateral + assigned shares at cost - tracked campaigns only",
     },
     utilizationLabel: report.capitalUtilizationStatus === "OK" ? percent(report.currentCapitalUtilizationPercent, 0) : null,
@@ -298,13 +357,23 @@ type ScannerResultLike = {
  * Compact, up-to-3-item preview reusing the exact same honest classification the Scanner page's
  * own PASS/NEAR/NEEDS_DATA/FAIL logic is built from (classifyReadiness/isActionableReadiness) - a
  * NEEDS_DATA candidate is never promoted here just because its numeric score looks attractive.
- * Phase 2 follow-up (not attempted here): Scanner's own personal-exclusion display policy,
- * settings-revision check, and resultsPredateCurrentSettings distinction are not yet threaded
- * through this preview - sharing that exact selector safely needs a small domain-level export
- * from the Scanner page's own logic, which this Phase 1 ticket does not touch.
+ *
+ * Astra review finding (P2, blocking): a ticker the owner has personally marked NEVER_TRADE
+ * (Research/Scanner's own "Exclude" state) must never be highlighted here just because its saved
+ * technical result still reads PASS/NEAR - `neverTradeTickers` mirrors Scanner's own default
+ * exclusion filter (scanner-workspace.tsx: `researchStatus !== "NEVER_TRADE"`) so this preview
+ * can't surface a candidate the owner has explicitly told Scanner to hide by default. Technical
+ * classification itself is untouched - only the personal-exclusion filter is applied before
+ * selecting the top 3.
+ *
+ * Phase 2 follow-up (not attempted here): Scanner's own settings-revision check and
+ * resultsPredateCurrentSettings distinction are not yet threaded through this preview - the
+ * "Saved results - check Scanner for current readiness" caption stays the honest disclosure for
+ * that gap until full parity exists.
  */
 export function scannerInsightViewModel(
   latestScanRun: { createdAt: Date; source: string; results: ScannerResultLike[] } | null,
+  neverTradeTickers: ReadonlySet<string> = new Set(),
 ): ScannerInsightViewModel {
   if (!latestScanRun) {
     return { hasRun: false, runAt: null, isLiveSchwab: false, items: [], totalScanned: 0 };
@@ -321,7 +390,7 @@ export function scannerInsightViewModel(
     };
   });
   const items = scanned
-    .filter((setup) => isActionableReadiness(setup.readiness))
+    .filter((setup) => isActionableReadiness(setup.readiness) && !neverTradeTickers.has(setup.result.ticker))
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
     .map((setup) => ({
