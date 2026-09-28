@@ -93,12 +93,18 @@ describe("Recommendations moved into Chat", () => {
     expect(recsText).toContain("recommendStockAction");
   });
 
-  it("9. Dashboard's recommendation card links to Chat instead of the trimmed primary destination", () => {
+  it("9. Dashboard no longer duplicates a standalone Recommendations preview, and its Chat panel (the current gateway to recommendations) links to Chat, never the trimmed primary destination", () => {
+    // Dashboard V2 Phase 1 removed the dashboard's own Recommendations preview card entirely
+    // (not part of that redesign's spec) - recommendations remain reachable only via Chat's own
+    // panel (see /recommendations page + Chat's Recommendations UI, both unchanged), never a
+    // second, separately-maintained preview on the dashboard.
     const dashboardText = source("./dashboard/page.tsx");
-    const panelStart = dashboardText.indexOf('title="Recommendations"');
-    const panelSlice = dashboardText.slice(panelStart, panelStart + 300);
-    expect(panelSlice).toContain('href="/chat"');
-    expect(panelSlice).not.toContain('href="/recommendations"');
+    expect(dashboardText).not.toContain('title="Recommendations"');
+    const chatPanelStart = dashboardText.indexOf('title="Chat"');
+    expect(chatPanelStart).toBeGreaterThan(-1);
+    const chatPanelSlice = dashboardText.slice(chatPanelStart, chatPanelStart + 300);
+    expect(chatPanelSlice).toContain('href="/chat"');
+    expect(chatPanelSlice).not.toContain('href="/recommendations"');
   });
 
   it("16. the new Chat buddy list is scoped per-viewer, matching the existing Recommendations buddy-selector pattern", () => {

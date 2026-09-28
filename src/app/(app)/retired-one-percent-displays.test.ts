@@ -52,6 +52,7 @@ describe("positions page no longer renders the 1% Goal Tracker", () => {
 
 describe("dashboard page no longer renders the weekly 1% target block", () => {
   const text = source("./dashboard/page.tsx");
+  const viewText = source("../../lib/dashboard-view.ts");
 
   it("has no weekly-percent-of-target display left", () => {
     expect(text).not.toContain("summarizeWeeklyReturns");
@@ -62,10 +63,16 @@ describe("dashboard page no longer renders the weekly 1% target block", () => {
 
   // Reporting Phase Ticket 2: the neutral "being rebuilt" placeholder is superseded by the real
   // "Return on campaigns closed this week" card (reporting.ts's tradeReturn* fields) - it must not
-  // reappear once the card that fulfills that promise exists. The win/loss record remains, moved
-  // to a secondary line beneath the five reporting cards rather than the old placeholder section.
-  it("no longer shows the rebuild-in-progress placeholder, and still shows the win/loss record", () => {
+  // reappear once the card that fulfills that promise exists. Dashboard V2 Phase 1 moved the
+  // win/loss record's formatting into dashboard-view.ts's confirmedTradingPLCard (win rate +
+  // wins/losses/breakevens sample label), consumed by page.tsx's Confirmed Trading P/L card - no
+  // longer inline JSX text in page.tsx itself, since that view-model extraction is this ticket's
+  // own explicit architecture requirement.
+  it("no longer shows the rebuild-in-progress placeholder, and still computes/renders the win/loss record", () => {
     expect(text).not.toContain("Trade-return goal reporting is being rebuilt from verified account and trade data.");
-    expect(text).toMatch(/W-L \{winLoss\.wins\}-\{winLoss\.losses\}/);
+    expect(viewText).toMatch(/winLoss\.wins/);
+    expect(viewText).toMatch(/winLoss\.losses/);
+    expect(viewText).toContain("winRateLabel");
+    expect(text).toContain("confirmedTradingPL.sampleLabel");
   });
 });

@@ -158,8 +158,13 @@ describe("Card 2: Confirmed Trading P/L", () => {
 
   it("7. dashboard page labels this card 'Confirmed Trading P/L' and never as a this-week figure", () => {
     const text = source("../app/(app)/dashboard/page.tsx");
+    const viewText = source("./dashboard-view.ts");
     expect(text).toContain('label="Confirmed Trading P/L"');
-    expect(text).toContain("Since tracked campaign history");
+    // Dashboard V2 Phase 1 moved this fixed period framing into dashboard-view.ts's
+    // confirmedTradingPLCard (the view-model extraction this ticket itself required) - page.tsx
+    // renders it via confirmedTradingPL.periodLabel rather than the literal string directly.
+    expect(viewText).toContain("Since tracked campaign history");
+    expect(text).toContain("confirmedTradingPL.periodLabel");
     expect(text).not.toMatch(/Confirmed Trading P\/L[\s\S]{0,120}This Week/);
   });
 });
@@ -367,15 +372,24 @@ describe("Dashboard page structure (source-level - no component-render harness i
     expect(text).not.toContain("accountPerformance.tradingPL");
   });
 
-  it("29. the five performance cards render in a responsive grid with no fixed-width overflow", () => {
-    expect(text).toContain('data-testid="dashboard-performance-cards"');
-    expect(text).toMatch(/dashboard-performance-cards"[\s\S]{0,400}/);
-    const gridSection = text.slice(text.indexOf('<div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"'), text.indexOf('data-testid="dashboard-performance-cards"') + 40);
+  // Dashboard V2 Phase 1 replaced the prior five-card row (Account Value, Confirmed Trading P/L,
+  // Trade Return this week, LST Capital Committed, Whole-Account Gain) with the ticket's own
+  // explicit "FOUR SUMMARY CARDS" spec (Account Value, Whole-Account Gain, Confirmed Trading P/L,
+  // Open Campaigns) - "Trade Return this week" moved into its own dedicated "Closed This Week"
+  // panel and "LST Capital Committed" moved into the new "Capital & Cash" panel, both now
+  // one-card-worth of detail instead of a fifth top-row stat.
+  it("29. exactly four summary cards render in a responsive grid with no fixed-width overflow", () => {
+    expect(text).toContain('data-testid="dashboard-summary-cards"');
+    const gridSection = text.slice(text.indexOf('<section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"'), text.indexOf('data-testid="dashboard-summary-cards"') + 40);
     expect(gridSection).not.toMatch(/w-\[\d/);
+    const summaryStart = text.indexOf('data-testid="dashboard-summary-cards"');
+    const cardsSection = text.slice(summaryStart, text.indexOf('title="Positions to Review"', summaryStart));
+    expect((cardsSection.match(/<SummaryCard\s/g) ?? []).length).toBe(4);
   });
 
-  it("30. the win/loss record is a secondary line beneath the cards, not one of the five primary cards", () => {
-    const cardsSection = text.slice(text.indexOf("How am I doing?"), text.indexOf("W-L {winLoss.wins}"));
-    expect((cardsSection.match(/<Stat\s/g) ?? []).length).toBe(5);
+  it("30. the win/loss record is embedded in the Confirmed Trading P/L card (per the ticket's own spec), not a separate page-level line", () => {
+    expect(text).toContain("confirmedTradingPL.winRateLabel");
+    const viewText = source("./dashboard-view.ts");
+    expect(viewText).toContain("winLoss.winRate === null");
   });
 });
