@@ -17,6 +17,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.116.0
         version: 2.116.0
+      '@swc/helpers':
+        specifier: 0.5.23
+        version: 0.5.23
       bcryptjs:
         specifier: ^3.0.3
         version: 3.0.3
