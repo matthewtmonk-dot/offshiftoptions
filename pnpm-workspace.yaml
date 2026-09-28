@@ -1,3 +1,8 @@
+# Flat, npm-like node_modules (no .pnpm symlink/junction layout): Hostinger's runtime packaging
+# does not preserve pnpm's symlinked root entries, so bare imports like `react` fail at runtime.
+# Set here, not in .npmrc - pnpm 11 ignores node-linker in .npmrc (verified on a fresh install).
+nodeLinker: hoisted
+
 allowBuilds:
   '@prisma/engines': true
   esbuild: true
