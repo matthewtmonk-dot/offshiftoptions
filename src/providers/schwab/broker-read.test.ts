@@ -101,6 +101,25 @@ describe("SchwabBrokerReadProvider.getPositions", () => {
     await expect(stubProvider({}).getPositions("acct-hash-1")).rejects.toThrow("position evidence is incomplete");
     await expect(stubProvider({ positions: [] }).getPositions("acct-hash-1")).resolves.toEqual([]);
   });
+
+  // Codex P1 (B1): positionReadReceivedAt is THIS app's own observation of when the successful
+  // fetch completed - distinct from (and never substituted for) valuationAsOf, which stays null.
+  it("stamps every returned position with this app's own read-receipt time, never the provider's (absent) valuation time", async () => {
+    const provider = stubProvider({ positions: [optionPosition(), optionPosition({ instrument: { symbol: "APLD 260904P00023500", assetType: "OPTION", putCall: "PUT", strikePrice: 23.5, underlyingSymbol: "APLD" } })] });
+    const before = Date.now();
+    const positions = await provider.getPositions("acct-hash-1");
+    const after = Date.now();
+
+    expect(positions).toHaveLength(2);
+    for (const position of positions) {
+      expect(position.valuationAsOf).toBeNull();
+      expect(position.positionReadReceivedAt).toBeInstanceOf(Date);
+      expect(position.positionReadReceivedAt!.getTime()).toBeGreaterThanOrEqual(before);
+      expect(position.positionReadReceivedAt!.getTime()).toBeLessThanOrEqual(after);
+    }
+    // Both positions came from the SAME HTTP round trip - they share the identical receipt instant.
+    expect(positions[0]!.positionReadReceivedAt!.getTime()).toBe(positions[1]!.positionReadReceivedAt!.getTime());
+  });
 });
 
 /** Returns `transactions` only for the one category the fixture represents (default TRADE) and

@@ -228,11 +228,15 @@ function resolvePositionEvidence({
     // evidence of its own (never borrow another campaign's confirmation).
     return { state: "NOT_ASSESSED" };
   }
-  if (!brokerRow.valuationAsOf) {
-    // A genuine Schwab match, but with no known read time - never fabricate "now" as if the read
-    // were fresh; the caller can't confirm the 5-minute freshness rule without a real timestamp.
+  // Codex P1 (B1) - freshness is about WHEN WE READ this position, not the provider's own
+  // (currently always-null, and conceptually unrelated) valuation timestamp. `valuationAsOf`
+  // answers "as of when is this price true"; `positionReadReceivedAt` answers "when did our own
+  // fetch actually complete" - only the latter can prove the ticket's 5-minute broker-freshness
+  // rule. A missing OR non-finite receipt time is never fabricated as "now."
+  const receivedAt = brokerRow.positionReadReceivedAt;
+  if (!receivedAt || !Number.isFinite(receivedAt.getTime())) {
     return { state: "NOT_ASSESSED" };
   }
 
-  return { state: "SCHWAB_CONFIRMED", asOf: brokerRow.valuationAsOf };
+  return { state: "SCHWAB_CONFIRMED", asOf: receivedAt };
 }

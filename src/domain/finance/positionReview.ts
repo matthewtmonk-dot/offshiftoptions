@@ -376,6 +376,12 @@ function evaluatePositionState(position: PositionReviewPositionInput, now: Date)
   if (position.state !== "SCHWAB_CONFIRMED") {
     return position.state;
   }
+  // Codex P1 (B1) - an invalid (NaN) receipt timestamp must fail closed, never pass the
+  // `ageMs < 0 || ageMs > window` comparisons vacuously (NaN fails both, which previously let a
+  // corrupted timestamp read as "fresh").
+  if (!Number.isFinite(position.asOf.getTime())) {
+    return "AWAITING_CONFIRMATION";
+  }
   const ageMs = now.getTime() - position.asOf.getTime();
   if (ageMs < 0 || ageMs > BROKER_POSITION_FRESHNESS_MS) {
     return "AWAITING_CONFIRMATION";

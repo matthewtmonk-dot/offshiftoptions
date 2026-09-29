@@ -88,9 +88,15 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
   }
 
   async getPositions(accountId: string): Promise<BrokerPosition[]> {
+    // Codex P1 (B1) - this app's own observation of when THIS specific successful read
+    // completed, stamped before the cache boundary (see providers/broker-read/cache.ts) so a
+    // cache hit always replays the original fetch's real receipt time, never a fresh `new Date()`.
+    // Mirrors SchwabMarketDataProvider.getQuoteReviewEvidence's identical requestStartedAt/
+    // responseReceivedAt pattern.
     const payload = await this.get(`/accounts/${encodeURIComponent(accountId)}`, {
       fields: "positions",
     });
+    const positionReadReceivedAt = new Date();
     const account = objectValue(objectValue(payload)?.securitiesAccount);
     if (!account || !Array.isArray(account.positions)) {
       throw new Error("Schwab position evidence is incomplete.");
@@ -120,6 +126,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
         marketValue: optionalMarketValue(position?.marketValue),
         // No provider valuation timestamp has been verified for this endpoint. Never use fetch time.
         valuationAsOf: null,
+        positionReadReceivedAt,
         assetType: stringValue(instrument?.assetType),
         putCall: putCallRaw === "PUT" || putCallRaw === "CALL" ? putCallRaw : null,
         strikePrice: numberValue(instrument?.strikePrice),

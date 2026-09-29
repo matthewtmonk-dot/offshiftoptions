@@ -236,6 +236,17 @@ describe("evaluatePositionReview - broker position evidence", () => {
     expect(result.explanation.reasonCodes).toContain("POSITION_AWAITING_CONFIRMATION");
   });
 
+  it("downgrades to AWAITING_CONFIRMATION for a future broker read-receipt timestamp (fails closed, never extends freshness)", () => {
+    const asOf = new Date(NOON.getTime() + 60_000);
+    const result = evaluatePositionReview(baseInput({ position: { state: "SCHWAB_CONFIRMED", asOf } }));
+    expect(result.evidence.position).toBe("AWAITING_CONFIRMATION");
+  });
+
+  it("downgrades to AWAITING_CONFIRMATION for an invalid (NaN) broker read-receipt timestamp (Codex P1 B1)", () => {
+    const result = evaluatePositionReview(baseInput({ position: { state: "SCHWAB_CONFIRMED", asOf: new Date(Number.NaN) } }));
+    expect(result.evidence.position).toBe("AWAITING_CONFIRMATION");
+  });
+
   it("is CANNOT_ASSESS for an ambiguous broker match", () => {
     const result = evaluatePositionReview(baseInput({ position: { state: "POSITION_MISMATCH_AMBIGUOUS" } }));
     expect(result.action).toBe("CANNOT_ASSESS");

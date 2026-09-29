@@ -17,6 +17,19 @@ export type BrokerPosition = {
   marketValue: number | null;
   /** Actual provider valuation time, if verified. Retrieval time is not valuation provenance. */
   valuationAsOf?: Date | null;
+  /**
+   * Codex P1 (B1) - this app's own observation of when the HTTP response carrying THIS position
+   * was actually received, stamped once per `getPositions` call at the provider layer (see
+   * SchwabBrokerReadProvider.getPositions) - deliberately distinct from `valuationAsOf` above,
+   * which is a provider-reported price/valuation time and is currently always null in production.
+   * Never substitute one for the other: `valuationAsOf` answers "as of when is this price/value
+   * true," this field answers "when did we last successfully read this position." A cache HIT
+   * (see providers/broker-read/cache.ts) replays the exact stored value - and therefore this exact
+   * timestamp - unchanged, since it is stamped BEFORE the cache boundary, never re-stamped with
+   * `new Date()` on every access. Null only when no successful read has ever produced this value
+   * (e.g. a synthetic/test fixture) - never fabricated as "now."
+   */
+  positionReadReceivedAt?: Date | null;
   /** Schwab's own instrument classification, when available (e.g. "OPTION", "EQUITY"). */
   assetType?: string | null;
   /** Schwab's own put/call flag for an option instrument, when available - the most
