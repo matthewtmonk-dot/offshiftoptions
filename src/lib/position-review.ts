@@ -98,7 +98,7 @@ export async function resolvePositionReviewsForUser(
     const openCall = getCurrentOpenCall(campaign.events);
 
     if (openPut) {
-      legByCampaignId.set(campaign.id, { kind: "PUT", strike: openPut.strike, expiration: openPut.expiration });
+      legByCampaignId.set(campaign.id, { kind: "PUT", strike: openPut.strike, expiration: openPut.expiration, contracts: openPut.contracts });
       trackedPuts.push({
         id: campaign.id,
         ownerId: campaign.ownerId,
@@ -110,7 +110,7 @@ export async function resolvePositionReviewsForUser(
         contracts: openPut.contracts,
       });
     } else if (openCall) {
-      legByCampaignId.set(campaign.id, { kind: "CALL", strike: openCall.strike, expiration: openCall.expiration });
+      legByCampaignId.set(campaign.id, { kind: "CALL", strike: openCall.strike, expiration: openCall.expiration, contracts: openCall.contracts });
       trackedCalls.push({
         id: campaign.id,
         ownerId: campaign.ownerId,
@@ -128,7 +128,12 @@ export async function resolvePositionReviewsForUser(
       const callEvidenceState = getOpenCallEvidenceState(campaign.events);
       if (callEvidenceState === "INCOMPLETE") {
         const partial = getIncompleteOpenCallTerms(campaign.events);
-        legByCampaignId.set(campaign.id, { kind: "CALL", strike: partial?.strike ?? null, expiration: partial?.expiration ?? null });
+        legByCampaignId.set(campaign.id, {
+          kind: "CALL",
+          strike: partial?.strike ?? null,
+          expiration: partial?.expiration ?? null,
+          contracts: partial?.contracts ?? null,
+        });
       } else {
         legByCampaignId.set(campaign.id, { kind: "NONE" });
       }
@@ -140,7 +145,12 @@ export async function resolvePositionReviewsForUser(
       // the Dashboard's own factual row, independent of this evaluator.
       if (getOpenPutEvidenceState(campaign.events) === "INCOMPLETE") {
         const partial = getIncompleteOpenPutTerms(campaign.events);
-        legByCampaignId.set(campaign.id, { kind: "PUT", strike: partial?.strike ?? null, expiration: partial?.expiration ?? null });
+        legByCampaignId.set(campaign.id, {
+          kind: "PUT",
+          strike: partial?.strike ?? null,
+          expiration: partial?.expiration ?? null,
+          contracts: partial?.contracts ?? null,
+        });
       }
     }
   }

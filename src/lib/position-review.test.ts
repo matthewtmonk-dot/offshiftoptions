@@ -460,14 +460,15 @@ describe("Codex P1 (B6) - incomplete campaigns survive orchestration as CANNOT_A
 
     const results = await resolvePositionReviewsForUser("matt", [incomplete], [schwabAccount], 3, NOON);
 
-    // Broker matching itself can't even be attempted without a complete strike/expiration, so
-    // evidence resolves NOT_ASSESSED (not a thrown error, not a dropped row) - the domain layer's
-    // own separate INCOMPLETE_TERMS path (see positionReview.test.ts) covers the case where
-    // position evidence DOES confirm but the moneyness math itself is what's missing terms.
+    // Codex P2 (C) - leg-term completeness (expiration/contracts/strike) is now validated FIRST,
+    // before position evidence is even resolved (so a MANUAL_POSITION bypass could never override
+    // it) - a missing strike now produces the precise INCOMPLETE_TERMS reason directly, never the
+    // more generic POSITION_NOT_ASSESSED (broker matching is never even attempted for an
+    // incomplete leg, but the leg's OWN incompleteness is now the reported reason).
     expect(results).toHaveLength(1);
-    expect(results[0]?.result.evidence.position).toBe("NOT_ASSESSED");
     expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
-    expect(results[0]?.result.explanation.reasonCodes).toContain("POSITION_NOT_ASSESSED");
+    expect(results[0]?.result.explanation.reasonCodes).toContain("INCOMPLETE_TERMS");
+    expect(results[0]?.result.priority.group).toBe(3);
   });
 
   it("an OPEN campaign with an incomplete put record (missing expiration) is CANNOT_ASSESS with EXPIRATION_UNKNOWN, in the high-priority group", async () => {
@@ -505,7 +506,9 @@ describe("Codex P1 (B6) - incomplete campaigns survive orchestration as CANNOT_A
     expect(results).toHaveLength(1);
     expect(results[0]?.result.lifecycle).toBe("COVERED_CALL");
     expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
-    expect(results[0]?.result.explanation.reasonCodes).toContain("POSITION_NOT_ASSESSED");
+    // Codex P2 (C) - leg-term completeness is validated before position evidence, so the precise
+    // INCOMPLETE_TERMS reason is reported directly.
+    expect(results[0]?.result.explanation.reasonCodes).toContain("INCOMPLETE_TERMS");
     // Never the "no call recorded" reason - a real attempt exists, just with broken terms.
     expect(results[0]?.result.explanation.reasonCodes).not.toContain("ASSIGNED_SHARES_NO_CALL");
   });

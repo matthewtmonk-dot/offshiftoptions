@@ -121,12 +121,18 @@ export type PositionReviewResult = {
   priority: PositionReviewPriority;
 };
 
-/** The authoritative current leg under review - never a historical/closed leg (see the ticket's
- * "rolled positions use current leg only" rule). `strike`/`expiration` may be null for a leg whose
- * own terms are incomplete (e.g. a legacy row) - this is handled as CANNOT_ASSESS, never guessed. */
+/**
+ * The authoritative current leg under review - never a historical/closed leg (see the ticket's
+ * "rolled positions use current leg only" rule). `strike`/`expiration`/`contracts` may each be
+ * null for a leg whose own terms are incomplete (e.g. a legacy row, or a manual entry missing a
+ * field) - this is handled as CANNOT_ASSESS, never guessed. Codex P2 (C): `contracts` is a
+ * REQUIRED field on this type (not merely optional) precisely so a caller constructing a leg
+ * cannot forget to state whether quantity is known - a leg with a known strike/expiration but an
+ * unstated quantity must never be silently treated as a complete, reviewable position.
+ */
 export type PositionReviewLeg =
-  | { kind: "PUT"; strike: number | null; expiration: Date | null }
-  | { kind: "CALL"; strike: number | null; expiration: Date | null }
+  | { kind: "PUT"; strike: number | null; expiration: Date | null; contracts: number | null }
+  | { kind: "CALL"; strike: number | null; expiration: Date | null; contracts: number | null }
   /** Assigned shares with no currently open covered call. */
   | { kind: "NONE" };
 
@@ -160,6 +166,15 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
   const sessionEndedToday = dte === 0 && sessionCloseInstant !== null && now.getTime() >= sessionCloseInstant.getTime();
   const sessionState = sessionStateOf(input.session, now);
 
+  // Codex P2 (C) - EVERY required factual term (expiration, contracts, strike) is validated here,
+  // together, BEFORE anything else runs - including before position evidence is even resolved, so
+  // a MANUAL_POSITION bypass can never override an incomplete leg (the check does not depend on
+  // `positionState` at all). A leg missing any one of these is never partially "complete enough"
+  // to reach quote/moneyness evaluation.
+  const contractsValid = leg.kind !== "NONE" && leg.contracts !== null && Number.isFinite(leg.contracts) && leg.contracts > 0;
+  const strikeValid = leg.kind !== "NONE" && leg.strike !== null && Number.isFinite(leg.strike) && leg.strike > 0;
+  const termsIncomplete = leg.kind !== "NONE" && (expiration === null || !contractsValid || !strikeValid);
+
   const reasonCodes: string[] = [];
   let action: PositionReviewAction | null = null;
   let lifecycle: PositionReviewLifecycle;
@@ -181,6 +196,12 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
     if (expiration === null) {
       action = "CANNOT_ASSESS";
       reasonCodes.push("EXPIRATION_UNKNOWN");
+    } else if (!contractsValid) {
+      action = "CANNOT_ASSESS";
+      reasonCodes.push("MISSING_CONTRACTS");
+    } else if (!strikeValid) {
+      action = "CANNOT_ASSESS";
+      reasonCodes.push("INCOMPLETE_TERMS");
     }
   }
 
@@ -220,6 +241,9 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
 
   if (action === null) {
     if (strike === null || !Number.isFinite(strike) || strike <= 0) {
+      // Unreachable in practice - `termsIncomplete` above already set `action` for this case
+      // before quote evaluation even ran. Kept as a defensive fallback only, and for TypeScript's
+      // own null-narrowing of `strike` below.
       action = "CANNOT_ASSESS";
       reasonCodes.push("INCOMPLETE_TERMS");
     } else if (stockPrice === null) {
@@ -253,8 +277,7 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
   }
 
   const finalAction: PositionReviewAction = action ?? "CANNOT_ASSESS";
-  const expirationUnknown = leg.kind !== "NONE" && expiration === null;
-  const group = priorityGroupOf({ lifecycle, action: finalAction, dte, expirationUnknown, reasonCodes });
+  const group = priorityGroupOf({ lifecycle, action: finalAction, dte, termsIncomplete, reasonCodes });
   const withinExpirationTodaySubgroup = group === 2 ? subgroupOf(finalAction) : null;
   const positionEvidenceAsOf = input.position.state === "SCHWAB_CONFIRMED" ? input.position.asOf : null;
   const activeGuidanceDeadline = computeActiveGuidanceDeadline({
@@ -345,13 +368,16 @@ function priorityGroupOf({
   lifecycle,
   action,
   dte,
-  expirationUnknown,
+  termsIncomplete,
   reasonCodes,
 }: {
   lifecycle: PositionReviewLifecycle;
   action: PositionReviewAction;
   dte: number | null;
-  expirationUnknown: boolean;
+  /** Codex P2 (C) - broadened from "expiration unknown" alone to ANY missing required leg term
+   * (expiration, contracts, or strike) - every incomplete-term case gets the same high priority,
+   * not just the expiration-specific one. */
+  termsIncomplete: boolean;
   reasonCodes: string[];
 }): PositionReviewPriorityGroup {
   if (lifecycle === "EXPIRATION_PENDING" || lifecycle === "EXPIRATION_SESSION_ENDED") {
@@ -360,7 +386,7 @@ function priorityGroupOf({
   if (dte === 0) {
     return 2;
   }
-  if (expirationUnknown) {
+  if (termsIncomplete) {
     return 3;
   }
   if (action === "REVIEW_ROLL" || action === "REVIEW_CALL") {

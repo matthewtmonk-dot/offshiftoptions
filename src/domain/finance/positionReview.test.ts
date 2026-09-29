@@ -46,7 +46,7 @@ function baseInput(overrides: Partial<PositionReviewInput> = {}): PositionReview
     campaignId: "campaign-1",
     accountId: "account-1",
     ticker: "UPST",
-    leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z") },
+    leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 1 },
     lifecycleStage: "Cash-secured put",
     rollBufferPercent: 3,
     position: { state: "SCHWAB_CONFIRMED", asOf: NOON },
@@ -59,7 +59,7 @@ function baseInput(overrides: Partial<PositionReviewInput> = {}): PositionReview
 
 describe("evaluatePositionReview - PUT moneyness boundaries", () => {
   it("is COMFORTABLE when favorable distance is well outside the buffer (OTM)", () => {
-    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z") }, quote: quote(30) }));
+    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 1 }, quote: quote(30) }));
     expect(result.action).toBe("COMFORTABLE");
     expect(result.explanation.moneyness).toBe("OTM");
   });
@@ -97,7 +97,7 @@ describe("evaluatePositionReview - PUT moneyness boundaries", () => {
 });
 
 describe("evaluatePositionReview - CALL moneyness boundaries", () => {
-  const callLeg: PositionReviewLeg = { kind: "CALL", strike: 30, expiration: new Date("2026-10-02T00:00:00.000Z") };
+  const callLeg: PositionReviewLeg = { kind: "CALL", strike: 30, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 1 };
   const callInput = (overrides: Partial<PositionReviewInput> = {}) =>
     baseInput({ leg: callLeg, lifecycleStage: "Covered call", ...overrides });
 
@@ -150,7 +150,7 @@ describe("evaluatePositionReview - roll buffer configuration", () => {
 describe("evaluatePositionReview - expiration/date contract", () => {
   it("downgrades an otherwise-comfortable position to WATCH when it expires today and the session is still open", () => {
     const result = evaluatePositionReview(
-      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`) }, quote: quote(30) }),
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), contracts: 1 }, quote: quote(30) }),
     );
     expect(result.action).toBe("WATCH");
     expect(result.explanation.reasonCodes).toContain("EXPIRES_TODAY");
@@ -161,7 +161,7 @@ describe("evaluatePositionReview - expiration/date contract", () => {
   it("is EXPIRATION_SESSION_ENDED / CANNOT_ASSESS once the regular session has closed on the expiration date", () => {
     const afterClose = new Date(`${NY_DATE}T16:00:01-04:00`);
     const result = evaluatePositionReview(
-      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`) }, quote: quote(30, afterClose), now: afterClose }),
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), contracts: 1 }, quote: quote(30, afterClose), now: afterClose }),
     );
     expect(result.lifecycle).toBe("EXPIRATION_SESSION_ENDED");
     expect(result.action).toBe("CANNOT_ASSESS");
@@ -170,7 +170,7 @@ describe("evaluatePositionReview - expiration/date contract", () => {
 
   it("is EXPIRATION_PENDING / CANNOT_ASSESS for an already-past, unresolved expiration", () => {
     const result = evaluatePositionReview(
-      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-06-10T00:00:00.000Z") } }),
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-06-10T00:00:00.000Z"), contracts: 1 } }),
     );
     expect(result.lifecycle).toBe("EXPIRATION_PENDING");
     expect(result.action).toBe("CANNOT_ASSESS");
@@ -180,13 +180,13 @@ describe("evaluatePositionReview - expiration/date contract", () => {
 
   it("does not treat expiration-pending/session-ended as expired-worthless, assigned, or closed - action is CANNOT_ASSESS, never a colored verdict", () => {
     const result = evaluatePositionReview(
-      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-06-10T00:00:00.000Z") } }),
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-06-10T00:00:00.000Z"), contracts: 1 } }),
     );
     expect(["COMFORTABLE", "WATCH", "REVIEW_ROLL", "REVIEW_CALL"]).not.toContain(result.action);
   });
 
   it("EXPIRATION_UNKNOWN (missing expiration) is CANNOT_ASSESS in priority group 3", () => {
-    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: null } }));
+    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: null, contracts: 1 } }));
     expect(result.action).toBe("CANNOT_ASSESS");
     expect(result.explanation.reasonCodes).toContain("EXPIRATION_UNKNOWN");
     expect(result.priority.group).toBe(3);
@@ -278,7 +278,7 @@ describe("evaluatePositionReview - assigned shares and covered calls", () => {
 
   it("evaluates an open covered call on assigned shares under the same shared CALL rules", () => {
     const result = evaluatePositionReview(
-      baseInput({ leg: { kind: "CALL", strike: 30, expiration: new Date("2026-10-02T00:00:00.000Z") }, lifecycleStage: "Covered call", quote: quote(30.5) }),
+      baseInput({ leg: { kind: "CALL", strike: 30, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 1 }, lifecycleStage: "Covered call", quote: quote(30.5) }),
     );
     expect(result.lifecycle).toBe("COVERED_CALL");
     expect(result.action).toBe("REVIEW_CALL");
@@ -288,7 +288,7 @@ describe("evaluatePositionReview - assigned shares and covered calls", () => {
 describe("evaluatePositionReview - rolled positions use the current leg only", () => {
   it("evaluates a rolled put's CURRENT leg normally - lifecycle label does not change the moneyness/action rules", () => {
     const result = evaluatePositionReview(
-      baseInput({ leg: { kind: "PUT", strike: 20, expiration: new Date("2026-10-02T00:00:00.000Z") }, lifecycleStage: "Rolled put", quote: quote(25) }),
+      baseInput({ leg: { kind: "PUT", strike: 20, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 1 }, lifecycleStage: "Rolled put", quote: quote(25) }),
     );
     expect(result.lifecycle).toBe("ROLLED_PUT");
     expect(result.action).toBe("COMFORTABLE");
@@ -297,9 +297,62 @@ describe("evaluatePositionReview - rolled positions use the current leg only", (
 
 describe("evaluatePositionReview - incomplete terms", () => {
   it("is CANNOT_ASSESS when strike is missing", () => {
-    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: null, expiration: new Date("2026-10-02T00:00:00.000Z") } }));
+    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: null, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 1 } }));
     expect(result.action).toBe("CANNOT_ASSESS");
     expect(result.explanation.reasonCodes).toContain("INCOMPLETE_TERMS");
+    expect(result.priority.group).toBe(3);
+  });
+
+  // Codex P2 (C): a leg with strike/expiration present but NO known contract quantity was
+  // reproduced reaching REVIEW_ROLL - it must be CANNOT_ASSESS instead, in the same high-priority
+  // group as a missing expiration/strike, and this must hold regardless of position evidence
+  // state (a MANUAL_POSITION bypass must never override incompleteness).
+  it.each([
+    { state: "SCHWAB_CONFIRMED" as const, asOf: NOON },
+    { state: "MANUAL_POSITION" as const },
+  ])("is CANNOT_ASSESS with MISSING_CONTRACTS - never REVIEW_ROLL - for a PUT with strike/expiration known but no contract quantity (position: %o)", (position) => {
+    const result = evaluatePositionReview(
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: null }, position, quote: quote(24) }),
+    );
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.action).not.toBe("REVIEW_ROLL");
+    expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
+    expect(result.priority.group).toBe(3);
+  });
+
+  it.each([
+    { state: "SCHWAB_CONFIRMED" as const, asOf: NOON },
+    { state: "MANUAL_POSITION" as const },
+  ])("is CANNOT_ASSESS with MISSING_CONTRACTS for a CALL with strike/expiration known but no contract quantity (position: %o)", (position) => {
+    const result = evaluatePositionReview(
+      baseInput({
+        leg: { kind: "CALL", strike: 30, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: null },
+        lifecycleStage: "Covered call",
+        position,
+        quote: quote(30.5),
+      }),
+    );
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.action).not.toBe("REVIEW_CALL");
+    expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
+    expect(result.priority.group).toBe(3);
+  });
+
+  it.each([0, -1, Number.NaN])("is CANNOT_ASSESS with MISSING_CONTRACTS for a non-positive/invalid contract count (%s)", (contracts) => {
+    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts }, quote: quote(24) }));
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
+  });
+
+  it("manual-position bypass cannot override an incomplete leg - completeness is validated before position evidence is even consulted", () => {
+    // Deliberately favorable moneyness (would otherwise be COMFORTABLE) - proves the block is
+    // coming from leg completeness, not from an unrelated evidence/moneyness failure.
+    const result = evaluatePositionReview(
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: null }, position: { state: "MANUAL_POSITION" }, quote: quote(30) }),
+    );
+    expect(result.evidence.position).toBe("MANUAL_POSITION");
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
   });
 });
 
@@ -365,8 +418,8 @@ describe("deterministic priority ordering", () => {
   }
 
   it("orders strictly by the 8 priority groups, independent of input array order", () => {
-    const pastExpiration = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-06-01T00:00:00.000Z") }, ticker: "A" });
-    const expiresToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`) }, quote: quote(30), ticker: "B" });
+    const pastExpiration = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-06-01T00:00:00.000Z"), contracts: 1 }, ticker: "A" });
+    const expiresToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), contracts: 1 }, quote: quote(30), ticker: "B" });
     const reviewRoll = resultWithGroup({ quote: quote(24), ticker: "C" });
     const assignedNoCall = resultWithGroup({ leg: { kind: "NONE" }, lifecycleStage: "Assigned shares", ticker: "D" });
     const watch = resultWithGroup({ quote: quote(25.3), ticker: "E" });
@@ -382,19 +435,19 @@ describe("deterministic priority ordering", () => {
 
   it("within the expires-today group, orders review-red before evidence-failure before watch", () => {
     const todayExpiration = new Date(`${NY_DATE}T00:00:00.000Z`);
-    const reviewRedToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: todayExpiration }, quote: quote(24), ticker: "A" });
-    const cannotAssessToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: todayExpiration }, position: { state: "BROKER_UNAVAILABLE" }, ticker: "B" });
-    const watchToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: todayExpiration }, quote: quote(30), ticker: "C" });
+    const reviewRedToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: todayExpiration, contracts: 1 }, quote: quote(24), ticker: "A" });
+    const cannotAssessToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: todayExpiration, contracts: 1 }, position: { state: "BROKER_UNAVAILABLE" }, ticker: "B" });
+    const watchToday = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: todayExpiration, contracts: 1 }, quote: quote(30), ticker: "C" });
 
     const sorted = sortPositionReviews([watchToday, cannotAssessToday, reviewRedToday]);
     expect(sorted).toEqual([reviewRedToday, cannotAssessToday, watchToday]);
   });
 
   it("within other groups, orders by earliest expiration, then ticker, then account, then campaign", () => {
-    const later = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-11-01T00:00:00.000Z") }, quote: quote(30), ticker: "AAA" });
-    const earlier = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-09-01T00:00:00.000Z") }, quote: quote(30), ticker: "ZZZ" });
+    const later = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-11-01T00:00:00.000Z"), contracts: 1 }, quote: quote(30), ticker: "AAA" });
+    const earlier = resultWithGroup({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-09-01T00:00:00.000Z"), contracts: 1 }, quote: quote(30), ticker: "ZZZ" });
     const sameExpirationLowerTicker = resultWithGroup({
-      leg: { kind: "PUT", strike: 25, expiration: new Date("2026-09-01T00:00:00.000Z") },
+      leg: { kind: "PUT", strike: 25, expiration: new Date("2026-09-01T00:00:00.000Z"), contracts: 1 },
       quote: quote(30),
       ticker: "AAA",
     });
@@ -408,5 +461,26 @@ describe("deterministic priority ordering", () => {
     const b = resultWithGroup({ quote: quote(24), ticker: "B" });
     expect(comparePositionReviewPriority(b, a)).toBeLessThan(0); // review-roll (b) sorts before comfortable (a)
     expect(comparePositionReviewPriority(a, b)).toBeGreaterThan(0);
+  });
+
+  // Codex P2 (C) - "evaluate all, then truncate" only actually protects a high-priority incomplete
+  // row if the SORT places it ahead of enough lower-priority rows to survive a small preview
+  // limit - this proves that end-to-end rather than just proving the sort comparator in isolation.
+  it("a preview truncated to a small limit still preserves a high-priority incomplete-terms row ahead of many comfortable rows", () => {
+    const incomplete = resultWithGroup({
+      leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: null },
+      ticker: "INCOMPLETE",
+    });
+    const comfortableRows = Array.from({ length: 10 }, (_, index) =>
+      resultWithGroup({ quote: quote(30), ticker: `COMFORTABLE_${index}` }),
+    );
+
+    const sorted = sortPositionReviews([...comfortableRows, incomplete]);
+    const previewLimit = 3;
+    const preview = sorted.slice(0, previewLimit);
+
+    expect(incomplete.priority.group).toBe(3);
+    expect(preview).toContainEqual(incomplete);
+    expect(preview[0]).toEqual(incomplete); // group 3 sorts ahead of every group-8 comfortable row
   });
 });
