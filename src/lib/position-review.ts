@@ -69,6 +69,16 @@ export async function resolvePositionReviewsForUser(
   accounts: PositionReviewAccountInput[],
   rollBufferPercent: number,
   now: Date = new Date(),
+  /**
+   * Codex P1 (B8) - `now` above is read by the CALLER before this function's own async evidence
+   * retrieval even starts (it also drives which NY calendar date to REQUEST session evidence
+   * for); it must never also stand in for the instant evaluation actually happens once that
+   * retrieval completes. `clock` is called exactly once, AFTER every quote/session/broker fetch
+   * resolves, to obtain the real evaluation time - defaulting to `() => now` so every existing
+   * caller/test that only supplies `now` keeps its exact prior deterministic behavior; a
+   * production caller that wants genuine post-retrieval timing passes `() => new Date()`.
+   */
+  clock: () => Date = () => now,
 ): Promise<ResolvedPositionReview[]> {
   const relevant = campaigns.filter((campaign) => campaign.status === "OPEN" || campaign.status === "ASSIGNED");
   if (relevant.length === 0) {
@@ -139,11 +149,31 @@ export async function resolvePositionReviewsForUser(
     ...new Set(relevant.filter((campaign) => legByCampaignId.get(campaign.id)?.kind !== "NONE" && legByCampaignId.has(campaign.id)).map((campaign) => campaign.ticker.toUpperCase())),
   ];
 
-  const [brokerPositions, quoteEvidenceByTicker, sessionEvidence] = await Promise.all([
+  const requestedNyDate = nyCalendarDateOf(now);
+  const [brokerPositions, quoteEvidenceByTicker, sessionEvidenceAsRequested] = await Promise.all([
     getSchwabOpenPositionsForUser(userId).catch(() => null),
     getQuoteReviewEvidenceForUser(userId, tickersNeedingQuotes),
-    getEquityMarketSessionEvidenceForUser(userId, nyCalendarDateOf(now)),
+    getEquityMarketSessionEvidenceForUser(userId, requestedNyDate),
   ]);
+
+  // Codex P1 (B8) - the REAL evaluation instant, read only now that every async fetch above has
+  // actually resolved - never the `now` captured before this function started retrieving
+  // anything. A quote/position genuinely observed WHILE this retrieval was in flight must be
+  // judged against the moment evaluation actually happens, not an earlier instant it could
+  // otherwise appear to be "from the future" relative to.
+  const evaluationTime = clock();
+
+  // Codex P1 (B8) - if the NY calendar date advanced between requesting session evidence and
+  // actually evaluating (a request spanning NY midnight), the evidence we already fetched is for
+  // the WRONG date - reusing it would silently misjudge session-membership/expiration-day state.
+  // Smallest safe choice: fail closed to UNAVAILABLE rather than re-fetching or guessing.
+  const sessionEvidence =
+    sessionEvidenceAsRequested.status === "AVAILABLE" && sessionEvidenceAsRequested.returnedDate !== nyCalendarDateOf(evaluationTime)
+      ? ({
+          status: "UNAVAILABLE",
+          reason: `Requested market-session evidence for ${requestedNyDate}, but evaluation happened on ${nyCalendarDateOf(evaluationTime)} - never reusing evidence for the wrong NY date.`,
+        } as const)
+      : sessionEvidenceAsRequested;
 
   // Codex P1 (B5) - computed ONCE across every competing covered-call campaign sharing the same
   // owner+account+underlying, never per-campaign in isolation (see computeCallShareCoverage).
@@ -156,7 +186,7 @@ export async function resolvePositionReviewsForUser(
       continue;
     }
     const account = accounts.find((candidate) => candidate.id === campaign.accountId) ?? null;
-    const position = resolvePositionEvidence({ userId, campaign, leg, account, accounts, brokerPositions, trackedPuts, trackedCalls, callShareCoverageByCampaignId, now });
+    const position = resolvePositionEvidence({ userId, campaign, leg, account, accounts, brokerPositions, trackedPuts, trackedCalls, callShareCoverageByCampaignId });
     const quote =
       leg.kind === "NONE"
         ? ({ status: "UNAVAILABLE", reason: "No option leg to quote." } as const)
@@ -172,7 +202,7 @@ export async function resolvePositionReviewsForUser(
       position,
       quote,
       session: sessionEvidence,
-      now,
+      now: evaluationTime,
     };
 
     results.push({ campaignId: campaign.id, result: evaluatePositionReview(input) });
@@ -189,8 +219,9 @@ export async function resolveSortedPositionReviewsForUser(
   accounts: PositionReviewAccountInput[],
   rollBufferPercent: number,
   now: Date = new Date(),
+  clock: () => Date = () => now,
 ): Promise<ResolvedPositionReview[]> {
-  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now);
+  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock);
   const sorted = sortPositionReviews(resolved.map((entry) => entry.result));
   const byCampaignId = new Map(resolved.map((entry) => [entry.campaignId, entry]));
   return sorted.map((result) => byCampaignId.get(result.priority.campaignId)!);
@@ -216,7 +247,6 @@ function resolvePositionEvidence({
   trackedPuts: TrackedPut[];
   trackedCalls: TrackedCall[];
   callShareCoverageByCampaignId: Map<string, boolean>;
-  now: Date;
 }): PositionReviewPositionInput {
   // Codex P1 (B7) - CRITICAL: active review guidance (a manual-account bypass, a Schwab broker
   // match, or the buffer-driven moneyness math this evidence state ultimately gates) is only ever

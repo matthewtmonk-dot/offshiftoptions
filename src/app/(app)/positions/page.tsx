@@ -269,7 +269,10 @@ export default async function PositionsPage({
       externalAccountId: account.externalAccountId,
       source: account.source,
     }));
-    const reviews = await resolvePositionReviewsForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt);
+    // Codex P1 (B8) - `snapshotCheckedAt` selects which NY date to request session evidence for;
+    // the real evaluation instant is captured fresh AFTER resolvePositionReviewsForUser's own
+    // retrieval completes, never reused from before this page even started fetching.
+    const reviews = await resolvePositionReviewsForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt, () => new Date());
     for (const entry of reviews) {
       positionReviewByCampaignId.set(entry.campaignId, entry.result);
     }
@@ -765,7 +768,11 @@ function CampaignCard({
             <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-put-contract">
               <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>
               <span className="text-zinc-300">{shortCalendarDate(openPut.expiration)}</span>
-              <span className="font-semibold text-zinc-100">{daysToExpiration(openPut.expiration, asOf)} DTE</span>
+              {/* Codex P1 - the shared review evaluator's own NY-calendar DTE, matching exactly
+                  what Dashboard shows for the same campaign; the legacy UTC-based
+                  calculations.daysToExpiration stays as a defensive fallback only (never the
+                  primary source) for the rare case review evaluation didn't populate this leg. */}
+              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? daysToExpiration(openPut.expiration, asOf)} DTE</span>
               <span className="text-xs text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
             </div>
           ) : null}
@@ -773,7 +780,8 @@ function CampaignCard({
             <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-call-contract">
               <span className="font-semibold text-amber-200">{campaign.ticker} {money(openCall.strike)} Call</span>
               <span className="text-zinc-300">{shortCalendarDate(openCall.expiration)}</span>
-              <span className="font-semibold text-zinc-100">{daysToExpiration(openCall.expiration, asOf)} DTE</span>
+              {/* Codex P1 - same NY-calendar DTE substitution as the put contract above. */}
+              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? daysToExpiration(openCall.expiration, asOf)} DTE</span>
               <span className="text-xs text-zinc-400">Short {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}</span>
               {openCallEventRow ? (
                 <span className="text-xs text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>

@@ -537,3 +537,80 @@ describe("Codex P1 (B6) - incomplete campaigns survive orchestration as CANNOT_A
     expect(results.map((r) => r.campaignId)).toEqual(["campaign-incomplete", "campaign-comfortable"]);
   });
 });
+
+describe("Codex P1 (B8) - evaluation time is captured AFTER retrieval, never before", () => {
+  it("a quote that arrived after the initial request-start timestamp is still eligible when judged against the post-retrieval evaluation time", async () => {
+    const requestStartedAt = NOON;
+    const evaluationTime = new Date(NOON.getTime() + 5_000);
+    // The trade happened AFTER the pre-fetch `now` but BEFORE the real evaluation time - under
+    // the old (buggy) behavior of evaluating against the pre-fetch `now`, this would incorrectly
+    // read as a future timestamp and be rejected.
+    const midRetrievalTrade = new Date(NOON.getTime() + 2_000);
+    getPositions.mockResolvedValue([]);
+    getQuoteEvidence.mockResolvedValue(new Map([["UPST", quoteEvidence(30, midRetrievalTrade)]]));
+
+    // A manual account isolates this test to the quote-timing question alone, bypassing broker
+    // position matching (a separate concern already covered elsewhere).
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign({ accountId: "account-2" })], [manualAccount], 3, requestStartedAt, () => evaluationTime);
+
+    expect(results[0]?.result.evidence.quote).toBe("ELIGIBLE");
+    expect(results[0]?.result.evidence.quoteIneligibleReason).toBeNull();
+    expect(results[0]?.result.action).toBe("COMFORTABLE");
+  });
+
+  it("evaluates session membership at the REAL post-retrieval time, correctly reflecting a request that crossed the regular-session close", async () => {
+    const requestStartedAt = new Date(`${NY_DATE}T15:59:59-04:00`); // just before 4:00 PM ET close
+    const evaluationTime = new Date(`${NY_DATE}T16:00:05-04:00`); // retrieval took long enough to cross close
+    getPositions.mockResolvedValue([]);
+    getQuoteEvidence.mockResolvedValue(new Map([["UPST", quoteEvidence(30, requestStartedAt)]]));
+
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, requestStartedAt, () => evaluationTime);
+
+    expect(results[0]?.result.evidence.session).toBe("CLOSED");
+    expect(results[0]?.result.evidence.quoteIneligibleReason).toBe("MARKET_NOT_IN_REGULAR_SESSION");
+  });
+
+  it("fails closed (never reuses the wrong date's session evidence) when the NY calendar date advances during retrieval", async () => {
+    const requestStartedAt = new Date(`${NY_DATE}T23:59:58-04:00`); // 11:59:58 PM ET
+    const nextNyDate = "2026-06-16";
+    const evaluationTime = new Date(`${nextNyDate}T00:00:02-04:00`); // retrieval crossed NY midnight
+    getPositions.mockResolvedValue([]);
+    // Session evidence was requested and returned for the ORIGINAL (now-stale) NY date.
+    getSessionEvidence.mockResolvedValue({ ...SESSION, requestedDate: NY_DATE, returnedDate: NY_DATE });
+    getQuoteEvidence.mockResolvedValue(new Map([["UPST", quoteEvidence(30, requestStartedAt)]]));
+
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, requestStartedAt, () => evaluationTime);
+
+    expect(results[0]?.result.evidence.session).toBe("UNAVAILABLE");
+    expect(results[0]?.result.evidence.quoteIneligibleReason).toBe("SESSION_EVIDENCE_UNAVAILABLE");
+  });
+
+  it("still evaluates correctly when the NY date does NOT change during retrieval (no false-positive fail-closed)", async () => {
+    const requestStartedAt = NOON;
+    const evaluationTime = new Date(NOON.getTime() + 3_000); // a few seconds later, same NY date
+    getPositions.mockResolvedValue([]);
+    getQuoteEvidence.mockResolvedValue(new Map([["UPST", quoteEvidence(30, evaluationTime)]]));
+
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign({ accountId: "account-2" })], [manualAccount], 3, requestStartedAt, () => evaluationTime);
+
+    expect(results[0]?.result.evidence.session).toBe("OPEN");
+    expect(results[0]?.result.action).toBe("COMFORTABLE");
+  });
+
+  it("defaults the clock to the supplied `now` when no explicit clock is given - fully backward compatible", async () => {
+    getPositions.mockResolvedValue([]);
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.explanation.quoteAgeMs).toBe(0);
+  });
+
+  it("resolveSortedPositionReviewsForUser forwards the injectable clock through to evaluation", async () => {
+    const requestStartedAt = new Date(`${NY_DATE}T15:59:59-04:00`);
+    const evaluationTime = new Date(`${NY_DATE}T16:00:05-04:00`);
+    getPositions.mockResolvedValue([]);
+    getQuoteEvidence.mockResolvedValue(new Map([["UPST", quoteEvidence(30, requestStartedAt)]]));
+
+    const results = await resolveSortedPositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, requestStartedAt, () => evaluationTime);
+
+    expect(results[0]?.result.evidence.session).toBe("CLOSED");
+  });
+});

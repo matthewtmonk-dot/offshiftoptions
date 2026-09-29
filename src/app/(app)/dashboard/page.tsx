@@ -396,7 +396,10 @@ async function PositionsToReviewWithStatus({
   limit: number;
 }) {
   const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
-  const reviews = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, asOf);
+  // Codex P1 (B8) - `asOf` selects which NY date to request session evidence for; the real
+  // evaluation instant is captured fresh AFTER resolvePositionReviewsForUser's own retrieval
+  // completes, never reused from before this page even started fetching.
+  const reviews = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
   const reviewsByCampaignId = new Map(reviews.map((entry) => [entry.campaignId, entry.result]));
   const sortedRows = sortPositionToReviewDisplayRows(attachPositionReviews(rows, reviewsByCampaignId));
   const visibleRows = sortedRows.slice(0, limit);
