@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/providers/market-data/types";
 import { getSchwabMarketDataProviderForUser } from "./broker-connections";
 import { mapWithConcurrency } from "./concurrency";
 
@@ -59,4 +60,61 @@ export async function getLiveQuotePricesForUser(userId: string, tickers: string[
 
   uniqueTickers.forEach((ticker, index) => prices.set(ticker, results[index]));
   return prices;
+}
+
+/**
+ * Dashboard V2 Phase 2 - user-scoped, never-throwing fetch of the stricter QuoteReviewEvidence
+ * for a batch of tickers, mirroring getQuoteSnapshotsForUser's own connection-resolution and
+ * concurrency pattern. A missing connection, a resolution failure, or a per-symbol provider
+ * error each map to `{ status: "UNAVAILABLE", reason }` - never thrown, never a fabricated price.
+ */
+export async function getQuoteReviewEvidenceForUser(userId: string, tickers: string[]): Promise<Map<string, QuoteReviewEvidence>> {
+  const uniqueTickers = [...new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
+  const unavailable = (reason: string): QuoteReviewEvidence => ({ status: "UNAVAILABLE", reason });
+  const evidence = new Map<string, QuoteReviewEvidence>(uniqueTickers.map((ticker) => [ticker, unavailable("Not yet evaluated.")]));
+  if (!uniqueTickers.length) return evidence;
+
+  try {
+    const provider = await getSchwabMarketDataProviderForUser(userId);
+    if (!provider) {
+      uniqueTickers.forEach((ticker) => evidence.set(ticker, unavailable("No Schwab market-data connection available.")));
+      return evidence;
+    }
+
+    const results = await mapWithConcurrency(uniqueTickers, 4, async (ticker) => {
+      if (!provider.getQuoteReviewEvidence) {
+        return unavailable("Provider does not support review-evidence quotes.");
+      }
+      try {
+        return await provider.getQuoteReviewEvidence(ticker);
+      } catch (error) {
+        return unavailable(error instanceof Error ? error.message : "Schwab quote review evidence request failed.");
+      }
+    });
+    uniqueTickers.forEach((ticker, index) => evidence.set(ticker, results[index]));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Schwab connection resolution failed.";
+    uniqueTickers.forEach((ticker) => evidence.set(ticker, unavailable(reason)));
+  }
+  return evidence;
+}
+
+/**
+ * Dashboard V2 Phase 2 - user-scoped, never-throwing fetch of equity regular-session evidence for
+ * one NY calendar date. A missing connection or a provider failure maps to
+ * `{ status: "UNAVAILABLE", reason }` - never thrown, and never re-interpreted as "market closed."
+ */
+export async function getEquityMarketSessionEvidenceForUser(userId: string, nyDate: string): Promise<EquityMarketSessionEvidence> {
+  try {
+    const provider = await getSchwabMarketDataProviderForUser(userId);
+    if (!provider) {
+      return { status: "UNAVAILABLE", reason: "No Schwab market-data connection available." };
+    }
+    if (!provider.getEquityMarketSessionEvidence) {
+      return { status: "UNAVAILABLE", reason: "Provider does not support equity market-session evidence." };
+    }
+    return await provider.getEquityMarketSessionEvidence(nyDate);
+  } catch (error) {
+    return { status: "UNAVAILABLE", reason: error instanceof Error ? error.message : "Schwab market-session request failed." };
+  }
 }

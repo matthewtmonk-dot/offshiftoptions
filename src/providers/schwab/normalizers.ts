@@ -1,4 +1,12 @@
-import type { MarketQuote, OptionContractSnapshot, PriceCandle } from "@/providers/market-data/types";
+import type {
+  EquityMarketSessionEvidence,
+  EquityRegularSessionInterval,
+  MarketQuote,
+  OptionContractSnapshot,
+  PriceCandle,
+  QuoteReviewEvidence,
+} from "@/providers/market-data/types";
+import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -140,6 +148,146 @@ export function normalizeSchwabMarketHours(payload: unknown) {
     isOpen,
     opensAt: opensAt ?? undefined,
     closesAt: closesAt ?? undefined,
+  };
+}
+
+export type SchwabQuoteReviewTransportEvidence = {
+  /** This app's own observation of when the request/response happened - never substituted for
+   * the provider's own quote.tradeTime. */
+  requestStartedAt: Date;
+  responseReceivedAt: Date;
+};
+
+/**
+ * Dashboard V2 Phase 2 - ADDITIVE producer of QuoteReviewEvidence from a Schwab `/quotes`
+ * response. Deliberately separate from normalizeSchwabQuoteRecord above: that function's price
+ * and timestamp are each chosen from independent fallback chains (quote.lastPrice ??
+ * regular.regularMarketLastPrice ?? quote.mark ?? quote.closePrice, paired independently with
+ * quote.quoteTimeInLong ?? regular.regularMarketTradeTimeInLong) - exactly the defect this
+ * evidence type exists to avoid. This function reads ONLY quote.lastPrice + quote.tradeTime as a
+ * single atomic pair; if either is absent/invalid, the whole result is UNAVAILABLE, with no
+ * fallback to any other field (not quoteTime, not regular.regularMarketTradeTime, not mark, not
+ * closePrice, not extended-hours prices - a live capture showed regular.regularMarketTradeTime
+ * reporting ~20:00 ET on an after-hours capture, so it must never be trusted as a regular-session
+ * trade time).
+ *
+ * Symbol matching: looks the record up by the exact `requestedSymbol` key - never Schwab's own
+ * first-object-in-payload fallback (unlike normalizeSchwabQuoteResponse above) - and additionally
+ * requires the record's own `symbol` field to equal `requestedSymbol` exactly (no case-folding).
+ * Either check failing means UNAVAILABLE, never a substituted record.
+ */
+export function normalizeSchwabQuoteReviewEvidence(
+  requestedSymbol: string,
+  payload: unknown,
+  transport: SchwabQuoteReviewTransportEvidence,
+): QuoteReviewEvidence {
+  const record = objectValue(objectValue(payload)?.[requestedSymbol]);
+  if (!record) {
+    return { status: "UNAVAILABLE", reason: `No Schwab quote record found for symbol "${requestedSymbol}".` };
+  }
+
+  const returnedSymbol = stringValue(record.symbol);
+  if (returnedSymbol === null || returnedSymbol !== requestedSymbol) {
+    return {
+      status: "UNAVAILABLE",
+      reason: `Schwab quote record symbol "${returnedSymbol ?? "missing"}" did not exactly match the requested symbol "${requestedSymbol}".`,
+    };
+  }
+
+  const quote = objectValue(record.quote);
+  const price = numberValue(quote?.lastPrice);
+  const tradeTimeEpochMs = numberValue(quote?.tradeTime);
+  if (price === null || tradeTimeEpochMs === null) {
+    return {
+      status: "UNAVAILABLE",
+      reason: `Schwab quote for "${requestedSymbol}" is missing an atomic quote.lastPrice/quote.tradeTime pair.`,
+    };
+  }
+
+  return {
+    status: "AVAILABLE",
+    requestedSymbol,
+    returnedSymbol,
+    assetMainType: stringValue(record.assetMainType),
+    realtime: typeof record.realtime === "boolean" ? record.realtime : null,
+    price,
+    tradeTime: new Date(tradeTimeEpochMs),
+    requestStartedAt: transport.requestStartedAt,
+    responseReceivedAt: transport.responseReceivedAt,
+  };
+}
+
+/**
+ * Dashboard V2 Phase 2 - ADDITIVE producer of EquityMarketSessionEvidence from a Schwab
+ * `/markets?markets=equity` response. Deliberately separate from normalizeSchwabMarketHours
+ * above: that function assumes a flat shape, falls back to `firstObjectValue(payload)` when
+ * `equity` is absent, and only ever reads `regularHours[0]` - exactly the risks this evidence
+ * type exists to avoid. This function parses ONLY through `equity.EQ`, validates every
+ * regularMarket interval (never just the first), and returns UNAVAILABLE - never "closed" - for
+ * any malformed, missing, or contradictory shape.
+ */
+export function normalizeSchwabEquityMarketSessionEvidence(requestedNyDate: string, payload: unknown): EquityMarketSessionEvidence {
+  const equity = objectValue(objectValue(payload)?.equity);
+  const eq = objectValue(equity?.EQ);
+  if (!eq) {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours payload did not include equity.EQ." };
+  }
+
+  const returnedDate = stringValue(eq.date);
+  if (returnedDate === null || returnedDate !== requestedNyDate) {
+    return {
+      status: "UNAVAILABLE",
+      reason: `Schwab market-hours date "${returnedDate ?? "missing"}" did not match the requested date "${requestedNyDate}".`,
+    };
+  }
+
+  const marketType = stringValue(eq.marketType);
+  if (marketType !== "EQUITY") {
+    return { status: "UNAVAILABLE", reason: `Unexpected Schwab market-hours marketType "${marketType ?? "missing"}".` };
+  }
+
+  const product = stringValue(eq.product);
+  if (product !== "EQ") {
+    return { status: "UNAVAILABLE", reason: `Unexpected Schwab market-hours product "${product ?? "missing"}".` };
+  }
+
+  if (typeof eq.isOpen !== "boolean") {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours isOpen was not an actual boolean." };
+  }
+
+  const regularMarketRaw = arrayValue(objectValue(eq.sessionHours)?.regularMarket);
+  const intervals: EquityRegularSessionInterval[] = [];
+  for (const item of regularMarketRaw) {
+    const interval = objectValue(item);
+    const start = dateValue(interval?.start);
+    const end = dateValue(interval?.end);
+    if (!start || !end || start.getTime() >= end.getTime()) {
+      return { status: "UNAVAILABLE", reason: "Schwab market-hours reported a regular-session interval with an invalid start/end." };
+    }
+    if (nyCalendarDateOf(start) !== requestedNyDate) {
+      return {
+        status: "UNAVAILABLE",
+        reason: "Schwab market-hours reported a regular-session interval that does not belong to the requested NY date.",
+      };
+    }
+    intervals.push({ start, end });
+  }
+
+  const sortedIntervals = [...intervals].sort((a, b) => a.start.getTime() - b.start.getTime());
+  for (let i = 1; i < sortedIntervals.length; i += 1) {
+    if (sortedIntervals[i]!.start.getTime() < sortedIntervals[i - 1]!.end.getTime()) {
+      return { status: "UNAVAILABLE", reason: "Schwab market-hours reported overlapping regular-session intervals." };
+    }
+  }
+
+  return {
+    status: "AVAILABLE",
+    requestedDate: requestedNyDate,
+    returnedDate,
+    marketType,
+    product,
+    isOpen: eq.isOpen,
+    regularMarketIntervals: sortedIntervals,
   };
 }
 

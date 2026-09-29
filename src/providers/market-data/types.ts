@@ -68,6 +68,58 @@ export type OptionChainRequest = {
   contractType?: "PUT" | "CALL" | "ALL";
 };
 
+/**
+ * Dashboard V2 Phase 2 - an ADDITIVE, stricter evidence contract for position-review advisory
+ * status. Deliberately NOT a replacement for MarketQuote (which many existing, unrelated
+ * consumers already trust) - MarketQuote's own fallback chains and `asOf` semantics are
+ * unchanged by this type's existence. This type exists because MarketQuote's `asOf` is already a
+ * fallback-chain result (quoteTimeInLong ?? regularMarketTradeTimeInLong ?? ...) and carries no
+ * asset-identity/realtime evidence at all - exactly what a colored advisory status needs and
+ * MarketQuote was never designed to prove.
+ *
+ * `price` and `tradeTime` MUST be selected atomically from the SAME source field pair (Schwab:
+ * quote.lastPrice + quote.tradeTime) - never independently-chosen fallbacks. See
+ * src/domain/finance/quoteEvidence.ts for the eligibility rules built on this type, and
+ * src/providers/schwab/normalizers.ts's normalizeSchwabQuoteReviewEvidence for the one producer.
+ */
+export type QuoteReviewEvidence =
+  | {
+      status: "AVAILABLE";
+      requestedSymbol: string;
+      returnedSymbol: string;
+      assetMainType: string | null;
+      realtime: boolean | null;
+      /** The exact price/time pair, selected atomically - never re-paired with any other field. */
+      price: number;
+      tradeTime: Date;
+      /** This app's own observation evidence - never substituted for `tradeTime` above. */
+      requestStartedAt: Date;
+      responseReceivedAt: Date;
+    }
+  | { status: "UNAVAILABLE"; reason: string };
+
+export type EquityRegularSessionInterval = { start: Date; end: Date };
+
+/**
+ * Dashboard V2 Phase 2 - full, unflattened equity regular-session evidence for exactly one
+ * requested America/New_York calendar date. Deliberately NOT a replacement for
+ * MarketDataProvider.getMarketHours (the existing flattened {isOpen, opensAt, closesAt} shape,
+ * still used by fundamentals-diagnostic.ts) - this type preserves every regularMarket interval
+ * (never just index 0) so a position-review evaluator can validate session membership itself
+ * rather than trusting a single pre-selected open/close pair.
+ */
+export type EquityMarketSessionEvidence =
+  | {
+      status: "AVAILABLE";
+      requestedDate: string;
+      returnedDate: string;
+      marketType: string;
+      product: string;
+      isOpen: boolean;
+      regularMarketIntervals: EquityRegularSessionInterval[];
+    }
+  | { status: "UNAVAILABLE"; reason: string };
+
 export interface MarketDataProvider {
   getQuote(symbol: string): Promise<MarketQuote>;
   /**
@@ -85,4 +137,12 @@ export interface MarketDataProvider {
   getOptionChain(symbol: string, request?: OptionChainRequest): Promise<OptionContractSnapshot[]>;
   getInstrument(symbol: string): Promise<{ symbol: string; description: string; assetType: string }>;
   getMarketHours(date: Date): Promise<{ isOpen: boolean; opensAt?: Date; closesAt?: Date }>;
+  /** Dashboard V2 Phase 2 - the stricter, additive review-evidence quote path (see
+   * QuoteReviewEvidence above). Optional so no existing provider/mock is broken by its addition;
+   * a provider that omits this simply can never produce an active colored advisory (positionReview
+   * treats the missing capability as UNAVAILABLE evidence, never a guess). */
+  getQuoteReviewEvidence?(symbol: string): Promise<QuoteReviewEvidence>;
+  /** Dashboard V2 Phase 2 - full equity regular-session evidence for one NY calendar date
+   * ("YYYY-MM-DD"). Optional for the same reason as getQuoteReviewEvidence above. */
+  getEquityMarketSessionEvidence?(nyDate: string): Promise<EquityMarketSessionEvidence>;
 }

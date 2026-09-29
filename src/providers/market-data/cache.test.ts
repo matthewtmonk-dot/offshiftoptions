@@ -183,4 +183,94 @@ describe("withMarketDataCache", () => {
       expect(inner.getOptionChain).toHaveBeenCalledWith("NKE", request);
     });
   });
+
+  describe("getQuoteReviewEvidence (Dashboard V2 Phase 2)", () => {
+    function reviewEvidence(price: number, tradeTime: Date) {
+      return {
+        status: "AVAILABLE" as const,
+        requestedSymbol: "SPY",
+        returnedSymbol: "SPY",
+        assetMainType: "EQUITY",
+        realtime: true,
+        price,
+        tradeTime,
+        requestStartedAt: tradeTime,
+        responseReceivedAt: tradeTime,
+      };
+    }
+
+    it("resolves to UNAVAILABLE, never throws, when the underlying provider does not implement it", async () => {
+      const inner = provider(); // no getQuoteReviewEvidence override
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      await expect(cached.getQuoteReviewEvidence("SPY")).resolves.toEqual({ status: "UNAVAILABLE", reason: expect.any(String) });
+    });
+
+    it("caches a fetched evidence object and serves the identical object on a hit - never renewing its timestamps", async () => {
+      const evidence = reviewEvidence(500, new Date("2026-06-15T16:00:00Z"));
+      const getQuoteReviewEvidence = vi.fn(async () => evidence);
+      const inner = provider({ getQuoteReviewEvidence });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one", { quoteReviewEvidenceTtlMs: 30_000 });
+
+      const first = await cached.getQuoteReviewEvidence("spy");
+      const second = await cached.getQuoteReviewEvidence("SPY");
+
+      expect(getQuoteReviewEvidence).toHaveBeenCalledTimes(1);
+      expect(second).toBe(first); // same object reference - a cache hit can't drift the evidence
+      if (second.status === "AVAILABLE") {
+        expect(second.tradeTime.getTime()).toBe(new Date("2026-06-15T16:00:00Z").getTime());
+      }
+    });
+
+    it("does not share cache entries across provider keys", async () => {
+      const firstEvidence = reviewEvidence(500, new Date("2026-06-15T16:00:00Z"));
+      const secondEvidence = reviewEvidence(600, new Date("2026-06-15T16:00:00Z"));
+      const firstProvider = provider({ getQuoteReviewEvidence: vi.fn(async () => firstEvidence) });
+      const secondProvider = provider({ getQuoteReviewEvidence: vi.fn(async () => secondEvidence) });
+
+      const firstCached = withMarketDataCache(firstProvider, "schwab:user:user-a:connection:one");
+      const secondCached = withMarketDataCache(secondProvider, "schwab:user:user-b:connection:two");
+
+      await expect(firstCached.getQuoteReviewEvidence("SPY")).resolves.toMatchObject({ price: 500 });
+      await expect(secondCached.getQuoteReviewEvidence("SPY")).resolves.toMatchObject({ price: 600 });
+    });
+  });
+
+  describe("getEquityMarketSessionEvidence (Dashboard V2 Phase 2)", () => {
+    function sessionEvidence(nyDate: string) {
+      return {
+        status: "AVAILABLE" as const,
+        requestedDate: nyDate,
+        returnedDate: nyDate,
+        marketType: "EQUITY",
+        product: "EQ",
+        isOpen: true,
+        regularMarketIntervals: [{ start: new Date(`${nyDate}T09:30:00-04:00`), end: new Date(`${nyDate}T16:00:00-04:00`) }],
+      };
+    }
+
+    it("resolves to UNAVAILABLE, never throws, when the underlying provider does not implement it", async () => {
+      const inner = provider();
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      await expect(cached.getEquityMarketSessionEvidence("2026-06-15")).resolves.toEqual({
+        status: "UNAVAILABLE",
+        reason: expect.any(String),
+      });
+    });
+
+    it("caches per requested NY date and serves the identical object on a hit", async () => {
+      const evidence = sessionEvidence("2026-06-15");
+      const getEquityMarketSessionEvidence = vi.fn(async () => evidence);
+      const inner = provider({ getEquityMarketSessionEvidence });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      const first = await cached.getEquityMarketSessionEvidence("2026-06-15");
+      const second = await cached.getEquityMarketSessionEvidence("2026-06-15");
+      await cached.getEquityMarketSessionEvidence("2026-06-16"); // a different date must refetch
+
+      expect(getEquityMarketSessionEvidence).toHaveBeenCalledTimes(2);
+      expect(second).toBe(first);
+    });
+  });
 });

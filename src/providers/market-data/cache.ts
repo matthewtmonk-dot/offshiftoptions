@@ -1,4 +1,4 @@
-import type { MarketDataProvider, MarketQuote } from "./types";
+import type { EquityMarketSessionEvidence, MarketDataProvider, MarketQuote, QuoteReviewEvidence } from "./types";
 
 type CacheEntry<T> = {
   expiresAt: number;
@@ -11,6 +11,15 @@ type CachePolicy = {
   optionChainTtlMs?: number;
   instrumentTtlMs?: number;
   marketHoursTtlMs?: number;
+  /** Dashboard V2 Phase 2 - deliberately much shorter than quoteTtlMs: this evidence feeds a
+   * 120-second-freshness colored advisory, so serving a stale cache entry for too long would
+   * itself become a freshness problem. A cache HIT still returns the exact same evidence object
+   * with its original tradeTime/requestStartedAt/responseReceivedAt untouched - it never renews
+   * freshness, it only avoids re-fetching within this short window. */
+  quoteReviewEvidenceTtlMs?: number;
+  /** Session evidence for a given NY calendar date is effectively immutable once Schwab reports
+   * it, so this can share marketHoursTtlMs's own conservative default rather than needing its own. */
+  equityMarketSessionEvidenceTtlMs?: number;
   now?: () => number;
 };
 
@@ -29,10 +38,15 @@ export class MarketDataProviderError extends Error {
 const cache = new Map<string, CacheEntry<unknown>>();
 const inFlight = new Map<string, Promise<unknown>>();
 
-/** The wrapper always implements getQuotes (see below), even when the underlying provider
- * doesn't - callers that go through withMarketDataCache can rely on it being present. */
+/** The wrapper always implements getQuotes, getQuoteReviewEvidence, and
+ * getEquityMarketSessionEvidence (see below), even when the underlying provider doesn't -
+ * callers that go through withMarketDataCache can rely on all three being present. A provider
+ * that omits the latter two simply always resolves to UNAVAILABLE evidence for them - never a
+ * guess, and never a thrown error. */
 export type CachedMarketDataProvider = MarketDataProvider & {
   getQuotes(symbols: string[]): Promise<Map<string, MarketQuote>>;
+  getQuoteReviewEvidence(symbol: string): Promise<QuoteReviewEvidence>;
+  getEquityMarketSessionEvidence(nyDate: string): Promise<EquityMarketSessionEvidence>;
 };
 
 export function withMarketDataCache(
@@ -47,6 +61,8 @@ export function withMarketDataCache(
     optionChain: policy.optionChainTtlMs ?? 30_000,
     instrument: policy.instrumentTtlMs ?? 24 * 60 * 60_000,
     marketHours: policy.marketHoursTtlMs ?? 5 * 60_000,
+    quoteReviewEvidence: policy.quoteReviewEvidenceTtlMs ?? 5_000,
+    equityMarketSessionEvidence: policy.equityMarketSessionEvidenceTtlMs ?? 5 * 60_000,
   };
 
   return {
@@ -115,6 +131,32 @@ export function withMarketDataCache(
     getMarketHours(date) {
       return cached(`${providerKey}:hours:${date.toISOString().slice(0, 10)}`, ttl.marketHours, now, () =>
         provider.getMarketHours(date),
+      );
+    },
+    /**
+     * Dashboard V2 Phase 2. A provider that doesn't implement the underlying capability resolves
+     * to UNAVAILABLE directly - never cached (there's nothing to cache), never thrown - so
+     * positionReview always gets a definite answer. A cache HIT returns the exact same
+     * QuoteReviewEvidence object `cached()` already stored - its tradeTime/requestStartedAt/
+     * responseReceivedAt are never touched or re-derived on a hit.
+     */
+    getQuoteReviewEvidence(symbol) {
+      if (!provider.getQuoteReviewEvidence) {
+        return Promise.resolve({ status: "UNAVAILABLE", reason: "Provider does not support review-evidence quotes." });
+      }
+      return cached(`${providerKey}:reviewEvidence:${symbol.toUpperCase()}`, ttl.quoteReviewEvidence, now, () =>
+        provider.getQuoteReviewEvidence!(symbol),
+      );
+    },
+    /** Dashboard V2 Phase 2 - same UNAVAILABLE-when-unsupported contract as getQuoteReviewEvidence
+     * above; a cache hit returns the same evidence object, preserving its original interval
+     * instants untouched. */
+    getEquityMarketSessionEvidence(nyDate) {
+      if (!provider.getEquityMarketSessionEvidence) {
+        return Promise.resolve({ status: "UNAVAILABLE", reason: "Provider does not support equity market-session evidence." });
+      }
+      return cached(`${providerKey}:marketSession:${nyDate}`, ttl.equityMarketSessionEvidence, now, () =>
+        provider.getEquityMarketSessionEvidence!(nyDate),
       );
     },
   };

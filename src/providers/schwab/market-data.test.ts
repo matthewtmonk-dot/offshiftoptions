@@ -219,3 +219,70 @@ describe("SchwabMarketDataProvider.getOptionChain (request narrowing)", () => {
     expect(params.has("toDate")).toBe(false);
   });
 });
+
+describe("SchwabMarketDataProvider.getQuoteReviewEvidence", () => {
+  it("requests only the quote field group and returns AVAILABLE evidence for a coherent payload", async () => {
+    const urls: URL[] = [];
+    const fetchFn = (async (url: string | URL) => {
+      urls.push(new URL(url));
+      return jsonResponse({
+        SPY: { assetMainType: "EQUITY", symbol: "SPY", realtime: true, quote: { lastPrice: 668.73, tradeTime: 1_780_000_000_000 } },
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+    const evidence = await provider.getQuoteReviewEvidence("spy");
+
+    expect(urls[0].searchParams.get("symbols")).toBe("SPY");
+    expect(urls[0].searchParams.get("fields")).toBe("quote");
+    expect(evidence).toMatchObject({ status: "AVAILABLE", requestedSymbol: "SPY", returnedSymbol: "SPY", price: 668.73 });
+    if (evidence.status === "AVAILABLE") {
+      expect(evidence.requestStartedAt).toBeInstanceOf(Date);
+      expect(evidence.responseReceivedAt).toBeInstanceOf(Date);
+      expect(evidence.responseReceivedAt.getTime()).toBeGreaterThanOrEqual(evidence.requestStartedAt.getTime());
+    }
+  });
+
+  it("is UNAVAILABLE when the requested symbol has no usable evidence - never throws", async () => {
+    const fetchFn = (async () => jsonResponse({})) as unknown as typeof fetch;
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+
+    const evidence = await provider.getQuoteReviewEvidence("NOPRICE");
+    expect(evidence.status).toBe("UNAVAILABLE");
+  });
+});
+
+describe("SchwabMarketDataProvider.getEquityMarketSessionEvidence", () => {
+  it("requests only equity markets for the given date and parses through equity.EQ", async () => {
+    const urls: URL[] = [];
+    const fetchFn = (async (url: string | URL) => {
+      urls.push(new URL(url));
+      return jsonResponse({
+        equity: {
+          EQ: {
+            date: "2026-06-15",
+            marketType: "EQUITY",
+            product: "EQ",
+            isOpen: true,
+            sessionHours: { regularMarket: [{ start: "2026-06-15T09:30:00-04:00", end: "2026-06-15T16:00:00-04:00" }] },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+    const evidence = await provider.getEquityMarketSessionEvidence("2026-06-15");
+
+    expect(urls[0].searchParams.get("markets")).toBe("equity");
+    expect(urls[0].searchParams.get("date")).toBe("2026-06-15");
+    expect(evidence.status).toBe("AVAILABLE");
+  });
+
+  it("is UNAVAILABLE, never MARKET CLOSED, for a malformed payload", async () => {
+    const fetchFn = (async () => jsonResponse({})) as unknown as typeof fetch;
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+
+    const evidence = await provider.getEquityMarketSessionEvidence("2026-06-15");
+    expect(evidence.status).toBe("UNAVAILABLE");
+  });
+});

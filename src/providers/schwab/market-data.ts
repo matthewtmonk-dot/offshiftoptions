@@ -1,15 +1,23 @@
 import "server-only";
 
-import type { MarketDataProvider, MarketQuote, OptionChainRequest } from "@/providers/market-data/types";
+import type {
+  EquityMarketSessionEvidence,
+  MarketDataProvider,
+  MarketQuote,
+  OptionChainRequest,
+  QuoteReviewEvidence,
+} from "@/providers/market-data/types";
 import { SCHWAB_MARKET_DATA_BASE_URL } from "./config";
 import { schwabGetJson, type SchwabFetch } from "./client";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import {
+  normalizeSchwabEquityMarketSessionEvidence,
   normalizeSchwabInstrument,
   normalizeSchwabMarketHours,
   normalizeSchwabOptionChainResponse,
   normalizeSchwabPriceHistoryResponse,
   normalizeSchwabQuoteResponse,
+  normalizeSchwabQuoteReviewEvidence,
   normalizeSchwabQuotesResponse,
 } from "./normalizers";
 
@@ -173,6 +181,42 @@ export class SchwabMarketDataProvider implements MarketDataProvider {
     });
 
     return normalizeSchwabMarketHours(payload);
+  }
+
+  /**
+   * Dashboard V2 Phase 2 - the stricter review-evidence quote path (see QuoteReviewEvidence's own
+   * doc comment). Deliberately its OWN request rather than reusing getQuote's cached/broader
+   * "quote,reference,regular,fundamental" fields call - this path only ever needs the `quote`
+   * group (assetMainType/realtime/symbol are returned by Schwab regardless of the fields param),
+   * and captures this app's own request/response timestamps around the call for
+   * QuoteReviewEvidence's requestStartedAt/responseReceivedAt (never substituted for the
+   * provider's own quote.tradeTime).
+   */
+  async getQuoteReviewEvidence(symbol: string): Promise<QuoteReviewEvidence> {
+    const normalized = symbol.toUpperCase();
+    const requestStartedAt = new Date();
+    const payload = await this.get("/quotes", {
+      symbols: normalized,
+      fields: "quote",
+    });
+    const responseReceivedAt = new Date();
+
+    return normalizeSchwabQuoteReviewEvidence(normalized, payload, { requestStartedAt, responseReceivedAt });
+  }
+
+  /**
+   * Dashboard V2 Phase 2 - full, unflattened equity regular-session evidence for one NY calendar
+   * date (see EquityMarketSessionEvidence's own doc comment). Deliberately its own request rather
+   * than reusing getMarketHours's "equity,option" call - this path only needs equity sessions,
+   * and normalizeSchwabEquityMarketSessionEvidence parses the shape strictly through equity.EQ.
+   */
+  async getEquityMarketSessionEvidence(nyDate: string): Promise<EquityMarketSessionEvidence> {
+    const payload = await this.get("/markets", {
+      markets: "equity",
+      date: nyDate,
+    });
+
+    return normalizeSchwabEquityMarketSessionEvidence(nyDate, payload);
   }
 
   private async get(path: string, params: Record<string, string>) {
