@@ -11,7 +11,9 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // scripts/**/*.test.ts added only for the temporary schwab-evidence-diagnostic branch's own
+    // sanitizer dry-run tests - never merged to main.
+    include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
     restoreMocks: true,
   },
 });
