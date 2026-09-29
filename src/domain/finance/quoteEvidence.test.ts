@@ -113,8 +113,23 @@ describe("evaluateQuoteEligibility", () => {
   describe("rule 6 - timestamp not in the future", () => {
     it("rejects a tradeTime after `now`", () => {
       const future = new Date(NOON.getTime() + 1000);
-      const result = evaluateQuoteEligibility(baseEvidence({ tradeTime: future }), ordinarySession(), NOON);
+      // responseReceivedAt is bumped to match so this isolates the now-vs-tradeTime check from
+      // the separate tradeTime-vs-responseReceivedAt chronology check (rule 5b).
+      const result = evaluateQuoteEligibility(baseEvidence({ tradeTime: future, responseReceivedAt: future }), ordinarySession(), NOON);
       expect(result).toEqual({ eligible: false, reason: "FUTURE_TIMESTAMP" });
+    });
+  });
+
+  describe("rule 5b - transport chronology (tradeTime vs. responseReceivedAt)", () => {
+    it("rejects a tradeTime reported after the response that carried it was received", () => {
+      const tradeTime = new Date(NOON.getTime() + 5000);
+      const result = evaluateQuoteEligibility(baseEvidence({ tradeTime, responseReceivedAt: NOON }), ordinarySession(), tradeTime);
+      expect(result).toEqual({ eligible: false, reason: "TRADE_TIME_AFTER_RESPONSE_RECEIVED" });
+    });
+
+    it("is eligible when tradeTime exactly equals responseReceivedAt", () => {
+      const result = evaluateQuoteEligibility(baseEvidence({ tradeTime: NOON, responseReceivedAt: NOON }), ordinarySession(), NOON);
+      expect(result.eligible).toBe(true);
     });
   });
 
@@ -142,7 +157,7 @@ describe("evaluateQuoteEligibility", () => {
       const afterHours = new Date(`${NY_DATE}T20:00:00-04:00`);
       // Mirrors the live-capture risk: a coherent lastPrice/tradeTime pair observed after-hours
       // must never produce an active advisory just because the pair is internally consistent.
-      const result = evaluateQuoteEligibility(baseEvidence({ tradeTime: afterHours }), ordinarySession(), afterHours);
+      const result = evaluateQuoteEligibility(baseEvidence({ tradeTime: afterHours, responseReceivedAt: afterHours }), ordinarySession(), afterHours);
       expect(result).toEqual({ eligible: false, reason: "MARKET_NOT_IN_REGULAR_SESSION" });
     });
 
@@ -159,6 +174,52 @@ describe("evaluateQuoteEligibility", () => {
       const tradeBeforeOpen = new Date(SESSION_OPEN.getTime() - 60_000);
       const result = evaluateQuoteEligibility(baseEvidence({ tradeTime: tradeBeforeOpen }), ordinarySession(), SESSION_OPEN);
       expect(result).toEqual({ eligible: false, reason: "TRADE_TIME_OUTSIDE_SESSION" });
+    });
+
+    it("rejects a trade from an earlier session interval once evaluation time has moved into a later interval (Codex P1 B4)", () => {
+      // Two regular-session intervals with a trading-halt gap between them - the trade happened
+      // in the FIRST interval and is still well within the 120s freshness window relative to
+      // `now`, but `now` has already moved into the SECOND interval. Being "in some interval" on
+      // each side independently is not enough - they must be the SAME interval.
+      const haltSession: EquityMarketSessionEvidence = {
+        status: "AVAILABLE",
+        requestedDate: NY_DATE,
+        returnedDate: NY_DATE,
+        marketType: "EQUITY",
+        product: "EQ",
+        isOpen: true,
+        regularMarketIntervals: [
+          { start: SESSION_OPEN, end: new Date(SESSION_OPEN.getTime() + 60_000) },
+          { start: new Date(SESSION_OPEN.getTime() + 60_001), end: SESSION_CLOSE },
+        ],
+      };
+      const tradeInFirstInterval = new Date(SESSION_OPEN.getTime() + 30_000);
+      const nowInSecondInterval = new Date(SESSION_OPEN.getTime() + 60_500);
+      const result = evaluateQuoteEligibility(
+        baseEvidence({ tradeTime: tradeInFirstInterval, responseReceivedAt: tradeInFirstInterval }),
+        haltSession,
+        nowInSecondInterval,
+      );
+      expect(result).toEqual({ eligible: false, reason: "TRADE_TIME_NOT_IN_SAME_SESSION_INTERVAL_AS_NOW" });
+    });
+
+    it("is eligible when the trade and evaluation time are both within the same interval of a multi-interval session", () => {
+      const haltSession: EquityMarketSessionEvidence = {
+        status: "AVAILABLE",
+        requestedDate: NY_DATE,
+        returnedDate: NY_DATE,
+        marketType: "EQUITY",
+        product: "EQ",
+        isOpen: true,
+        regularMarketIntervals: [
+          { start: SESSION_OPEN, end: new Date(SESSION_OPEN.getTime() + 60_000) },
+          { start: new Date(SESSION_OPEN.getTime() + 60_001), end: SESSION_CLOSE },
+        ],
+      };
+      const trade = new Date(SESSION_OPEN.getTime() + 70_000);
+      const now = new Date(SESSION_OPEN.getTime() + 75_000);
+      const result = evaluateQuoteEligibility(baseEvidence({ tradeTime: trade, responseReceivedAt: trade }), haltSession, now);
+      expect(result.eligible).toBe(true);
     });
 
     it("rejects on a weekend/holiday with no regular-market intervals at all", () => {

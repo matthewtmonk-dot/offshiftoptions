@@ -1,5 +1,5 @@
 import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/providers/market-data/types";
-import { isWithinRegularSession } from "./marketSession";
+import { regularSessionIntervalContaining } from "./marketSession";
 
 /**
  * Dashboard V2 Phase 2 - the approved live-price eligibility contract for a colored advisory
@@ -23,7 +23,9 @@ export type QuoteEligibilityFailureReason =
   | "STALE_TIMESTAMP"
   | "SESSION_EVIDENCE_UNAVAILABLE"
   | "MARKET_NOT_IN_REGULAR_SESSION"
-  | "TRADE_TIME_OUTSIDE_SESSION";
+  | "TRADE_TIME_OUTSIDE_SESSION"
+  | "TRADE_TIME_NOT_IN_SAME_SESSION_INTERVAL_AS_NOW"
+  | "TRADE_TIME_AFTER_RESPONSE_RECEIVED";
 
 export type EligibleQuoteEvidence = Extract<QuoteReviewEvidence, { status: "AVAILABLE" }>;
 
@@ -66,6 +68,13 @@ export function evaluateQuoteEligibility(
   if (!Number.isFinite(evidence.tradeTime.getTime())) {
     return { eligible: false, reason: "INVALID_TIMESTAMP" };
   }
+  // Codex P1 (B4): transport chronology - the provider's own trade time can never be AFTER this
+  // app's own record of when the HTTP response carrying it was received. A trade "in the future"
+  // relative to its own response is internally contradictory evidence (a clock skew or a
+  // corrupted/replayed timestamp), never something evaluation time "catching up" should excuse.
+  if (evidence.tradeTime.getTime() > evidence.responseReceivedAt.getTime()) {
+    return { eligible: false, reason: "TRADE_TIME_AFTER_RESPONSE_RECEIVED" };
+  }
   const ageMs = now.getTime() - evidence.tradeTime.getTime();
   // Rule 6: timestamp not in the future.
   if (ageMs < 0) {
@@ -81,14 +90,21 @@ export function evaluateQuoteEligibility(
   if (sessionEvidence.status !== "AVAILABLE") {
     return { eligible: false, reason: "SESSION_EVIDENCE_UNAVAILABLE" };
   }
-  if (!isWithinRegularSession(sessionEvidence, now)) {
+  const nowInterval = regularSessionIntervalContaining(sessionEvidence, now);
+  if (!nowInterval) {
     return { eligible: false, reason: "MARKET_NOT_IN_REGULAR_SESSION" };
   }
-  // Rule 9: the trade timestamp itself must fall inside THAT SAME regular-session interval -
-  // rejects a premarket/after-hours trade time carried over into a moment when `now` happens to
-  // be in the regular session (the exact after-hours-capture risk the ticket calls out).
-  if (!isWithinRegularSession(sessionEvidence, evidence.tradeTime)) {
+  // Rule 9: the trade timestamp itself must fall inside a regular-session interval...
+  const tradeTimeInterval = regularSessionIntervalContaining(sessionEvidence, evidence.tradeTime);
+  if (!tradeTimeInterval) {
     return { eligible: false, reason: "TRADE_TIME_OUTSIDE_SESSION" };
+  }
+  // Codex P1 (B4): ...and it must be the SAME interval `now` is in, not merely "some" regular
+  // session interval. Without this, a trade in an earlier session interval (before a mid-day
+  // trading halt/resumption gap) could still read as eligible once evaluation time reaches a
+  // LATER interval, purely because each endpoint was checked against the session independently.
+  if (nowInterval.start.getTime() !== tradeTimeInterval.start.getTime() || nowInterval.end.getTime() !== tradeTimeInterval.end.getTime()) {
+    return { eligible: false, reason: "TRADE_TIME_NOT_IN_SAME_SESSION_INTERVAL_AS_NOW" };
   }
   return { eligible: true, evidence, ageMs };
 }

@@ -446,4 +446,68 @@ describe("normalizeSchwabEquityMarketSessionEvidence", () => {
     const result = normalizeSchwabEquityMarketSessionEvidence("2026-06-13", fixture);
     expect(result).toMatchObject({ status: "AVAILABLE", isOpen: false, regularMarketIntervals: [] });
   });
+
+  // Codex P1 (B2): the session parser previously let isOpen and the regularMarket intervals
+  // disagree, silently trusting whichever one it happened to read - both of the tests below prove
+  // a disagreement between the two now fails closed to UNAVAILABLE instead of picking a side.
+  it("is UNAVAILABLE (never a silently-open day) when isOpen: false is reported alongside regular-session intervals", () => {
+    const fixture = ordinaryDayMarketHoursFixture();
+    (fixture.equity.EQ as Record<string, unknown>).isOpen = false;
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  it("is UNAVAILABLE (never silently reinterpreted as CLOSED) when isOpen: true is reported with no regular-session intervals", () => {
+    const fixture = {
+      equity: { EQ: { date: "2026-06-15", marketType: "EQUITY", product: "EQ", isOpen: true, sessionHours: {} } },
+    };
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  it("is UNAVAILABLE when isOpen: true is reported but sessionHours.regularMarket is malformed (not an array)", () => {
+    const fixture = ordinaryDayMarketHoursFixture();
+    (fixture.equity.EQ.sessionHours as Record<string, unknown>).regularMarket = "not-an-array";
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  // Codex P1 (B2): a bare "2026-06-15T09:30:00" with no Z/offset is ambiguous (ECMAScript parses
+  // it as LOCAL time, which depends on the runtime's own timezone) - it must be rejected outright,
+  // never silently accepted the way `new Date()` alone would accept it.
+  it("is UNAVAILABLE when a regular-session interval's start or end has no explicit UTC offset", () => {
+    const missingStartOffset = ordinaryDayMarketHoursFixture();
+    (missingStartOffset.equity.EQ.sessionHours as Record<string, unknown>).regularMarket = [
+      { start: "2026-06-15T09:30:00", end: "2026-06-15T16:00:00-04:00" },
+    ];
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", missingStartOffset).status).toBe("UNAVAILABLE");
+
+    const missingEndOffset = ordinaryDayMarketHoursFixture();
+    (missingEndOffset.equity.EQ.sessionHours as Record<string, unknown>).regularMarket = [
+      { start: "2026-06-15T09:30:00-04:00", end: "2026-06-15T16:00:00" },
+    ];
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", missingEndOffset).status).toBe("UNAVAILABLE");
+  });
+
+  it("accepts a Z-suffixed UTC offset just as validly as a numeric +/-HH:MM offset", () => {
+    const fixture = {
+      equity: {
+        EQ: {
+          date: "2026-06-15",
+          marketType: "EQUITY",
+          product: "EQ",
+          isOpen: true,
+          sessionHours: { regularMarket: [{ start: "2026-06-15T13:30:00Z", end: "2026-06-15T20:00:00Z" }] },
+        },
+      },
+    };
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", fixture).status).toBe("AVAILABLE");
+  });
+
+  it("is UNAVAILABLE when a regular-session interval's END crosses into a different NY calendar date than its start", () => {
+    const fixture = ordinaryDayMarketHoursFixture();
+    // Start is legitimately on 2026-06-15, but end is pushed to 2026-06-16 - only `start` was
+    // checked against the requested date before this fix, letting a malformed `end` slip through.
+    (fixture.equity.EQ.sessionHours as Record<string, unknown>).regularMarket = [
+      { start: "2026-06-15T09:30:00-04:00", end: "2026-06-16T00:30:00-04:00" },
+    ];
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", fixture).status).toBe("UNAVAILABLE");
+  });
 });

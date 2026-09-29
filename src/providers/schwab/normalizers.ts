@@ -255,19 +255,41 @@ export function normalizeSchwabEquityMarketSessionEvidence(requestedNyDate: stri
     return { status: "UNAVAILABLE", reason: "Schwab market-hours isOpen was not an actual boolean." };
   }
 
-  const regularMarketRaw = arrayValue(objectValue(eq.sessionHours)?.regularMarket);
+  // "regularMarket missing/malformed entirely" (not an array at all, or absent) must be told apart
+  // from "regularMarket is a real, empty array" so a genuinely closed day (which legitimately
+  // reports no intervals) is never confused with a structurally broken response on an open day.
+  const sessionHours = objectValue(eq.sessionHours);
+  const regularMarketValue = sessionHours?.regularMarket;
+  const regularMarketIsWellFormedArray = Array.isArray(regularMarketValue);
+  const regularMarketRaw = regularMarketIsWellFormedArray ? regularMarketValue : [];
+
+  // Codex P1 (B2): isOpen and the regularMarket intervals are two independent claims from the
+  // same response - they must agree, never let one silently override the other. isOpen:false with
+  // intervals supplied is a contradiction (which is actually open?); isOpen:true with no
+  // structurally valid intervals is a missing-evidence case - neither is a value shape this
+  // function may reinterpret as CLOSED. Only isOpen:false with NO intervals supplied is genuine,
+  // trustworthy closed-day evidence.
+  if (eq.isOpen === false && regularMarketRaw.length > 0) {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours reported isOpen: false alongside regular-session intervals - contradictory evidence." };
+  }
+  if (eq.isOpen === true && (!regularMarketIsWellFormedArray || regularMarketRaw.length === 0)) {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours reported isOpen: true but no regular-session intervals were present." };
+  }
+
   const intervals: EquityRegularSessionInterval[] = [];
   for (const item of regularMarketRaw) {
     const interval = objectValue(item);
-    const start = dateValue(interval?.start);
-    const end = dateValue(interval?.end);
+    const start = dateValueWithExplicitOffset(interval?.start);
+    const end = dateValueWithExplicitOffset(interval?.end);
     if (!start || !end || start.getTime() >= end.getTime()) {
-      return { status: "UNAVAILABLE", reason: "Schwab market-hours reported a regular-session interval with an invalid start/end." };
+      return { status: "UNAVAILABLE", reason: "Schwab market-hours reported a regular-session interval with an invalid, ambiguous, or backwards start/end." };
     }
-    if (nyCalendarDateOf(start) !== requestedNyDate) {
+    // Codex P1 (B2): BOTH ends must belong to the requested NY calendar date - checking only
+    // `start` let a malformed `end` silently cross into the next NY date.
+    if (nyCalendarDateOf(start) !== requestedNyDate || nyCalendarDateOf(end) !== requestedNyDate) {
       return {
         status: "UNAVAILABLE",
-        reason: "Schwab market-hours reported a regular-session interval that does not belong to the requested NY date.",
+        reason: "Schwab market-hours reported a regular-session interval that does not belong entirely to the requested NY date.",
       };
     }
     intervals.push({ start, end });
@@ -289,6 +311,24 @@ export function normalizeSchwabEquityMarketSessionEvidence(requestedNyDate: stri
     isOpen: eq.isOpen,
     regularMarketIntervals: sortedIntervals,
   };
+}
+
+/**
+ * Codex P1 (B2): a bare "2026-06-15T09:30:00" (no `Z`, no explicit +/-HH:MM offset) is parsed by
+ * `Date` as LOCAL time per the ECMAScript spec - ambiguous and runtime-dependent, exactly the
+ * defect this function exists to reject. Only a string carrying its own explicit offset is
+ * accepted; anything else (including a value that `new Date()` would otherwise happily parse) is
+ * treated as invalid.
+ */
+const EXPLICIT_OFFSET_DATETIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+function dateValueWithExplicitOffset(value: unknown): Date | null {
+  const text = stringValue(value);
+  if (!text || !EXPLICIT_OFFSET_DATETIME_PATTERN.test(text)) {
+    return null;
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function contractsFromMap(mapValue: unknown, optionType: "PUT" | "CALL", fallbackUnderlying: string) {
