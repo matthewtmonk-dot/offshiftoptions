@@ -3,6 +3,7 @@ import { friendlyReportingReason, type AccountReportingSummary } from "@/domain/
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignCurrentStage, type CampaignStatusInput } from "@/domain/finance/campaigns";
+import { comparePositionReviewPriority, type PositionReviewResult } from "@/domain/finance/positionReview";
 import {
   accountValueDetail,
   accountValueUnavailableReason,
@@ -209,26 +210,38 @@ export function positionsToReviewRows(
   });
 }
 
-export type PositionConfirmationStatus = "SCHWAB_CONFIRMED" | "AWAITING_CONFIRMATION" | "NOT_ASSESSED" | "BROKER_UNAVAILABLE";
+/**
+ * Dashboard V2 Phase 2 - merges each factual row with its shared positionReview.ts evaluation, by
+ * campaign id. A row absent from `reviewsByCampaignId` (no leg the shared evaluator could resolve
+ * at all, e.g. a "Review needed" legacy row) gets `review: null` - rendered distinctly, never
+ * defaulted to a guessed status. Supersedes the old positionConfirmationStatus/ConfirmationBadge
+ * pair entirely: PositionReviewResult.evidence.position already carries the same (and more
+ * complete) confirmation states, and keeping both would risk the two disagreeing.
+ */
+export type PositionToReviewDisplayRow = PositionToReviewRow & { review: PositionReviewResult | null };
+
+export function attachPositionReviews(
+  rows: PositionToReviewRow[],
+  reviewsByCampaignId: ReadonlyMap<string, PositionReviewResult>,
+): PositionToReviewDisplayRow[] {
+  return rows.map((row) => ({ ...row, review: reviewsByCampaignId.get(row.campaignId) ?? null }));
+}
 
 /**
- * Astra review finding (non-blocking): the broker-position match (loadDashboardBrokerData,
- * page.tsx) only ever attempts to corroborate a currently-OPEN put against live Schwab data
- * (buildTrackedPuts) - an ASSIGNED row (with or without a covered call) is never a candidate for
- * that match at all, and previously still showed "Awaiting confirmation," implying a check had
- * been attempted and failed rather than "this row type isn't assessed by matching." Also keeps
- * "we tried and found nothing" (AWAITING_CONFIRMATION) distinguishable from "Schwab data wasn't
- * available to check against at all" (BROKER_UNAVAILABLE) - never imply reassurance from missing
- * evidence in either case.
+ * The ticket's own deterministic priority ordering, applied to full display rows rather than bare
+ * PositionReviewResults - callers MUST sort the complete owner-scoped set before truncating for
+ * display (never sort an already-truncated slice). A row with no review (no leg the shared
+ * evaluator could resolve) sorts after every row that does have one - there is nothing to
+ * prioritize it against, so it is treated as the least actionable case rather than guessed into a
+ * priority group.
  */
-export function positionConfirmationStatus(
-  row: { legType: "PUT" | "CALL" | null; campaignId: string },
-  confirmedCampaignIds: ReadonlySet<string>,
-  brokerDataAvailable: boolean,
-): PositionConfirmationStatus {
-  if (row.legType !== "PUT") return "NOT_ASSESSED";
-  if (!brokerDataAvailable) return "BROKER_UNAVAILABLE";
-  return confirmedCampaignIds.has(row.campaignId) ? "SCHWAB_CONFIRMED" : "AWAITING_CONFIRMATION";
+export function sortPositionToReviewDisplayRows<T extends { review: PositionReviewResult | null }>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => {
+    if (a.review && b.review) return comparePositionReviewPriority(a.review, b.review);
+    if (a.review && !b.review) return -1;
+    if (!a.review && b.review) return 1;
+    return 0;
+  });
 }
 
 // ---------------------------------------------------------------------------

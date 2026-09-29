@@ -1,32 +1,34 @@
-import { cache, Suspense } from "react";
+import { Suspense } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
+import { PositionReviewEvidenceLine } from "@/components/position-review-badge";
+import { LivePositionReviewBadge } from "@/components/live-position-review-badge";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { money, shortCalendarDate } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
-import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
-import { getLinkedCampaignIdsBySymbolForUser, brokerPositionLinkKey } from "@/lib/broker-reconciliation";
+import { resolvePositionReviewsForUser } from "@/lib/position-review";
 import { summarizeAccountReporting } from "@/domain/finance/reporting";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { summarizeCampaignExposure, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
-import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign } from "@/domain/finance/campaigns";
-import { matchDashboardPositions, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
+import { getCurrentOpenCall, summarizeCampaign } from "@/domain/finance/campaigns";
+import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { summarizeThisWeek, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import {
   accountValueCard,
+  attachPositionReviews,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
   confirmedTradingPLCard,
   openCampaignsCard,
-  positionConfirmationStatus,
   positionsToReviewRows,
   scannerInsightViewModel,
+  sortPositionToReviewDisplayRows,
   wholeAccountGainCard,
-  type PositionConfirmationStatus,
+  type PositionToReviewDisplayRow,
   type PositionToReviewRow,
 } from "@/lib/dashboard-view";
 
@@ -39,50 +41,6 @@ const TRACKER_PERFORMANCE_HREF = "/positions?scope=mine&view=performance";
 
 type DashboardAccount = Awaited<ReturnType<typeof getDashboardData>>["ownAccounts"][number];
 type DashboardOpenCampaign = Awaited<ReturnType<typeof getDashboardData>>["openCampaigns"][number];
-type DashboardSchwabPosition = NonNullable<Awaited<ReturnType<typeof getSchwabOpenPositionsForUser>>>[number];
-
-/** Builds the same TrackedPut shape the Tracker's own matchTrackedPut/exactMatchedCampaignId
- * expect, from this page's already-loaded open campaigns - mirrors positions/page.tsx's
- * identical construction so the two pages can never define "current open put" differently. */
-function buildTrackedPuts(campaigns: DashboardOpenCampaign[]): TrackedPut[] {
-  return campaigns.flatMap((campaign) => {
-    const openPut = getCurrentOpenPut(campaign.events);
-    return openPut
-      ? [{ id: campaign.id, ownerId: campaign.ownerId, accountId: campaign.accountId, ticker: campaign.ticker, status: campaign.status, ...openPut }]
-      : [];
-  });
-}
-
-/**
- * Resolves, once per request (cache() dedupes by argument identity), which Schwab positions are
- * already represented by a tracked campaign and must never be shown or counted a second time -
- * same precedence as the Tracker's own position badge (persisted link, then a unique exact
- * matchTrackedPut). Also the source of "Positions to Review"'s confirmation state - a campaign
- * whose put shows up here as confirmed is genuinely corroborated by live Schwab data, never a
- * guess.
- */
-const loadDashboardBrokerData = cache(async (userId: string, ownAccounts: DashboardAccount[], openCampaigns: DashboardOpenCampaign[]) => {
-  const schwabPositions = await getSchwabOpenPositionsForUser(userId);
-  if (schwabPositions === null) {
-    return {
-      schwabPositions: null as DashboardSchwabPosition[] | null,
-      confirmedCampaignIds: new Set<string>(),
-    };
-  }
-
-  const linkedCampaignIdBySymbol = await getLinkedCampaignIdsBySymbolForUser(userId, schwabPositions);
-  const positionsWithLink = schwabPositions.map((position) => {
-    const normalizedSymbol = brokerPositionLinkKey(position.accountId, position.symbol);
-    return { ...position, linkedCampaignId: (normalizedSymbol && linkedCampaignIdBySymbol.get(normalizedSymbol)) || null };
-  });
-  const trackedPuts = buildTrackedPuts(openCampaigns);
-  const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId }));
-
-  const matches = matchDashboardPositions(userId, positionsWithLink, accounts, trackedPuts);
-  const confirmedCampaignIds = new Set(matches.flatMap((match) => (match.confirmedCampaignId ? [match.confirmedCampaignId] : [])));
-
-  return { schwabPositions, confirmedCampaignIds };
-});
 
 export default async function DashboardPage() {
   const user = await requireCurrentUser();
@@ -156,9 +114,12 @@ export default async function DashboardPage() {
   const scannerInsight = scannerInsightViewModel(data.latestScanRun, neverTradeTickers);
   const chatPreview = chatPreviewViewModel(unreadChatCount, data.recentMessages);
 
+  // Dashboard V2 Phase 2 - the full owner-scoped set is evaluated and priority-sorted (never
+  // sorted after truncation) by PositionsToReviewWithStatus below, before it slices to
+  // POSITIONS_TO_REVIEW_LIMIT; `allReviewRows` here is only the factual row list, in its
+  // pre-evaluation order.
   const allReviewRows = positionsToReviewRows(data.openCampaigns);
-  const reviewRows = allReviewRows.slice(0, POSITIONS_TO_REVIEW_LIMIT);
-  const hiddenReviewRowCount = allReviewRows.length - reviewRows.length;
+  const rollBufferPercent = Number(data.settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
 
   const checkpointLabel = getNextLstCheckpointLabel();
 
@@ -229,7 +190,7 @@ export default async function DashboardPage() {
               </IntentPrefetchLink>
             }
           >
-            {reviewRows.length === 0 ? (
+            {allReviewRows.length === 0 ? (
               <EmptyState>
                 No open campaigns.{" "}
                 <IntentPrefetchLink href="/positions" className="text-emerald-300 hover:text-emerald-200">
@@ -237,16 +198,24 @@ export default async function DashboardPage() {
                 </IntentPrefetchLink>
               </EmptyState>
             ) : (
-              <div className="space-y-2">
-                <Suspense fallback={<PositionsToReviewTable rows={reviewRows} confirmedCampaignIds={new Set()} brokerDataAvailable={false} statusLoading />}>
-                  <PositionsToReviewWithStatus userId={user.id} ownAccounts={data.ownAccounts} allOpenCampaigns={data.openCampaigns} rows={reviewRows} />
-                </Suspense>
-                {hiddenReviewRowCount > 0 ? (
-                  <IntentPrefetchLink href="/positions" className="block text-center text-xs text-zinc-500 hover:text-emerald-300">
-                    +{hiddenReviewRowCount} more in Tracker
-                  </IntentPrefetchLink>
-                ) : null}
-              </div>
+              <Suspense
+                fallback={
+                  <PositionsToReviewTable
+                    rows={allReviewRows.slice(0, POSITIONS_TO_REVIEW_LIMIT).map((row) => ({ ...row, review: null }))}
+                    loading
+                  />
+                }
+              >
+                <PositionsToReviewWithStatus
+                  userId={user.id}
+                  ownAccounts={data.ownAccounts}
+                  campaigns={data.openCampaigns}
+                  rows={allReviewRows}
+                  rollBufferPercent={rollBufferPercent}
+                  asOf={asOf}
+                  limit={POSITIONS_TO_REVIEW_LIMIT}
+                />
+              </Suspense>
             )}
           </Panel>
         </div>
@@ -403,39 +372,49 @@ function CapitalLine({ label, value, detail, emphasize = false }: { label: strin
 }
 
 /**
- * Astra review finding (P1, blocking): the prior roll-status badge required a live price with no
- * verified timestamp (getLiveQuotePricesForUser discards freshness) to render an ADVISORY output
- * (HOLD/ROLL CANDIDATE/ROLL) - that's advisory guidance, not a contract/lifecycle fact, and Phase
- * 1's own scope is factual-only. Removed entirely from the Dashboard (Tracker's own roll-status
- * implementation is unchanged - see positions/page.tsx). Only Schwab-confirmation state - a
- * factual match against live broker data, never an advisory recommendation - remains here.
+ * Dashboard V2 Phase 2 - resolves the shared positionReview.ts evaluation for every relevant open
+ * campaign (never just the truncated slice - see resolvePositionReviewsForUser's own contract),
+ * attaches it to each factual row, sorts the FULL set by the ticket's deterministic priority order,
+ * and only THEN truncates to `limit`. Tracker (positions/page.tsx) resolves the identical
+ * evaluator for the same campaign, so the two pages can never disagree about a position's status.
  */
 async function PositionsToReviewWithStatus({
   userId,
   ownAccounts,
-  allOpenCampaigns,
+  campaigns,
   rows,
+  rollBufferPercent,
+  asOf,
+  limit,
 }: {
   userId: string;
   ownAccounts: DashboardAccount[];
-  allOpenCampaigns: DashboardOpenCampaign[];
+  campaigns: DashboardOpenCampaign[];
   rows: PositionToReviewRow[];
+  rollBufferPercent: number;
+  asOf: Date;
+  limit: number;
 }) {
-  const { schwabPositions, confirmedCampaignIds } = await loadDashboardBrokerData(userId, ownAccounts, allOpenCampaigns);
-  return <PositionsToReviewTable rows={rows} confirmedCampaignIds={confirmedCampaignIds} brokerDataAvailable={schwabPositions !== null} />;
+  const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
+  const reviews = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, asOf);
+  const reviewsByCampaignId = new Map(reviews.map((entry) => [entry.campaignId, entry.result]));
+  const sortedRows = sortPositionToReviewDisplayRows(attachPositionReviews(rows, reviewsByCampaignId));
+  const visibleRows = sortedRows.slice(0, limit);
+  const hiddenCount = sortedRows.length - visibleRows.length;
+
+  return (
+    <div className="space-y-2">
+      <PositionsToReviewTable rows={visibleRows} />
+      {hiddenCount > 0 ? (
+        <IntentPrefetchLink href="/positions" className="block text-center text-xs text-zinc-500 hover:text-emerald-300">
+          +{hiddenCount} more in Tracker
+        </IntentPrefetchLink>
+      ) : null}
+    </div>
+  );
 }
 
-function PositionsToReviewTable({
-  rows,
-  confirmedCampaignIds,
-  brokerDataAvailable,
-  statusLoading = false,
-}: {
-  rows: PositionToReviewRow[];
-  confirmedCampaignIds: Set<string>;
-  brokerDataAvailable: boolean;
-  statusLoading?: boolean;
-}) {
+function PositionsToReviewTable({ rows, loading = false }: { rows: PositionToReviewDisplayRow[]; loading?: boolean }) {
   return (
     <div className="space-y-2">
       {rows.map((row) => (
@@ -454,35 +433,13 @@ function PositionsToReviewTable({
               {row.stage}
               {row.quantity !== null ? ` - ${row.quantity} ${row.quantityUnit}` : ""}
             </div>
+            {row.review ? <PositionReviewEvidenceLine result={row.review} /> : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <ConfirmationBadge status={statusLoading ? "LOADING" : positionConfirmationStatus(row, confirmedCampaignIds, brokerDataAvailable)} />
+            {row.review ? <LivePositionReviewBadge result={row.review} /> : <Badge tone="neutral">{loading ? "Checking..." : "Review needed"}</Badge>}
           </div>
         </div>
       ))}
     </div>
   );
-}
-
-/**
- * Neutral, never-reassuring confirmation state (ticket requirement) - and distinguishes WHY a row
- * isn't confirmed rather than collapsing every non-match into one ambiguous "awaiting" label
- * (Astra review, non-blocking): an assigned/covered-call row was never a candidate for broker
- * matching at all (NOT_ASSESSED), which reads differently from "we checked and found nothing yet"
- * (AWAITING_CONFIRMATION) or "Schwab data wasn't available to check against" (BROKER_UNAVAILABLE).
- */
-function ConfirmationBadge({ status }: { status: PositionConfirmationStatus | "LOADING" }) {
-  if (status === "LOADING") {
-    return <Badge tone="neutral">Checking...</Badge>;
-  }
-  if (status === "SCHWAB_CONFIRMED") {
-    return <Badge tone="info">Schwab confirmed</Badge>;
-  }
-  if (status === "AWAITING_CONFIRMATION") {
-    return <Badge tone="neutral">Awaiting confirmation</Badge>;
-  }
-  if (status === "BROKER_UNAVAILABLE") {
-    return <Badge tone="warn">Broker unavailable</Badge>;
-  }
-  return <Badge tone="neutral">Not assessed</Badge>;
 }

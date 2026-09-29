@@ -75,6 +75,22 @@ export function shortCalendarDate(value: Date | string) {
   }).format(new Date(value));
 }
 
+/**
+ * Dashboard V2 Phase 2 - a genuine time-of-day instant (e.g. a quote's own trade time), always
+ * rendered in America/New_York regardless of the runtime's local timezone, since that's the
+ * timezone every review-price/session-evidence rule in this app is defined against. Deliberately
+ * a plain "ET" suffix rather than Intl's EST/EDT distinction - the ticket's own display examples
+ * use exactly this level of precision ("Price as of 3:58 PM ET").
+ */
+export function formatEtTime(value: Date | string) {
+  const formatted = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  }).format(new Date(value));
+  return `${formatted} ET`;
+}
+
 export function upperTicker(value: FormDataEntryValue | null) {
   return normalizeTicker(value);
 }

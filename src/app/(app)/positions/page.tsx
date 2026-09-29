@@ -19,7 +19,8 @@ import {
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
-import { RollStatusBadge } from "@/components/roll-status-badge";
+import { PositionReviewEvidenceLine } from "@/components/position-review-badge";
+import { LivePositionReviewBadge } from "@/components/live-position-review-badge";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -31,9 +32,11 @@ import {
   summarizeCampaign,
   type CurrentOpenCall,
 } from "@/domain/finance/campaigns";
+import type { PositionReviewResult } from "@/domain/finance/positionReview";
 import { resolveCurrentCostToClose, type CurrentCostToCloseSource } from "@/domain/finance/currentPositionMark";
 import { daysToExpiration, distanceToStrikeDollars } from "@/domain/finance/calculations";
 import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
+import { resolvePositionReviewsForUser, type PositionReviewCampaignInput } from "@/lib/position-review";
 import {
   summarizeCampaignProgress,
   summarizePerformanceMetrics,
@@ -50,14 +53,7 @@ import {
   tradeReturnReason,
   tradeReturnValue,
 } from "@/lib/reporting-display";
-import {
-  computeCoveredCallRollStatus,
-  computeRollStatus,
-  DEFAULT_ROLL_BUFFER_PERCENT,
-  isCoveredCallRollGuidanceApplicable,
-  isRollGuidanceApplicable,
-  type RollStatus,
-} from "@/domain/finance/rollStatus";
+import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { getTrackerPageData, normalizeTrackerScope, optionContractKey, type TrackerScope } from "@/lib/app-data";
 import { money, percent, shortCalendarDate, shortDate, toNumber } from "@/lib/format";
@@ -220,66 +216,64 @@ export default async function PositionsPage({
   const premiumIncomplete = rows.some((row) => !row.feesFullyKnown || row.summary.unknowns.length > 0);
   const premiumTotal = rows.reduce((sum, row) => sum + row.summary.netOptionPremium, 0);
 
-  // Roll Status (see PROJECT_HANDOFF.md) - always uses the VIEWER's own Roll Buffer setting,
-  // never the campaign owner's, so a Buddy-scope card reflects what the person looking at it
-  // configured for themselves. Only computed for the Open view, where it's actually shown.
+  // Dashboard V2 Phase 2 - always uses the VIEWER's own Roll Buffer setting, never the campaign
+  // owner's, so a Buddy-scope card reflects what the person looking at it configured for
+  // themselves - same precedent the old per-page Roll Status computation used.
   const rollBufferPercent = Number(data.settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
   const openPutsByCampaignId = new Map(openRows.map((row) => [row.campaign.id, getCurrentOpenPut(row.campaign.events)]));
-  const openCallsByCampaignId = new Map(
-    openRows.map((row) => [row.campaign.id, row.campaign.status === "ASSIGNED" ? getCurrentOpenCall(row.campaign.events) : null]),
-  );
   const trackedPuts: TrackedPut[] = openRows.flatMap(({ campaign }) => {
     const put = openPutsByCampaignId.get(campaign.id);
     return put ? [{ id: campaign.id, ownerId: campaign.ownerId, accountId: campaign.accountId,
       ticker: campaign.ticker, status: campaign.status, ...put }] : [];
   });
+  const snapshotCheckedAt = new Date();
   let quoteSnapshots = new Map<string, QuoteSnapshot | null>();
-  const rollStatusByCampaignId = new Map<string, RollStatus | "UNAVAILABLE">();
-  // Same map shape as the put side, but only ever populated when a covered call is actually open
-  // AND its own expiration hasn't passed yet (isCoveredCallRollGuidanceApplicable) - a campaign
-  // with no map entry here means either no call is open or guidance is currently suppressed;
-  // CampaignCard tells those two apart itself since it already has openCall in scope.
-  const callRollStatusByCampaignId = new Map<string, RollStatus | "UNAVAILABLE">();
+  // Dashboard V2 Phase 2 - the SAME shared position-review evaluator the Dashboard uses (see
+  // src/lib/position-review.ts), so Tracker and Dashboard can never disagree about a position's
+  // status. Supersedes the old per-page computeRollStatus/computeCoveredCallRollStatus pair
+  // entirely, including their own Friday/weekend escalation wording and expiration-guidance
+  // suppression logic - those are now the shared evaluator's own action/lifecycle contract.
+  const positionReviewByCampaignId = new Map<string, PositionReviewResult>();
   // Recomputed only for ASSIGNED rows once a quote is available, so the Assigned Stock card can
   // show unrealized/total campaign P/L - summarizeCampaign never fabricates these without a real
   // current price (see PROJECT_HANDOFF.md), so an unavailable quote just leaves them UNKNOWN.
   const assignedSummaryByCampaignId = new Map<string, ReturnType<typeof summarizeCampaign>>();
   if (view === "open") {
-    // Once a campaign is in Expiration Processing, its fate is already decided and just
-    // awaiting confirmation - HOLD/ROLL guidance no longer applies, and the lifecycle stage
-    // itself (rendered alongside this badge) is the correct guidance to show instead.
-    const rollEligibleRows = openRows.filter((row) => isRollGuidanceApplicable(row.summary.currentStage));
     const assignedRows = openRows.filter((row) => row.campaign.status === "ASSIGNED");
     const tickersNeedingQuotes = [
-      ...rollEligibleRows.filter((row) => openPutsByCampaignId.get(row.campaign.id)).map((row) => row.campaign.ticker),
+      ...openRows.filter((row) => openPutsByCampaignId.get(row.campaign.id)).map((row) => row.campaign.ticker),
       ...assignedRows.map((row) => row.campaign.ticker),
     ];
+    // Still the legacy, timestamp-optional snapshot - kept only for the "Stock snapshot" info
+    // cell's own general/delayed price display, never for the colored review advisory below.
     quoteSnapshots = await getQuoteSnapshotsForUser(user.id, tickersNeedingQuotes);
-    for (const row of rollEligibleRows) {
-      const openPut = openPutsByCampaignId.get(row.campaign.id);
-      if (!openPut) {
-        continue;
-      }
-      const price = quoteSnapshots.get(row.campaign.ticker.toUpperCase())?.price ?? null;
-      const status = price !== null ? computeRollStatus({ currentPrice: price, strike: openPut.strike, rollBufferPercent }) : null;
-      rollStatusByCampaignId.set(row.campaign.id, status ?? "UNAVAILABLE");
-    }
     for (const row of assignedRows) {
       const price = quoteSnapshots.get(row.campaign.ticker.toUpperCase())?.price ?? null;
       assignedSummaryByCampaignId.set(
         row.campaign.id,
         summarizeCampaign({ status: row.campaign.status, events: row.campaign.events, currentUnderlyingPrice: price }),
       );
+    }
 
-      const openCall = openCallsByCampaignId.get(row.campaign.id);
-      if (openCall && isCoveredCallRollGuidanceApplicable(openCall.expiration)) {
-        const status = price !== null ? computeCoveredCallRollStatus({ currentPrice: price, strike: openCall.strike, rollBufferPercent }) : null;
-        callRollStatusByCampaignId.set(row.campaign.id, status ?? "UNAVAILABLE");
-      }
+    const reviewCampaignInputs: PositionReviewCampaignInput[] = openRows.map((row) => ({
+      id: row.campaign.id,
+      ownerId: row.campaign.ownerId,
+      accountId: row.campaign.accountId,
+      ticker: row.campaign.ticker,
+      status: row.campaign.status,
+      events: row.campaign.events,
+    }));
+    const reviewAccounts = data.visibleAccounts.map((account) => ({
+      id: account.id,
+      userId: account.userId,
+      externalAccountId: account.externalAccountId,
+      source: account.source,
+    }));
+    const reviews = await resolvePositionReviewsForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt);
+    for (const entry of reviews) {
+      positionReviewByCampaignId.set(entry.campaignId, entry.result);
     }
   }
-
-  const snapshotCheckedAt = new Date();
 
   // Performance is always computed from the current user's own completed campaigns and own
   // accounts, never from the scope-filtered `campaigns`/`visibleAccounts` lists above - so
@@ -471,8 +465,7 @@ export default async function PositionsPage({
                 key={row.campaign.id}
                 row={assignedSummaryByCampaignId.has(row.campaign.id) ? { ...row, summary: assignedSummaryByCampaignId.get(row.campaign.id)! } : row}
                 currentUserId={user.id}
-                rollStatus={rollStatusByCampaignId.get(row.campaign.id) ?? null}
-                callRollStatus={callRollStatusByCampaignId.get(row.campaign.id) ?? null}
+                review={positionReviewByCampaignId.get(row.campaign.id) ?? null}
                 openView
                 quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
                 asOf={snapshotCheckedAt}
@@ -707,16 +700,18 @@ function NewAccountPanel({
 function CampaignCard({
   row,
   currentUserId,
-  rollStatus = null,
-  callRollStatus = null,
+  review = null,
   openView = false,
   quoteSnapshot = null,
   asOf = new Date(),
 }: {
   row: { campaign: CampaignRow; summary: ReturnType<typeof summarizeCampaign>; feesFullyKnown?: boolean };
   currentUserId: string;
-  rollStatus?: RollStatus | "UNAVAILABLE" | null;
-  callRollStatus?: RollStatus | "UNAVAILABLE" | null;
+  /** Dashboard V2 Phase 2 - the SAME shared positionReview.ts evaluation the Dashboard shows for
+   * this campaign (see src/lib/position-review.ts). Null only when Open view hasn't resolved it
+   * (a different view is showing this card) or the campaign has no leg the evaluator could
+   * resolve at all - never a guessed status. */
+  review?: PositionReviewResult | null;
   openView?: boolean;
   quoteSnapshot?: QuoteSnapshot | null;
   asOf?: Date;
@@ -741,16 +736,12 @@ function CampaignCard({
   const openCall = campaign.status === "ASSIGNED" ? getCurrentOpenCall(campaign.events) : null;
   const openCallEventRow = openCall ? openCallEvent(campaign.events) : null;
   const latestAssignmentEvent = campaign.status === "ASSIGNED" ? latestAssignment(campaign.events) : null;
-  // A covered call has no dedicated "Expiration processing" CampaignCurrentStage of its own (it
-  // stays "Covered call" throughout an ASSIGNED campaign - see campaigns.ts), so this is checked
-  // directly off the call's own expiration rather than off summary.currentStage.
-  const callRollGuidanceApplicable = openCall ? isCoveredCallRollGuidanceApplicable(openCall.expiration, asOf) : false;
   const strikeVsBasis = openCall ? describeCallStrikeVsAdjustedBasis(openCall.strike, summary.adjustedBasis) : null;
-  // Roll Status's own distancePct (currentPrice - strike) / strike * 100) is reused as-is so this
-  // never disagrees with the HOLD/NEAR STRIKE/ROLL guidance shown next to it; only the dollar
-  // figure is new math here.
+  // A general, delayed/non-authoritative "roughly where is the stock" figure for the Stock
+  // Snapshot info cell only - never the colored review advisory (see `review` above), which uses
+  // its own approved, timestamp-verified evidence instead.
   const distanceDollars = quoteSnapshot && openPut ? distanceToStrikeDollars(quoteSnapshot.price, openPut.strike) : null;
-  const distancePct = rollStatus && rollStatus !== "UNAVAILABLE" ? rollStatus.distancePct : null;
+  const distancePct = quoteSnapshot && openPut ? ((quoteSnapshot.price - openPut.strike) / openPut.strike) * 100 : null;
   const returnOnSecuredCapital = campaign.status === "CLOSED" ? progress.currentReturnPercent : null;
 
   return (
@@ -767,19 +758,9 @@ function CampaignCard({
               </Badge>
             ) : null}
             {!openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
-            {rollStatus === "UNAVAILABLE" ? (
-              <Badge tone="neutral">Price unavailable · status pending</Badge>
-            ) : rollStatus ? (
-              <RollStatusBadge status={rollStatus} />
-            ) : null}
-            {openCall && !callRollGuidanceApplicable ? (
-              <Badge tone="neutral">Call expiration processing</Badge>
-            ) : callRollStatus === "UNAVAILABLE" ? (
-              <Badge tone="neutral">Price unavailable · status pending</Badge>
-            ) : callRollStatus ? (
-              <RollStatusBadge status={callRollStatus} />
-            ) : null}
+            {review ? <LivePositionReviewBadge result={review} /> : null}
           </div>
+          {openView && review ? <PositionReviewEvidenceLine result={review} /> : null}
           {openView && openPut ? (
             <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-put-contract">
               <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>

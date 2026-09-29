@@ -2,16 +2,18 @@ import { describe, expect, it } from "vitest";
 import type { AccountReportingSummary } from "@/domain/finance/reporting";
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
+import type { PositionReviewResult } from "@/domain/finance/positionReview";
 import {
   accountValueCard,
+  attachPositionReviews,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
   confirmedTradingPLCard,
   openCampaignsCard,
-  positionConfirmationStatus,
   positionsToReviewRows,
   scannerInsightViewModel,
+  sortPositionToReviewDisplayRows,
   wholeAccountGainCard,
 } from "./dashboard-view";
 
@@ -419,19 +421,43 @@ describe("positionsToReviewRows", () => {
   });
 });
 
-describe("positionConfirmationStatus - unsupported matching vs. unavailable brokerage data (Astra review, non-blocking)", () => {
-  it("confirms a matched OPEN put", () => {
-    expect(positionConfirmationStatus({ legType: "PUT", campaignId: "c1" }, new Set(["c1"]), true)).toBe("SCHWAB_CONFIRMED");
+describe("Dashboard V2 Phase 2 - attachPositionReviews / sortPositionToReviewDisplayRows", () => {
+  function reviewFixture(overrides: Partial<PositionReviewResult> = {}): PositionReviewResult {
+    return {
+      action: "COMFORTABLE",
+      lifecycle: "CURRENT_PUT",
+      evidence: { position: "SCHWAB_CONFIRMED", quote: "ELIGIBLE", quoteIneligibleReason: null, session: "OPEN" },
+      explanation: {
+        reasonCodes: [], optionType: "PUT", strike: 25, stockPrice: 30, dollarDistance: 5, percentageDistance: 20,
+        moneyness: "OTM", bufferPercent: 3, expiration: new Date("2026-10-02"), daysToExpiration: 10,
+        quoteTradeTime: new Date("2026-06-15T16:00:00Z"), quoteAgeMs: 0, positionEvidenceAsOf: new Date("2026-06-15T16:00:00Z"),
+      },
+      priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "XYZ", accountId: "a1", campaignId: "c1" },
+      ...overrides,
+    };
+  }
+
+  function row(campaignId: string) {
+    return { campaignId, ownerId: "u1", accountId: "a1", ticker: "XYZ", status: "OPEN" as const, stage: "Cash-secured put" as const, legType: "PUT" as const, strike: 25, expiration: new Date("2026-10-02"), quantity: 1, quantityUnit: "contracts" as const };
+  }
+
+  it("attaches a matching review by campaign id, and null when none exists", () => {
+    const reviews = new Map([["c1", reviewFixture()]]);
+    const [attached1, attached2] = attachPositionReviews([row("c1"), row("c2")], reviews);
+    expect(attached1.review).toEqual(reviewFixture());
+    expect(attached2.review).toBeNull();
   });
-  it("reports an unmatched OPEN put as awaiting confirmation - matching ran but found nothing", () => {
-    expect(positionConfirmationStatus({ legType: "PUT", campaignId: "c1" }, new Set(), true)).toBe("AWAITING_CONFIRMATION");
+
+  it("sorts by the shared evaluator's own priority order, never by input order", () => {
+    const reviewRoll = reviewFixture({ action: "REVIEW_ROLL", priority: { group: 4, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "AAA", accountId: "a1", campaignId: "c1" } });
+    const comfortable = reviewFixture({ priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "ZZZ", accountId: "a1", campaignId: "c2" } });
+    const attached = attachPositionReviews([row("c2"), row("c1")], new Map([["c1", reviewRoll], ["c2", comfortable]]));
+    expect(sortPositionToReviewDisplayRows(attached).map((r) => r.campaignId)).toEqual(["c1", "c2"]);
   });
-  it("reports BROKER_UNAVAILABLE distinctly when Schwab data wasn't available to check against at all", () => {
-    expect(positionConfirmationStatus({ legType: "PUT", campaignId: "c1" }, new Set(), false)).toBe("BROKER_UNAVAILABLE");
-  });
-  it("reports NOT_ASSESSED for a row type matching never attempts (assigned shares/covered call), regardless of broker availability", () => {
-    expect(positionConfirmationStatus({ legType: "CALL", campaignId: "c1" }, new Set(["c1"]), true)).toBe("NOT_ASSESSED");
-    expect(positionConfirmationStatus({ legType: null, campaignId: "c1" }, new Set(), false)).toBe("NOT_ASSESSED");
+
+  it("sorts a row with no evaluable review after every row that has one, rather than guessing a priority", () => {
+    const attached = attachPositionReviews([row("c1"), row("c2")], new Map([["c1", reviewFixture()]]));
+    expect(sortPositionToReviewDisplayRows(attached).map((r) => r.campaignId)).toEqual(["c1", "c2"]);
   });
 });
 
