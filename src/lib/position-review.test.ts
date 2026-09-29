@@ -451,6 +451,95 @@ describe("Codex P1 (B5) - covered-call underlying-share coverage", () => {
   });
 });
 
+describe("Codex P2 (B) - covered-call coverage must account for ALL broker-visible short calls, not just tracked ones", () => {
+  it("the exact reproduced defect: 100 shares, one tracked call, plus one UNTRACKED broker short call on the same underlying -> Cannot assess", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 100 }),
+      callOptionPosition(), // the tracked campaign's own matching contract
+      callOptionPosition({ symbol: "UPST  261101C00032000" }), // an UNTRACKED short call Schwab reports on the same underlying/account
+    ]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+  });
+
+  it("100 shares, exactly one tracked short call, no other broker obligation -> potentially covered", async () => {
+    getPositions.mockResolvedValue([equityPosition({ quantity: 100 }), callOptionPosition()]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("SCHWAB_CONFIRMED");
+  });
+
+  it("200 shares, two total broker short standard calls (both tracked) -> potentially covered", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 200 }),
+      callOptionPosition(),
+      callOptionPosition({ symbol: "UPST  261101C00032000" }),
+    ]);
+    const second = callCampaign({
+      id: "campaign-call-b",
+      events: [
+        { type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 28, shares: 100 },
+        { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-05-02T00:00:00.000Z"), optionType: "CALL", contracts: 1, strike: 32, expiration: new Date("2026-11-01T00:00:00.000Z"), premium: 1 },
+      ],
+    });
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign({ id: "campaign-call-a" }), second], [schwabAccount], 3, NOON);
+    expect(results.every((r) => r.result.evidence.position === "SCHWAB_CONFIRMED")).toBe(true);
+  });
+
+  it("150 shares, two total broker short standard calls -> insufficient / Cannot assess", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 150 }),
+      callOptionPosition(),
+      callOptionPosition({ symbol: "UPST  261101C00032000" }),
+    ]);
+    const second = callCampaign({
+      id: "campaign-call-b",
+      events: [
+        { type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 28, shares: 100 },
+        { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-05-02T00:00:00.000Z"), optionType: "CALL", contracts: 1, strike: 32, expiration: new Date("2026-11-01T00:00:00.000Z"), premium: 1 },
+      ],
+    });
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign({ id: "campaign-call-a" }), second], [schwabAccount], 3, NOON);
+    expect(results.every((r) => r.result.evidence.position === "INSUFFICIENT_SHARE_COVERAGE")).toBe(true);
+  });
+
+  it("a tracked call's own matching broker row is never double-counted against its own tracked contracts", async () => {
+    // 100 shares, exactly one tracked call (1 contract = 100 shares needed) whose OWN broker row
+    // is present - if it were double-counted (100 needed twice = 200), this would incorrectly
+    // read as insufficient against only 100 shares.
+    getPositions.mockResolvedValue([equityPosition({ quantity: 100 }), callOptionPosition()]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("SCHWAB_CONFIRMED");
+  });
+
+  it("fails closed as ambiguous when conflicting/multiple broker equity rows exist for the same account+underlying", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 100 }),
+      equityPosition({ quantity: 50 }), // a second, conflicting equity row for the same symbol/account
+      callOptionPosition(),
+    ]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
+  });
+
+  it("never counts a SHORT (negative) equity row as coverage", async () => {
+    getPositions.mockResolvedValue([equityPosition({ quantity: -100 }), callOptionPosition()]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
+  });
+
+  it("fails closed when an untracked broker short call has a non-standard/unparseable symbol shape (unknown multiplier, never assumed 100)", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 100 }),
+      callOptionPosition(),
+      // A malformed/non-standard OCC shape - this app has no verified multiplier evidence for it.
+      { accountId: "broker-a", symbol: "UPST-NONSTANDARD-CALL", quantity: -1, marketValue: -50, putCall: "CALL" as const, underlyingSymbol: "UPST", accountLabel: "Test" },
+    ]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
+  });
+});
+
 describe("Codex P1 (B6) - incomplete campaigns survive orchestration as CANNOT_ASSESS, never disappear", () => {
   it("an OPEN campaign with an incomplete put record (missing strike) is CANNOT_ASSESS, not dropped", async () => {
     getPositions.mockResolvedValue([]);

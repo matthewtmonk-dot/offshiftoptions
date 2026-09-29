@@ -13,7 +13,7 @@ import {
   type CampaignStatusInput,
 } from "@/domain/finance/campaigns";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
-import { formatOccSymbol, occContractKey } from "@/domain/finance/occOption";
+import { formatOccSymbol, occContractKey, parseOccOptionSymbol } from "@/domain/finance/occOption";
 import {
   evaluatePositionReview,
   sortPositionReviews,
@@ -331,16 +331,28 @@ function resolvePositionEvidence({
 }
 
 /**
- * Codex P1 (B5) - proves underlying-share coverage for every currently-open covered call, at the
- * complete owner+account+underlying allocation level - never per-campaign in isolation, since two
- * campaigns can each independently record their own "open call" while actually competing for the
- * SAME real broker-held shares (e.g. two ASSIGNED campaigns tracking separate lots of the same
- * ticker in the same account). Returns `true` for a campaign's id only when its entire competing
- * group's aggregate share need fits within the actual broker-held share count for that
- * owner+account+underlying; every other campaign in that same group maps to `false` too - no
- * first-campaign-wins allocation, no partial credit. A group whose broker share position can't be
- * resolved at all (missing account/external id, or no matching equity position) fails closed to
- * `false` for every campaign in it, since coverage cannot be proven.
+ * Codex P1 (B5) / Codex P2 (B) - proves underlying-share coverage for every currently-open covered
+ * call, at the complete owner+account+underlying allocation level - never per-campaign in
+ * isolation, since two campaigns can each independently record their own "open call" while
+ * actually competing for the SAME real broker-held shares. Returns `true` for a campaign's id only
+ * when its entire competing group's TOTAL short-call obligation fits within the actual broker-held
+ * share count for that owner+account+underlying; every other campaign in that same group maps to
+ * `false` too - no first-campaign-wins allocation, no partial credit.
+ *
+ * Codex P2 (B) hardened this beyond only summing TRACKED campaigns' own contracts: total
+ * obligation now includes every broker-visible short call on the same account+underlying,
+ * including one with no corresponding tracked campaign at all (an "untracked" broker call still
+ * consumes real share capacity) - a tracked call's own matching broker position is counted exactly
+ * once (never double-counted against both its tracked contracts AND its own broker row). A group
+ * fails closed to `false` for every campaign in it whenever: the account/share evidence can't be
+ * resolved at all; more than one broker equity row exists for the same account+underlying (no
+ * verified provider semantics support summing separate rows, so this is treated as ambiguous
+ * rather than guessed); the one equity row's quantity is not a positive real long-share count
+ * (a short/negative share row never counts as coverage); or any broker call position sharing the
+ * underlying has a symbol that does not parse as this app's one supported standard OCC contract
+ * shape (see occOption.ts) - this app has no verified provider evidence of a per-contract
+ * multiplier/deliverable, so a non-standard-shaped contract's multiplier can never be assumed to
+ * be the standard 100 shares/contract (`OPTION_MULTIPLIER`) and coverage is never claimed for it.
  */
 function computeCallShareCoverage(
   trackedCalls: TrackedCall[],
@@ -366,15 +378,60 @@ function computeCallShareCoverage(
   for (const [key, calls] of groups) {
     const [, accountId, ticker] = key.split("|");
     const account = accounts.find((candidate) => candidate.id === accountId);
-    const sharePosition = account?.externalAccountId
-      ? brokerPositions.find((position) => position.accountId === account.externalAccountId && isEquitySharePosition(position, ticker!))
-      : undefined;
+    const externalAccountId = account?.externalAccountId;
+    if (!externalAccountId) {
+      for (const call of calls) coverageByCampaignId.set(call.id, false);
+      continue;
+    }
 
-    const coversAll =
-      sharePosition !== undefined &&
-      Number.isFinite(sharePosition.quantity) &&
-      sharePosition.quantity > 0 &&
-      calls.reduce((sum, call) => sum + call.contracts * OPTION_MULTIPLIER, 0) <= sharePosition.quantity;
+    // Every tracked call's own OCC contract key, so its matching broker row is recognized and
+    // never double-counted below (its contracts already come from the tracked campaign's own
+    // validated `contracts` field, not re-derived from the broker quantity).
+    const trackedContractKeys = new Set(
+      calls
+        .map((call) => occContractKey(formatOccSymbol(call.ticker, call.expiration, call.strike, "CALL")))
+        .filter((contractKey): contractKey is string => contractKey !== null),
+    );
+
+    const shortCallPositions = brokerPositions.filter(
+      (position) => position.accountId === externalAccountId && isShortCallPositionForUnderlying(position, ticker!),
+    );
+
+    let untrackedShortCallContracts = 0;
+    let obligationUnresolvable = false;
+    for (const position of shortCallPositions) {
+      const contractKey = occContractKey(position.symbol);
+      if (contractKey !== null && trackedContractKeys.has(contractKey)) {
+        continue; // Already represented by a tracked campaign's own `contracts` count below.
+      }
+      // Codex P2 (B) - an untracked broker short call must parse as this app's one supported
+      // standard OCC contract shape before its multiplier can be assumed to be the standard 100
+      // shares/contract - a non-standard/unparseable shape means the real deliverable is unknown,
+      // and this app has no other verified source for it. Never fabricate a multiplier.
+      const parsed = parseOccOptionSymbol(position.symbol);
+      const positionContracts = Math.abs(position.quantity);
+      if (!parsed || !Number.isFinite(positionContracts) || positionContracts <= 0) {
+        obligationUnresolvable = true;
+        continue;
+      }
+      untrackedShortCallContracts += positionContracts;
+    }
+
+    const totalShortCallContracts = calls.reduce((sum, call) => sum + call.contracts, 0) + untrackedShortCallContracts;
+
+    // Codex P2 (B) - never a first-match `.find()`: multiple broker equity rows for the same
+    // account+underlying are ambiguous (this app has no verified provider semantics establishing
+    // they safely sum to one real holding) and fail closed rather than guessing.
+    const equityPositions = brokerPositions.filter(
+      (position) => position.accountId === externalAccountId && isEquitySharePosition(position, ticker!),
+    );
+
+    let coversAll = false;
+    if (!obligationUnresolvable && equityPositions.length === 1) {
+      const shares = equityPositions[0]!.quantity;
+      const totalSharesNeeded = totalShortCallContracts * OPTION_MULTIPLIER;
+      coversAll = Number.isFinite(shares) && shares > 0 && totalSharesNeeded <= shares;
+    }
 
     for (const call of calls) {
       coverageByCampaignId.set(call.id, coversAll);
@@ -395,4 +452,24 @@ function isEquitySharePosition(position: BrokerPosition, ticker: string): boolea
     return position.assetType === "EQUITY";
   }
   return occContractKey(position.symbol) === null;
+}
+
+/** Codex P2 (B) - any SHORT call option position on `ticker`, tracked by a campaign or not.
+ * Prefers Schwab's own `putCall`/`underlyingSymbol` fields (the most authoritative signal, per
+ * BrokerPosition's own doc comments); falls back to OCC symbol parsing only when those fields are
+ * absent. A position must genuinely be short (negative quantity) - a long call is never a
+ * short-call obligation against the underlying shares. */
+function isShortCallPositionForUnderlying(position: BrokerPosition, ticker: string): boolean {
+  if (!(position.quantity < 0) || !Number.isFinite(position.quantity)) {
+    return false;
+  }
+  const parsed = parseOccOptionSymbol(position.symbol);
+  const underlying = position.underlyingSymbol?.trim().toUpperCase() || parsed?.underlying || null;
+  if (underlying !== ticker.toUpperCase()) {
+    return false;
+  }
+  if (position.putCall) {
+    return position.putCall === "CALL";
+  }
+  return parsed?.optionType === "CALL";
 }
