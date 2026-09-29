@@ -410,6 +410,33 @@ describe("Codex P1 (B3) - activeGuidanceDeadline", () => {
     // Only the quote deadline and session close remain - quote wins since it's much sooner.
     expect(result.explanation.activeGuidanceDeadline?.getTime()).toBe(NOON.getTime() + 120_000);
   });
+
+  it("Codex P2 (A) - on a multi-interval trading day, the session deadline component is the END OF THE CONTAINING interval, never the day's last interval", () => {
+    // The ticket's own worked example: 09:30-12:00 and 13:00-16:00 (a mid-day halt/resumption
+    // gap), evaluated at 11:59:50 - the deadline's session component must be 12:00, NOT 16:00.
+    const midDayGapSession: EquityMarketSessionEvidence = {
+      status: "AVAILABLE",
+      requestedDate: NY_DATE,
+      returnedDate: NY_DATE,
+      marketType: "EQUITY",
+      product: "EQ",
+      isOpen: true,
+      regularMarketIntervals: [
+        { start: new Date(`${NY_DATE}T09:30:00-04:00`), end: new Date(`${NY_DATE}T12:00:00-04:00`) },
+        { start: new Date(`${NY_DATE}T13:00:00-04:00`), end: new Date(`${NY_DATE}T16:00:00-04:00`) },
+      ],
+    };
+    const evaluationTime = new Date(`${NY_DATE}T11:59:50-04:00`);
+    const result = evaluatePositionReview(
+      baseInput({
+        position: { state: "SCHWAB_CONFIRMED", asOf: evaluationTime },
+        quote: quote(30, evaluationTime),
+        session: midDayGapSession,
+        now: evaluationTime,
+      }),
+    );
+    expect(result.explanation.activeGuidanceDeadline?.getTime()).toBe(new Date(`${NY_DATE}T12:00:00-04:00`).getTime());
+  });
 });
 
 describe("deterministic priority ordering", () => {

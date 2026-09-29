@@ -6,17 +6,19 @@ import { PositionReviewActionBadge, PositionReviewEvidenceLine } from "@/compone
 import { useActiveGuidanceExpired } from "@/components/use-active-guidance-expired";
 
 /**
- * Dashboard V2 Phase 2 - Codex P1 (B3). Client-side downgrade of an active colored advisory once
- * its own server-computed activeGuidanceDeadline passes in the viewer's browser - the EARLIEST of
- * the quote's 120s freshness window, a Schwab-confirmed position's 5-minute read-receipt window,
- * and the validated regular session's own close instant (see
- * PositionReviewExplanation.activeGuidanceDeadline's own doc comment for the full contract).
- * Scheduled against that real deadline (useActiveGuidanceExpired), not a fixed poll interval, and
- * re-checked on tab-visibility resume. Never triggers a brokerage sync or a data refetch itself -
- * only degrades the display; refreshing prices/positions stays the user's own explicit action.
+ * Dashboard V2 Phase 2 - Codex P1 (B3) / Codex P2 (A). Client-side downgrade of an active colored
+ * advisory once its own server-computed activeGuidanceDeadline passes in the viewer's browser -
+ * the EARLIEST of the quote's 120s freshness window, a Schwab-confirmed position's 5-minute
+ * read-receipt window, and the end of the SAME regular-session interval that authorized the review
+ * (see PositionReviewExplanation.activeGuidanceDeadline's own doc comment for the full contract).
+ * Scheduled against that real deadline using a monotonic-clock timing model
+ * (useActiveGuidanceExpired) that a slow/manipulated client wall clock cannot use to extend
+ * guidance, with no polling and no grace period past the deadline, and re-checked on tab-visibility
+ * resume. Never triggers a brokerage sync or a data refetch itself - only degrades the display;
+ * refreshing prices/positions stays the user's own explicit action.
  */
 export function LivePositionReviewBadge({ result }: { result: PositionReviewResult }) {
-  const expired = useActiveGuidanceExpired(result.explanation.activeGuidanceDeadline);
+  const expired = useActiveGuidanceExpired(result.explanation.activeGuidanceDeadline, result.explanation.evaluatedAt);
 
   if (!expired) {
     return <PositionReviewActionBadge result={result} />;
@@ -33,7 +35,7 @@ export function LivePositionReviewBadge({ result }: { result: PositionReviewResu
  * whether the advisory is still current.
  */
 export function LivePositionReviewEvidenceLine({ result }: { result: PositionReviewResult }) {
-  const expired = useActiveGuidanceExpired(result.explanation.activeGuidanceDeadline);
+  const expired = useActiveGuidanceExpired(result.explanation.activeGuidanceDeadline, result.explanation.evaluatedAt);
 
   if (expired) {
     return <p className="text-xs text-zinc-500">Evidence expired - refresh to check current status.</p>;

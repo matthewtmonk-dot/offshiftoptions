@@ -1,7 +1,7 @@
 import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/providers/market-data/types";
 import type { CampaignCurrentStage } from "./campaigns";
 import { round } from "./calculations";
-import { daysToExpiration, expirationCalendarDate, isWithinRegularSession, regularSessionCloseInstant } from "./marketSession";
+import { daysToExpiration, expirationCalendarDate, isWithinRegularSession, regularSessionCloseInstant, regularSessionIntervalContaining } from "./marketSession";
 import { evaluateQuoteEligibility, QUOTE_FRESHNESS_WINDOW_MS, type QuoteEligibilityFailureReason } from "./quoteEvidence";
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "./rollStatus";
 
@@ -96,6 +96,15 @@ export type PositionReviewExplanation = {
    * never client clock time.
    */
   activeGuidanceDeadline: Date | null;
+  /**
+   * Codex P2 (A) - the exact server-side instant this whole evaluation was performed against
+   * (`input.now`) - the trusted origin a client uses, together with `activeGuidanceDeadline`, to
+   * compute how much validity remains WITHOUT ever comparing the deadline directly against its
+   * own `Date.now()` (which a slow/manipulated client clock could use to extend guidance past
+   * when the server actually authorized it). See useActiveGuidanceExpired's own doc comment for
+   * the full client-side timing model built on these two fields.
+   */
+  evaluatedAt: Date;
 };
 
 export type PositionReviewPriorityGroup = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
@@ -286,6 +295,7 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
     positionState,
     positionEvidenceAsOf,
     session: input.session,
+    now,
   });
 
   return {
@@ -307,6 +317,7 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
       quoteAgeMs,
       positionEvidenceAsOf,
       activeGuidanceDeadline,
+      evaluatedAt: now,
     },
     priority: {
       group,
@@ -419,21 +430,27 @@ function isMarketClosedReason(reason: QuoteEligibilityFailureReason): boolean {
 
 const LIVE_ACTIONS: ReadonlySet<PositionReviewAction> = new Set(["COMFORTABLE", "WATCH", "REVIEW_ROLL", "REVIEW_CALL"]);
 
-/** Codex P1 (B3) - see PositionReviewExplanation.activeGuidanceDeadline's own doc comment for the
- * exact contract. Every component is a real evidence/session time - never `new Date()`, never the
- * client's own clock. */
+/** Codex P1 (B3) / Codex P2 (A) - see PositionReviewExplanation.activeGuidanceDeadline's own doc
+ * comment for the exact contract. Every component is a real evidence/session time - never
+ * `new Date()`, never the client's own clock. Codex P2 (A) fixed the session component: it
+ * previously used the trading DAY's LAST regular-session interval end (wrong on a multi-interval
+ * day, e.g. a mid-day halt/resumption), when the correct deadline is the end of the SAME
+ * interval that actually authorized this review - the identical interval identity
+ * evaluateQuoteEligibility itself already required `now` and `quoteTradeTime` to share. */
 function computeActiveGuidanceDeadline({
   action,
   quoteTradeTime,
   positionState,
   positionEvidenceAsOf,
   session,
+  now,
 }: {
   action: PositionReviewAction;
   quoteTradeTime: Date | null;
   positionState: PositionEvidenceState;
   positionEvidenceAsOf: Date | null;
   session: EquityMarketSessionEvidence;
+  now: Date;
 }): Date | null {
   if (!LIVE_ACTIONS.has(action) || !quoteTradeTime) {
     return null;
@@ -445,9 +462,12 @@ function computeActiveGuidanceDeadline({
     deadlines.push(positionEvidenceAsOf.getTime() + BROKER_POSITION_FRESHNESS_MS);
   }
 
-  const sessionClose = regularSessionCloseInstant(session);
-  if (sessionClose) {
-    deadlines.push(sessionClose.getTime());
+  // The CONTAINING interval, not the day's last one - a live advisory can only ever have been
+  // authorized because `now` fell inside this exact interval (see evaluateQuoteEligibility's own
+  // same-interval requirement), so its own end is the true session-driven deadline.
+  const containingInterval = regularSessionIntervalContaining(session, now);
+  if (containingInterval) {
+    deadlines.push(containingInterval.end.getTime());
   }
 
   return new Date(Math.min(...deadlines));
