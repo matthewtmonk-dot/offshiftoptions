@@ -38,7 +38,13 @@ export type PositionReviewPositionInput =
   | { state: "POSITION_MISMATCH_AMBIGUOUS" }
   /** An owner-classified manual (non-Schwab-linked) campaign with complete manual terms - never
    * inferred silently for an unmatched Schwab campaign. */
-  | { state: "MANUAL_POSITION" };
+  | { state: "MANUAL_POSITION" }
+  /** Codex P1 (B5) - the short call's own CONTRACT matched a real broker position exactly, but the
+   * owner+account+underlying's aggregate broker-held share count does not (or cannot be proven to)
+   * cover every campaign currently claiming a covered call against it. An uncovered short call
+   * must never receive "covered call" active guidance - the caller resolves this by aggregating
+   * ALL competing campaigns for the same shares, never a first-campaign-wins allocation. */
+  | { state: "INSUFFICIENT_SHARE_COVERAGE" };
 
 export type PositionEvidenceState = PositionReviewPositionInput["state"];
 

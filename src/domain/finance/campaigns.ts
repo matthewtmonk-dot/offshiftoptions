@@ -1,6 +1,9 @@
 import { round } from "./calculations";
 
-const OPTION_MULTIPLIER = 100;
+/** Shares represented by one standard equity option contract - the one trusted source for this
+ * multiplier; other modules (e.g. positionReview.ts's covered-call share-coverage check) import
+ * this rather than hardcoding 100 themselves. */
+export const OPTION_MULTIPLIER = 100;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export type CampaignEventKind =

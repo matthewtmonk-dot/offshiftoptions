@@ -1,6 +1,6 @@
 import "server-only";
 
-import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignEventInput, type CampaignStatusInput } from "@/domain/finance/campaigns";
+import { getCurrentOpenCall, getCurrentOpenPut, OPTION_MULTIPLIER, summarizeCampaign, type CampaignEventInput, type CampaignStatusInput } from "@/domain/finance/campaigns";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 import { formatOccSymbol, occContractKey } from "@/domain/finance/occOption";
 import {
@@ -118,6 +118,10 @@ export async function resolvePositionReviewsForUser(
     getEquityMarketSessionEvidenceForUser(userId, nyCalendarDateOf(now)),
   ]);
 
+  // Codex P1 (B5) - computed ONCE across every competing covered-call campaign sharing the same
+  // owner+account+underlying, never per-campaign in isolation (see computeCallShareCoverage).
+  const callShareCoverageByCampaignId = computeCallShareCoverage(trackedCalls, brokerPositions, accounts);
+
   const results: ResolvedPositionReview[] = [];
   for (const campaign of relevant) {
     const leg = legByCampaignId.get(campaign.id);
@@ -125,7 +129,7 @@ export async function resolvePositionReviewsForUser(
       continue;
     }
     const account = accounts.find((candidate) => candidate.id === campaign.accountId) ?? null;
-    const position = resolvePositionEvidence({ userId, campaign, leg, account, accounts, brokerPositions, trackedPuts, trackedCalls, now });
+    const position = resolvePositionEvidence({ userId, campaign, leg, account, accounts, brokerPositions, trackedPuts, trackedCalls, callShareCoverageByCampaignId, now });
     const quote =
       leg.kind === "NONE"
         ? ({ status: "UNAVAILABLE", reason: "No option leg to quote." } as const)
@@ -174,6 +178,7 @@ function resolvePositionEvidence({
   brokerPositions,
   trackedPuts,
   trackedCalls,
+  callShareCoverageByCampaignId,
 }: {
   userId: string;
   campaign: PositionReviewCampaignInput;
@@ -183,6 +188,7 @@ function resolvePositionEvidence({
   brokerPositions: (BrokerPosition & { accountLabel: string })[] | null;
   trackedPuts: TrackedPut[];
   trackedCalls: TrackedCall[];
+  callShareCoverageByCampaignId: Map<string, boolean>;
   now: Date;
 }): PositionReviewPositionInput {
   // Codex P1 (B7) - CRITICAL: active review guidance (a manual-account bypass, a Schwab broker
@@ -238,6 +244,12 @@ function resolvePositionEvidence({
     // evidence of its own (never borrow another campaign's confirmation).
     return { state: "NOT_ASSESSED" };
   }
+  // Codex P1 (B5) - the call's own CONTRACT matching exactly (above) proves identity, never share
+  // coverage. A short call backed by too few (or unverifiable) broker-held shares must never
+  // receive "covered call" guidance, regardless of how cleanly its own contract matched.
+  if (leg.kind === "CALL" && callShareCoverageByCampaignId.get(campaign.id) !== true) {
+    return { state: "INSUFFICIENT_SHARE_COVERAGE" };
+  }
   // Codex P1 (B1) - freshness is about WHEN WE READ this position, not the provider's own
   // (currently always-null, and conceptually unrelated) valuation timestamp. `valuationAsOf`
   // answers "as of when is this price true"; `positionReadReceivedAt` answers "when did our own
@@ -249,4 +261,71 @@ function resolvePositionEvidence({
   }
 
   return { state: "SCHWAB_CONFIRMED", asOf: receivedAt };
+}
+
+/**
+ * Codex P1 (B5) - proves underlying-share coverage for every currently-open covered call, at the
+ * complete owner+account+underlying allocation level - never per-campaign in isolation, since two
+ * campaigns can each independently record their own "open call" while actually competing for the
+ * SAME real broker-held shares (e.g. two ASSIGNED campaigns tracking separate lots of the same
+ * ticker in the same account). Returns `true` for a campaign's id only when its entire competing
+ * group's aggregate share need fits within the actual broker-held share count for that
+ * owner+account+underlying; every other campaign in that same group maps to `false` too - no
+ * first-campaign-wins allocation, no partial credit. A group whose broker share position can't be
+ * resolved at all (missing account/external id, or no matching equity position) fails closed to
+ * `false` for every campaign in it, since coverage cannot be proven.
+ */
+function computeCallShareCoverage(
+  trackedCalls: TrackedCall[],
+  brokerPositions: (BrokerPosition & { accountLabel: string })[] | null,
+  accounts: PositionReviewAccountInput[],
+): Map<string, boolean> {
+  const coverageByCampaignId = new Map<string, boolean>();
+  if (brokerPositions === null || trackedCalls.length === 0) {
+    return coverageByCampaignId;
+  }
+
+  const groups = new Map<string, TrackedCall[]>();
+  for (const call of trackedCalls) {
+    const key = `${call.ownerId}|${call.accountId}|${call.ticker.trim().toUpperCase()}`;
+    const group = groups.get(key);
+    if (group) {
+      group.push(call);
+    } else {
+      groups.set(key, [call]);
+    }
+  }
+
+  for (const [key, calls] of groups) {
+    const [, accountId, ticker] = key.split("|");
+    const account = accounts.find((candidate) => candidate.id === accountId);
+    const sharePosition = account?.externalAccountId
+      ? brokerPositions.find((position) => position.accountId === account.externalAccountId && isEquitySharePosition(position, ticker!))
+      : undefined;
+
+    const coversAll =
+      sharePosition !== undefined &&
+      Number.isFinite(sharePosition.quantity) &&
+      sharePosition.quantity > 0 &&
+      calls.reduce((sum, call) => sum + call.contracts * OPTION_MULTIPLIER, 0) <= sharePosition.quantity;
+
+    for (const call of calls) {
+      coverageByCampaignId.set(call.id, coversAll);
+    }
+  }
+
+  return coverageByCampaignId;
+}
+
+/** A real equity (stock) position for `ticker` - never an option contract on the same underlying.
+ * Prefers Schwab's own `assetType` when present; falls back to "not an OCC-parseable option
+ * symbol" when absent, mirroring BrokerPosition.putCall's own documented fallback convention. */
+function isEquitySharePosition(position: BrokerPosition, ticker: string): boolean {
+  if (position.symbol.trim().toUpperCase() !== ticker.toUpperCase()) {
+    return false;
+  }
+  if (position.assetType) {
+    return position.assetType === "EQUITY";
+  }
+  return occContractKey(position.symbol) === null;
 }

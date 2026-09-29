@@ -45,6 +45,7 @@ const CANNOT_ASSESS_REASON_LABELS: Record<string, string> = {
   INCOMPLETE_TERMS: "Incomplete position terms",
   MARKET_CLOSED: "Market closed",
   QUOTE_UNAVAILABLE: "Quote unavailable",
+  POSITION_INSUFFICIENT_SHARE_COVERAGE: "Insufficient share coverage for this call",
 };
 
 /** Picks the single most relevant human-readable reason for a CANNOT_ASSESS row, in the same
@@ -66,6 +67,7 @@ const POSITION_EVIDENCE_LABELS: Record<PositionReviewEvidence["position"], strin
   BROKER_UNAVAILABLE: "Broker unavailable",
   POSITION_MISMATCH_AMBIGUOUS: "Position mismatch",
   MANUAL_POSITION: "Manual position",
+  INSUFFICIENT_SHARE_COVERAGE: "Insufficient share coverage",
 };
 
 /** The compact colored action badge alone - text + icon, color never the only signal. */

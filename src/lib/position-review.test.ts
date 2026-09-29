@@ -62,6 +62,37 @@ function putCampaign(overrides: Partial<PositionReviewCampaignInput> = {}): Posi
   };
 }
 
+function callCampaign(overrides: Partial<PositionReviewCampaignInput> = {}): PositionReviewCampaignInput {
+  return {
+    id: "campaign-call",
+    ownerId: "matt",
+    accountId: "account-1",
+    ticker: "UPST",
+    status: "ASSIGNED",
+    events: [
+      { type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 25, shares: 100 },
+      {
+        type: "SELL_COVERED_CALL",
+        occurredAt: new Date("2026-05-02T00:00:00.000Z"),
+        optionType: "CALL",
+        contracts: 1,
+        strike: 30,
+        expiration: new Date("2026-10-02T00:00:00.000Z"),
+        premium: 1,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function equityPosition(overrides: Partial<{ accountId: string; symbol: string; quantity: number }> = {}) {
+  return { accountId: "broker-a", symbol: "UPST", quantity: 100, marketValue: 3000, assetType: "EQUITY", accountLabel: "Test", ...overrides };
+}
+
+function callOptionPosition(overrides: Partial<{ accountId: string; symbol: string; quantity: number }> = {}) {
+  return { accountId: "broker-a", symbol: "UPST  261002C00030000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test", ...overrides };
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   getSessionEvidence.mockResolvedValue(SESSION);
@@ -323,5 +354,99 @@ describe("Codex P1 (B1) - production-shaped broker receipt-timestamp chain: Schw
     expect(staleResult[0]?.result.evidence.position).toBe("AWAITING_CONFIRMATION");
 
     clearBrokerReadCacheForTests();
+  });
+});
+
+describe("Codex P1 (B5) - covered-call underlying-share coverage", () => {
+  it("is SCHWAB_CONFIRMED when one covered call is fully backed by enough broker-held shares", async () => {
+    getPositions.mockResolvedValue([equityPosition({ quantity: 100 }), callOptionPosition()]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("SCHWAB_CONFIRMED");
+  });
+
+  it("confirms BOTH calls when two competing campaigns' aggregate share need fits the actual broker-held shares", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 200 }),
+      callOptionPosition(),
+      callOptionPosition({ symbol: "UPST  261101C00032000" }),
+    ]);
+    const first = callCampaign({ id: "campaign-call-a" });
+    const second = callCampaign({
+      id: "campaign-call-b",
+      events: [
+        { type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 28, shares: 100 },
+        { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-05-02T00:00:00.000Z"), optionType: "CALL", contracts: 1, strike: 32, expiration: new Date("2026-11-01T00:00:00.000Z"), premium: 1 },
+      ],
+    });
+
+    const results = await resolvePositionReviewsForUser("matt", [first, second], [schwabAccount], 3, NOON);
+    expect(results.map((r) => r.result.evidence.position)).toEqual(["SCHWAB_CONFIRMED", "SCHWAB_CONFIRMED"]);
+  });
+
+  it("resolves BOTH competing calls to INSUFFICIENT_SHARE_COVERAGE when the aggregate need exceeds actual broker-held shares (never a first-campaign-wins pick)", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 100 }), // only enough for ONE call's 100 shares, not both
+      callOptionPosition(),
+      callOptionPosition({ symbol: "UPST  261101C00032000" }),
+    ]);
+    const first = callCampaign({ id: "campaign-call-a" });
+    const second = callCampaign({
+      id: "campaign-call-b",
+      events: [
+        { type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 28, shares: 100 },
+        { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-05-02T00:00:00.000Z"), optionType: "CALL", contracts: 1, strike: 32, expiration: new Date("2026-11-01T00:00:00.000Z"), premium: 1 },
+      ],
+    });
+
+    const results = await resolvePositionReviewsForUser("matt", [first, second], [schwabAccount], 3, NOON);
+    expect(results.map((r) => r.result.evidence.position)).toEqual(["INSUFFICIENT_SHARE_COVERAGE", "INSUFFICIENT_SHARE_COVERAGE"]);
+    expect(results.every((r) => r.result.action === "CANNOT_ASSESS")).toBe(true);
+  });
+
+  it("keeps competing-shares grouping isolated per ACCOUNT - two calls on the same ticker in different accounts never compete", async () => {
+    const accountB: PositionReviewAccountInput = { id: "account-b", userId: "matt", externalAccountId: "broker-b", source: "SCHWAB" };
+    getPositions.mockResolvedValue([
+      equityPosition({ accountId: "broker-a", quantity: 100 }),
+      callOptionPosition({ accountId: "broker-a" }),
+      equityPosition({ accountId: "broker-b", quantity: 100 }),
+      callOptionPosition({ accountId: "broker-b" }),
+    ]);
+    const first = callCampaign({ id: "campaign-call-a", accountId: "account-1" });
+    const second = callCampaign({ id: "campaign-call-b", accountId: "account-b" });
+
+    const results = await resolvePositionReviewsForUser("matt", [first, second], [schwabAccount, accountB], 3, NOON);
+    expect(results.map((r) => r.result.evidence.position)).toEqual(["SCHWAB_CONFIRMED", "SCHWAB_CONFIRMED"]);
+  });
+
+  it("keeps competing-shares grouping isolated per OWNER - Eric's call is never counted against Matt's shares (or vice versa)", async () => {
+    const ericSchwabAccount: PositionReviewAccountInput = { id: "account-eric", userId: "eric", externalAccountId: "broker-a", source: "SCHWAB" };
+    // Same account/ticker as Matt's own call, but owned by Eric - grouping must not merge them
+    // even though they'd otherwise share an owner+account+underlying key collision risk.
+    getPositions.mockResolvedValue([equityPosition({ quantity: 100 }), callOptionPosition()]);
+    const mattsCall = callCampaign({ id: "campaign-call-matt" });
+    const ericsCall = callCampaign({ id: "campaign-call-eric", ownerId: "eric", accountId: "account-eric" });
+
+    const results = await resolvePositionReviewsForUser("matt", [mattsCall, ericsCall], [schwabAccount, ericSchwabAccount], 3, NOON);
+    const mattResult = results.find((r) => r.campaignId === "campaign-call-matt");
+    const ericResult = results.find((r) => r.campaignId === "campaign-call-eric");
+    expect(mattResult?.result.evidence.position).toBe("SCHWAB_CONFIRMED");
+    // Eric's campaign is blocked by the B7 owner-isolation check regardless, but confirms grouping
+    // never crosses owners either way.
+    expect(ericResult?.result.evidence.position).toBe("NOT_ASSESSED");
+  });
+
+  it("proves share coverage without needing cost-basis evidence at all", async () => {
+    // No STOCK_SALE/basis-relevant events beyond the assignment itself - summarizeCampaign's own
+    // adjustedBasis may be null here, but that must never block a pure share-count coverage proof.
+    getPositions.mockResolvedValue([equityPosition({ quantity: 100 }), callOptionPosition()]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("SCHWAB_CONFIRMED");
+    expect(results[0]?.result.explanation.strike).toBe(30); // the call's own strike, confirming normal evaluation proceeded
+  });
+
+  it("resolves INSUFFICIENT_SHARE_COVERAGE (never SCHWAB_CONFIRMED) when no equity share position can be found at all", async () => {
+    getPositions.mockResolvedValue([callOptionPosition()]); // contract matches, but no stock position exists
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
   });
 });
