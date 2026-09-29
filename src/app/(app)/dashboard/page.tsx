@@ -2,8 +2,7 @@ import { Suspense } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
-import { PositionReviewEvidenceLine } from "@/components/position-review-badge";
-import { LivePositionReviewBadge } from "@/components/live-position-review-badge";
+import { LivePositionReviewBadge, LivePositionReviewEvidenceLine } from "@/components/live-position-review-badge";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { money, shortCalendarDate } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
@@ -436,7 +435,7 @@ function PositionsToReviewTable({ rows, loading = false }: { rows: PositionToRev
               {row.stage}
               {row.quantity !== null ? ` - ${row.quantity} ${row.quantityUnit}` : ""}
             </div>
-            {row.review ? <PositionReviewEvidenceLine result={row.review} /> : null}
+            {row.review ? <LivePositionReviewEvidenceLine result={row.review} /> : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {row.review ? <LivePositionReviewBadge result={row.review} /> : <Badge tone="neutral">{loading ? "Checking..." : "Review needed"}</Badge>}

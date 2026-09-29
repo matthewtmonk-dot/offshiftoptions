@@ -431,6 +431,7 @@ describe("Dashboard V2 Phase 2 - attachPositionReviews / sortPositionToReviewDis
         reasonCodes: [], optionType: "PUT", strike: 25, stockPrice: 30, dollarDistance: 5, percentageDistance: 20,
         moneyness: "OTM", bufferPercent: 3, expiration: new Date("2026-10-02"), daysToExpiration: 10,
         quoteTradeTime: new Date("2026-06-15T16:00:00Z"), quoteAgeMs: 0, positionEvidenceAsOf: new Date("2026-06-15T16:00:00Z"),
+        activeGuidanceDeadline: new Date("2026-06-15T16:02:00Z"),
       },
       priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "XYZ", accountId: "a1", campaignId: "c1" },
       ...overrides,

@@ -19,8 +19,7 @@ import {
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
-import { PositionReviewEvidenceLine } from "@/components/position-review-badge";
-import { LivePositionReviewBadge } from "@/components/live-position-review-badge";
+import { LivePositionReviewBadge, LivePositionReviewEvidenceLine } from "@/components/live-position-review-badge";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -763,7 +762,7 @@ function CampaignCard({
             {!openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
             {review ? <LivePositionReviewBadge result={review} /> : null}
           </div>
-          {openView && review ? <PositionReviewEvidenceLine result={review} /> : null}
+          {openView && review ? <LivePositionReviewEvidenceLine result={review} /> : null}
           {openView && openPut ? (
             <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-put-contract">
               <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>

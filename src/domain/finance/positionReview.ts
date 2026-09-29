@@ -2,7 +2,7 @@ import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/provide
 import type { CampaignCurrentStage } from "./campaigns";
 import { round } from "./calculations";
 import { daysToExpiration, expirationCalendarDate, isWithinRegularSession, regularSessionCloseInstant } from "./marketSession";
-import { evaluateQuoteEligibility, type QuoteEligibilityFailureReason } from "./quoteEvidence";
+import { evaluateQuoteEligibility, QUOTE_FRESHNESS_WINDOW_MS, type QuoteEligibilityFailureReason } from "./quoteEvidence";
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "./rollStatus";
 
 /**
@@ -85,6 +85,17 @@ export type PositionReviewExplanation = {
   quoteAgeMs: number | null;
   /** The broker position read's own observation time - never the render/re-check time. */
   positionEvidenceAsOf: Date | null;
+  /**
+   * Codex P1 (B3) - the exact instant a LIVE colored advisory (COMFORTABLE/WATCH/REVIEW_ROLL/
+   * REVIEW_CALL) stops being presentable, computed here (server/domain side) rather than left for
+   * a client to guess: the EARLIEST of (1) quoteTradeTime + 120s, (2) a SCHWAB_CONFIRMED position's
+   * own read-receipt time + 5 minutes, and (3) the validated regular session's own close instant.
+   * Null whenever there is no live advisory to expire at all (CANNOT_ASSESS, or no eligible quote).
+   * A client re-checks against this deadline using its OWN clock only to measure elapsed time
+   * against it - the deadline itself is always derived from real provider/broker evidence times,
+   * never client clock time.
+   */
+  activeGuidanceDeadline: Date | null;
 };
 
 export type PositionReviewPriorityGroup = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
@@ -245,6 +256,14 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
   const expirationUnknown = leg.kind !== "NONE" && expiration === null;
   const group = priorityGroupOf({ lifecycle, action: finalAction, dte, expirationUnknown, reasonCodes });
   const withinExpirationTodaySubgroup = group === 2 ? subgroupOf(finalAction) : null;
+  const positionEvidenceAsOf = input.position.state === "SCHWAB_CONFIRMED" ? input.position.asOf : null;
+  const activeGuidanceDeadline = computeActiveGuidanceDeadline({
+    action: finalAction,
+    quoteTradeTime,
+    positionState,
+    positionEvidenceAsOf,
+    session: input.session,
+  });
 
   return {
     action: finalAction,
@@ -263,7 +282,8 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
       daysToExpiration: dte,
       quoteTradeTime,
       quoteAgeMs,
-      positionEvidenceAsOf: input.position.state === "SCHWAB_CONFIRMED" ? input.position.asOf : null,
+      positionEvidenceAsOf,
+      activeGuidanceDeadline,
     },
     priority: {
       group,
@@ -369,6 +389,42 @@ function subgroupOf(action: PositionReviewAction): 0 | 1 | 2 {
 
 function isMarketClosedReason(reason: QuoteEligibilityFailureReason): boolean {
   return reason === "MARKET_NOT_IN_REGULAR_SESSION";
+}
+
+const LIVE_ACTIONS: ReadonlySet<PositionReviewAction> = new Set(["COMFORTABLE", "WATCH", "REVIEW_ROLL", "REVIEW_CALL"]);
+
+/** Codex P1 (B3) - see PositionReviewExplanation.activeGuidanceDeadline's own doc comment for the
+ * exact contract. Every component is a real evidence/session time - never `new Date()`, never the
+ * client's own clock. */
+function computeActiveGuidanceDeadline({
+  action,
+  quoteTradeTime,
+  positionState,
+  positionEvidenceAsOf,
+  session,
+}: {
+  action: PositionReviewAction;
+  quoteTradeTime: Date | null;
+  positionState: PositionEvidenceState;
+  positionEvidenceAsOf: Date | null;
+  session: EquityMarketSessionEvidence;
+}): Date | null {
+  if (!LIVE_ACTIONS.has(action) || !quoteTradeTime) {
+    return null;
+  }
+
+  const deadlines: number[] = [quoteTradeTime.getTime() + QUOTE_FRESHNESS_WINDOW_MS];
+
+  if (positionState === "SCHWAB_CONFIRMED" && positionEvidenceAsOf) {
+    deadlines.push(positionEvidenceAsOf.getTime() + BROKER_POSITION_FRESHNESS_MS);
+  }
+
+  const sessionClose = regularSessionCloseInstant(session);
+  if (sessionClose) {
+    deadlines.push(sessionClose.getTime());
+  }
+
+  return new Date(Math.min(...deadlines));
 }
 
 function sessionStateOf(session: EquityMarketSessionEvidence, now: Date): SessionEvidenceState {

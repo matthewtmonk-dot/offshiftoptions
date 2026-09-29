@@ -312,6 +312,53 @@ describe("evaluatePositionReview - purity", () => {
   });
 });
 
+describe("Codex P1 (B3) - activeGuidanceDeadline", () => {
+  it("is the quote's own 120s freshness deadline when it is the earliest of the three components", () => {
+    // position.asOf and quote.tradeTime are both exactly NOON here (baseInput's own defaults), so
+    // the quote deadline (NOON+120s) arrives well before the broker deadline (NOON+5min) or the
+    // session close (16:00 ET, hours away).
+    const result = evaluatePositionReview(baseInput({ quote: quote(30) }));
+    expect(result.explanation.activeGuidanceDeadline?.getTime()).toBe(NOON.getTime() + 120_000);
+  });
+
+  it("is the broker read-receipt's 5-minute deadline when the position evidence is the older (and therefore earlier-expiring) one", () => {
+    const positionAsOf = new Date(NOON.getTime() - 4 * 60_000); // 4 minutes old - still fresh (<=5min)
+    const result = evaluatePositionReview(baseInput({ position: { state: "SCHWAB_CONFIRMED", asOf: positionAsOf }, quote: quote(30, NOON) }));
+    expect(result.explanation.activeGuidanceDeadline?.getTime()).toBe(positionAsOf.getTime() + 5 * 60_000);
+  });
+
+  it("is the validated regular-session close instant when the session is about to end before either freshness window would", () => {
+    const almostClose = new Date(SESSION_CLOSE.getTime() - 30_000);
+    const result = evaluatePositionReview(
+      baseInput({ position: { state: "SCHWAB_CONFIRMED", asOf: almostClose }, quote: quote(30, almostClose), now: almostClose }),
+    );
+    expect(result.explanation.activeGuidanceDeadline?.getTime()).toBe(SESSION_CLOSE.getTime());
+  });
+
+  it("is null for a CANNOT_ASSESS row - there is no live advisory to expire", () => {
+    const result = evaluatePositionReview(baseInput({ position: { state: "BROKER_UNAVAILABLE" } }));
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.explanation.activeGuidanceDeadline).toBeNull();
+  });
+
+  it("is null when the quote itself is ineligible, even though the action still resolves to CANNOT_ASSESS", () => {
+    const result = evaluatePositionReview(baseInput({ quote: { status: "UNAVAILABLE", reason: "provider error" } }));
+    expect(result.explanation.activeGuidanceDeadline).toBeNull();
+  });
+
+  it("is still computed for a WATCH row (a live advisory, not just COMFORTABLE/REVIEW)", () => {
+    const result = evaluatePositionReview(baseInput({ quote: quote(25.3) })); // within the default 3% buffer
+    expect(result.action).toBe("WATCH");
+    expect(result.explanation.activeGuidanceDeadline).not.toBeNull();
+  });
+
+  it("omits the broker-freshness component entirely for a MANUAL_POSITION (no broker read to expire)", () => {
+    const result = evaluatePositionReview(baseInput({ position: { state: "MANUAL_POSITION" }, quote: quote(30) }));
+    // Only the quote deadline and session close remain - quote wins since it's much sooner.
+    expect(result.explanation.activeGuidanceDeadline?.getTime()).toBe(NOON.getTime() + 120_000);
+  });
+});
+
 describe("deterministic priority ordering", () => {
   function resultWithGroup(overrides: Partial<PositionReviewInput>): PositionReviewResult {
     return evaluatePositionReview(baseInput(overrides));
