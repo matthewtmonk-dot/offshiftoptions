@@ -169,6 +169,71 @@ describe("resolvePositionReviewsForUser", () => {
   });
 });
 
+describe("Codex P1 (B7) - owner isolation, CRITICAL", () => {
+  const ericManualAccount: PositionReviewAccountInput = { id: "account-eric-manual", userId: "eric", externalAccountId: null, source: "MANUAL" };
+  const ericSchwabAccount: PositionReviewAccountInput = { id: "account-eric-schwab", userId: "eric", externalAccountId: "broker-eric", source: "SCHWAB" };
+
+  it("never evaluates an Eric-owned MANUAL campaign as COMFORTABLE using Matt's settings (the exact Codex repro)", async () => {
+    getPositions.mockResolvedValue([]);
+    const ericCampaign = putCampaign({ id: "campaign-eric", ownerId: "eric", accountId: "account-eric-manual" });
+
+    const results = await resolvePositionReviewsForUser("matt", [ericCampaign], [ericManualAccount], 3, NOON);
+
+    expect(results[0]?.result.evidence.position).toBe("NOT_ASSESSED");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.action).not.toBe("COMFORTABLE");
+  });
+
+  it("never confirms an Eric-owned Schwab campaign against Matt's own broker positions", async () => {
+    // Matt's own Schwab connection happens to hold the exact same contract - it must never be
+    // treated as confirming ERIC's campaign.
+    getPositions.mockResolvedValue([
+      { accountId: "broker-eric", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test" },
+    ]);
+    const ericCampaign = putCampaign({ id: "campaign-eric", ownerId: "eric", accountId: "account-eric-schwab" });
+
+    const results = await resolvePositionReviewsForUser("matt", [ericCampaign], [ericSchwabAccount], 3, NOON);
+
+    expect(results[0]?.result.evidence.position).toBe("NOT_ASSESSED");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+  });
+
+  it("isolates ownership correctly in a mixed batch (Matt's own campaign confirms normally; Eric's buddy row alongside it does not)", async () => {
+    getPositions.mockResolvedValue([
+      { accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test" },
+    ]);
+    const mattsCampaign = putCampaign({ id: "campaign-matt" });
+    const ericsCampaign = putCampaign({ id: "campaign-eric", ownerId: "eric", accountId: "account-eric-manual", ticker: "UPST" });
+
+    const results = await resolvePositionReviewsForUser("matt", [mattsCampaign, ericsCampaign], [schwabAccount, ericManualAccount], 3, NOON);
+
+    const mattResult = results.find((r) => r.campaignId === "campaign-matt");
+    const ericResult = results.find((r) => r.campaignId === "campaign-eric");
+    expect(mattResult?.result.evidence.position).toBe("SCHWAB_CONFIRMED");
+    expect(mattResult?.result.action).toBe("COMFORTABLE");
+    expect(ericResult?.result.evidence.position).toBe("NOT_ASSESSED");
+    expect(ericResult?.result.action).toBe("CANNOT_ASSESS");
+  });
+
+  it("never grants active guidance when the campaign owner matches but the account itself belongs to someone else", async () => {
+    // A defensive/contradictory-data case: campaign.ownerId says "matt" but its account row's own
+    // userId says "eric" - ownership must be proven on BOTH, never just the campaign's own claim.
+    getPositions.mockResolvedValue([]);
+    const mismatchedCampaign = putCampaign({ accountId: "account-eric-manual" });
+    const results = await resolvePositionReviewsForUser("matt", [mismatchedCampaign], [ericManualAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("NOT_ASSESSED");
+  });
+
+  it("does not let Eric's own settings/buffer apply when Eric views his own campaign through a shared batch call using a different rollBufferPercent than Matt's", async () => {
+    // Sanity: when the VIEWER is genuinely Eric, his own campaign confirms and evaluates normally.
+    getPositions.mockResolvedValue([]);
+    const ericOwnCampaign = putCampaign({ id: "campaign-eric-own", ownerId: "eric", accountId: "account-eric-manual" });
+    const results = await resolvePositionReviewsForUser("eric", [ericOwnCampaign], [ericManualAccount], 10, NOON);
+    expect(results[0]?.result.evidence.position).toBe("MANUAL_POSITION");
+    expect(results[0]?.result.explanation.bufferPercent).toBe(10);
+  });
+});
+
 describe("resolveSortedPositionReviewsForUser", () => {
   it("returns results in the deterministic priority order, not input order", async () => {
     getPositions.mockResolvedValue([]);

@@ -185,6 +185,16 @@ function resolvePositionEvidence({
   trackedCalls: TrackedCall[];
   now: Date;
 }): PositionReviewPositionInput {
+  // Codex P1 (B7) - CRITICAL: active review guidance (a manual-account bypass, a Schwab broker
+  // match, or the buffer-driven moneyness math this evidence state ultimately gates) is only ever
+  // computed for the AUTHENTICATED VIEWER's own campaign on their own account. A buddy/shared
+  // campaign passed into this same batch call (Tracker's Buddy/Both scope) must resolve to
+  // NOT_ASSESSED here regardless of its account's source - it must never silently borrow the
+  // viewer's own manual-bypass, broker connection, or roll-buffer setting. This check runs BEFORE
+  // every other branch below, including the manual-account bypass.
+  if (campaign.ownerId !== userId || account?.userId !== userId) {
+    return { state: "NOT_ASSESSED" };
+  }
   // An owner-classified manual (non-Schwab-linked) account uses its own complete manual terms -
   // never inferred silently for an unmatched Schwab campaign (the ticket's own explicit rule).
   if (account?.source === "MANUAL") {
