@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { summarizeCspSecuredCapital } from "./brokerPositions";
 import {
+  exactMatchedCallCampaignId,
   exactMatchedCampaignId,
   matchDashboardPositions,
+  matchTrackedCall,
   matchTrackedPut,
   resolveTrackerPositionMatchState,
   type DashboardPositionInput,
+  type TrackedCall,
   type TrackedPut,
 } from "./trackerPositionMatch";
 
@@ -85,6 +88,72 @@ describe("exactMatchedCampaignId (attribution for an already-confirmed EXACT mat
   });
   it("returns null for another user even if the same campaign/account identifiers coincide", () => {
     expect(exactMatchedCampaignId("eric", position, [position], [account], [campaign])).toBeNull();
+  });
+});
+
+describe("Dashboard V2 Phase 2 - Tracker display-only call matching", () => {
+  const callPosition = { accountId: "broker-a", symbol: "CORZ  260918C00016500", quantity: -1 };
+  const callCampaign: TrackedCall = { id: "campaign-a", ownerId: "matt", accountId: "account-a", ticker: "CORZ",
+    status: "ASSIGNED", strike: 16.5, expiration: new Date("2026-09-18"), contracts: 1 };
+
+  it("matches padded/canonical/case equivalents in the user's own account", () => {
+    for (const symbol of [callPosition.symbol, "CORZ260918C00016500", " corz 260918c00016500 "]) {
+      const row = { ...callPosition, symbol };
+      expect(matchTrackedCall("matt", row, [row], [account], [callCampaign])).toBe("EXACT");
+    }
+  });
+
+  it.each([
+    { ticker: "HL" }, { strike: 18 }, { expiration: new Date("2026-09-25") }, { contracts: 2 },
+    { accountId: "another-account" }, { ownerId: "eric" }, { status: "CLOSED" }, { status: "OPEN" },
+  ])("rejects a different active leg, quantity, account, owner or lifecycle: %j", (change) => {
+    expect(matchTrackedCall("matt", callPosition, [callPosition], [account], [{ ...callCampaign, ...change }])).toBe("NONE");
+  });
+
+  it.each([
+    { quantity: 1 }, { quantity: 0 }, { symbol: "CORZ 260918P00016500" }, { symbol: "CORZ" },
+    { putCall: "PUT" as const }, { assetType: "EQUITY" }, { strikePrice: 18 }, { underlyingSymbol: "HL" },
+  ])("rejects incompatible/invalid broker evidence: %j", (change) => {
+    const row = { ...callPosition, ...change };
+    expect(matchTrackedCall("matt", row, [row], [account], [callCampaign])).toBe("NONE");
+  });
+
+  it("a PUT and a CALL on the same strike/expiration never cross-match each other's campaign", () => {
+    const putCampaign: TrackedPut = { ...callCampaign, status: "OPEN" };
+    expect(matchTrackedCall("matt", callPosition, [callPosition], [account], [])).toBe("NONE");
+    // The put-matching function must not accept the call position either.
+    expect(matchTrackedPut("matt", callPosition, [callPosition], [account], [putCampaign])).toBe("NONE");
+  });
+
+  it("keeps multiple candidate campaigns for one call contract ambiguous instead of picking one", () => {
+    expect(
+      matchTrackedCall("matt", callPosition, [callPosition], [account], [callCampaign, { ...callCampaign, id: "second", contracts: 2 }]),
+    ).toBe("AMBIGUOUS");
+  });
+
+  it("rejects duplicate provider rows for the same call contract", () => {
+    expect(
+      matchTrackedCall("matt", callPosition, [callPosition, { ...callPosition, symbol: "CORZ260918C00016500" }], [account], [callCampaign]),
+    ).toBe("AMBIGUOUS");
+  });
+
+  it("does not match another user's account even if identifiers coincide", () => {
+    expect(matchTrackedCall("eric", callPosition, [callPosition], [account], [callCampaign])).toBe("NONE");
+  });
+
+  describe("exactMatchedCallCampaignId", () => {
+    it("identifies the specific campaign for a genuine EXACT call match", () => {
+      expect(exactMatchedCallCampaignId("matt", callPosition, [callPosition], [account], [callCampaign])).toBe("campaign-a");
+    });
+
+    it("returns null when the match is AMBIGUOUS (never guesses which campaign)", () => {
+      const second: TrackedCall = { ...callCampaign, id: "campaign-b", contracts: 2 };
+      expect(exactMatchedCallCampaignId("matt", callPosition, [callPosition], [account], [callCampaign, second])).toBeNull();
+    });
+
+    it("returns null when the match is NONE", () => {
+      expect(exactMatchedCallCampaignId("matt", callPosition, [callPosition], [account], [{ ...callCampaign, status: "CLOSED" }])).toBeNull();
+    });
   });
 });
 

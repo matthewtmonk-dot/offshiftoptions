@@ -76,6 +76,84 @@ export function exactMatchedCampaignId(
   return campaigns.find((campaign) => campaign.accountId === ownAccount?.id && campaignContractKey(campaign) === key)?.id ?? null;
 }
 
+/**
+ * Dashboard V2 Phase 2 - the narrowest safe extension of the put-matching pattern above to
+ * currently-open COVERED CALLS, so positionReview.ts can resolve real "Schwab confirmed" position
+ * evidence for a call leg (see getCurrentOpenCall in campaigns.ts, the one authoritative source
+ * for "what call is currently open" - this file never re-derives that). A deliberate parallel
+ * implementation rather than a shared generic with matchTrackedPut: the put path is already
+ * covered by its own tests and this ticket must never risk regressing it, so nothing about
+ * matchTrackedPut's body is touched.
+ *
+ * Differs from the put side only where the underlying economics differ: a covered call exists on
+ * an ASSIGNED campaign (never OPEN, which is what a cash-secured put uses), and the OCC contract
+ * key/putCall check look for CALL instead of PUT. Every other safety property is identical: exact
+ * owner/account/contract/quantity match required, any multi-candidate or duplicate-provider-row
+ * ambiguity is rejected rather than guessed, and a position belonging to a different user/account
+ * can never match.
+ */
+export type TrackedCall = {
+  id: string;
+  ownerId: string;
+  accountId: string;
+  ticker: string;
+  status: string;
+  strike: number;
+  expiration: Date;
+  contracts: number;
+};
+
+function campaignCallContractKey(campaign: TrackedCall): string | null {
+  if (!Number.isFinite(campaign.expiration.getTime()) || !Number.isFinite(campaign.strike) || campaign.strike <= 0) {
+    return null;
+  }
+  return `${campaign.ticker.trim().toUpperCase()}|${campaign.expiration.toISOString().slice(0, 10)}|CALL|${Math.round(campaign.strike * 1000)}`;
+}
+
+export function matchTrackedCall(
+  userId: string,
+  position: Position,
+  positions: Position[],
+  accounts: Account[],
+  campaigns: TrackedCall[],
+): "EXACT" | "AMBIGUOUS" | "NONE" {
+  const key = occContractKey(position.symbol);
+  const contract = parseOccOptionSymbol(position.symbol);
+  if (!key || !key.includes("|CALL|") || !Number.isInteger(position.quantity) || position.quantity >= 0) return "NONE";
+  if ((position.assetType && position.assetType !== "OPTION") || (position.putCall && position.putCall !== "CALL") ||
+    (position.strikePrice != null && position.strikePrice !== contract?.strike) ||
+    (position.underlyingSymbol && position.underlyingSymbol.trim().toUpperCase() !== contract?.underlying)) return "NONE";
+  const ownAccounts = accounts.filter((account) => account.userId === userId && account.externalAccountId === position.accountId);
+  if (ownAccounts.length !== 1) return ownAccounts.length ? "AMBIGUOUS" : "NONE";
+  const candidates = campaigns.filter((campaign) =>
+    campaign.ownerId === userId && campaign.accountId === ownAccounts[0].id && campaign.status === "ASSIGNED" &&
+    campaignCallContractKey(campaign) === key,
+  );
+  // Same "never pick the first plausible candidate" rule as matchTrackedPut: multiple candidate
+  // campaigns, or a duplicate provider row for the same contract, is ambiguous even if one
+  // candidate happens to have the expected quantity.
+  const samePositions = positions.filter((other) => other.accountId === position.accountId && occContractKey(other.symbol) === key);
+  if (candidates.length > 1 || (candidates.length && samePositions.length !== 1)) return "AMBIGUOUS";
+  return candidates.length === 1 && candidates[0].contracts === -position.quantity ? "EXACT" : "NONE";
+}
+
+/** Call-side counterpart of exactMatchedCampaignId - same "only after EXACT, never guesses"
+ * contract. */
+export function exactMatchedCallCampaignId(
+  userId: string,
+  position: Position,
+  positions: Position[],
+  accounts: Account[],
+  campaigns: TrackedCall[],
+): string | null {
+  if (matchTrackedCall(userId, position, positions, accounts, campaigns) !== "EXACT") {
+    return null;
+  }
+  const key = occContractKey(position.symbol);
+  const ownAccount = accounts.find((account) => account.userId === userId && account.externalAccountId === position.accountId);
+  return campaigns.find((campaign) => campaign.accountId === ownAccount?.id && campaignCallContractKey(campaign) === key)?.id ?? null;
+}
+
 export type TrackerPositionMatchState = "LINKED" | "EXACT" | "AMBIGUOUS" | "NONE";
 
 /**
