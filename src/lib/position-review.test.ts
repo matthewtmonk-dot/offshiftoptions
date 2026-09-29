@@ -614,3 +614,94 @@ describe("Codex P1 (B8) - evaluation time is captured AFTER retrieval, never bef
     expect(results[0]?.result.evidence.session).toBe("CLOSED");
   });
 });
+
+describe("Codex P1 - Dashboard/Tracker orchestration parity", () => {
+  // Dashboard and Tracker each fetch campaigns/accounts via their OWN Prisma queries, carrying
+  // different extra fields the shared evaluator never asked for (Dashboard's own
+  // entrySnapshotJson/thesis/strategy vs. Tracker's own relation objects/visibility) before
+  // mapping down to the identical PositionReviewCampaignInput/PositionReviewAccountInput shape -
+  // see the exact mapping in both page.tsx files. This proves the shared orchestration's result
+  // depends ONLY on that shared shape, never accidentally on which page's incidental extra fields
+  // happened to be present alongside it.
+  function dashboardShapedCampaign(): PositionReviewCampaignInput & { strategy: string; entrySnapshotJson: unknown; thesis: string | null } {
+    return { ...putCampaign(), strategy: "CASH_SECURED_PUT", entrySnapshotJson: { note: "dashboard-only field" }, thesis: "Dashboard's own thesis field" };
+  }
+
+  function trackerShapedCampaign(): PositionReviewCampaignInput & { account: { visibility: string; name: string }; owner: { name: string } } {
+    return { ...putCampaign(), account: { visibility: "PRIVATE", name: "Tracker's own account relation" }, owner: { name: "Matt" } };
+  }
+
+  it("produces an identical result whether the campaign arrives in Dashboard's own shape or Tracker's own shape", async () => {
+    getPositions.mockResolvedValue([
+      { accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test" },
+    ]);
+
+    const fromDashboardShape = await resolvePositionReviewsForUser("matt", [dashboardShapedCampaign()], [schwabAccount], 3, NOON);
+    const fromTrackerShape = await resolvePositionReviewsForUser("matt", [trackerShapedCampaign()], [schwabAccount], 3, NOON);
+
+    expect(fromTrackerShape).toEqual(fromDashboardShape);
+    expect(fromDashboardShape[0]?.result.action).toBe("COMFORTABLE");
+  });
+
+  it("produces identical action/moneyness/DTE/lifecycle/evidence for the same owner+campaign+evidence+settings regardless of which page's account shape supplied the account row", async () => {
+    // Dashboard's own account mapping vs. Tracker's own account mapping both reduce to the exact
+    // same PositionReviewAccountInput fields - confirms neither page can drift by carrying a
+    // differently-shaped account object into the shared resolver.
+    const dashboardAccountShape = { id: "account-1", userId: "matt", externalAccountId: "broker-a", source: "SCHWAB" as const, brokerName: "Schwab", accountType: "Margin" };
+    const trackerAccountShape = { id: "account-1", userId: "matt", externalAccountId: "broker-a", source: "SCHWAB" as const, currency: "USD", visibility: "PRIVATE" };
+    getPositions.mockResolvedValue([
+      { accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test" },
+    ]);
+
+    const fromDashboardAccount = await resolvePositionReviewsForUser("matt", [putCampaign()], [dashboardAccountShape], 3, NOON);
+    const fromTrackerAccount = await resolvePositionReviewsForUser("matt", [putCampaign()], [trackerAccountShape], 3, NOON);
+
+    expect(fromDashboardAccount[0]?.result.action).toBe(fromTrackerAccount[0]?.result.action);
+    expect(fromDashboardAccount[0]?.result.explanation.moneyness).toBe(fromTrackerAccount[0]?.result.explanation.moneyness);
+    expect(fromDashboardAccount[0]?.result.explanation.daysToExpiration).toBe(fromTrackerAccount[0]?.result.explanation.daysToExpiration);
+    expect(fromDashboardAccount[0]?.result.lifecycle).toBe(fromTrackerAccount[0]?.result.lifecycle);
+    expect(fromDashboardAccount[0]?.result.evidence).toEqual(fromTrackerAccount[0]?.result.evidence);
+  });
+});
+
+describe("Codex P1 - rolled-position orchestration (realistic history, not a pre-selected leg)", () => {
+  it("derives strike/expiration/review status from the CURRENT (post-roll) leg only - the original, closed leg never leaks through", async () => {
+    const rolledCampaign = putCampaign({
+      events: [
+        // Original put: strike 20, expiring Sep 18 - if this leaked through, moneyness/DTE would
+        // be computed against a strike/expiration that no longer exists.
+        { type: "SELL_PUT", occurredAt: new Date("2026-04-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 20, expiration: new Date("2026-09-18T00:00:00.000Z"), premium: 1 },
+        { type: "ROLL_PUT_CLOSE", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 20, expiration: new Date("2026-09-18T00:00:00.000Z"), premium: 0.5 },
+        // Rolled put: the REAL current leg - strike 25, expiring Oct 2.
+        { type: "ROLL_PUT_OPEN", occurredAt: new Date("2026-05-01T00:00:00.000Z"), sortOrder: 1, optionType: "PUT", contracts: 1, strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1.2 },
+      ],
+    });
+    getPositions.mockResolvedValue([
+      { accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test" },
+    ]);
+
+    const results = await resolvePositionReviewsForUser("matt", [rolledCampaign], [schwabAccount], 3, NOON);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.result.lifecycle).toBe("ROLLED_PUT");
+    expect(results[0]?.result.explanation.strike).toBe(25); // the NEW strike, never the original 20
+    expect(results[0]?.result.explanation.expiration?.toISOString().slice(0, 10)).toBe("2026-10-02"); // never Sep 18
+    expect(results[0]?.result.evidence.position).toBe("SCHWAB_CONFIRMED"); // matched against the NEW contract's own OCC symbol
+    expect(results[0]?.result.action).toBe("COMFORTABLE"); // quote(30) is well OTM of the new $25 strike
+  });
+
+  it("a rolled-then-closed-again put has no current leg at all - never reports the original or the intermediate strike", async () => {
+    const closedAfterRoll = putCampaign({
+      status: "CLOSED",
+      events: [
+        { type: "SELL_PUT", occurredAt: new Date("2026-04-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 20, expiration: new Date("2026-09-18T00:00:00.000Z"), premium: 1 },
+        { type: "ROLL_PUT_CLOSE", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 20, expiration: new Date("2026-09-18T00:00:00.000Z"), premium: 0.5 },
+        { type: "ROLL_PUT_OPEN", occurredAt: new Date("2026-05-01T00:00:00.000Z"), sortOrder: 1, optionType: "PUT", contracts: 1, strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1.2 },
+        { type: "CLOSE_PUT", occurredAt: new Date("2026-06-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 0.1 },
+      ],
+    });
+    getPositions.mockResolvedValue([]);
+    const results = await resolvePositionReviewsForUser("matt", [closedAfterRoll], [schwabAccount], 3, NOON);
+    expect(results).toHaveLength(0); // CLOSED campaigns are never part of the review set at all
+  });
+});
