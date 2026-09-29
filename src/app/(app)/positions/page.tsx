@@ -33,7 +33,7 @@ import {
 } from "@/domain/finance/campaigns";
 import type { PositionReviewResult } from "@/domain/finance/positionReview";
 import { resolveCurrentCostToClose, type CurrentCostToCloseSource } from "@/domain/finance/currentPositionMark";
-import { daysToExpiration, distanceToStrikeDollars } from "@/domain/finance/calculations";
+import { distanceToStrikeDollars } from "@/domain/finance/calculations";
 import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import { resolvePositionReviewsForUser, type PositionReviewCampaignInput } from "@/lib/position-review";
 import {
@@ -767,11 +767,14 @@ function CampaignCard({
             <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-put-contract">
               <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>
               <span className="text-zinc-300">{shortCalendarDate(openPut.expiration)}</span>
-              {/* Codex P1 - the shared review evaluator's own NY-calendar DTE, matching exactly
-                  what Dashboard shows for the same campaign; the legacy UTC-based
-                  calculations.daysToExpiration stays as a defensive fallback only (never the
-                  primary source) for the rare case review evaluation didn't populate this leg. */}
-              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? daysToExpiration(openPut.expiration, asOf)} DTE</span>
+              {/* Codex P2 - the shared review evaluator's own NY-calendar DTE, matching exactly
+                  what Dashboard shows for the same campaign. Never falls back to the legacy
+                  UTC-based calculations.daysToExpiration - that calculation uses different
+                  (UTC, not NY-calendar) semantics, so silently substituting it would show a DTE
+                  that could disagree with the review evaluator's own expiration-state logic
+                  right next to it. Shows "-" rather than an incompatible number when review
+                  evaluation didn't populate this leg. */}
+              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? "-"} DTE</span>
               <span className="text-xs text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
             </div>
           ) : null}
@@ -779,8 +782,8 @@ function CampaignCard({
             <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-call-contract">
               <span className="font-semibold text-amber-200">{campaign.ticker} {money(openCall.strike)} Call</span>
               <span className="text-zinc-300">{shortCalendarDate(openCall.expiration)}</span>
-              {/* Codex P1 - same NY-calendar DTE substitution as the put contract above. */}
-              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? daysToExpiration(openCall.expiration, asOf)} DTE</span>
+              {/* Codex P2 - same NY-calendar-only DTE as the put contract above, no legacy fallback. */}
+              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? "-"} DTE</span>
               <span className="text-xs text-zinc-400">Short {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}</span>
               {openCallEventRow ? (
                 <span className="text-xs text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>
