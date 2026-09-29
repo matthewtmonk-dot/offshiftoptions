@@ -447,6 +447,48 @@ describe("normalizeSchwabEquityMarketSessionEvidence", () => {
     expect(result).toMatchObject({ status: "AVAILABLE", isOpen: false, regularMarketIntervals: [] });
   });
 
+  // Codex P2 (D) - "regularMarket legitimately absent" (a genuinely closed day may omit it
+  // entirely) must never be conflated with "regularMarket was supplied but malformed" (corrupt
+  // provider data) - collapsing both into the same [] treatment would let corrupt data masquerade
+  // as a validated closed day.
+  it("is AVAILABLE/CLOSED when sessionHours itself is entirely absent on an explicit closed day", () => {
+    const fixture = { equity: { EQ: { date: "2026-06-13", marketType: "EQUITY", product: "EQ", isOpen: false } } };
+    const result = normalizeSchwabEquityMarketSessionEvidence("2026-06-13", fixture);
+    expect(result).toMatchObject({ status: "AVAILABLE", isOpen: false, regularMarketIntervals: [] });
+  });
+
+  it("is UNAVAILABLE when regularMarket was SUPPLIED as a malformed scalar rather than legitimately absent", () => {
+    const fixture = {
+      equity: { EQ: { date: "2026-06-13", marketType: "EQUITY", product: "EQ", isOpen: false, sessionHours: { regularMarket: "closed" } } },
+    };
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-13", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  it("is UNAVAILABLE when regularMarket was SUPPLIED as a malformed object rather than legitimately absent", () => {
+    const fixture = {
+      equity: { EQ: { date: "2026-06-13", marketType: "EQUITY", product: "EQ", isOpen: false, sessionHours: { regularMarket: { unexpected: true } } } },
+    };
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-13", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  it("is UNAVAILABLE when isOpen: false is reported alongside a valid, non-empty regularMarket (contradiction, not a malformed-value case)", () => {
+    const fixture = ordinaryDayMarketHoursFixture();
+    (fixture.equity.EQ as Record<string, unknown>).isOpen = false;
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-15", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  it("is UNAVAILABLE when sessionHours itself is a malformed scalar", () => {
+    const fixture = { equity: { EQ: { date: "2026-06-13", marketType: "EQUITY", product: "EQ", isOpen: false, sessionHours: "not-an-object" } } };
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-13", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  it("is UNAVAILABLE when required identity/date/type fields are missing, distinct from the closed-day case", () => {
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-13", { equity: { EQ: { isOpen: false } } }).status).toBe("UNAVAILABLE");
+    expect(
+      normalizeSchwabEquityMarketSessionEvidence("2026-06-13", { equity: { EQ: { date: "2026-06-13", isOpen: false } } }).status,
+    ).toBe("UNAVAILABLE");
+  });
+
   // Codex P1 (B2): the session parser previously let isOpen and the regularMarket intervals
   // disagree, silently trusting whichever one it happened to read - both of the tests below prove
   // a disagreement between the two now fails closed to UNAVAILABLE instead of picking a side.

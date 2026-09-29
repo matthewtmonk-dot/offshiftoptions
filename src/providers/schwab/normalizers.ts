@@ -255,20 +255,32 @@ export function normalizeSchwabEquityMarketSessionEvidence(requestedNyDate: stri
     return { status: "UNAVAILABLE", reason: "Schwab market-hours isOpen was not an actual boolean." };
   }
 
-  // "regularMarket missing/malformed entirely" (not an array at all, or absent) must be told apart
-  // from "regularMarket is a real, empty array" so a genuinely closed day (which legitimately
-  // reports no intervals) is never confused with a structurally broken response on an open day.
-  const sessionHours = objectValue(eq.sessionHours);
-  const regularMarketValue = sessionHours?.regularMarket;
-  const regularMarketIsWellFormedArray = Array.isArray(regularMarketValue);
-  const regularMarketRaw = regularMarketIsWellFormedArray ? regularMarketValue : [];
+  // Codex P2 (D) - "the field is legitimately ABSENT" (a genuinely closed day may omit
+  // sessionHours/regularMarket entirely) must be told apart from "the field was SUPPLIED but is
+  // not a valid shape" (a corrupt/malformed response) - collapsing both into the same "treat as
+  // empty" behavior would let corrupt provider data masquerade as a validated closed day.
+  const sessionHoursRaw = eq.sessionHours;
+  const sessionHoursSupplied = sessionHoursRaw !== undefined && sessionHoursRaw !== null;
+  const sessionHours = objectValue(sessionHoursRaw);
+  if (sessionHoursSupplied && !sessionHours) {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours sessionHours was supplied but is not a valid object." };
+  }
+
+  const regularMarketRawValue = sessionHours?.regularMarket;
+  const regularMarketSupplied = regularMarketRawValue !== undefined && regularMarketRawValue !== null;
+  const regularMarketIsWellFormedArray = Array.isArray(regularMarketRawValue);
+  if (regularMarketSupplied && !regularMarketIsWellFormedArray) {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours sessionHours.regularMarket was supplied but is not a valid array." };
+  }
+  const regularMarketRaw = regularMarketIsWellFormedArray ? regularMarketRawValue : [];
 
   // Codex P1 (B2): isOpen and the regularMarket intervals are two independent claims from the
   // same response - they must agree, never let one silently override the other. isOpen:false with
   // intervals supplied is a contradiction (which is actually open?); isOpen:true with no
   // structurally valid intervals is a missing-evidence case - neither is a value shape this
-  // function may reinterpret as CLOSED. Only isOpen:false with NO intervals supplied is genuine,
-  // trustworthy closed-day evidence.
+  // function may reinterpret as CLOSED. Only isOpen:false with NO intervals SUPPLIED AT ALL
+  // (never merely malformed - that was already rejected above) is genuine, trustworthy closed-day
+  // evidence.
   if (eq.isOpen === false && regularMarketRaw.length > 0) {
     return { status: "UNAVAILABLE", reason: "Schwab market-hours reported isOpen: false alongside regular-session intervals - contradictory evidence." };
   }
