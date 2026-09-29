@@ -337,6 +337,26 @@ export function getOpenPutEvidenceState(events: CampaignEventInput[]): OpenPutEv
   return getCurrentOpenPut(events) ? "COMPLETE" : "INCOMPLETE";
 }
 
+/** Codex P1 (B6) - best-effort PARTIAL terms for a put-opening event getOpenPutEvidenceState
+ * already found INCOMPLETE - reads whatever fields ARE present on the last open-attempt event
+ * (e.g. a known strike with a missing expiration), never guessing the ones that aren't. Null when
+ * there is no open-attempt event at all (mirrors getOpenPutEvidenceState's own "NONE" case).
+ * Diagnostic only - a caller (positionReview.ts) uses this to tell "missing expiration" apart from
+ * "missing strike" in its own CANNOT_ASSESS reasoning; it is never treated as a valid position. */
+export type IncompleteOpenLegTerms = { strike: number | null; expiration: Date | null; contracts: number | null };
+
+export function getIncompleteOpenPutTerms(events: CampaignEventInput[]): IncompleteOpenLegTerms | null {
+  const lastTradeEvent = lastNonNoteTradeEvent(events);
+  if (!lastTradeEvent || (lastTradeEvent.type !== "SELL_PUT" && lastTradeEvent.type !== "ROLL_PUT_OPEN") || lastTradeEvent.optionType === "CALL") {
+    return null;
+  }
+  return {
+    strike: numeric(lastTradeEvent.strike),
+    expiration: lastTradeEvent.expiration ? toDate(lastTradeEvent.expiration) : null,
+    contracts: numeric(lastTradeEvent.contracts),
+  };
+}
+
 /**
  * The campaign's currently-open short covered call, if any. Unlike a put (the only leg a
  * campaign holds while OPEN, so "the most recent trade event" is enough), a covered call can
@@ -367,6 +387,55 @@ export function getCurrentOpenCall(events: CampaignEventInput[]): CurrentOpenCal
   }
 
   return open;
+}
+
+export type OpenCallEvidenceState = "NONE" | "INCOMPLETE" | "COMPLETE";
+
+/**
+ * Codex P1 (B6) - the call-side counterpart of getOpenPutEvidenceState: distinguishes "no call was
+ * ever recorded" from "a call WAS opened but its own record is incomplete" - a distinction
+ * getCurrentOpenCall's null return can't express (both cases return null there, by design). An
+ * ASSIGNED campaign with an incomplete call record must never be silently treated as "no call at
+ * all" (which would imply "Assigned shares - review next step" instead of the real "Cannot assess
+ * / incomplete call evidence" state). Same ordered event reduction as getCurrentOpenCall itself -
+ * never a second, independently-drifting copy of that ordering/validity logic.
+ */
+export function getOpenCallEvidenceState(events: CampaignEventInput[]): OpenCallEvidenceState {
+  const ordered = [...events].sort(compareEvents);
+  let state: OpenCallEvidenceState = "NONE";
+
+  for (const event of ordered) {
+    if (event.type === "SELL_COVERED_CALL") {
+      const contracts = numeric(event.contracts);
+      const strike = numeric(event.strike);
+      state = contracts !== null && contracts > 0 && strike !== null && strike > 0 && event.expiration ? "COMPLETE" : "INCOMPLETE";
+    } else if (event.type === "CLOSE_COVERED_CALL" || event.type === "COVERED_CALL_EXPIRED") {
+      state = "NONE";
+    }
+  }
+
+  return state;
+}
+
+/** Codex P1 (B6) - call-side counterpart of getIncompleteOpenPutTerms; same "best-effort partial,
+ * never guessed" contract. */
+export function getIncompleteOpenCallTerms(events: CampaignEventInput[]): IncompleteOpenLegTerms | null {
+  const ordered = [...events].sort(compareEvents);
+  let terms: IncompleteOpenLegTerms | null = null;
+
+  for (const event of ordered) {
+    if (event.type === "SELL_COVERED_CALL") {
+      terms = {
+        strike: numeric(event.strike),
+        expiration: event.expiration ? toDate(event.expiration) : null,
+        contracts: numeric(event.contracts),
+      };
+    } else if (event.type === "CLOSE_COVERED_CALL" || event.type === "COVERED_CALL_EXPIRED") {
+      terms = null;
+    }
+  }
+
+  return terms;
 }
 
 /**

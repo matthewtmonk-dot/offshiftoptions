@@ -450,3 +450,90 @@ describe("Codex P1 (B5) - covered-call underlying-share coverage", () => {
     expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
   });
 });
+
+describe("Codex P1 (B6) - incomplete campaigns survive orchestration as CANNOT_ASSESS, never disappear", () => {
+  it("an OPEN campaign with an incomplete put record (missing strike) is CANNOT_ASSESS, not dropped", async () => {
+    getPositions.mockResolvedValue([]);
+    const incomplete = putCampaign({
+      events: [{ type: "SELL_PUT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1 }],
+    });
+
+    const results = await resolvePositionReviewsForUser("matt", [incomplete], [schwabAccount], 3, NOON);
+
+    // Broker matching itself can't even be attempted without a complete strike/expiration, so
+    // evidence resolves NOT_ASSESSED (not a thrown error, not a dropped row) - the domain layer's
+    // own separate INCOMPLETE_TERMS path (see positionReview.test.ts) covers the case where
+    // position evidence DOES confirm but the moneyness math itself is what's missing terms.
+    expect(results).toHaveLength(1);
+    expect(results[0]?.result.evidence.position).toBe("NOT_ASSESSED");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.explanation.reasonCodes).toContain("POSITION_NOT_ASSESSED");
+  });
+
+  it("an OPEN campaign with an incomplete put record (missing expiration) is CANNOT_ASSESS with EXPIRATION_UNKNOWN, in the high-priority group", async () => {
+    getPositions.mockResolvedValue([]);
+    const incomplete = putCampaign({
+      events: [{ type: "SELL_PUT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 25, premium: 1 }],
+    });
+
+    const results = await resolvePositionReviewsForUser("matt", [incomplete], [schwabAccount], 3, NOON);
+
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.explanation.reasonCodes).toContain("EXPIRATION_UNKNOWN");
+    expect(results[0]?.result.priority.group).toBe(3);
+  });
+
+  it("a genuinely put-less OPEN campaign (no open-attempt event at all) still has no leg to review", async () => {
+    getPositions.mockResolvedValue([]);
+    const noPutAtAll = putCampaign({ events: [{ type: "NOTE", occurredAt: new Date("2026-05-01T00:00:00.000Z"), notes: "placeholder" }] });
+    const results = await resolvePositionReviewsForUser("matt", [noPutAtAll], [schwabAccount], 3, NOON);
+    expect(results).toHaveLength(0);
+  });
+
+  it("an ASSIGNED campaign with an INCOMPLETE call record is Cannot assess / incomplete call evidence - never 'Assigned shares, no call'", async () => {
+    getPositions.mockResolvedValue([]);
+    const incompleteCall = callCampaign({
+      events: [
+        { type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 25, shares: 100 },
+        // Missing strike - an attempted call with a broken record, distinct from no call at all.
+        { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-05-02T00:00:00.000Z"), optionType: "CALL", contracts: 1, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1 },
+      ],
+    });
+
+    const results = await resolvePositionReviewsForUser("matt", [incompleteCall], [schwabAccount], 3, NOON);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.result.lifecycle).toBe("COVERED_CALL");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.explanation.reasonCodes).toContain("POSITION_NOT_ASSESSED");
+    // Never the "no call recorded" reason - a real attempt exists, just with broken terms.
+    expect(results[0]?.result.explanation.reasonCodes).not.toContain("ASSIGNED_SHARES_NO_CALL");
+  });
+
+  it("an ASSIGNED campaign with genuinely NO call ever recorded still resolves to 'Assigned shares - review next step'", async () => {
+    getPositions.mockResolvedValue([]);
+    const noCallAtAll = callCampaign({
+      events: [{ type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 25, shares: 100 }],
+    });
+    const results = await resolvePositionReviewsForUser("matt", [noCallAtAll], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.lifecycle).toBe("ASSIGNED_SHARES");
+    expect(results[0]?.result.explanation.reasonCodes).toContain("ASSIGNED_SHARES_NO_CALL");
+  });
+
+  it("deterministic tie-breakers still apply to incomplete rows alongside ordinary ones", async () => {
+    getPositions.mockResolvedValue([]);
+    const incomplete = putCampaign({
+      id: "campaign-incomplete",
+      ticker: "AAA",
+      events: [{ type: "SELL_PUT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1 }],
+    });
+    const comfortable = putCampaign({ id: "campaign-comfortable", ticker: "ZZZ" });
+    getQuoteEvidence.mockResolvedValue(new Map([["AAA", quoteEvidence(30)], ["ZZZ", quoteEvidence(30)]]));
+
+    const { resolveSortedPositionReviewsForUser: sortedFn } = await import("./position-review");
+    const results = await sortedFn("matt", [comfortable, incomplete], [schwabAccount], 3, NOON);
+    // Group 5 (incomplete-terms evidence failure) sorts before group 8 (comfortable) - stable and
+    // deterministic regardless of input order.
+    expect(results.map((r) => r.campaignId)).toEqual(["campaign-incomplete", "campaign-comfortable"]);
+  });
+});

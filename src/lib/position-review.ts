@@ -1,6 +1,17 @@
 import "server-only";
 
-import { getCurrentOpenCall, getCurrentOpenPut, OPTION_MULTIPLIER, summarizeCampaign, type CampaignEventInput, type CampaignStatusInput } from "@/domain/finance/campaigns";
+import {
+  getCurrentOpenCall,
+  getCurrentOpenPut,
+  getIncompleteOpenCallTerms,
+  getIncompleteOpenPutTerms,
+  getOpenCallEvidenceState,
+  getOpenPutEvidenceState,
+  OPTION_MULTIPLIER,
+  summarizeCampaign,
+  type CampaignEventInput,
+  type CampaignStatusInput,
+} from "@/domain/finance/campaigns";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 import { formatOccSymbol, occContractKey } from "@/domain/finance/occOption";
 import {
@@ -101,11 +112,27 @@ export async function resolvePositionReviewsForUser(
         contracts: openCall.contracts,
       });
     } else if (campaign.status === "ASSIGNED") {
-      legByCampaignId.set(campaign.id, { kind: "NONE" });
+      // Codex P1 (B6) - an incomplete call record must survive as a CANNOT_ASSESS leg, never
+      // silently collapse into "no call at all" (which would wrongly read as "Assigned shares -
+      // review next step" instead of the real "incomplete call evidence" state).
+      const callEvidenceState = getOpenCallEvidenceState(campaign.events);
+      if (callEvidenceState === "INCOMPLETE") {
+        const partial = getIncompleteOpenCallTerms(campaign.events);
+        legByCampaignId.set(campaign.id, { kind: "CALL", strike: partial?.strike ?? null, expiration: partial?.expiration ?? null });
+      } else {
+        legByCampaignId.set(campaign.id, { kind: "NONE" });
+      }
+    } else if (campaign.status === "OPEN") {
+      // Codex P1 (B6) - an OPEN campaign whose last trade event DOES attempt to open a put, but
+      // whose own terms are incomplete, must also survive as a CANNOT_ASSESS leg rather than
+      // vanishing from the review set entirely. A genuinely put-less "Review needed" campaign (no
+      // open-attempt event at all) still has no leg to review - that stage is already surfaced by
+      // the Dashboard's own factual row, independent of this evaluator.
+      if (getOpenPutEvidenceState(campaign.events) === "INCOMPLETE") {
+        const partial = getIncompleteOpenPutTerms(campaign.events);
+        legByCampaignId.set(campaign.id, { kind: "PUT", strike: partial?.strike ?? null, expiration: partial?.expiration ?? null });
+      }
     }
-    // An OPEN campaign with neither a recognizable open put nor a recognizable stage (e.g. a
-    // legacy "Review needed" row with incomplete evidence) has no leg to review yet, and is
-    // intentionally absent from legByCampaignId - never guessed into a leg it doesn't have.
   }
 
   const tickersNeedingQuotes = [
