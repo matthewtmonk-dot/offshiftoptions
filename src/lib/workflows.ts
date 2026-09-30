@@ -48,7 +48,7 @@ import {
 import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
 import { getEquityMarketSessionEvidenceForUser, getQuoteReviewEvidenceForUser } from "./live-quotes";
 import { resolveRelevantCampaignLegs, tickersNeedingReviewQuotes, type PositionReviewCampaignInput } from "./position-review-scope";
-import { clearRefreshGuardsForTests, runGuarded } from "./refresh-guard";
+import { clearRefreshGuardsForTests, runGuarded, type RefreshDisposition } from "./refresh-guard";
 import { getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
 import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
@@ -563,7 +563,7 @@ export async function getSchwabOpenPositionsForUser(userId: string, options: { b
 
 export type RefreshPositionEvidenceResult =
   | { ok: true; refreshedAt: string }
-  | { ok: false; reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED" | "MARKET_DATA_REFRESH_FAILED" };
+  | { ok: false; reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED" | "MARKET_DATA_REFRESH_FAILED" | "TIMEOUT" };
 
 /** Post-Phase-2 UX follow-up correctness repair - the minimal campaign shape
  * resolveRelevantCampaignLegs/tickersNeedingReviewQuotes (position-review-scope.ts) need to
@@ -677,21 +677,63 @@ export async function refreshPositionEvidenceForUser(userId: string): Promise<Re
  * distributed limiter. */
 export const REFRESH_POSITION_EVIDENCE_COOLDOWN_MS = 15_000;
 
-export type GuardedRefreshPositionEvidenceResult = RefreshPositionEvidenceResult & { availableAgainAt: string };
+/** How long a single manual "Refresh status" operation may run before this app gives up waiting on
+ * it and releases the guard for a future attempt - an APPLICATION operational bound, never a
+ * claimed Schwab/provider quota or timeout. Chosen from the existing project convention of treating
+ * ~15-30s as this app's own "something is genuinely stuck" threshold for a single user-facing
+ * manual action (matching the cooldown's own order of magnitude); real cancellation (AbortSignal)
+ * is not threaded through the Schwab provider call chain for this narrow ticket - see
+ * refreshPositionEvidenceForUser's own doc comment and refresh-guard.ts's generation-based
+ * abandonment mechanism, which safely handles an operation that never actually cancels. */
+export const REFRESH_POSITION_EVIDENCE_TIMEOUT_MS = 20_000;
+
+export type GuardedRefreshPositionEvidenceResult = RefreshPositionEvidenceResult & {
+  availableAgainAt: string;
+  disposition: RefreshDisposition;
+  /**
+   * Post-Phase-2 UX follow-up (final correctness fixes) - an explicit, server-decided flag for
+   * "the client should call router.refresh() to pick up newly-fresh evidence," so this decision is
+   * never independently re-derived in the component. True only when this call's own evidence is
+   * actually fresh (a genuine success from EXECUTED or COALESCED) - never for a COOLDOWN result,
+   * regardless of whether the reused result itself was `ok: true`.
+   */
+  shouldRefreshClient: boolean;
+};
 
 /**
  * Post-Phase-2 UX follow-up (correctness repair) - wraps refreshPositionEvidenceForUser with the
- * per-user, process-local in-flight-coalescing + cooldown guard (refresh-guard.ts). Two concurrent
- * requests for the SAME userId (e.g. two open tabs) reuse one real operation instead of issuing two
- * sets of Schwab/market-data requests; a request within the cooldown window after a prior attempt
- * reuses that attempt's result instead of starting a new one. Matt and Eric each get fully
- * independent guard state, keyed by their own userId.
+ * per-user, process-local in-flight-coalescing + cooldown + timeout guard (refresh-guard.ts). Two
+ * concurrent requests for the SAME userId (e.g. two open tabs) reuse one real operation instead of
+ * issuing two sets of Schwab/market-data requests; a request within the cooldown window after a
+ * prior attempt reuses that attempt's result instead of starting a new one, and NEVER triggers a
+ * new fetch/cache-clear. Matt and Eric each get fully independent guard state, keyed by their own
+ * userId.
+ *
+ * Final correctness fixes:
+ * 1. `disposition` (EXECUTED/COALESCED/COOLDOWN) is now explicit, not inferred from timestamps -
+ *    `refreshPositionEvidenceAction` (actions.ts) uses it to decide whether to call
+ *    `revalidatePath` at all (only for a successful EXECUTED call - never redundantly for a
+ *    COALESCED caller whose result the actual executor already revalidated for, and never for a
+ *    COOLDOWN result, which performed no new work).
+ * 2. `shouldRefreshClient` is computed here, once, so the client component never has to re-derive
+ *    "should I call router.refresh()" itself.
+ * 3. The underlying operation is bounded to `REFRESH_POSITION_EVIDENCE_TIMEOUT_MS` - a stalled
+ *    Schwab/market-data call can no longer block a user (or every future request for that user)
+ *    indefinitely; see refresh-guard.ts's own doc comment for exactly how an abandoned, still-
+ *    running operation is prevented from later corrupting a newer attempt's result.
  */
 export async function refreshPositionEvidenceForUserGuarded(userId: string): Promise<GuardedRefreshPositionEvidenceResult> {
-  const { result, availableAgainAt } = await runGuarded(`refresh-position-evidence:${userId}`, REFRESH_POSITION_EVIDENCE_COOLDOWN_MS, () =>
-    refreshPositionEvidenceForUser(userId),
-  );
-  return { ...result, availableAgainAt: new Date(availableAgainAt).toISOString() };
+  const { result, availableAgainAt, disposition } = await runGuarded(`refresh-position-evidence:${userId}`, () => refreshPositionEvidenceForUser(userId), {
+    cooldownMs: REFRESH_POSITION_EVIDENCE_COOLDOWN_MS,
+    timeoutMs: REFRESH_POSITION_EVIDENCE_TIMEOUT_MS,
+    onTimeout: (): RefreshPositionEvidenceResult => ({ ok: false, reason: "TIMEOUT" }),
+  });
+  return {
+    ...result,
+    availableAgainAt: new Date(availableAgainAt).toISOString(),
+    disposition,
+    shouldRefreshClient: result.ok && disposition !== "COOLDOWN",
+  };
 }
 
 export function clearRefreshPositionEvidenceGuardsForTests() {

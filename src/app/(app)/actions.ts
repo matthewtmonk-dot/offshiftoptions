@@ -1207,15 +1207,21 @@ export type { GuardedRefreshPositionEvidenceResult };
  * refresh-status-control.tsx, rendered once in the global authenticated header - Tracker's own
  * former duplicate control was removed). A thin wrapper only: resolves the authenticated user and
  * delegates to `refreshPositionEvidenceForUserGuarded` (workflows.ts), which applies the per-user,
- * process-local in-flight-coalescing + cooldown guard and is directly unit-tested there.
+ * process-local in-flight-coalescing + cooldown + timeout guard and is directly unit-tested there.
  *
- * `revalidatePath` (not `redirect`) so the calling client component can show inline success/failure
- * feedback and then call `router.refresh()` itself.
+ * Final correctness fix - `revalidatePath` is called ONLY for a successful `EXECUTED` disposition:
+ * a `COOLDOWN` result performed no new work at all (never clears caches, never calls Schwab/
+ * market-data, never revalidates - the whole point of the cooldown), and a `COALESCED` caller's own
+ * server action invocation skips it too, since the actual executor's own invocation already
+ * revalidated once - calling it again here would be redundant. `revalidatePath` (not `redirect`) so
+ * the calling client component can show inline success/failure feedback and then call
+ * `router.refresh()` itself - driven by this result's own `shouldRefreshClient` flag, never
+ * re-derived independently in the component.
  */
 export async function refreshPositionEvidenceAction(): Promise<GuardedRefreshPositionEvidenceResult> {
   const user = await requireCurrentUser();
   const result = await refreshPositionEvidenceForUserGuarded(user.id);
-  if (result.ok) {
+  if (result.ok && result.disposition === "EXECUTED") {
     revalidatePath("/dashboard");
     revalidatePath("/positions");
   }

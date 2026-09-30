@@ -97,3 +97,44 @@ describe("refreshPositionEvidenceAction never duplicates Phase 2's own review/ro
     expect(fnBody).toContain("tickersNeedingReviewQuotes");
   });
 });
+
+describe("Final correctness fixes - disposition-driven revalidation/refresh (never inferred from timestamps)", () => {
+  it("actions.ts only calls revalidatePath for a successful EXECUTED disposition - never for COOLDOWN, and never redundantly for a COALESCED caller", () => {
+    const actions = source("../app/(app)/actions.ts");
+    const actionStart = actions.indexOf("export async function refreshPositionEvidenceAction");
+    expect(actionStart).toBeGreaterThan(-1);
+    const actionBody = actions.slice(actionStart, actions.indexOf("\n}", actionStart));
+    expect(actionBody).toMatch(/disposition === "EXECUTED"/);
+    expect(actionBody).toContain("revalidatePath");
+  });
+
+  it("RefreshStatusControl never calls router.refresh() for a COOLDOWN result, and defers to the server's own shouldRefreshClient flag rather than re-deriving the decision from `ok`", () => {
+    const control = source("./refresh-status-control.tsx");
+    expect(control).toContain('disposition === "COOLDOWN"');
+    expect(control).toContain("shouldRefreshClient");
+    // The COOLDOWN branch returns before ever reaching router.refresh() - structurally checked by
+    // requiring an early `return` between the disposition check and the router.refresh() call.
+    const cooldownCheckIndex = control.indexOf('disposition === "COOLDOWN"');
+    const nextReturnIndex = control.indexOf("return;", cooldownCheckIndex);
+    const routerRefreshIndex = control.indexOf("router.refresh()", cooldownCheckIndex);
+    expect(nextReturnIndex).toBeGreaterThan(-1);
+    expect(nextReturnIndex).toBeLessThan(routerRefreshIndex);
+  });
+
+  it("RefreshStatusControl retains the prior 'Last checked' value on a COOLDOWN result rather than manufacturing a new one - it never calls setLastRefreshedAt in that branch", () => {
+    const control = source("./refresh-status-control.tsx");
+    const cooldownCheckIndex = control.indexOf('disposition === "COOLDOWN"');
+    const nextReturnIndex = control.indexOf("return;", cooldownCheckIndex);
+    const cooldownBranch = control.slice(cooldownCheckIndex, nextReturnIndex);
+    expect(cooldownBranch).not.toContain("setLastRefreshedAt");
+  });
+
+  it("workflows.ts bounds a single refresh operation with an APPLICATION timeout, never a claimed Schwab quota, and the guard is process-local (documented, not a distributed limiter)", () => {
+    const workflows = source("../lib/workflows.ts");
+    expect(workflows).toMatch(/REFRESH_POSITION_EVIDENCE_TIMEOUT_MS\s*=\s*20_000/);
+    expect(workflows).toContain('reason: "TIMEOUT"');
+    const guard = source("../lib/refresh-guard.ts");
+    expect(guard).toMatch(/process-local/i);
+    expect(guard).toMatch(/NOT a durable or\s*\n?\s*\*?\s*distributed rate limiter/i);
+  });
+});

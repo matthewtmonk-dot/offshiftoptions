@@ -698,6 +698,12 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     expect(firstResult.ok).toBe(true);
     expect(secondResult.ok).toBe(true);
     expect(firstResult.availableAgainAt).toBe(secondResult.availableAgainAt); // coherent, shared result
+    // Disposition contract: the first caller EXECUTED the real operation, the second COALESCED into
+    // it - both still report a fresh, refreshable result (shouldRefreshClient true).
+    expect(firstResult.disposition).toBe("EXECUTED");
+    expect(secondResult.disposition).toBe("COALESCED");
+    expect(firstResult.shouldRefreshClient).toBe(true);
+    expect(secondResult.shouldRefreshClient).toBe(true);
   });
 
   it("Matt and Eric refresh independently - Eric's refresh is never coalesced with or blocked by Matt's", async () => {
@@ -728,27 +734,51 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: mattAccounts }));
     m.campaignFindMany.mockResolvedValue([]);
 
-    await refreshPositionEvidenceForUserGuarded("matt");
+    const first = await refreshPositionEvidenceForUserGuarded("matt");
     const second = await refreshPositionEvidenceForUserGuarded("matt"); // immediately after - well within cooldown
 
     expect(mattAccounts).toHaveBeenCalledTimes(1); // no second Schwab fetch
+    expect(first.disposition).toBe("EXECUTED");
+    expect(second.disposition).toBe("COOLDOWN");
     expect(second.ok).toBe(true);
+    expect((second as { refreshedAt: string }).refreshedAt).toBe((first as { refreshedAt: string }).refreshedAt); // retains the PRIOR factual refreshedAt, never a manufactured new one
+    expect(second.shouldRefreshClient).toBe(false); // COOLDOWN must never trigger a client refresh
     expect(second.availableAgainAt).toEqual(expect.any(String));
 
     // Eric is completely unaffected by Matt's in-progress cooldown.
     const ericAccounts = vi.fn(async () => []);
     m.getSchwabBrokerReadProviderForUser.mockResolvedValueOnce(fakeReadProvider({ getAccounts: ericAccounts }));
-    await refreshPositionEvidenceForUserGuarded("eric");
+    const ericResult = await refreshPositionEvidenceForUserGuarded("eric");
     expect(ericAccounts).toHaveBeenCalledTimes(1);
+    expect(ericResult.disposition).toBe("EXECUTED");
   });
 
-  it("the component's/action's error handling has something to hold onto: even a failed refresh returns a cooldown timestamp", async () => {
+  it("a COOLDOWN result never causes another broker/quote/session fetch, even with active positions requiring review evidence", async () => {
+    const m = await mocks();
+    const mattAccounts = vi.fn(async () => []);
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: mattAccounts }));
+    m.campaignFindMany.mockResolvedValue([]);
+
+    await refreshPositionEvidenceForUserGuarded("matt");
+    m.campaignFindMany.mockClear();
+
+    const cooldownResult = await refreshPositionEvidenceForUserGuarded("matt");
+
+    expect(cooldownResult.disposition).toBe("COOLDOWN");
+    expect(mattAccounts).toHaveBeenCalledTimes(1); // zero broker calls during cooldown
+    expect(m.campaignFindMany).not.toHaveBeenCalled(); // zero quote/session-scoping work during cooldown
+  });
+
+  it("the component's/action's error handling has something to hold onto: even a failed refresh returns a cooldown timestamp and a false shouldRefreshClient", async () => {
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
 
     const result = await refreshPositionEvidenceForUserGuarded("matt");
 
     expect(result.ok).toBe(false);
+    expect(result.disposition).toBe("EXECUTED");
+    expect(result.shouldRefreshClient).toBe(false);
     expect(result.availableAgainAt).toEqual(expect.any(String));
   });
 });

@@ -10,7 +10,7 @@ import { formatEtTime } from "@/lib/format";
  * Post-Phase-2 UX follow-up (correctness repair) - a last-resort, CLIENT-only fallback cooldown,
  * used only when the server action itself rejects unexpectedly (a network failure, a thrown
  * exception before the server could even return its own authoritative `availableAgainAt`). In the
- * normal case - success OR a typed failure result - the server's own `availableAgainAt`
+ * normal case - success, a typed failure, or a cooldown reuse - the server's own `availableAgainAt`
  * (refreshPositionEvidenceForUserGuarded, workflows.ts) is authoritative and this constant is not
  * used at all. Matches that same server-side default (see REFRESH_POSITION_EVIDENCE_COOLDOWN_MS) -
  * not a fabricated limit, and not a claimed Schwab quota.
@@ -21,23 +21,28 @@ const FALLBACK_COOLDOWN_MS = 15_000;
  * Dashboard V2 Phase 2 follow-up - the ONE manual "Refresh status" control in the authenticated app
  * (rendered once, in the global app header - see layout.tsx). Triggers ONLY
  * refreshPositionEvidenceAction (read-only Schwab positions + the quote/session evidence actually
- * required for a fresh position review, never transactions/campaign history/accounting) and then
- * `router.refresh()` so the already-approved Phase 2 evaluator (resolvePositionReviewsForUser)
- * picks up the newly-uncached evidence on its own next render - this component never computes or
- * duplicates any review/roll logic itself.
+ * required for a fresh position review, never transactions/campaign history/accounting) - this
+ * component never computes or duplicates any review/roll logic itself.
  *
  * Always neutral/factual: initial state is "Ready" (no prior click yet), a click shows
  * "Refreshing…", success shows "Last checked <time> · Ready", and failure shows a concise reason
- * without ever implying financial data changed or pretending evidence became fresh. The server is
- * authoritative for cooldown timing (`availableAgainAt`) whenever it returns one - including on a
- * typed failure - so the countdown here reflects the SAME process-local guard the server itself
- * enforces (see refresh-guard.ts), never a client-invented number.
+ * without ever implying financial data changed or pretending evidence became fresh.
  *
- * Codex correctness repair - explicit try/catch/finally around the server action call: an
- * unexpected rejection (not just a typed `{ ok: false }` result) can no longer leave this component
- * stuck showing "Refreshing…" forever. `pending` always ends, a factual failure message is always
- * shown, and a cooldown always applies (falling back to `FALLBACK_COOLDOWN_MS` only when the
- * rejection happened before any server-authoritative cooldown could be returned at all).
+ * Final correctness fixes:
+ * 1. The server is authoritative for BOTH cooldown timing (`availableAgainAt`) AND whether the
+ *    client should call `router.refresh()` at all (`shouldRefreshClient`) - this component never
+ *    re-derives either from the raw `ok`/timestamps itself. A `COOLDOWN` disposition (this app's
+ *    15-second manual-refresh cooldown is still active - see refresh-guard.ts) never triggers
+ *    `router.refresh()` and never overwrites the "Last checked" time already shown: it only updates
+ *    the countdown. Only a genuinely fresh result (`EXECUTED`, or `COALESCED` - this click's own
+ *    request joined an already-running refresh someone else triggered and received its real,
+ *    completed outcome) updates "Last checked" and refreshes the page's own data.
+ * 2. Explicit try/catch around the server action call: an unexpected rejection (not just a typed
+ *    `{ ok: false }` result) can no longer leave this component stuck showing "Refreshing…" forever.
+ *    `pending` always ends, a factual failure message is always shown, and a cooldown always applies
+ *    (falling back to `FALLBACK_COOLDOWN_MS` only when the rejection happened before any
+ *    server-authoritative cooldown could be returned at all).
+ * 3. The countdown interval stops itself once it reaches zero, rather than ticking forever.
  */
 export function RefreshStatusControl() {
   const router = useRouter();
@@ -47,15 +52,21 @@ export function RefreshStatusControl() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
 
-  // Ticks only while a cooldown is actually active, so the "Available again in Ns" countdown
-  // updates - never runs at all otherwise.
+  // Ticks only while a cooldown is actually active, and stops itself once it reaches zero.
   useEffect(() => {
     if (availableAt === null) {
       return;
     }
-    const tick = () => setNowMs(Date.now());
-    tick();
+    const target = availableAt;
     const interval = setInterval(tick, 250);
+    function tick() {
+      const current = Date.now();
+      setNowMs(current);
+      if (current >= target) {
+        clearInterval(interval);
+      }
+    }
+    tick();
     return () => clearInterval(interval);
   }, [availableAt]);
 
@@ -72,11 +83,22 @@ export function RefreshStatusControl() {
       try {
         const result = await refreshPositionEvidenceAction();
         setAvailableAt(new Date(result.availableAgainAt).getTime());
+
+        if (result.disposition === "COOLDOWN") {
+          // Codex correctness fix - a COOLDOWN result performed no new work at all: never overwrite
+          // the "Last checked" time or error state already shown, and never refresh the page's data
+          // for it - only the countdown above updates.
+          return;
+        }
+
         if (result.ok) {
           setLastRefreshedAt(new Date(result.refreshedAt));
-          router.refresh();
+          setErrorMessage(null);
         } else {
           setErrorMessage(refreshFailureMessage(result.reason));
+        }
+        if (result.shouldRefreshClient) {
+          router.refresh();
         }
       } catch {
         // The server action rejected outright (network failure, unexpected exception before it
@@ -117,9 +139,12 @@ export function RefreshStatusControl() {
   );
 }
 
-function refreshFailureMessage(reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED" | "MARKET_DATA_REFRESH_FAILED"): string {
+function refreshFailureMessage(reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED" | "MARKET_DATA_REFRESH_FAILED" | "TIMEOUT"): string {
   if (reason === "NO_CONNECTION") {
     return "Schwab connection needs attention";
+  }
+  if (reason === "TIMEOUT") {
+    return "Refresh timed out";
   }
   return "Current status could not be refreshed";
 }
