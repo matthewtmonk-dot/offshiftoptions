@@ -179,8 +179,10 @@ export function evaluatePositionReview(input: PositionReviewInput): PositionRevi
   // together, BEFORE anything else runs - including before position evidence is even resolved, so
   // a MANUAL_POSITION bypass can never override an incomplete leg (the check does not depend on
   // `positionState` at all). A leg missing any one of these is never partially "complete enough"
-  // to reach quote/moneyness evaluation.
-  const contractsValid = leg.kind !== "NONE" && leg.contracts !== null && Number.isFinite(leg.contracts) && leg.contracts > 0;
+  // to reach quote/moneyness evaluation. Codex P2 (round 3) - a contract count must be a genuine
+  // INTEGER, not merely a positive finite number: a fractional value (0.5, 1.25) is not a real,
+  // reviewable option-contract quantity and must fail the same way a missing one does.
+  const contractsValid = leg.kind !== "NONE" && leg.contracts !== null && Number.isFinite(leg.contracts) && Number.isInteger(leg.contracts) && leg.contracts > 0;
   const strikeValid = leg.kind !== "NONE" && leg.strike !== null && Number.isFinite(leg.strike) && leg.strike > 0;
   const termsIncomplete = leg.kind !== "NONE" && (expiration === null || !contractsValid || !strikeValid);
 
@@ -394,11 +396,15 @@ function priorityGroupOf({
   if (lifecycle === "EXPIRATION_PENDING" || lifecycle === "EXPIRATION_SESSION_ENDED") {
     return 1;
   }
-  if (dte === 0) {
-    return 2;
-  }
+  // Codex P2 (round 3) - incomplete required terms are checked BEFORE "expires today": a position
+  // expiring today with missing/invalid contracts (or any other required term) is an INCOMPLETE
+  // row (group 3), never a genuine "complete terms, expires today" row (group 2) - the two groups
+  // are mutually exclusive by definition, not merely by coincidence of which check ran first.
   if (termsIncomplete) {
     return 3;
+  }
+  if (dte === 0) {
+    return 2;
   }
   if (action === "REVIEW_ROLL" || action === "REVIEW_CALL") {
     return 4;

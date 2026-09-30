@@ -43,6 +43,7 @@ const CANNOT_ASSESS_REASON_LABELS: Record<string, string> = {
   EXPIRATION_SESSION_ENDED: "Expiration session ended - awaiting confirmation",
   EXPIRATION_UNKNOWN: "Expiration unknown",
   INCOMPLETE_TERMS: "Incomplete position terms",
+  MISSING_CONTRACTS: "Contract quantity missing",
   MARKET_CLOSED: "Market closed",
   QUOTE_UNAVAILABLE: "Quote unavailable",
   POSITION_INSUFFICIENT_SHARE_COVERAGE: "Insufficient share coverage for this call",

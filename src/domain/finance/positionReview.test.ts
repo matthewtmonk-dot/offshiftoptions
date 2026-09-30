@@ -338,10 +338,65 @@ describe("evaluatePositionReview - incomplete terms", () => {
     expect(result.priority.group).toBe(3);
   });
 
-  it.each([0, -1, Number.NaN])("is CANNOT_ASSESS with MISSING_CONTRACTS for a non-positive/invalid contract count (%s)", (contracts) => {
-    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts }, quote: quote(24) }));
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 0.5, 1.25])(
+    "is CANNOT_ASSESS with MISSING_CONTRACTS for a non-positive/non-integer/invalid contract count (%s)",
+    (contracts) => {
+      const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts }, quote: quote(24) }));
+      expect(result.action).toBe("CANNOT_ASSESS");
+      expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
+    },
+  );
+
+  // Codex P2 (round 3) - a fractional contract count is not a real, reviewable option-contract
+  // quantity, for either leg type, and under a MANUAL_POSITION bypass too (completeness is
+  // validated before position evidence is even consulted, so the bypass cannot rescue it).
+  it("is CANNOT_ASSESS for a manual PUT with a fractional (0.5) contract count", () => {
+    const result = evaluatePositionReview(
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 0.5 }, position: { state: "MANUAL_POSITION" }, quote: quote(30) }),
+    );
     expect(result.action).toBe("CANNOT_ASSESS");
     expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
+  });
+
+  it("is CANNOT_ASSESS for a manual CALL with a fractional (0.5) contract count", () => {
+    const result = evaluatePositionReview(
+      baseInput({
+        leg: { kind: "CALL", strike: 30, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 0.5 },
+        lifecycleStage: "Covered call",
+        position: { state: "MANUAL_POSITION" },
+        quote: quote(27),
+      }),
+    );
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
+  });
+
+  it("Codex P2 (round 3) - an expiring-TODAY position with missing contracts is an INCOMPLETE row (group 3), never a 'complete terms, expires today' row (group 2)", () => {
+    const result = evaluatePositionReview(
+      baseInput({ leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), contracts: null }, quote: quote(24) }),
+    );
+    expect(result.explanation.daysToExpiration).toBe(0);
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.explanation.reasonCodes).toContain("MISSING_CONTRACTS");
+    expect(result.priority.group).toBe(3);
+  });
+
+  it("Codex P2 (round 3) - an expiring-TODAY position with a missing strike is also an INCOMPLETE row (group 3), never group 2", () => {
+    const result = evaluatePositionReview(
+      baseInput({ leg: { kind: "PUT", strike: null, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), contracts: 1 }, quote: quote(24) }),
+    );
+    expect(result.explanation.daysToExpiration).toBe(0);
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.explanation.reasonCodes).toContain("INCOMPLETE_TERMS");
+    expect(result.priority.group).toBe(3);
+  });
+
+  it("a position with a missing expiration can never be classified 'expires today' at all - it is group 3 via EXPIRATION_UNKNOWN", () => {
+    const result = evaluatePositionReview(baseInput({ leg: { kind: "PUT", strike: 25, expiration: null, contracts: 1 } }));
+    expect(result.explanation.daysToExpiration).toBeNull();
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(result.explanation.reasonCodes).toContain("EXPIRATION_UNKNOWN");
+    expect(result.priority.group).toBe(3);
   });
 
   it("manual-position bypass cannot override an incomplete leg - completeness is validated before position evidence is even consulted", () => {
@@ -509,5 +564,29 @@ describe("deterministic priority ordering", () => {
     expect(incomplete.priority.group).toBe(3);
     expect(preview).toContainEqual(incomplete);
     expect(preview[0]).toEqual(incomplete); // group 3 sorts ahead of every group-8 comfortable row
+  });
+
+  it("Codex P2 (round 3) - a preview limit still preserves an expiring-today-but-INCOMPLETE row ahead of both a genuine 'expires today' row and many comfortable rows", () => {
+    const incompleteExpiringToday = resultWithGroup({
+      leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), contracts: null },
+      ticker: "INCOMPLETE_TODAY",
+    });
+    const genuinelyExpiresToday = resultWithGroup({
+      leg: { kind: "PUT", strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), contracts: 1 },
+      quote: quote(30),
+      ticker: "EXPIRES_TODAY",
+    });
+    const comfortableRows = Array.from({ length: 10 }, (_, index) => resultWithGroup({ quote: quote(30), ticker: `COMFORTABLE_${index}` }));
+
+    expect(incompleteExpiringToday.priority.group).toBe(3);
+    expect(genuinelyExpiresToday.priority.group).toBe(2);
+
+    const sorted = sortPositionReviews([...comfortableRows, genuinelyExpiresToday, incompleteExpiringToday]);
+    const preview = sorted.slice(0, 3);
+    // Group 2 (complete terms, expires today) sorts ahead of group 3 (incomplete terms) - the
+    // ticket's own numbered ordering (lower group number = higher priority) - and BOTH survive a
+    // small preview limit ahead of every comfortable (group 8) row.
+    expect(preview[0]).toEqual(genuinelyExpiresToday);
+    expect(preview[1]).toEqual(incompleteExpiringToday);
   });
 });
