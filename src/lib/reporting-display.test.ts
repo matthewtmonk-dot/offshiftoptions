@@ -12,7 +12,7 @@ import {
   wholeAccountGainDetail,
 } from "./reporting-display";
 import type { AccountReportingSummary } from "@/domain/finance/reporting";
-import { shortDate, shortDateTime } from "@/lib/format";
+import { formatEtDateTime, shortDate } from "@/lib/format";
 
 // Reporting Phase, Ticket 2 ("How am I doing?") and Ticket 3 (Tracker reuse): these helpers are
 // the ONLY thing dashboard/page.tsx and positions/page.tsx do with AccountReportingSummary -
@@ -20,11 +20,12 @@ import { shortDate, shortDateTime } from "@/lib/format";
 // them directly (rather than the pages' JSX) is the practical substitute for a component-render
 // harness, which this repo does not have.
 
-// These are genuine instants (a snapshot capture time, a baseline-set time) - shortDate/
-// shortDateTime render them in the runner's local timezone by design (see format.ts's own
-// shortCalendarDate doc comment on why that's the WRONG choice only for date-only stored values,
-// not for real timestamps like these). Tests build expected strings through the same formatters
-// rather than hardcoding a UTC-assuming string, so they pass under any timezone.
+// These are genuine instants (a snapshot capture time, a baseline-set time). Account Value's own
+// "As of"/"updated between" strings (accountValueDetail) render through formatEtDateTime - always
+// America/New_York, regardless of the runtime's own local timezone (see format.ts's own doc
+// comment: a real production bug showed a UTC instant 4 hours ahead of the correct ET time when
+// rendered through the runtime-local-timezone shortDateTime instead). Tests build expected strings
+// through that same formatter rather than hardcoding a string, so they pass under any timezone.
 const commonInstant = new Date("2026-09-20T20:00:00.000Z");
 const baselineStart = new Date("2026-08-01T00:00:00.000Z");
 const oldestStart = new Date("2026-08-01T00:00:00.000Z");
@@ -97,7 +98,13 @@ function source(path: string) {
 describe("Card 1: Account Value", () => {
   it("1. shows a single common snapshot as a concise 'As of' timestamp", () => {
     const report = baseReport();
-    expect(accountValueDetail(report)).toBe(`As of ${shortDateTime(commonInstant)}`);
+    expect(accountValueDetail(report)).toBe(`As of ${formatEtDateTime(commonInstant)}`);
+  });
+
+  it("Codex UX fix - the 'As of' timestamp is always America/New_York, never a raw UTC/runtime-local reading (the exact live production bug)", () => {
+    // 20:00 UTC on 2026-09-20 (EDT, UTC-4) is 4:00 PM ET - never "8:00 PM" (the unconverted UTC time).
+    const report = baseReport({ currentAccountValueAsOf: new Date("2026-09-20T20:00:00.000Z") });
+    expect(accountValueDetail(report)).toBe("As of Sep 20, 2026, 4:00 PM ET");
   });
 
   it("2. mixed-account snapshot timestamps do not render a false common 'As of' - shows the range instead", () => {
@@ -108,8 +115,8 @@ describe("Card 1: Account Value", () => {
     });
     const detail = accountValueDetail(report);
     expect(detail).toContain("updated between");
-    expect(detail).toContain(shortDateTime(oldestSnapshot));
-    expect(detail).toContain(shortDateTime(newestSnapshot));
+    expect(detail).toContain(formatEtDateTime(oldestSnapshot));
+    expect(detail).toContain(formatEtDateTime(newestSnapshot));
     expect(detail).not.toMatch(/^As of/);
   });
 

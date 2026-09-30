@@ -18,6 +18,8 @@ import {
   createRecommendationForUser,
   createWatchlistItemForUser,
   expireCoveredCallForUser,
+  refreshPositionEvidenceForUser,
+  type RefreshPositionEvidenceResult,
   markAllNotificationsReadForUser,
   markConversationReadForUser,
   markNotificationReadForUser,
@@ -1195,6 +1197,28 @@ export async function syncSchwabAccountAction() {
   revalidatePath("/dashboard");
   revalidatePath("/positions");
   redirect(`/account?schwab=synced&campaignsUpdated=${campaignsUpdated}`);
+}
+
+export type { RefreshPositionEvidenceResult };
+
+/**
+ * Post-Phase-2 UX follow-up - the universal "Refresh status" control's ONE server action, shared by
+ * the global app header and Tracker's own refresh button (see refresh-status-control.tsx). A thin
+ * wrapper only: resolves the authenticated user and delegates the actual work to
+ * refreshPositionEvidenceForUser (workflows.ts), which is directly unit-tested there - this action
+ * itself does nothing but identity resolution and revalidation.
+ *
+ * `revalidatePath` (not `redirect`) so the calling client component can show inline success/failure
+ * feedback and then call `router.refresh()` itself, exactly like Tracker's existing refresh button.
+ */
+export async function refreshPositionEvidenceAction(): Promise<RefreshPositionEvidenceResult> {
+  const user = await requireCurrentUser();
+  const result = await refreshPositionEvidenceForUser(user.id);
+  if (result.ok) {
+    revalidatePath("/dashboard");
+    revalidatePath("/positions");
+  }
+  return result;
 }
 
 export async function previewSchwabImportAction(formData: FormData) {

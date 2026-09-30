@@ -91,6 +91,33 @@ export function formatEtTime(value: Date | string) {
   return `${formatted} ET`;
 }
 
+/**
+ * Post-Phase-2 UX follow-up - a genuine date+time instant (e.g. an account valuation's own "as of"
+ * timestamp), always rendered in America/New_York regardless of the runtime's local timezone -
+ * `shortDateTime` above has no explicit `timeZone`, so it silently uses whatever timezone the
+ * process happens to be running in. That's harmless for a value formatted in the VISITOR's own
+ * browser (a client component), but this app also formats real timestamps in SERVER components,
+ * where the runtime is production's own Node process - not guaranteed to be America/New_York
+ * (confirmed live: it is NOT, at least not always - a genuine UTC instant rendered through
+ * `shortDateTime` server-side showed 4 hours AHEAD of the correct ET time, exactly the gap between
+ * UTC and EDT). Every other current-position timestamp in this app (quote trade time, broker sync
+ * time) is already deliberately pinned to America/New_York (see `formatEtTime` above) - this is the
+ * same convention, extended to include the calendar date for contexts (like Account Value's "As of
+ * ...") that need more than a bare time. Deliberately a plain "ET" suffix, matching `formatEtTime`'s
+ * own choice, never Intl's EST/EDT distinction.
+ */
+export function formatEtDateTime(value: Date | string) {
+  const formatted = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  }).format(new Date(value));
+  return `${formatted} ET`;
+}
+
 export function upperTicker(value: FormDataEntryValue | null) {
   return normalizeTicker(value);
 }

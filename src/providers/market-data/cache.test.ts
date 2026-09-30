@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MarketDataProvider, MarketQuote, PriceCandle } from "./types";
-import { clearMarketDataCacheForTests, MarketDataProviderError, withMarketDataCache } from "./cache";
+import { clearMarketDataCacheForTests, clearMarketDataCacheForUser, MarketDataProviderError, withMarketDataCache } from "./cache";
 
 function quote(symbol: string, price: number): MarketQuote {
   return { symbol, price, asOf: new Date("2026-08-31T12:00:00.000Z") };
@@ -57,6 +57,52 @@ describe("withMarketDataCache", () => {
 
     expect(first.getQuote).toHaveBeenCalledTimes(1);
     expect(second.getQuote).toHaveBeenCalledTimes(1);
+  });
+
+  describe("Codex UX follow-up - clearMarketDataCacheForUser (universal 'Refresh status' control)", () => {
+    it("clears only the named user's own cached entries, never another user's", async () => {
+      const userA = provider({ getQuote: vi.fn(async (symbol: string) => quote(symbol, 10)) });
+      const userB = provider({ getQuote: vi.fn(async (symbol: string) => quote(symbol, 20)) });
+      const cachedA = withMarketDataCache(userA, "schwab:user:user-a:connection:one");
+      const cachedB = withMarketDataCache(userB, "schwab:user:user-b:connection:two");
+
+      await cachedA.getQuote("LSTO");
+      await cachedB.getQuote("LSTO");
+      clearMarketDataCacheForUser("user-a");
+      await cachedA.getQuote("LSTO");
+      await cachedB.getQuote("LSTO");
+
+      expect(userA.getQuote).toHaveBeenCalledTimes(2); // re-fetched after its own cache was cleared
+      expect(userB.getQuote).toHaveBeenCalledTimes(1); // untouched by user-a's refresh
+    });
+
+    it("does not re-cache an in-flight response after that user's cache is cleared", async () => {
+      let resolveQuote: ((value: MarketQuote) => void) | undefined;
+      const calls = { quote: 0 };
+      const inner = provider({
+        getQuote: vi.fn(
+          (symbol: string) =>
+            new Promise<MarketQuote>((resolve) => {
+              calls.quote += 1;
+              resolveQuote = resolve;
+            }).then((value) => {
+              void symbol;
+              return value;
+            }),
+        ),
+      });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      const pending = cached.getQuote("LSTO");
+      clearMarketDataCacheForUser("user-a");
+      resolveQuote!(quote("LSTO", 10));
+      await expect(pending).resolves.toMatchObject({ price: 10 });
+
+      const fresh = cached.getQuote("LSTO");
+      resolveQuote!(quote("LSTO", 10));
+      await expect(fresh).resolves.toMatchObject({ price: 10 });
+      expect(calls.quote).toBe(2); // the second call proves the first response was never re-cached
+    });
   });
 
   it("coalesces simultaneous price-history requests within one provider", async () => {

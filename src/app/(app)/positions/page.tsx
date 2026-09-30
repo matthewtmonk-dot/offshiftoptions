@@ -88,7 +88,7 @@ import {
   toggleTradingAccountVisibilityAction,
 } from "../actions";
 import { TrackerTabs } from "./tracker-tabs";
-import { RefreshSnapshot } from "./refresh-snapshot";
+import { RefreshStatusControl } from "@/components/refresh-status-control";
 import { snapshotTime } from "./snapshot-time";
 
 export const dynamic = "force-dynamic";
@@ -456,7 +456,7 @@ export default async function PositionsPage({
               <p>Refresh checks prices and positions. Brokerage Sync imports account activity and updates campaign history.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <RefreshSnapshot />
+              <RefreshStatusControl />
               <IntentPrefetchLink href="/account#brokerage-sync" className={tinyButtonClass}>Brokerage Sync in Account</IntentPrefetchLink>
             </div>
           </div>

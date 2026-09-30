@@ -37,7 +37,9 @@ import {
 import {
   categorizeSchwabSyncError,
   clearSchwabBrokerReadCacheForUser,
+  clearSchwabMarketDataCacheForUser,
   getSchwabBrokerReadProviderForUser,
+  getSchwabConnectionSummaryForUser,
   getSchwabMarketDataProviderForUser,
   logSchwabSyncFailure,
   recordSchwabAccountSyncResult,
@@ -553,6 +555,42 @@ export async function getSchwabOpenPositionsForUser(userId: string, options: { b
   } catch {
     return null;
   }
+}
+
+export type RefreshPositionEvidenceResult = { ok: true; refreshedAt: string } | { ok: false; reason: "NO_CONNECTION" | "FETCH_FAILED" };
+
+/**
+ * Post-Phase-2 UX follow-up - the universal "Refresh status" control's ONE underlying operation,
+ * shared by the global app header and Tracker's own refresh button (both call the thin
+ * `refreshPositionEvidenceAction` server action in actions.ts, which does nothing but resolve
+ * `requireCurrentUser()` and call this). Always scoped to the given `userId` - every cache-clear
+ * and every fetch below is keyed by THIS user's own connection (see clearSchwabBrokerReadCacheForUser
+ * /clearSchwabMarketDataCacheForUser's own `schwab:user:${userId}:...` key prefix), so one user's
+ * click can never affect, or count as fresh evidence for, another user.
+ *
+ * Deliberately narrow, unlike syncSchwabAccountForUser: this refreshes ONLY the read-only evidence
+ * Phase 2's shared position-review evaluator (resolvePositionReviewsForUser) consumes - current
+ * Schwab positions/accounts (bypassing the broker-read cache) and current equity quote/session
+ * evidence (by clearing the market-data cache so the next read is forced fresh). It never imports
+ * transactions, never calls reconcileSchwabActivityForUser/reconcileSchwabCoveredCallActivityForUser,
+ * never writes a CampaignEvent, and never touches accounting/P&L - a successful call returns only a
+ * timestamp, no campaign/position counts of any kind (there is nothing here that could create them).
+ */
+export async function refreshPositionEvidenceForUser(userId: string): Promise<RefreshPositionEvidenceResult> {
+  const connection = await getSchwabConnectionSummaryForUser(userId);
+  if (!connection || !connection.connected) {
+    return { ok: false, reason: "NO_CONNECTION" };
+  }
+
+  clearSchwabBrokerReadCacheForUser(userId);
+  clearSchwabMarketDataCacheForUser(userId);
+
+  const positions = await getSchwabOpenPositionsForUser(userId, { bypassCache: true });
+  if (positions === null) {
+    return { ok: false, reason: "FETCH_FAILED" };
+  }
+
+  return { ok: true, refreshedAt: new Date().toISOString() };
 }
 
 export async function addAccountLedgerEntryForUser(

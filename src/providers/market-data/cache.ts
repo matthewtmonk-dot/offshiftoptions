@@ -37,6 +37,7 @@ export class MarketDataProviderError extends Error {
 
 const cache = new Map<string, CacheEntry<unknown>>();
 const inFlight = new Map<string, Promise<unknown>>();
+const invalidationVersions = new Map<string, number>();
 
 /** The wrapper always implements getQuotes, getQuoteReviewEvidence, and
  * getEquityMarketSessionEvidence (see below), even when the underlying provider doesn't -
@@ -165,6 +166,42 @@ export function withMarketDataCache(
 export function clearMarketDataCacheForTests() {
   cache.clear();
   inFlight.clear();
+  invalidationVersions.clear();
+}
+
+/**
+ * Post-Phase-2 UX follow-up (universal "Refresh status" control) - clears every cache entry for
+ * one user's own market-data connection(s), keyed by the SAME `schwab:user:${userId}:...`
+ * providerKey prefix `resolveMarketDataProviderForUser` already uses (see broker-connections.ts) -
+ * never a cross-user key, so Matt's refresh can never clear or otherwise affect Eric's cached
+ * evidence. Mirrors `clearBrokerReadCacheForUser`'s exact prefix-clear + invalidation-version
+ * approach (providers/broker-read/cache.ts) so an in-flight fetch that started BEFORE this call
+ * can never repopulate the cache with a value fetched before the user's own refresh click.
+ */
+export function clearMarketDataCacheForUser(userId: string) {
+  const prefix = `schwab:user:${userId}:`;
+  invalidationVersions.set(prefix, (invalidationVersions.get(prefix) ?? 0) + 1);
+
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) {
+      cache.delete(key);
+    }
+  }
+  for (const key of inFlight.keys()) {
+    if (key.startsWith(prefix)) {
+      inFlight.delete(key);
+    }
+  }
+}
+
+function invalidationVersionForKey(key: string): number {
+  let version = 0;
+  for (const [prefix, prefixVersion] of invalidationVersions) {
+    if (key.startsWith(prefix)) {
+      version += prefixVersion;
+    }
+  }
+  return version;
 }
 
 async function cached<T>(
@@ -184,16 +221,23 @@ async function cached<T>(
     return existingPromise as Promise<T>;
   }
 
+  const version = invalidationVersionForKey(key);
   const promise = load()
     .then((value) => {
-      cache.set(key, { expiresAt: now() + ttlMs, value });
+      // Codex UX follow-up - a fetch that was already in flight when clearMarketDataCacheForUser
+      // ran must never repopulate the cache with a value effectively fetched before that clear.
+      if (invalidationVersionForKey(key) === version) {
+        cache.set(key, { expiresAt: now() + ttlMs, value });
+      }
       return value;
     })
     .catch((error) => {
       throw new MarketDataProviderError(providerNameFromKey(key), error);
     })
     .finally(() => {
-      inFlight.delete(key);
+      if (inFlight.get(key) === promise) {
+        inFlight.delete(key);
+      }
     });
 
   inFlight.set(key, promise);

@@ -4,7 +4,7 @@ import type { TransactionEvidenceStatus } from "@/domain/finance/schwabReconcili
 import type { BrokerReadProvider } from "@/providers/broker-read/types";
 import { clearBrokerReadCacheForUser, withBrokerReadCache } from "@/providers/broker-read/cache";
 import type { MarketDataProvider } from "@/providers/market-data/types";
-import { withMarketDataCache } from "@/providers/market-data/cache";
+import { clearMarketDataCacheForUser, withMarketDataCache } from "@/providers/market-data/cache";
 import { SchwabBrokerReadProvider } from "@/providers/schwab/broker-read";
 import { SchwabMarketDataProvider } from "@/providers/schwab/market-data";
 import { SchwabApiError } from "@/providers/schwab/client";
@@ -381,6 +381,12 @@ export async function getSchwabBrokerReadProviderForUser(userId: string, options
 
 export function clearSchwabBrokerReadCacheForUser(userId: string) {
   clearBrokerReadCacheForUser(userId);
+}
+
+/** Post-Phase-2 UX follow-up - the market-data counterpart of clearSchwabBrokerReadCacheForUser
+ * above, for the universal "Refresh status" control (see refreshPositionEvidenceAction). */
+export function clearSchwabMarketDataCacheForUser(userId: string) {
+  clearMarketDataCacheForUser(userId);
 }
 
 function schwabBrokerReadCacheKey(userId: string, connectionId: string) {

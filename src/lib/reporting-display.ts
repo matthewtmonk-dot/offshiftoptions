@@ -1,4 +1,4 @@
-import { money, percent, shortDate, shortDateTime } from "@/lib/format";
+import { formatEtDateTime, money, percent, shortDate } from "@/lib/format";
 import type { AccountReportingSummary } from "@/domain/finance/reporting";
 
 /**
@@ -55,15 +55,21 @@ export function dashboardHasEvidenceGap(report: AccountReportingSummary): boolea
   return dashboardEvidenceGapCount(report) >= 2;
 }
 
+/**
+ * Post-Phase-2 UX follow-up - these are genuine time-of-day valuation instants (never a date-only
+ * concept like a trade/expiration date), so they use `formatEtDateTime` (always America/New_York),
+ * never the runtime-local-timezone `shortDateTime` - see that function's own doc comment for the
+ * live production bug this fixes (a UTC instant rendered 4 hours ahead of the correct ET time).
+ */
 export function accountValueDetail(report: AccountReportingSummary): string | null {
   if (report.currentAccountValue === null) {
     return null;
   }
   if (report.currentAccountValueAsOf) {
-    return `As of ${shortDateTime(report.currentAccountValueAsOf)}`;
+    return `As of ${formatEtDateTime(report.currentAccountValueAsOf)}`;
   }
   if (report.currentAccountValueOldestSnapshotAsOf && report.currentAccountValueNewestSnapshotAsOf) {
-    return `Account values updated between ${shortDateTime(report.currentAccountValueOldestSnapshotAsOf)} and ${shortDateTime(report.currentAccountValueNewestSnapshotAsOf)}`;
+    return `Account values updated between ${formatEtDateTime(report.currentAccountValueOldestSnapshotAsOf)} and ${formatEtDateTime(report.currentAccountValueNewestSnapshotAsOf)}`;
   }
   return null;
 }
