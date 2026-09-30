@@ -257,20 +257,24 @@ export function normalizeSchwabEquityMarketSessionEvidence(requestedNyDate: stri
 
   // Codex P2 (D) - "the field is legitimately ABSENT" (a genuinely closed day may omit
   // sessionHours/regularMarket entirely) must be told apart from "the field was SUPPLIED but is
-  // not a valid shape" (a corrupt/malformed response) - collapsing both into the same "treat as
-  // empty" behavior would let corrupt provider data masquerade as a validated closed day.
-  const sessionHoursRaw = eq.sessionHours;
-  const sessionHoursSupplied = sessionHoursRaw !== undefined && sessionHoursRaw !== null;
-  const sessionHours = objectValue(sessionHoursRaw);
-  if (sessionHoursSupplied && !sessionHours) {
-    return { status: "UNAVAILABLE", reason: "Schwab market-hours sessionHours was supplied but is not a valid object." };
+  // not a valid shape" - collapsing both into the same "treat as empty" behavior would let corrupt
+  // provider data masquerade as a validated closed day. Codex P2 (round 3) found the PREVIOUS fix
+  // still got this wrong for an EXPLICIT `null`: checking `!== null` treated `sessionHours: null`
+  // (or `regularMarket: null`) as if the key were never sent at all, when a real provider response
+  // that explicitly sends `null` is making a different (and here, invalid) claim than one that
+  // omits the field entirely. Presence is now determined by the raw KEY itself
+  // (`hasOwnProperty`), never by whether the resulting value happens to be null/undefined.
+  const sessionHoursKeyPresent = hasOwnKey(eq, "sessionHours");
+  const sessionHours = objectValue(eq.sessionHours);
+  if (sessionHoursKeyPresent && !sessionHours) {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours sessionHours was supplied (possibly null) but is not a valid object." };
   }
 
+  const regularMarketKeyPresent = sessionHours !== null && hasOwnKey(sessionHours, "regularMarket");
   const regularMarketRawValue = sessionHours?.regularMarket;
-  const regularMarketSupplied = regularMarketRawValue !== undefined && regularMarketRawValue !== null;
   const regularMarketIsWellFormedArray = Array.isArray(regularMarketRawValue);
-  if (regularMarketSupplied && !regularMarketIsWellFormedArray) {
-    return { status: "UNAVAILABLE", reason: "Schwab market-hours sessionHours.regularMarket was supplied but is not a valid array." };
+  if (regularMarketKeyPresent && !regularMarketIsWellFormedArray) {
+    return { status: "UNAVAILABLE", reason: "Schwab market-hours sessionHours.regularMarket was supplied (possibly null) but is not a valid array." };
   }
   const regularMarketRaw = regularMarketIsWellFormedArray ? regularMarketRawValue : [];
 
@@ -408,6 +412,13 @@ function midpoint(bid: number | null, ask: number | null) {
 
 function objectValue(value: unknown): UnknownRecord | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as UnknownRecord) : null;
+}
+
+/** Codex P2 (D, round 3) - true KEY presence, regardless of the value (including an explicit
+ * `null`) - never confused with `value !== undefined && value !== null`, which would treat an
+ * explicitly-sent `null` the same as a key that was never sent at all. */
+function hasOwnKey(record: UnknownRecord, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
 function firstObjectValue(value: unknown): UnknownRecord | null {

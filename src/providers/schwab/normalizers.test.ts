@@ -457,6 +457,19 @@ describe("normalizeSchwabEquityMarketSessionEvidence", () => {
     expect(result).toMatchObject({ status: "AVAILABLE", isOpen: false, regularMarketIntervals: [] });
   });
 
+  // Codex P2 (D, round 3) - an EXPLICIT `null` is a real value the provider chose to send, never
+  // the same claim as omitting the key entirely - both must be rejected as UNAVAILABLE, never
+  // silently treated the same as "genuinely absent" (which would still make a closed day).
+  it("is UNAVAILABLE when sessionHours is explicitly null (never the same as omitting the key)", () => {
+    const fixture = { equity: { EQ: { date: "2026-06-13", marketType: "EQUITY", product: "EQ", isOpen: false, sessionHours: null } } };
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-13", fixture).status).toBe("UNAVAILABLE");
+  });
+
+  it("is UNAVAILABLE when regularMarket is explicitly null (never the same as omitting the key)", () => {
+    const fixture = { equity: { EQ: { date: "2026-06-13", marketType: "EQUITY", product: "EQ", isOpen: false, sessionHours: { regularMarket: null } } } };
+    expect(normalizeSchwabEquityMarketSessionEvidence("2026-06-13", fixture).status).toBe("UNAVAILABLE");
+  });
+
   it("is UNAVAILABLE when regularMarket was SUPPLIED as a malformed scalar rather than legitimately absent", () => {
     const fixture = {
       equity: { EQ: { date: "2026-06-13", marketType: "EQUITY", product: "EQ", isOpen: false, sessionHours: { regularMarket: "closed" } } },
