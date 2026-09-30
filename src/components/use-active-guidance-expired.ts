@@ -1,40 +1,56 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { calibrateServerTime, computeRemainingMsFromCalibration, isExpiredGivenRemainingMs } from "@/lib/server-time-calibration";
 
 /**
- * Dashboard V2 Phase 2 - Codex P1 (B3) / Codex P2 (A). Shared by LivePositionReviewBadge and
- * LivePositionReviewEvidenceLine so the dominant badge and the secondary evidence text always
+ * Dashboard V2 Phase 2 - Codex P1 (B3) / Codex P2 (A, rounds 1-3). Shared by LivePositionReviewBadge
+ * and LivePositionReviewEvidenceLine so the dominant badge and the secondary evidence text always
  * downgrade TOGETHER, from the exact same deadline, rather than drifting independently.
  *
  * `deadline` and `evaluatedAt` are both real, server-computed instants (see
  * PositionReviewExplanation.activeGuidanceDeadline/evaluatedAt) - `evaluatedAt` is the trusted
  * origin, `deadline` the trusted expiry, and `deadline - evaluatedAt` is the TOTAL validity budget
- * the server actually authorized. This hook never compares `deadline` directly against a fresh
- * `Date.now()` read on every check - that would let a slow/manipulated client wall clock make an
- * already-expired advisory look current indefinitely (Codex P2 (A)'s exact finding). Instead:
+ * the server actually authorized.
  *
- * 1. At the moment this hook first sees a given (deadline, evaluatedAt) pair (mount, or a fresh
- *    evaluation replacing a prior one), `Date.now()` is read EXACTLY ONCE, only to conservatively
- *    estimate delivery/hydration delay: `Math.max(evaluatedAtMs, Date.now())` can only ever be
- *    >= evaluatedAtMs, so the computed remaining budget (`deadlineMs - that`) can only ever be
- *    <= `deadlineMs - evaluatedAtMs` - the client can shorten the budget (a slow OR fast clock, or
- *    real delivery delay, all reduce or leave it unchanged) but can never extend it.
- * 2. Every check AFTER that one-time read uses only `performance.now()` - a monotonic clock immune
- *    to wall-clock adjustments while the page stays open (a user/OS changing the system clock
- *    mid-session cannot resurrect or extend an advisory this way, unlike a repeated `Date.now()`
- *    comparison would).
- * 3. The single scheduled check fires exactly at the computed budget - no polling, no grace period
+ * Codex P2 (A, round 3) - a round-2 attempt anchored the remaining-budget calculation at
+ * `Math.max(evaluatedAtMs, Date.now())`: a client wall clock reading EARLIER than the true delivery
+ * delay could still grant MORE remaining validity than the server actually authorized (see
+ * server-time-calibration.ts's own doc comment for the exact worked example). The browser's
+ * `Date.now()` is no longer used as an authority for remaining validity AT ALL. Instead:
+ *
+ * 1. This hook ALWAYS starts neutral/pending (`expired = true`) - there is no synchronous answer
+ *    available at first render (calibration is inherently async), and the ticket is explicit that
+ *    an advisory must never briefly flash active and then retract once calibration resolves it was
+ *    already stale. Only a snapshot's own factual (non-live-guidance) data may still render.
+ * 2. On mount (and whenever a fresh (deadline, evaluatedAt) pair replaces a prior one), this hook
+ *    fetches this app's own same-origin, read-only server-time endpoint (see
+ *    src/app/api/time/route.ts) and computes the remaining budget ONLY from that response plus the
+ *    measured round-trip time - never from the browser's own clock (calibrateServerTime /
+ *    computeRemainingMsFromCalibration in server-time-calibration.ts).
+ * 3. On ANY calibration failure - a rejected fetch, a non-OK response, malformed JSON, a missing or
+ *    non-finite server timestamp, or a contradictory (deadline <= evaluatedAt) input - this hook
+ *    never guesses: it stays neutral/expired.
+ * 4. After a successful calibration, every subsequent check uses ONLY `performance.now()` monotonic
+ *    elapsed time from that calibration's own origin - never returning to Date.now(), and immune to
+ *    a wall-clock adjustment mid-session.
+ * 5. The single scheduled check fires exactly at the computed budget - no polling, no grace period
  *    past the real deadline.
- * 4. Tab-visibility resume re-runs the SAME monotonic comparison (never a fresh Date.now() read),
- *    so a background tab that missed its timer still resolves conservatively on resume.
+ * 6. Tab-visibility resume never blindly restores a previously-active status (a backgrounded tab
+ *    could have been asleep well past its real deadline) - it immediately downgrades to
+ *    neutral/expired and requires a NEW successful calibration (itself same-origin/read-only, so
+ *    this is safe even while otherwise "paused") before it can become active again; a failed
+ *    recalibration on resume leaves it neutral.
  *
- * Uncertainty fails closed: a non-finite deadline/evaluatedAt resolves immediately expired.
+ * This hook's own scheduling/effect wiring is not directly unit-tested (this repo has no React/DOM
+ * component-test harness - see PROJECT_HANDOFF.md); the pure, trust-sensitive math it calls into
+ * (calibrateServerTime / computeRemainingMsFromCalibration / isExpiredGivenRemainingMs) is fully
+ * covered by src/lib/server-time-calibration.test.ts.
  */
 export function useActiveGuidanceExpired(deadline: Date | null, evaluatedAt: Date | null): boolean {
   const deadlineMs = deadline?.getTime() ?? null;
   const evaluatedAtMs = evaluatedAt?.getTime() ?? null;
-  const [expired, setExpired] = useState(() => computeExpiredAtHydration(deadlineMs, evaluatedAtMs) ?? false);
+  const [expired, setExpired] = useState(true);
 
   useEffect(() => {
     if (deadlineMs === null || evaluatedAtMs === null) {
@@ -45,55 +61,57 @@ export function useActiveGuidanceExpired(deadline: Date | null, evaluatedAt: Dat
       return;
     }
 
-    if (!Number.isFinite(deadlineMs) || !Number.isFinite(evaluatedAtMs)) {
-      // Fail closed on a corrupted trusted timestamp - never treat uncertainty as "still valid".
-      const check = () => setExpired(true);
+    // Always re-enter neutral/pending for a fresh (deadline, evaluatedAt) pair - never carry over
+    // the previous pair's resolved status while this pair's own calibration is still in flight.
+    const resetToPending = () => setExpired(true);
+    resetToPending();
+
+    let cancelled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    const recalibrate = async () => {
+      const calibration = await calibrateServerTime();
+      if (cancelled) {
+        return;
+      }
+      const remainingMs = computeRemainingMsFromCalibration(deadlineMs, evaluatedAtMs, calibration);
+      if (remainingMs === null) {
+        setExpired(true); // failed/malformed/invalid/contradictory - never guess, stay neutral
+        return;
+      }
+
+      const originMonotonic = performance.now();
+      const check = () => setExpired(isExpiredGivenRemainingMs(remainingMs, performance.now() - originMonotonic));
       check();
-      return;
-    }
 
-    // The ONE, single Date.now() read for this (deadline, evaluatedAt) pair - see the doc comment
-    // above for why this can only ever shorten, never extend, the computed budget.
-    const remainingMs = deadlineMs - Math.max(evaluatedAtMs, Date.now());
-    const hydrationMonotonic = performance.now();
-    const deadlineMonotonic = hydrationMonotonic + remainingMs;
+      if (remainingMs > 0) {
+        timeout = setTimeout(check, remainingMs);
+      }
+    };
 
-    const check = () => setExpired(performance.now() >= deadlineMonotonic);
-    check();
+    void recalibrate();
 
-    if (remainingMs <= 0) {
-      return; // already past budget at hydration - check() above already set expired, nothing to schedule
-    }
-
-    const timeout = setTimeout(check, remainingMs);
-    // A hidden/backgrounded tab can suspend timers - re-check on resume using the SAME monotonic
-    // comparison (never a fresh Date.now() read).
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") check();
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      // Codex P2 (A, round 3) - never blindly restore a previously-active status on resume.
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      setExpired(true);
+      void recalibrate();
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      clearTimeout(timeout);
+      cancelled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [deadlineMs, evaluatedAtMs]);
 
   return expired;
-}
-
-/** Exported for direct unit testing - this repo has no React/DOM component-test harness (see
- * PROJECT_HANDOFF.md), so the hook's own scheduling/re-render behavior is not exercised by an
- * automated test; this pure decision function (the hydration-time expiry rule) is. Returns `null`
- * when there is no deadline at all (nothing to expire) so a caller can distinguish "definitely not
- * expired" from "not applicable." */
-export function computeExpiredAtHydration(deadlineMs: number | null, evaluatedAtMs: number | null, clientNowMs: number = Date.now()): boolean | null {
-  if (deadlineMs === null || evaluatedAtMs === null) {
-    return null;
-  }
-  if (!Number.isFinite(deadlineMs) || !Number.isFinite(evaluatedAtMs)) {
-    return true;
-  }
-  const remainingMs = deadlineMs - Math.max(evaluatedAtMs, clientNowMs);
-  return remainingMs <= 0;
 }
