@@ -47,6 +47,7 @@ const CANNOT_ASSESS_REASON_LABELS: Record<string, string> = {
   MARKET_CLOSED: "Market closed",
   QUOTE_UNAVAILABLE: "Quote unavailable",
   POSITION_INSUFFICIENT_SHARE_COVERAGE: "Insufficient share coverage for this call",
+  POSITION_UNSUPPORTED_CONTRACT_DELIVERABLE: "Contract deliverable can't be verified",
 };
 
 /** Picks the single most relevant human-readable reason for a CANNOT_ASSESS row, in the same
@@ -69,6 +70,7 @@ const POSITION_EVIDENCE_LABELS: Record<PositionReviewEvidence["position"], strin
   POSITION_MISMATCH_AMBIGUOUS: "Position mismatch",
   MANUAL_POSITION: "Manual position",
   INSUFFICIENT_SHARE_COVERAGE: "Insufficient share coverage",
+  UNSUPPORTED_CONTRACT_DELIVERABLE: "Contract deliverable unverified",
 };
 
 /** The compact colored action badge alone - text + icon, color never the only signal. */

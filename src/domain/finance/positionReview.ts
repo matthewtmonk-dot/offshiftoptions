@@ -44,7 +44,14 @@ export type PositionReviewPositionInput =
    * cover every campaign currently claiming a covered call against it. An uncovered short call
    * must never receive "covered call" active guidance - the caller resolves this by aggregating
    * ALL competing campaigns for the same shares, never a first-campaign-wins allocation. */
-  | { state: "INSUFFICIENT_SHARE_COVERAGE" };
+  | { state: "INSUFFICIENT_SHARE_COVERAGE" }
+  /** Codex P2 (B, round 3) - the short call's own contract matched, and share coverage math may
+   * even appear to add up, but this app cannot PROVE the contract's actual deliverable is a
+   * standard 100 shares (no trustworthy provider multiplier/deliverable evidence exists for any
+   * contract contributing to this owner+account+underlying's obligation total). OCC symbol shape
+   * alone never proves the deliverable - see BrokerPosition.sharesPerContract's own doc comment.
+   * Covered-call active guidance fails closed rather than assuming the standard multiplier. */
+  | { state: "UNSUPPORTED_CONTRACT_DELIVERABLE" };
 
 export type PositionEvidenceState = PositionReviewPositionInput["state"];
 

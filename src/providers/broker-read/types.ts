@@ -39,6 +39,18 @@ export type BrokerPosition = {
   /** The option's strike price, straight from Schwab's instrument object when available. */
   strikePrice?: number | null;
   underlyingSymbol?: string | null;
+  /**
+   * Codex P2 (B, round 3) - the option's actual, provider-verified shares-per-contract deliverable,
+   * when a trustworthy field for it exists on the underlying instrument. Deliberately NOT derived
+   * from OCC symbol shape: a symbol parsing as this app's one supported standard OCC contract shape
+   * (see occOption.ts) proves the SYMBOL is well-formed, never that the contract's actual current
+   * deliverable is a standard 100 shares - adjusted/nonstandard deliverables can exist and this app
+   * has no live diagnostic confirming Schwab's provider response ever exposes this field today.
+   * Currently always null/undefined in production (no normalizer populates it) - present so covered
+   * -call coverage math can require a PROVEN multiplier of 100 rather than assuming one, and so a
+   * future ticket with verified provider evidence can populate it without another type change.
+   */
+  sharesPerContract?: number | null;
 };
 
 /**

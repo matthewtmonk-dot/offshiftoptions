@@ -256,7 +256,7 @@ function resolvePositionEvidence({
   brokerPositions: (BrokerPosition & { accountLabel: string })[] | null;
   trackedPuts: TrackedPut[];
   trackedCalls: TrackedCall[];
-  callShareCoverageByCampaignId: Map<string, boolean>;
+  callShareCoverageByCampaignId: Map<string, CallShareCoverageOutcome>;
 }): PositionReviewPositionInput {
   // Codex P1 (B7) - CRITICAL: active review guidance (a manual-account bypass, a Schwab broker
   // match, or the buffer-driven moneyness math this evidence state ultimately gates) is only ever
@@ -314,8 +314,14 @@ function resolvePositionEvidence({
   // Codex P1 (B5) - the call's own CONTRACT matching exactly (above) proves identity, never share
   // coverage. A short call backed by too few (or unverifiable) broker-held shares must never
   // receive "covered call" guidance, regardless of how cleanly its own contract matched.
-  if (leg.kind === "CALL" && callShareCoverageByCampaignId.get(campaign.id) !== true) {
-    return { state: "INSUFFICIENT_SHARE_COVERAGE" };
+  if (leg.kind === "CALL") {
+    const coverage = callShareCoverageByCampaignId.get(campaign.id);
+    if (coverage === "UNSUPPORTED_CONTRACT_DELIVERABLE") {
+      return { state: "UNSUPPORTED_CONTRACT_DELIVERABLE" };
+    }
+    if (coverage !== "COVERED") {
+      return { state: "INSUFFICIENT_SHARE_COVERAGE" };
+    }
   }
   // Codex P1 (B1) - freshness is about WHEN WE READ this position, not the provider's own
   // (currently always-null, and conceptually unrelated) valuation timestamp. `valuationAsOf`
@@ -330,36 +336,61 @@ function resolvePositionEvidence({
   return { state: "SCHWAB_CONFIRMED", asOf: receivedAt };
 }
 
+/** Codex P2 (B, round 3) - `computeCallShareCoverage`'s per-campaign outcome. `COVERED` is the
+ * only outcome that may ever receive "covered call" active guidance; both other outcomes fail
+ * closed to CANNOT_ASSESS, but are kept distinct so the caller (and its tests) can tell "the
+ * share math itself doesn't add up / is ambiguous" apart from "the deliverable can never be
+ * proven, regardless of what the share math says." */
+type CallShareCoverageOutcome = "COVERED" | "INSUFFICIENT_SHARE_COVERAGE" | "UNSUPPORTED_CONTRACT_DELIVERABLE";
+
 /**
- * Codex P1 (B5) / Codex P2 (B) - proves underlying-share coverage for every currently-open covered
- * call, at the complete owner+account+underlying allocation level - never per-campaign in
- * isolation, since two campaigns can each independently record their own "open call" while
- * actually competing for the SAME real broker-held shares. Returns `true` for a campaign's id only
- * when its entire competing group's TOTAL short-call obligation fits within the actual broker-held
- * share count for that owner+account+underlying; every other campaign in that same group maps to
- * `false` too - no first-campaign-wins allocation, no partial credit.
+ * Codex P1 (B5) / Codex P2 (B, rounds 2-3) - proves underlying-share coverage for every currently
+ * -open covered call, at the complete owner+account+underlying allocation level - never
+ * per-campaign in isolation, since two campaigns can each independently record their own "open
+ * call" while actually competing for the SAME real broker-held shares. Every campaign in a
+ * competing group maps to the SAME outcome - no first-campaign-wins allocation, no partial credit.
  *
- * Codex P2 (B) hardened this beyond only summing TRACKED campaigns' own contracts: total
- * obligation now includes every broker-visible short call on the same account+underlying,
- * including one with no corresponding tracked campaign at all (an "untracked" broker call still
- * consumes real share capacity) - a tracked call's own matching broker position is counted exactly
- * once (never double-counted against both its tracked contracts AND its own broker row). A group
- * fails closed to `false` for every campaign in it whenever: the account/share evidence can't be
- * resolved at all; more than one broker equity row exists for the same account+underlying (no
- * verified provider semantics support summing separate rows, so this is treated as ambiguous
- * rather than guessed); the one equity row's quantity is not a positive real long-share count
- * (a short/negative share row never counts as coverage); or any broker call position sharing the
- * underlying has a symbol that does not parse as this app's one supported standard OCC contract
- * shape (see occOption.ts) - this app has no verified provider evidence of a per-contract
- * multiplier/deliverable, so a non-standard-shaped contract's multiplier can never be assumed to
- * be the standard 100 shares/contract (`OPTION_MULTIPLIER`) and coverage is never claimed for it.
+ * Codex P2 (B, round 3) - BROKER POSITION DATA IS AUTHORITATIVE for each contract's actual current
+ * short-call obligation quantity, full stop. The group's total obligation is now built ENTIRELY
+ * from broker-visible short-call rows' own `Math.abs(quantity)` - a tracked campaign's own claimed
+ * `contracts` field is NEVER substituted into this total, not even for a broker row that DOES
+ * match a tracked campaign's contract key. (Round 2's approach of summing tracked campaigns' own
+ * `contracts` for their matching rows, and only broker quantity for the rest, undercounted the
+ * group's real obligation whenever a tracked campaign's claimed count disagreed with what the
+ * broker actually reports for that same contract - e.g. campaign claims 1, broker reports -3: the
+ * real obligation is 3, not 1, and every OTHER campaign in the group must see the real number.) A
+ * tracked campaign's own `contracts` field is used only upstream, by trackerPositionMatch.ts's
+ * exact-quantity check, to decide whether THAT campaign's own identity match is confirmed - it
+ * plays no role in this function's group-wide obligation total.
+ *
+ * Duplicate broker rows for the identical OCC contract key are never summed - this app has no
+ * verified provider evidence that Schwab ever legitimately reports the same contract as separate
+ * additive lots, so a duplicate is treated as AMBIGUOUS and the whole group fails closed.
+ *
+ * A group fails closed (`INSUFFICIENT_SHARE_COVERAGE`) whenever: the account/share evidence can't
+ * be resolved at all; a duplicate same-contract broker row exists; any broker short-call row's
+ * quantity is not a positive finite number; more than one broker equity row exists for the same
+ * account+underlying (no verified provider semantics support summing separate rows); or the one
+ * equity row's quantity is not a positive real long-share count.
+ *
+ * Codex P2 (B, round 3) - CRITICAL, and checked independently of the above: OCC symbol syntax
+ * alone never proves a contract's actual deliverable is a standard 100 shares (see
+ * BrokerPosition.sharesPerContract's own doc comment - adjusted/nonstandard deliverables can
+ * exist, and this app has no live diagnostic confirming a trustworthy multiplier field exists in
+ * Schwab's provider response today). If ANY broker short-call row contributing to a group's
+ * obligation lacks a PROVEN `sharesPerContract === 100`, the entire group resolves to
+ * `UNSUPPORTED_CONTRACT_DELIVERABLE` - never `COVERED`, regardless of how the share arithmetic
+ * would otherwise come out. This is intentionally the dominant, most commonly reached outcome in
+ * production today, since no normalizer currently populates `sharesPerContract` at all: this is
+ * acceptable fail-closed behavior, not a bug - see the ticket's own instruction not to infer a
+ * standard deliverable from symbol formatting, and not to invent evidence that doesn't exist.
  */
 function computeCallShareCoverage(
   trackedCalls: TrackedCall[],
   brokerPositions: (BrokerPosition & { accountLabel: string })[] | null,
   accounts: PositionReviewAccountInput[],
-): Map<string, boolean> {
-  const coverageByCampaignId = new Map<string, boolean>();
+): Map<string, CallShareCoverageOutcome> {
+  const coverageByCampaignId = new Map<string, CallShareCoverageOutcome>();
   if (brokerPositions === null || trackedCalls.length === 0) {
     return coverageByCampaignId;
   }
@@ -380,44 +411,45 @@ function computeCallShareCoverage(
     const account = accounts.find((candidate) => candidate.id === accountId);
     const externalAccountId = account?.externalAccountId;
     if (!externalAccountId) {
-      for (const call of calls) coverageByCampaignId.set(call.id, false);
+      for (const call of calls) coverageByCampaignId.set(call.id, "INSUFFICIENT_SHARE_COVERAGE");
       continue;
     }
-
-    // Every tracked call's own OCC contract key, so its matching broker row is recognized and
-    // never double-counted below (its contracts already come from the tracked campaign's own
-    // validated `contracts` field, not re-derived from the broker quantity).
-    const trackedContractKeys = new Set(
-      calls
-        .map((call) => occContractKey(formatOccSymbol(call.ticker, call.expiration, call.strike, "CALL")))
-        .filter((contractKey): contractKey is string => contractKey !== null),
-    );
 
     const shortCallPositions = brokerPositions.filter(
       (position) => position.accountId === externalAccountId && isShortCallPositionForUnderlying(position, ticker!),
     );
 
-    let untrackedShortCallContracts = 0;
-    let obligationUnresolvable = false;
+    // Codex P2 (B, round 3) - duplicate rows for the SAME OCC contract are ambiguous, never
+    // blindly summed - this app has no verified provider evidence that Schwab legitimately
+    // reports the same contract as separate additive lots.
+    const contractKeyCounts = new Map<string, number>();
     for (const position of shortCallPositions) {
       const contractKey = occContractKey(position.symbol);
-      if (contractKey !== null && trackedContractKeys.has(contractKey)) {
-        continue; // Already represented by a tracked campaign's own `contracts` count below.
+      if (contractKey !== null) {
+        contractKeyCounts.set(contractKey, (contractKeyCounts.get(contractKey) ?? 0) + 1);
       }
-      // Codex P2 (B) - an untracked broker short call must parse as this app's one supported
-      // standard OCC contract shape before its multiplier can be assumed to be the standard 100
-      // shares/contract - a non-standard/unparseable shape means the real deliverable is unknown,
-      // and this app has no other verified source for it. Never fabricate a multiplier.
-      const parsed = parseOccOptionSymbol(position.symbol);
+    }
+    let obligationUnresolvable = [...contractKeyCounts.values()].some((count) => count > 1);
+
+    let totalShortCallContracts = 0;
+    let multiplierProven = true;
+    for (const position of shortCallPositions) {
       const positionContracts = Math.abs(position.quantity);
-      if (!parsed || !Number.isFinite(positionContracts) || positionContracts <= 0) {
+      // Defensive only - isShortCallPositionForUnderlying above already requires a finite, negative
+      // `quantity` before a row reaches this loop at all, so `positionContracts` is always a finite
+      // positive number here in practice. Kept in case that upstream guarantee ever changes.
+      if (!Number.isFinite(positionContracts) || positionContracts <= 0) {
         obligationUnresolvable = true;
         continue;
       }
-      untrackedShortCallContracts += positionContracts;
+      totalShortCallContracts += positionContracts;
+      // Codex P2 (B, round 3) - OCC symbol shape (checked upstream by isShortCallPositionForUnderlying
+      // via parseOccOptionSymbol) proves the symbol is well-formed, never that the deliverable is a
+      // standard 100 shares. Only an explicit, provider-verified `sharesPerContract === 100` proves it.
+      if (position.sharesPerContract !== 100) {
+        multiplierProven = false;
+      }
     }
-
-    const totalShortCallContracts = calls.reduce((sum, call) => sum + call.contracts, 0) + untrackedShortCallContracts;
 
     // Codex P2 (B) - never a first-match `.find()`: multiple broker equity rows for the same
     // account+underlying are ambiguous (this app has no verified provider semantics establishing
@@ -426,15 +458,20 @@ function computeCallShareCoverage(
       (position) => position.accountId === externalAccountId && isEquitySharePosition(position, ticker!),
     );
 
-    let coversAll = false;
-    if (!obligationUnresolvable && equityPositions.length === 1) {
+    let outcome: CallShareCoverageOutcome;
+    if (!multiplierProven) {
+      outcome = "UNSUPPORTED_CONTRACT_DELIVERABLE";
+    } else if (obligationUnresolvable || equityPositions.length !== 1) {
+      outcome = "INSUFFICIENT_SHARE_COVERAGE";
+    } else {
       const shares = equityPositions[0]!.quantity;
       const totalSharesNeeded = totalShortCallContracts * OPTION_MULTIPLIER;
-      coversAll = Number.isFinite(shares) && shares > 0 && totalSharesNeeded <= shares;
+      const covers = Number.isFinite(shares) && shares > 0 && totalSharesNeeded <= shares;
+      outcome = covers ? "COVERED" : "INSUFFICIENT_SHARE_COVERAGE";
     }
 
     for (const call of calls) {
-      coverageByCampaignId.set(call.id, coversAll);
+      coverageByCampaignId.set(call.id, outcome);
     }
   }
 

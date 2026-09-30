@@ -89,8 +89,17 @@ function equityPosition(overrides: Partial<{ accountId: string; symbol: string; 
   return { accountId: "broker-a", symbol: "UPST", quantity: 100, marketValue: 3000, assetType: "EQUITY", accountLabel: "Test", ...overrides };
 }
 
-function callOptionPosition(overrides: Partial<{ accountId: string; symbol: string; quantity: number }> = {}) {
-  return { accountId: "broker-a", symbol: "UPST  261002C00030000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test", ...overrides };
+/**
+ * Codex P2 (B, round 3) - defaults to `sharesPerContract: 100` so every EXISTING call site below
+ * keeps testing the obligation-grouping/arithmetic logic in isolation from the separate deliverable
+ * -proof gate (computeCallShareCoverage's `multiplierProven` check) - exactly as if a future ticket
+ * had already wired up trustworthy provider evidence. This is NOT today's real production shape:
+ * see the dedicated "round 3 - deliverable-proof gate" describe block below, which explicitly omits
+ * this field to prove the REAL default (no normalizer populates it) fails closed regardless of how
+ * the share arithmetic would otherwise come out.
+ */
+function callOptionPosition(overrides: Partial<{ accountId: string; symbol: string; quantity: number; sharesPerContract: number | null }> = {}) {
+  return { accountId: "broker-a", symbol: "UPST  261002C00030000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, sharesPerContract: 100, accountLabel: "Test", ...overrides };
 }
 
 beforeEach(() => {
@@ -527,16 +536,73 @@ describe("Codex P2 (B) - covered-call coverage must account for ALL broker-visib
     const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
     expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
   });
+});
 
-  it("fails closed when an untracked broker short call has a non-standard/unparseable symbol shape (unknown multiplier, never assumed 100)", async () => {
+describe("Codex P2 (B, round 3) - broker-authoritative obligation model + deliverable-proof gate", () => {
+  it("the REAL production shape (no provider deliverable evidence anywhere) fails closed to UNSUPPORTED_CONTRACT_DELIVERABLE even with fully sufficient broker-held shares", async () => {
+    // Deliberately built WITHOUT callOptionPosition()'s test-only sharesPerContract:100 default -
+    // this is the actual shape every current Schwab normalizer produces in production.
     getPositions.mockResolvedValue([
       equityPosition({ quantity: 100 }),
-      callOptionPosition(),
-      // A malformed/non-standard OCC shape - this app has no verified multiplier evidence for it.
-      { accountId: "broker-a", symbol: "UPST-NONSTANDARD-CALL", quantity: -1, marketValue: -50, putCall: "CALL" as const, underlyingSymbol: "UPST", accountLabel: "Test" },
+      { accountId: "broker-a", symbol: "UPST  261002C00030000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test" },
+    ]);
+    const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("UNSUPPORTED_CONTRACT_DELIVERABLE");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+  });
+
+  it("put-side review is never affected by the covered-call deliverable-proof gate", async () => {
+    getPositions.mockResolvedValue([
+      { accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, positionReadReceivedAt: NOON, accountLabel: "Test" },
+    ]);
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
+    expect(results[0]?.result.evidence.position).toBe("SCHWAB_CONFIRMED");
+    expect(results[0]?.result.action).toBe("COMFORTABLE");
+  });
+
+  it("the exact reproduced defect: a tracked campaign's own CLAIMED contract count must never stand in for its real broker quantity when computing a DIFFERENT campaign's coverage", async () => {
+    // Campaign A: tracks 1 call, broker's ACTUAL quantity agrees (-1, EXACT match, confirmed).
+    // Campaign B: tracks 1 call, but broker's ACTUAL quantity is -3 (mismatch - B's own identity
+    // match fails and B resolves NOT_ASSESSED) - the real group obligation is 1 + 3 = 4 contracts
+    // (400 shares), never 1 + 1 = 2 (200 shares, which 200 held shares would have wrongly covered).
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 200 }),
+      callOptionPosition(), // Campaign A's own contract: UPST 261002C00030000, quantity -1
+      callOptionPosition({ symbol: "UPST  261101C00032000", quantity: -3 }), // Campaign B's contract: broker reports -3, not -1
+    ]);
+    const campaignA = callCampaign({ id: "campaign-call-a" });
+    const campaignB = callCampaign({
+      id: "campaign-call-b",
+      events: [
+        { type: "ASSIGNMENT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), contracts: 1, strike: 28, shares: 100 },
+        { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-05-02T00:00:00.000Z"), optionType: "CALL", contracts: 1, strike: 32, expiration: new Date("2026-11-01T00:00:00.000Z"), premium: 1 },
+      ],
+    });
+
+    const results = await resolvePositionReviewsForUser("matt", [campaignA, campaignB], [schwabAccount], 3, NOON);
+
+    const resultA = results.find((r) => r.campaignId === "campaign-call-a");
+    const resultB = results.find((r) => r.campaignId === "campaign-call-b");
+    // B's own claimed 1 contract never matched its real broker row's -3 quantity.
+    expect(resultB?.result.evidence.position).toBe("NOT_ASSESSED");
+    // A's own contract matched exactly, but the GROUP's real obligation (1 + 3 = 4 contracts, 400
+    // shares) exceeds the 200 held shares - never wrongly SCHWAB_CONFIRMED from an undercounted
+    // (1 + 1 = 2 contract, 200 share) total.
+    expect(resultA?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
+  });
+
+  it("treats duplicate broker rows for the identical OCC contract as ambiguous and fails the whole group closed, regardless of how much share capacity would otherwise appear available", async () => {
+    getPositions.mockResolvedValue([
+      equityPosition({ quantity: 1000 }), // far more than enough under ANY naive interpretation
+      callOptionPosition(), // Campaign A's own contract - unique, matches cleanly
+      // An UNTRACKED contract reported TWICE - a duplicate-row data anomaly this app has no
+      // verified provider semantics proving is a legitimate pair of additive lots.
+      callOptionPosition({ symbol: "UPST  261101C00032000", quantity: -1 }),
+      callOptionPosition({ symbol: "UPST  261101C00032000", quantity: -1 }),
     ]);
     const results = await resolvePositionReviewsForUser("matt", [callCampaign()], [schwabAccount], 3, NOON);
     expect(results[0]?.result.evidence.position).toBe("INSUFFICIENT_SHARE_COVERAGE");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
   });
 });
 
