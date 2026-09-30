@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { endOfNyCalendarDateUtc, selectEffectiveBaseline, type AccountLedgerEntryInput } from "@/domain/finance/accountLedger";
 import { getCurrentOpenCall, isPastExpiration, summarizeCampaign } from "@/domain/finance/campaigns";
+import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 import type { SchwabReconciliationEvidence, TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
 import { compareStockStageCandidates, evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
 import type {
@@ -45,6 +46,9 @@ import {
   recordSchwabAccountSyncResult,
 } from "./broker-connections";
 import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
+import { getEquityMarketSessionEvidenceForUser, getQuoteReviewEvidenceForUser } from "./live-quotes";
+import { resolveRelevantCampaignLegs, tickersNeedingReviewQuotes, type PositionReviewCampaignInput } from "./position-review-scope";
+import { clearRefreshGuardsForTests, runGuarded } from "./refresh-guard";
 import { getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
 import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
@@ -557,40 +561,141 @@ export async function getSchwabOpenPositionsForUser(userId: string, options: { b
   }
 }
 
-export type RefreshPositionEvidenceResult = { ok: true; refreshedAt: string } | { ok: false; reason: "NO_CONNECTION" | "FETCH_FAILED" };
+export type RefreshPositionEvidenceResult =
+  | { ok: true; refreshedAt: string }
+  | { ok: false; reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED" | "MARKET_DATA_REFRESH_FAILED" };
+
+/** Post-Phase-2 UX follow-up correctness repair - the minimal campaign shape
+ * resolveRelevantCampaignLegs/tickersNeedingReviewQuotes (position-review-scope.ts) need to
+ * determine which tickers currently require review evidence, queried directly rather than reusing
+ * app-data.ts's much larger getDashboardData (which also loads watchlist/recommendations/chat/
+ * trades - unrelated to a position-review evidence refresh). */
+async function loadOpenAndAssignedCampaignsForUser(userId: string): Promise<PositionReviewCampaignInput[]> {
+  return prisma.campaign.findMany({
+    where: { ownerId: userId, status: { in: ["OPEN", "ASSIGNED"] } },
+    include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+  });
+}
 
 /**
- * Post-Phase-2 UX follow-up - the universal "Refresh status" control's ONE underlying operation,
- * shared by the global app header and Tracker's own refresh button (both call the thin
- * `refreshPositionEvidenceAction` server action in actions.ts, which does nothing but resolve
- * `requireCurrentUser()` and call this). Always scoped to the given `userId` - every cache-clear
- * and every fetch below is keyed by THIS user's own connection (see clearSchwabBrokerReadCacheForUser
- * /clearSchwabMarketDataCacheForUser's own `schwab:user:${userId}:...` key prefix), so one user's
- * click can never affect, or count as fresh evidence for, another user.
+ * Post-Phase-2 UX follow-up (correctness repair) - the universal "Refresh status" control's ONE
+ * underlying operation, shared by the global app header (the only manual refresh control - Tracker's
+ * own duplicate was removed) via the thin `refreshPositionEvidenceAction` server action in
+ * actions.ts (which resolves `requireCurrentUser()` and calls `refreshPositionEvidenceForUserGuarded`
+ * below). Always scoped to the given `userId` - every cache-clear, every fetch, and every DB query
+ * below is keyed by THIS user's own id/connection, so one user's click can never affect, or count as
+ * fresh evidence for, another user.
  *
  * Deliberately narrow, unlike syncSchwabAccountForUser: this refreshes ONLY the read-only evidence
- * Phase 2's shared position-review evaluator (resolvePositionReviewsForUser) consumes - current
- * Schwab positions/accounts (bypassing the broker-read cache) and current equity quote/session
- * evidence (by clearing the market-data cache so the next read is forced fresh). It never imports
- * transactions, never calls reconcileSchwabActivityForUser/reconcileSchwabCoveredCallActivityForUser,
- * never writes a CampaignEvent, and never touches accounting/P&L - a successful call returns only a
- * timestamp, no campaign/position counts of any kind (there is nothing here that could create them).
+ * Phase 2's shared position-review evaluator (resolvePositionReviewsForUser) consumes. It never
+ * imports transactions, never calls reconcileSchwabActivityForUser/
+ * reconcileSchwabCoveredCallActivityForUser, never writes a CampaignEvent, and never touches
+ * accounting/P&L. A successful call returns only a timestamp - no campaign/position counts of any
+ * kind (there is nothing here that could create them). The underlying Schwab OAuth access-token
+ * path may still perform its own normal token renewal when a token is missing an expiry or has
+ * under 60 seconds remaining (see providers/schwab/tokens.ts) - that is ordinary authentication
+ * maintenance, not a brokerage sync, and is left completely untouched here.
+ *
+ * Codex correctness repair - three defects fixed from the first pass:
+ *
+ * 1. SUCCESS now genuinely means the evidence needed for a fresh position review was obtained -
+ *    not merely that positions were fetched. After confirming fresh broker positions/accounts,
+ *    this also determines the exact ticker set requiring review (via
+ *    resolveRelevantCampaignLegs/tickersNeedingReviewQuotes, position-review-scope.ts - the SAME
+ *    logic resolvePositionReviewsForUser itself uses, never re-derived) and fetches fresh quote
+ *    review evidence for every one of those tickers plus fresh market-session evidence for today's
+ *    NY date, AWAITING all of it before ever reporting success. `MARKET_DATA_REFRESH_FAILED` is
+ *    returned - not `ok: true` - if any required ticker's quote evidence, or the session evidence,
+ *    comes back anything other than AVAILABLE. When there are no active positions needing review at
+ *    all, there is nothing to require, and a successful broker fetch alone is sufficient.
+ * 2. The forced fresh broker fetch is no longer bypassed-and-discarded. `clearSchwabBrokerReadCacheForUser`
+ *    empties this user's cache first, then `getSchwabOpenPositionsForUser(userId)` is called WITHOUT
+ *    `bypassCache` - since the cache is already empty, this naturally misses and fetches fresh, and
+ *    the normal caching path (`withBrokerReadCache`) stores that SAME result under the SAME key
+ *    Dashboard/Tracker read from next, with the adapter's own real `positionReadReceivedAt` - never
+ *    a second Schwab request, and never a synthetic/renewed receipt time.
+ * 3. The market-data cache is cleared, then the same quote/session evidence functions used above
+ *    naturally populate it fresh (same reasoning as #2) - Dashboard/Tracker's own subsequent read
+ *    reuses this same evidence rather than triggering another live fetch.
+ *
+ * None of quote.lastPrice/tradeTime atomic pairing, the 120-second freshness rule, market-session
+ * validation, or server-time calibration are reimplemented here - only the existing, already-
+ * approved evidence-loading functions are triggered.
  */
 export async function refreshPositionEvidenceForUser(userId: string): Promise<RefreshPositionEvidenceResult> {
-  const connection = await getSchwabConnectionSummaryForUser(userId);
-  if (!connection || !connection.connected) {
-    return { ok: false, reason: "NO_CONNECTION" };
+  try {
+    const connection = await getSchwabConnectionSummaryForUser(userId);
+    if (!connection || !connection.connected) {
+      return { ok: false, reason: "NO_CONNECTION" };
+    }
+
+    clearSchwabBrokerReadCacheForUser(userId);
+    clearSchwabMarketDataCacheForUser(userId);
+
+    // Fix #2 - never bypassCache here: the cache was just cleared above, so this normal call
+    // already misses it and fetches fresh, while ALSO populating the same cache Dashboard/Tracker
+    // will read from moments later (see this function's own doc comment).
+    const positions = await getSchwabOpenPositionsForUser(userId);
+    if (positions === null) {
+      return { ok: false, reason: "BROKER_REFRESH_FAILED" };
+    }
+
+    // Fix #1 - determine exactly which tickers Phase 2's own evaluator would need review evidence
+    // for, using the SAME shared scoping logic it uses (never re-derived), and require their quote
+    // + session evidence to genuinely succeed before ever reporting overall success.
+    const now = new Date();
+    const campaigns = await loadOpenAndAssignedCampaignsForUser(userId);
+    const { relevant, legByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
+    const tickers = tickersNeedingReviewQuotes(relevant, legByCampaignId);
+
+    if (tickers.length > 0) {
+      const [quoteEvidenceByTicker, sessionEvidence] = await Promise.all([
+        getQuoteReviewEvidenceForUser(userId, tickers),
+        getEquityMarketSessionEvidenceForUser(userId, nyCalendarDateOf(now)),
+      ]);
+
+      const quotesOk = tickers.every((ticker) => quoteEvidenceByTicker.get(ticker)?.status === "AVAILABLE");
+      const sessionOk = sessionEvidence.status === "AVAILABLE";
+      if (!quotesOk || !sessionOk) {
+        return { ok: false, reason: "MARKET_DATA_REFRESH_FAILED" };
+      }
+    }
+
+    return { ok: true, refreshedAt: new Date().toISOString() };
+  } catch {
+    // Defensive only - every call above already fails closed internally (getSchwabOpenPositionsForUser
+    // never throws; getQuoteReviewEvidenceForUser/getEquityMarketSessionEvidenceForUser never throw).
+    // An unexpected exception (e.g. a DB error resolving campaigns/accounts) must still resolve to a
+    // typed failure, never an unhandled rejection reaching the server action/client.
+    return { ok: false, reason: "BROKER_REFRESH_FAILED" };
   }
+}
 
-  clearSchwabBrokerReadCacheForUser(userId);
-  clearSchwabMarketDataCacheForUser(userId);
+/** This app's own manual-refresh spam guard's cooldown - an APPLICATION choice reusing the existing
+ * broker positions/accounts cache TTL default (providers/broker-read/cache.ts), never a claimed
+ * Schwab rate limit. Process-local (see refresh-guard.ts's own doc comment) - not a durable/
+ * distributed limiter. */
+export const REFRESH_POSITION_EVIDENCE_COOLDOWN_MS = 15_000;
 
-  const positions = await getSchwabOpenPositionsForUser(userId, { bypassCache: true });
-  if (positions === null) {
-    return { ok: false, reason: "FETCH_FAILED" };
-  }
+export type GuardedRefreshPositionEvidenceResult = RefreshPositionEvidenceResult & { availableAgainAt: string };
 
-  return { ok: true, refreshedAt: new Date().toISOString() };
+/**
+ * Post-Phase-2 UX follow-up (correctness repair) - wraps refreshPositionEvidenceForUser with the
+ * per-user, process-local in-flight-coalescing + cooldown guard (refresh-guard.ts). Two concurrent
+ * requests for the SAME userId (e.g. two open tabs) reuse one real operation instead of issuing two
+ * sets of Schwab/market-data requests; a request within the cooldown window after a prior attempt
+ * reuses that attempt's result instead of starting a new one. Matt and Eric each get fully
+ * independent guard state, keyed by their own userId.
+ */
+export async function refreshPositionEvidenceForUserGuarded(userId: string): Promise<GuardedRefreshPositionEvidenceResult> {
+  const { result, availableAgainAt } = await runGuarded(`refresh-position-evidence:${userId}`, REFRESH_POSITION_EVIDENCE_COOLDOWN_MS, () =>
+    refreshPositionEvidenceForUser(userId),
+  );
+  return { ...result, availableAgainAt: new Date(availableAgainAt).toISOString() };
+}
+
+export function clearRefreshPositionEvidenceGuardsForTests() {
+  clearRefreshGuardsForTests();
 }
 
 export async function addAccountLedgerEntryForUser(

@@ -18,8 +18,8 @@ import {
   createRecommendationForUser,
   createWatchlistItemForUser,
   expireCoveredCallForUser,
-  refreshPositionEvidenceForUser,
-  type RefreshPositionEvidenceResult,
+  refreshPositionEvidenceForUserGuarded,
+  type GuardedRefreshPositionEvidenceResult,
   markAllNotificationsReadForUser,
   markConversationReadForUser,
   markNotificationReadForUser,
@@ -1199,21 +1199,22 @@ export async function syncSchwabAccountAction() {
   redirect(`/account?schwab=synced&campaignsUpdated=${campaignsUpdated}`);
 }
 
-export type { RefreshPositionEvidenceResult };
+export type { GuardedRefreshPositionEvidenceResult };
 
 /**
- * Post-Phase-2 UX follow-up - the universal "Refresh status" control's ONE server action, shared by
- * the global app header and Tracker's own refresh button (see refresh-status-control.tsx). A thin
- * wrapper only: resolves the authenticated user and delegates the actual work to
- * refreshPositionEvidenceForUser (workflows.ts), which is directly unit-tested there - this action
- * itself does nothing but identity resolution and revalidation.
+ * Post-Phase-2 UX follow-up (correctness repair) - the universal "Refresh status" control's ONE
+ * server action, and the ONLY manual current-status refresh entry point in the app (see
+ * refresh-status-control.tsx, rendered once in the global authenticated header - Tracker's own
+ * former duplicate control was removed). A thin wrapper only: resolves the authenticated user and
+ * delegates to `refreshPositionEvidenceForUserGuarded` (workflows.ts), which applies the per-user,
+ * process-local in-flight-coalescing + cooldown guard and is directly unit-tested there.
  *
  * `revalidatePath` (not `redirect`) so the calling client component can show inline success/failure
- * feedback and then call `router.refresh()` itself, exactly like Tracker's existing refresh button.
+ * feedback and then call `router.refresh()` itself.
  */
-export async function refreshPositionEvidenceAction(): Promise<RefreshPositionEvidenceResult> {
+export async function refreshPositionEvidenceAction(): Promise<GuardedRefreshPositionEvidenceResult> {
   const user = await requireCurrentUser();
-  const result = await refreshPositionEvidenceForUser(user.id);
+  const result = await refreshPositionEvidenceForUserGuarded(user.id);
   if (result.ok) {
     revalidatePath("/dashboard");
     revalidatePath("/positions");

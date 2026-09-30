@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { buildLiveScanFailureMessage, buildSchwabRecordsToPersist, fetchSchwabAccountActivity, refreshPositionEvidenceForUser } from "./workflows";
+import {
+  buildLiveScanFailureMessage,
+  buildSchwabRecordsToPersist,
+  clearRefreshPositionEvidenceGuardsForTests,
+  fetchSchwabAccountActivity,
+  refreshPositionEvidenceForUser,
+  refreshPositionEvidenceForUserGuarded,
+} from "./workflows";
 import type { BrokerReadProvider, BrokerTransaction } from "@/providers/broker-read/types";
 import { SchwabApiError } from "@/providers/schwab/client";
 
@@ -16,6 +23,9 @@ vi.mock("./broker-connections", async (importOriginal) => {
     getSchwabConnectionSummaryForUser: vi.fn(),
   };
 });
+
+vi.mock("./prisma", () => ({ prisma: { campaign: { findMany: vi.fn() } } }));
+vi.mock("./live-quotes", () => ({ getQuoteReviewEvidenceForUser: vi.fn(), getEquityMarketSessionEvidenceForUser: vi.fn() }));
 
 describe("buildLiveScanFailureMessage", () => {
   it("reports LIVE DATA UNAVAILABLE when nothing was persisted before the failure", () => {
@@ -268,18 +278,24 @@ describe("buildSchwabRecordsToPersist", () => {
   });
 });
 
-describe("Post-Phase-2 UX follow-up - refreshPositionEvidenceForUser (universal 'Refresh status' control)", () => {
+describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEvidenceForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearRefreshPositionEvidenceGuardsForTests();
   });
 
   async function mocks() {
     const brokerConnections = await import("./broker-connections");
+    const { prisma } = await import("./prisma");
+    const liveQuotes = await import("./live-quotes");
     return {
       getSchwabConnectionSummaryForUser: vi.mocked(brokerConnections.getSchwabConnectionSummaryForUser),
       clearSchwabBrokerReadCacheForUser: vi.mocked(brokerConnections.clearSchwabBrokerReadCacheForUser),
       clearSchwabMarketDataCacheForUser: vi.mocked(brokerConnections.clearSchwabMarketDataCacheForUser),
       getSchwabBrokerReadProviderForUser: vi.mocked(brokerConnections.getSchwabBrokerReadProviderForUser),
+      campaignFindMany: vi.mocked(prisma.campaign.findMany),
+      getQuoteReviewEvidenceForUser: vi.mocked(liveQuotes.getQuoteReviewEvidenceForUser),
+      getEquityMarketSessionEvidenceForUser: vi.mocked(liveQuotes.getEquityMarketSessionEvidenceForUser),
     };
   }
 
@@ -318,6 +334,36 @@ describe("Post-Phase-2 UX follow-up - refreshPositionEvidenceForUser (universal 
     };
   }
 
+  // A single OPEN cash-secured-put campaign, ticker UPST - the exact minimal shape that requires
+  // review evidence (position-review-scope.ts's resolveRelevantCampaignLegs would give it a real
+  // "PUT" leg, so UPST ends up in tickersNeedingReviewQuotes).
+  function openPutCampaign(overrides: Partial<{ id: string; ticker: string }> = {}) {
+    return {
+      id: overrides.id ?? "campaign-1",
+      ownerId: "matt",
+      accountId: "account-1",
+      ticker: overrides.ticker ?? "UPST",
+      status: "OPEN",
+      events: [
+        {
+          type: "SELL_PUT",
+          occurredAt: new Date("2026-05-01T00:00:00.000Z"),
+          optionType: "PUT",
+          contracts: 1,
+          strike: 25,
+          expiration: new Date("2026-10-02T00:00:00.000Z"),
+          premium: 1,
+        },
+      ],
+    };
+  }
+
+  function connectedWithNoCampaigns(m: Awaited<ReturnType<typeof mocks>>) {
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+    m.campaignFindMany.mockResolvedValue([]);
+  }
+
   it("is NO_CONNECTION when the user has no Schwab connection at all", async () => {
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
@@ -338,25 +384,19 @@ describe("Post-Phase-2 UX follow-up - refreshPositionEvidenceForUser (universal 
     expect(result).toEqual({ ok: false, reason: "NO_CONNECTION" });
   });
 
-  it("is FETCH_FAILED when the connection exists but the live positions fetch fails", async () => {
+  it("is BROKER_REFRESH_FAILED when the connection exists but the live positions fetch fails", async () => {
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
     m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: async () => { throw new Error("Schwab unavailable"); } }));
 
     const result = await refreshPositionEvidenceForUser("matt");
 
-    expect(result).toEqual({ ok: false, reason: "FETCH_FAILED" });
+    expect(result).toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
   });
 
-  it("succeeds and returns only a timestamp - never a campaign/position/transaction count of any kind", async () => {
+  it("succeeds (no active positions needing review) and returns only a timestamp - never a campaign/position/transaction count of any kind", async () => {
     const m = await mocks();
-    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
-    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(
-      fakeReadProvider({
-        getAccounts: async () => [{ id: "acct-1", label: "Individual", accountValue: 10_000, cash: 500, liquidationValue: 10_000 }],
-        getPositions: async () => [],
-      }),
-    );
+    connectedWithNoCampaigns(m);
 
     const result = await refreshPositionEvidenceForUser("matt");
 
@@ -365,22 +405,141 @@ describe("Post-Phase-2 UX follow-up - refreshPositionEvidenceForUser (universal 
     expect(Object.keys(result)).toEqual(["ok", "refreshedAt"]); // no campaignsUpdated/positions/etc.
   });
 
+  describe("Fix #1 - success genuinely requires fresh quote/session evidence, not just positions", () => {
+    it("gets fresh broker positions as part of a successful refresh", async () => {
+      const m = await mocks();
+      const getAccounts = vi.fn(async () => [{ id: "acct-1", label: "Individual", accountValue: 10_000, cash: 500, liquidationValue: 10_000 }]);
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts }));
+      m.campaignFindMany.mockResolvedValue([]);
+
+      const result = await refreshPositionEvidenceForUser("matt");
+
+      expect(getAccounts).toHaveBeenCalled();
+      expect(result.ok).toBe(true);
+    });
+
+    it("gets required current quote evidence for the active owner-scoped ticker before reporting success", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+      m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
+
+      const result = await refreshPositionEvidenceForUser("matt");
+
+      expect(m.getQuoteReviewEvidenceForUser).toHaveBeenCalledWith("matt", ["UPST"]);
+      expect(result.ok).toBe(true);
+    });
+
+    it("gets required session evidence for today's NY date before reporting success", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+      m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
+
+      await refreshPositionEvidenceForUser("matt");
+
+      expect(m.getEquityMarketSessionEvidenceForUser).toHaveBeenCalledWith("matt", expect.any(String));
+    });
+
+    it("success is not returned before quote/session retrieval finishes - both are awaited, not fired-and-forgotten", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+
+      let quoteResolved = false;
+      m.getQuoteReviewEvidenceForUser.mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => {
+              quoteResolved = true;
+              resolve(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+            }, 5),
+          ),
+      );
+      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
+
+      const result = await refreshPositionEvidenceForUser("matt");
+
+      expect(quoteResolved).toBe(true); // the quote fetch had genuinely completed by the time this resolved
+      expect(result.ok).toBe(true);
+    });
+
+    it("a quote failure prevents overall success / a false 'Last checked'", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+      m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "UNAVAILABLE", reason: "Schwab quote request failed." }]]) as never);
+      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
+
+      const result = await refreshPositionEvidenceForUser("matt");
+
+      expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
+    });
+
+    it("a session failure prevents a false success where session evidence is required", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+      m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "UNAVAILABLE", reason: "Schwab market-session request failed." } as never);
+
+      const result = await refreshPositionEvidenceForUser("matt");
+
+      expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
+    });
+  });
+
+  describe("Fix #2/#3 - the forced fresh broker/market-data reads are never bypassed-and-discarded", () => {
+    it("never passes bypassCache to getSchwabBrokerReadProviderForUser - the cache is cleared first instead, so the SAME cache is populated with the fresh result", async () => {
+      const m = await mocks();
+      connectedWithNoCampaigns(m);
+
+      await refreshPositionEvidenceForUser("matt");
+
+      expect(m.clearSchwabBrokerReadCacheForUser).toHaveBeenCalledWith("matt");
+      // getSchwabBrokerReadProviderForUser is called via getSchwabOpenPositionsForUser with NO
+      // bypassCache option - the mock captures whatever options were actually passed.
+      const callArgs = m.getSchwabBrokerReadProviderForUser.mock.calls.at(-1);
+      expect(callArgs?.[1]?.bypassCache).not.toBe(true);
+    });
+
+    it("clears the market-data cache before fetching quote/session evidence, so that fresh result populates the SAME cache Dashboard/Tracker read from", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+      m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
+
+      await refreshPositionEvidenceForUser("matt");
+
+      expect(m.clearSchwabMarketDataCacheForUser).toHaveBeenCalledWith("matt");
+    });
+  });
+
   it("clears the cache for THIS user's own scoped key, never a hardcoded or shared key", async () => {
     const m = await mocks();
-    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
-    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+    connectedWithNoCampaigns(m);
 
     await refreshPositionEvidenceForUser("eric");
 
     expect(m.clearSchwabBrokerReadCacheForUser).toHaveBeenCalledWith("eric");
     expect(m.clearSchwabMarketDataCacheForUser).toHaveBeenCalledWith("eric");
     expect(m.getSchwabConnectionSummaryForUser).toHaveBeenCalledWith("eric");
+    expect(m.campaignFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ ownerId: "eric" }) }));
   });
 
   it("Matt and Eric refreshing independently never cross-contaminate - each call is scoped to its own userId only", async () => {
     const m = await mocks();
-    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
-    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+    connectedWithNoCampaigns(m);
 
     await refreshPositionEvidenceForUser("matt");
     await refreshPositionEvidenceForUser("eric");
@@ -403,9 +562,193 @@ describe("Post-Phase-2 UX follow-up - refreshPositionEvidenceForUser (universal 
       },
     });
     m.getSchwabBrokerReadProviderForUser.mockResolvedValue(provider);
+    m.campaignFindMany.mockResolvedValue([]);
 
     const result = await refreshPositionEvidenceForUser("matt");
 
     expect(result.ok).toBe(true);
+  });
+
+  describe("Failure resilience - an unexpected throw anywhere in the pipeline resolves to a typed failure, never an unhandled rejection", () => {
+    it("a provider-resolver throw resolves to BROKER_REFRESH_FAILED", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockRejectedValue(new Error("resolver exploded"));
+
+      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+    });
+
+    it("an accounts-fetch throw resolves to BROKER_REFRESH_FAILED", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: async () => { throw new Error("boom"); } }));
+
+      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+    });
+
+    it("a positions-fetch throw resolves to BROKER_REFRESH_FAILED", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(
+        fakeReadProvider({ getAccounts: async () => [{ id: "acct-1", label: "Individual", accountValue: 1, cash: 1, liquidationValue: 1 }], getPositions: async () => { throw new Error("boom"); } }),
+      );
+
+      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+    });
+
+    it("a quote-fetch throw resolves to a typed failure, never an unhandled rejection", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+      m.getQuoteReviewEvidenceForUser.mockRejectedValue(new Error("quote provider exploded"));
+      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
+
+      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+    });
+
+    it("a session-fetch throw resolves to a typed failure, never an unhandled rejection", async () => {
+      const m = await mocks();
+      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+      m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+      m.getEquityMarketSessionEvidenceForUser.mockRejectedValue(new Error("session provider exploded"));
+
+      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+    });
+  });
+});
+
+describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEvidenceForUserGuarded (per-user in-flight + cooldown)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearRefreshPositionEvidenceGuardsForTests();
+  });
+
+  async function mocks() {
+    const brokerConnections = await import("./broker-connections");
+    const { prisma } = await import("./prisma");
+    return {
+      getSchwabConnectionSummaryForUser: vi.mocked(brokerConnections.getSchwabConnectionSummaryForUser),
+      getSchwabBrokerReadProviderForUser: vi.mocked(brokerConnections.getSchwabBrokerReadProviderForUser),
+      campaignFindMany: vi.mocked(prisma.campaign.findMany),
+    };
+  }
+
+  function connectedSummary() {
+    return {
+      id: "connection-1",
+      label: "Schwab",
+      status: "CONNECTED",
+      connected: true,
+      expiresAt: null,
+      updatedAt: new Date(),
+      accountCount: 1,
+      accountNumberLast4s: ["1234"],
+      accountDiscoveryStatus: null,
+      lastSuccessfulRefreshAt: null,
+      lastRefreshFailureAt: null,
+      lastRefreshFailureReason: null,
+      lastAccountSyncAt: null,
+      lastAccountSyncFailureAt: null,
+      lastAccountSyncFailureReason: null,
+    };
+  }
+
+  function fakeReadProvider(overrides: Partial<BrokerReadProvider> = {}): BrokerReadProvider {
+    return {
+      getAccounts: async () => [],
+      getAccount: async () => null,
+      getPositions: async () => [],
+      getTransactions: async () => ({ transactions: [], categories: { TRADE: { status: "OK", count: 0 }, RECEIVE_AND_DELIVER: { status: "OK", count: 0 }, DIVIDEND_OR_INTEREST: { status: "OK", count: 0 } } }),
+      getOrders: async () => [],
+      ...overrides,
+    };
+  }
+
+  it("two simultaneous Matt refreshes coalesce into ONE provider operation and both callers receive a coherent result", async () => {
+    const m = await mocks();
+    let accountsCalls = 0;
+    let resolveAccounts: ((value: Awaited<ReturnType<BrokerReadProvider["getAccounts"]>>) => void) | undefined;
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(
+      fakeReadProvider({
+        getAccounts: () =>
+          new Promise((resolve) => {
+            accountsCalls += 1;
+            resolveAccounts = resolve;
+          }),
+      }),
+    );
+    m.campaignFindMany.mockResolvedValue([]);
+
+    const first = refreshPositionEvidenceForUserGuarded("matt");
+    const second = refreshPositionEvidenceForUserGuarded("matt");
+    // getAccounts() is only actually invoked after a few awaited steps inside
+    // refreshPositionEvidenceForUser (connection lookup, cache clears) - wait for it before resolving.
+    while (!resolveAccounts) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    resolveAccounts([]);
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(accountsCalls).toBe(1); // exactly one underlying Schwab operation
+    expect(firstResult.ok).toBe(true);
+    expect(secondResult.ok).toBe(true);
+    expect(firstResult.availableAgainAt).toBe(secondResult.availableAgainAt); // coherent, shared result
+  });
+
+  it("Matt and Eric refresh independently - Eric's refresh is never coalesced with or blocked by Matt's", async () => {
+    const m = await mocks();
+    const mattAccounts = vi.fn(async () => []);
+    const ericAccounts = vi.fn(async () => []);
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+    m.getSchwabBrokerReadProviderForUser.mockImplementation(async (userId) =>
+      fakeReadProvider({ getAccounts: userId === "matt" ? mattAccounts : ericAccounts }),
+    );
+    m.campaignFindMany.mockResolvedValue([]);
+
+    const [mattResult, ericResult] = await Promise.all([
+      refreshPositionEvidenceForUserGuarded("matt"),
+      refreshPositionEvidenceForUserGuarded("eric"),
+    ]);
+
+    expect(mattAccounts).toHaveBeenCalledTimes(1);
+    expect(ericAccounts).toHaveBeenCalledTimes(1);
+    expect(mattResult.ok).toBe(true);
+    expect(ericResult.ok).toBe(true);
+  });
+
+  it("a request within Matt's 15-second cooldown reuses the prior result and never triggers another Schwab fetch - Eric remains unaffected", async () => {
+    const m = await mocks();
+    const mattAccounts = vi.fn(async () => []);
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: mattAccounts }));
+    m.campaignFindMany.mockResolvedValue([]);
+
+    await refreshPositionEvidenceForUserGuarded("matt");
+    const second = await refreshPositionEvidenceForUserGuarded("matt"); // immediately after - well within cooldown
+
+    expect(mattAccounts).toHaveBeenCalledTimes(1); // no second Schwab fetch
+    expect(second.ok).toBe(true);
+    expect(second.availableAgainAt).toEqual(expect.any(String));
+
+    // Eric is completely unaffected by Matt's in-progress cooldown.
+    const ericAccounts = vi.fn(async () => []);
+    m.getSchwabBrokerReadProviderForUser.mockResolvedValueOnce(fakeReadProvider({ getAccounts: ericAccounts }));
+    await refreshPositionEvidenceForUserGuarded("eric");
+    expect(ericAccounts).toHaveBeenCalledTimes(1);
+  });
+
+  it("the component's/action's error handling has something to hold onto: even a failed refresh returns a cooldown timestamp", async () => {
+    const m = await mocks();
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
+
+    const result = await refreshPositionEvidenceForUserGuarded("matt");
+
+    expect(result.ok).toBe(false);
+    expect(result.availableAgainAt).toEqual(expect.any(String));
   });
 });

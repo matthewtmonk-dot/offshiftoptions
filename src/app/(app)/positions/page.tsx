@@ -88,7 +88,6 @@ import {
   toggleTradingAccountVisibilityAction,
 } from "../actions";
 import { TrackerTabs } from "./tracker-tabs";
-import { RefreshStatusControl } from "@/components/refresh-status-control";
 import { snapshotTime } from "./snapshot-time";
 
 export const dynamic = "force-dynamic";
@@ -453,10 +452,9 @@ export default async function PositionsPage({
               <p>Snapshot checked: {snapshotTime(snapshotCheckedAt)} · {quoteSnapshots.size ? `${Array.from(quoteSnapshots.values()).filter(Boolean).length}/${quoteSnapshots.size} stock prices available` : "No unexpired puts need prices"}</p>
               <p>Your brokerage last synced: {snapshotTime(schwabConnection?.lastAccountSyncAt)} · Positions {schwabPositions === null ? "unavailable" : "available"}</p>
               <p>Snapshots may be delayed or from the last session; quotes and positions can be cached for 15 seconds.</p>
-              <p>Refresh checks prices and positions. Brokerage Sync imports account activity and updates campaign history.</p>
+              <p>Use &ldquo;Refresh status&rdquo; in the header above to check current prices and positions. Brokerage Sync imports account activity and updates campaign history.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <RefreshStatusControl />
               <IntentPrefetchLink href="/account#brokerage-sync" className={tinyButtonClass}>Brokerage Sync in Account</IntentPrefetchLink>
             </div>
           </div>

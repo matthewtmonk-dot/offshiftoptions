@@ -35,49 +35,65 @@ describe("RefreshStatusControl - truthful rate-limit display", () => {
     expect(text).toContain("Current status could not be refreshed");
   });
 
-  it("the client-side cooldown is a plain constant reusing an existing app TTL, not a persisted/invented limit - no new Prisma model/migration for it", () => {
-    expect(text).toMatch(/COOLDOWN_MS\s*=\s*15_000/);
+  it("the client-only fallback cooldown is a plain constant reusing the server's own default TTL, not a persisted/invented limit - no new Prisma model/migration for it", () => {
+    expect(text).toMatch(/FALLBACK_COOLDOWN_MS\s*=\s*15_000/);
     expect(text).not.toMatch(/prisma\./i);
+  });
+
+  it("the server's own authoritative cooldown (availableAgainAt) drives the countdown in the normal case - never only a client-invented timer", () => {
+    expect(text).toContain("availableAgainAt");
+    expect(text).toContain("result.availableAgainAt");
   });
 });
 
-describe("Universal 'Refresh status' control - one shared implementation, not two divergent ones", () => {
+describe("Universal 'Refresh status' control - ONE manual refresh control, not two divergent ones (correctness repair item 6)", () => {
   it("the global app layout renders RefreshStatusControl", () => {
     const layout = source("../app/(app)/layout.tsx");
     expect(layout).toContain('import { RefreshStatusControl } from "@/components/refresh-status-control";');
     expect(layout).toContain("<RefreshStatusControl");
   });
 
-  it("Tracker's own refresh button now uses the exact same shared component - never a second implementation", () => {
+  it("Tracker no longer mounts its own instance of RefreshStatusControl - the global header control is the ONE manual refresh action", () => {
     const positionsPage = source("../app/(app)/positions/page.tsx");
-    expect(positionsPage).toContain('import { RefreshStatusControl } from "@/components/refresh-status-control";');
-    expect(positionsPage).toContain("<RefreshStatusControl");
-    // The old ad-hoc router.refresh()-only button is gone, not left behind as a second path.
+    expect(positionsPage).not.toContain("RefreshStatusControl");
+    expect(positionsPage).not.toContain("<RefreshStatusControl");
+    // The old ad-hoc router.refresh()-only button is gone too, not left behind as a THIRD path.
     expect(positionsPage).not.toContain("RefreshSnapshot");
   });
 
-  it("both call the same single server action, refreshPositionEvidenceAction", () => {
+  it("Tracker still shows useful factual status text (snapshot checked / brokerage synced / positions available) - only the manual ACTION was removed, not the information", () => {
+    const positionsPage = source("../app/(app)/positions/page.tsx");
+    expect(positionsPage).toContain("Snapshot checked");
+    expect(positionsPage).toMatch(/brokerage last synced/i);
+    expect(positionsPage).toMatch(/Positions \{/);
+  });
+
+  it("the ONE control calls the single shared server action, refreshPositionEvidenceAction", () => {
     const control = source("./refresh-status-control.tsx");
     expect(control).toContain("refreshPositionEvidenceAction");
   });
 });
 
 describe("refreshPositionEvidenceAction never duplicates Phase 2's own review/roll rules", () => {
-  it("actions.ts's refresh action contains no review/roll/moneyness logic of its own - it only resolves the user and delegates", () => {
+  it("actions.ts's refresh action contains no review/roll/moneyness logic of its own - it only resolves the user and delegates to the guarded workflow", () => {
     const actions = source("../app/(app)/actions.ts");
     const actionStart = actions.indexOf("export async function refreshPositionEvidenceAction");
     expect(actionStart).toBeGreaterThan(-1);
     const actionBody = actions.slice(actionStart, actionStart + 400);
     expect(actionBody).not.toMatch(/evaluatePositionReview|rollBufferPercent|moneyness|COMFORTABLE|REVIEW_ROLL/);
-    expect(actionBody).toContain("refreshPositionEvidenceForUser");
+    expect(actionBody).toContain("refreshPositionEvidenceForUserGuarded");
   });
 
-  it("workflows.ts's refreshPositionEvidenceForUser never imports or calls the position-review evaluator, campaign reconciliation, or transaction import", () => {
+  it("workflows.ts's refreshPositionEvidenceForUser never calls the position-review EVALUATOR, campaign reconciliation, or transaction import - it reuses the shared evidence-scoping helpers, never re-derives them", () => {
     const workflows = source("../lib/workflows.ts");
-    const fnStart = workflows.indexOf("export async function refreshPositionEvidenceForUser");
+    const fnStart = workflows.indexOf("export async function refreshPositionEvidenceForUser(");
     expect(fnStart).toBeGreaterThan(-1);
     const fnEnd = workflows.indexOf("\n}", fnStart);
     const fnBody = workflows.slice(fnStart, fnEnd);
-    expect(fnBody).not.toMatch(/evaluatePositionReview|resolvePositionReviewsForUser|reconcileSchwabActivityForUser|reconcileSchwabCoveredCallActivityForUser|getTransactions|persistNormalizedBrokerRecordsForUser/);
+    expect(fnBody).not.toMatch(/evaluatePositionReview|resolvePositionReviewsForUser\(|reconcileSchwabActivityForUser|reconcileSchwabCoveredCallActivityForUser|getTransactions|persistNormalizedBrokerRecordsForUser/);
+    // It DOES reuse the shared scoping helpers - never a second, independently-maintained answer to
+    // "which tickers need review evidence."
+    expect(fnBody).toContain("resolveRelevantCampaignLegs");
+    expect(fnBody).toContain("tickersNeedingReviewQuotes");
   });
 });
