@@ -132,9 +132,12 @@ export type BrokerTransactionsResult = {
 };
 
 export interface BrokerReadProvider {
-  getAccounts(): Promise<BrokerAccount[]>;
+  /** `signal` is optional and purely additive - see schwabGetJson's own doc comment
+   * (providers/schwab/client.ts). Only the manual "Refresh status" bounded-operation path ever
+   * passes one; every other existing caller keeps its exact prior behavior. */
+  getAccounts(signal?: AbortSignal): Promise<BrokerAccount[]>;
   getAccount(accountId: string): Promise<BrokerAccount | null>;
-  getPositions(accountId: string): Promise<BrokerPosition[]>;
+  getPositions(accountId: string, signal?: AbortSignal): Promise<BrokerPosition[]>;
   getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransactionsResult>;
   getOrders(accountId: string, from: Date, to: Date): Promise<BrokerObservedOrder[]>;
 }

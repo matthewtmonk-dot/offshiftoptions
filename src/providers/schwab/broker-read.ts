@@ -33,10 +33,14 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
     },
   ) {}
 
-  async getAccounts(): Promise<BrokerAccount[]> {
-    const payload = await this.get("/accounts", {
-      fields: "positions",
-    });
+  async getAccounts(signal?: AbortSignal): Promise<BrokerAccount[]> {
+    const payload = await this.get(
+      "/accounts",
+      {
+        fields: "positions",
+      },
+      signal,
+    );
     const accountRecords = Array.isArray(payload) ? payload : [];
 
     return accountRecords.flatMap((record) => {
@@ -87,15 +91,19 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
     };
   }
 
-  async getPositions(accountId: string): Promise<BrokerPosition[]> {
+  async getPositions(accountId: string, signal?: AbortSignal): Promise<BrokerPosition[]> {
     // Codex P1 (B1) - this app's own observation of when THIS specific successful read
     // completed, stamped before the cache boundary (see providers/broker-read/cache.ts) so a
     // cache hit always replays the original fetch's real receipt time, never a fresh `new Date()`.
     // Mirrors SchwabMarketDataProvider.getQuoteReviewEvidence's identical requestStartedAt/
     // responseReceivedAt pattern.
-    const payload = await this.get(`/accounts/${encodeURIComponent(accountId)}`, {
-      fields: "positions",
-    });
+    const payload = await this.get(
+      `/accounts/${encodeURIComponent(accountId)}`,
+      {
+        fields: "positions",
+      },
+      signal,
+    );
     const positionReadReceivedAt = new Date();
     const account = objectValue(objectValue(payload)?.securitiesAccount);
     if (!account || !Array.isArray(account.positions)) {
@@ -256,13 +264,14 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
     return exact?.hashValue ?? this.options.accountNumbers[0]?.hashValue ?? null;
   }
 
-  private async get(path: string, params: Record<string, string>) {
+  private async get(path: string, params: Record<string, string>, signal?: AbortSignal) {
     return schwabGetJson<unknown>({
       accessToken: this.options.accessToken,
       baseUrl: this.options.baseUrl ?? SCHWAB_TRADER_BASE_URL,
       path,
       searchParams: new URLSearchParams(params),
       fetchFn: this.options.fetchFn,
+      signal,
     });
   }
 }

@@ -192,13 +192,17 @@ export class SchwabMarketDataProvider implements MarketDataProvider {
    * QuoteReviewEvidence's requestStartedAt/responseReceivedAt (never substituted for the
    * provider's own quote.tradeTime).
    */
-  async getQuoteReviewEvidence(symbol: string): Promise<QuoteReviewEvidence> {
+  async getQuoteReviewEvidence(symbol: string, signal?: AbortSignal): Promise<QuoteReviewEvidence> {
     const normalized = symbol.toUpperCase();
     const requestStartedAt = new Date();
-    const payload = await this.get("/quotes", {
-      symbols: normalized,
-      fields: "quote",
-    });
+    const payload = await this.get(
+      "/quotes",
+      {
+        symbols: normalized,
+        fields: "quote",
+      },
+      signal,
+    );
     const responseReceivedAt = new Date();
 
     return normalizeSchwabQuoteReviewEvidence(normalized, payload, { requestStartedAt, responseReceivedAt });
@@ -210,22 +214,27 @@ export class SchwabMarketDataProvider implements MarketDataProvider {
    * than reusing getMarketHours's "equity,option" call - this path only needs equity sessions,
    * and normalizeSchwabEquityMarketSessionEvidence parses the shape strictly through equity.EQ.
    */
-  async getEquityMarketSessionEvidence(nyDate: string): Promise<EquityMarketSessionEvidence> {
-    const payload = await this.get("/markets", {
-      markets: "equity",
-      date: nyDate,
-    });
+  async getEquityMarketSessionEvidence(nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence> {
+    const payload = await this.get(
+      "/markets",
+      {
+        markets: "equity",
+        date: nyDate,
+      },
+      signal,
+    );
 
     return normalizeSchwabEquityMarketSessionEvidence(nyDate, payload);
   }
 
-  private async get(path: string, params: Record<string, string>) {
+  private async get(path: string, params: Record<string, string>, signal?: AbortSignal) {
     return schwabGetJson<unknown>({
       accessToken: this.options.accessToken,
       baseUrl: this.options.baseUrl ?? SCHWAB_MARKET_DATA_BASE_URL,
       path,
       searchParams: new URLSearchParams(params),
       fetchFn: this.options.fetchFn,
+      signal,
     });
   }
 }

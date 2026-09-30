@@ -68,7 +68,7 @@ export async function getLiveQuotePricesForUser(userId: string, tickers: string[
  * concurrency pattern. A missing connection, a resolution failure, or a per-symbol provider
  * error each map to `{ status: "UNAVAILABLE", reason }` - never thrown, never a fabricated price.
  */
-export async function getQuoteReviewEvidenceForUser(userId: string, tickers: string[]): Promise<Map<string, QuoteReviewEvidence>> {
+export async function getQuoteReviewEvidenceForUser(userId: string, tickers: string[], signal?: AbortSignal): Promise<Map<string, QuoteReviewEvidence>> {
   const uniqueTickers = [...new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
   const unavailable = (reason: string): QuoteReviewEvidence => ({ status: "UNAVAILABLE", reason });
   const evidence = new Map<string, QuoteReviewEvidence>(uniqueTickers.map((ticker) => [ticker, unavailable("Not yet evaluated.")]));
@@ -86,7 +86,7 @@ export async function getQuoteReviewEvidenceForUser(userId: string, tickers: str
         return unavailable("Provider does not support review-evidence quotes.");
       }
       try {
-        return await provider.getQuoteReviewEvidence(ticker);
+        return await provider.getQuoteReviewEvidence(ticker, signal);
       } catch (error) {
         return unavailable(error instanceof Error ? error.message : "Schwab quote review evidence request failed.");
       }
@@ -104,7 +104,7 @@ export async function getQuoteReviewEvidenceForUser(userId: string, tickers: str
  * one NY calendar date. A missing connection or a provider failure maps to
  * `{ status: "UNAVAILABLE", reason }` - never thrown, and never re-interpreted as "market closed."
  */
-export async function getEquityMarketSessionEvidenceForUser(userId: string, nyDate: string): Promise<EquityMarketSessionEvidence> {
+export async function getEquityMarketSessionEvidenceForUser(userId: string, nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence> {
   try {
     const provider = await getSchwabMarketDataProviderForUser(userId);
     if (!provider) {
@@ -113,7 +113,7 @@ export async function getEquityMarketSessionEvidenceForUser(userId: string, nyDa
     if (!provider.getEquityMarketSessionEvidence) {
       return { status: "UNAVAILABLE", reason: "Provider does not support equity market-session evidence." };
     }
-    return await provider.getEquityMarketSessionEvidence(nyDate);
+    return await provider.getEquityMarketSessionEvidence(nyDate, signal);
   } catch (error) {
     return { status: "UNAVAILABLE", reason: error instanceof Error ? error.message : "Schwab market-session request failed." };
   }

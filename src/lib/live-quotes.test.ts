@@ -101,7 +101,7 @@ describe("Dashboard V2 Phase 2 - getEquityMarketSessionEvidenceForUser", () => {
     const result = await getEquityMarketSessionEvidenceForUser("matt", "2026-06-15");
 
     expect(resolveProvider).toHaveBeenCalledWith("matt");
-    expect(getEquityMarketSessionEvidence).toHaveBeenCalledWith("2026-06-15");
+    expect(getEquityMarketSessionEvidence).toHaveBeenCalledWith("2026-06-15", undefined);
     expect(result).toEqual(evidence);
   });
 

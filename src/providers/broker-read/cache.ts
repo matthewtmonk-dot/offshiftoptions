@@ -51,14 +51,14 @@ export function withBrokerReadCache(
   };
 
   return {
-    getAccounts(): Promise<BrokerAccount[]> {
-      return cached(`${providerKey}:accounts`, ttl.accounts, now, () => provider.getAccounts());
+    getAccounts(signal?: AbortSignal): Promise<BrokerAccount[]> {
+      return cached(`${providerKey}:accounts`, ttl.accounts, now, () => provider.getAccounts(signal), signal);
     },
     getAccount(accountId: string): Promise<BrokerAccount | null> {
       return cached(`${providerKey}:account:${accountId}`, ttl.account, now, () => provider.getAccount(accountId));
     },
-    getPositions(accountId: string): Promise<BrokerPosition[]> {
-      return cached(`${providerKey}:positions:${accountId}`, ttl.positions, now, () => provider.getPositions(accountId));
+    getPositions(accountId: string, signal?: AbortSignal): Promise<BrokerPosition[]> {
+      return cached(`${providerKey}:positions:${accountId}`, ttl.positions, now, () => provider.getPositions(accountId, signal), signal);
     },
     getTransactions(accountId: string, from: Date, to: Date): Promise<BrokerTransactionsResult> {
       return cached(`${providerKey}:transactions:${accountId}:${from.toISOString()}:${to.toISOString()}`, ttl.transactions, now, () =>
@@ -87,7 +87,7 @@ export function clearBrokerReadCacheForTests() {
   invalidationVersions.clear();
 }
 
-async function cached<T>(key: string, ttlMs: number, now: () => number, load: () => Promise<T>): Promise<T> {
+async function cached<T>(key: string, ttlMs: number, now: () => number, load: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const existing = cache.get(key);
   const currentTime = now();
   if (existing && existing.expiresAt > currentTime) {
@@ -102,6 +102,15 @@ async function cached<T>(key: string, ttlMs: number, now: () => number, load: ()
   const version = invalidationVersionForKey(key);
   const promise = load()
     .then((value) => {
+      // Post-Phase-2 UX follow-up (end-to-end abandonment repair) - a request whose OWN generation
+      // was aborted (the manual "Refresh status" bounded-operation timeout fired) must never
+      // publish a result, even in the narrow race where its underlying fetch happened to resolve
+      // at almost the same instant. In practice an aborted fetch already rejects before reaching
+      // here (see schwabGetJson) - this is defense in depth, on top of (never instead of) the
+      // existing invalidationVersions cache-key-boundary protection below.
+      if (signal?.aborted) {
+        throw new DOMException("Refresh operation was aborted.", "AbortError");
+      }
       if (invalidationVersionForKey(key) === version) {
         cache.set(key, { expiresAt: now() + ttlMs, value });
       }

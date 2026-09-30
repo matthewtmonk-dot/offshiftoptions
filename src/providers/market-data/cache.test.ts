@@ -319,4 +319,62 @@ describe("withMarketDataCache", () => {
       expect(second).toBe(first);
     });
   });
+
+  describe("Post-Phase-2 UX follow-up (end-to-end abandonment repair) - cache publication fencing", () => {
+    function reviewEvidence() {
+      return {
+        status: "AVAILABLE" as const,
+        requestedSymbol: "UPST",
+        returnedSymbol: "UPST",
+        assetMainType: "EQUITY",
+        realtime: true,
+        price: 30,
+        tradeTime: new Date("2026-06-15T16:00:00.000Z"),
+        requestStartedAt: new Date("2026-06-15T16:00:00.000Z"),
+        responseReceivedAt: new Date("2026-06-15T16:00:00.000Z"),
+      };
+    }
+
+    it("forwards the caller's own signal down to the underlying provider call", async () => {
+      const getQuoteReviewEvidence = vi.fn(async () => reviewEvidence());
+      const cached = withMarketDataCache(provider({ getQuoteReviewEvidence }), "schwab:user:user-a:connection:one");
+      const controller = new AbortController();
+
+      await cached.getQuoteReviewEvidence("UPST", controller.signal);
+
+      expect(getQuoteReviewEvidence).toHaveBeenCalledWith("UPST", controller.signal);
+    });
+
+    it("defense in depth - never publishes a result to cache when the caller's own signal is already aborted, even if the underlying provider call resolved anyway (the narrow abort-vs-completion race)", async () => {
+      const cached = withMarketDataCache(provider({ getQuoteReviewEvidence: async () => reviewEvidence() }), "schwab:user:user-a:connection:one");
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(cached.getQuoteReviewEvidence("UPST", controller.signal)).rejects.toThrow(MarketDataProviderError);
+
+      // A subsequent, non-aborted call must genuinely re-fetch - proving nothing was cached above.
+      let secondCallHappened = false;
+      const freshCached = withMarketDataCache(
+        provider({
+          getQuoteReviewEvidence: async () => {
+            secondCallHappened = true;
+            return reviewEvidence();
+          },
+        }),
+        "schwab:user:user-a:connection:one",
+      );
+      await freshCached.getQuoteReviewEvidence("UPST");
+      expect(secondCallHappened).toBe(true);
+    });
+
+    it("a normal (non-aborted) call still publishes to cache as usual - the abort guard is additive, never a regression for ordinary callers", async () => {
+      const getQuoteReviewEvidence = vi.fn(async () => reviewEvidence());
+      const cached = withMarketDataCache(provider({ getQuoteReviewEvidence }), "schwab:user:user-a:connection:one", { quoteReviewEvidenceTtlMs: 30_000 });
+
+      await cached.getQuoteReviewEvidence("UPST");
+      await cached.getQuoteReviewEvidence("UPST", new AbortController().signal);
+
+      expect(getQuoteReviewEvidence).toHaveBeenCalledTimes(1); // second call served from cache
+    });
+  });
 });

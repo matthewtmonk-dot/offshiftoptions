@@ -538,18 +538,23 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
   return { syncedAccounts: accounts.length, accounts, diagnostics };
 }
 
-export async function getSchwabOpenPositionsForUser(userId: string, options: { bypassCache?: boolean } = {}) {
+export async function getSchwabOpenPositionsForUser(userId: string, options: { bypassCache?: boolean; signal?: AbortSignal } = {}) {
   const provider = await getSchwabBrokerReadProviderForUser(userId, options);
   if (!provider) {
     return null;
   }
 
   try {
-    const accounts = await provider.getAccounts();
+    const accounts = await provider.getAccounts(options.signal);
+    // Post-Phase-2 UX follow-up (end-to-end abandonment repair) - a real async gap exists between
+    // the accounts fetch resolving and the positions fetch starting; check here so an abandoned
+    // (timed-out) manual refresh generation whose accounts call happened to resolve right at its
+    // own deadline never proceeds into a fresh positions fetch afterward.
+    options.signal?.throwIfAborted();
     const positionsByAccount = await Promise.all(
       accounts.map(async (account) => ({
         account,
-        positions: await provider.getPositions(account.id),
+        positions: await provider.getPositions(account.id, options.signal),
       })),
     );
 
@@ -621,10 +626,28 @@ async function loadOpenAndAssignedCampaignsForUser(userId: string): Promise<Posi
  * None of quote.lastPrice/tradeTime atomic pairing, the 120-second freshness rule, market-session
  * validation, or server-time calibration are reimplemented here - only the existing, already-
  * approved evidence-loading functions are triggered.
+ *
+ * End-to-end abandonment repair - `signal` (this generation's own AbortSignal, see refresh-guard.ts)
+ * is threaded into every abort-aware provider call this function makes (getSchwabOpenPositionsForUser
+ * -> SchwabBrokerReadProvider.getAccounts/getPositions; getQuoteReviewEvidenceForUser/
+ * getEquityMarketSessionEvidenceForUser -> SchwabMarketDataProvider - all the way down to the real
+ * `fetch()` call in schwabGetJson), so a timed-out generation's outstanding HTTP request actually
+ * aborts instead of finishing in the background. It is ALSO checked explicitly (`signal.throwIfAborted()`)
+ * between every consequential stage - after the connection lookup, after the broker positions fetch,
+ * after loading campaigns (the one async step before ticker-scoping), and before returning success -
+ * because the connection/token-resolution step above is NOT abort-aware (this app's existing OAuth
+ * token-refresh path is deliberately left untouched - see its own doc comment) and could otherwise
+ * still be pending when this generation's deadline fires: without an explicit check, a slow
+ * connection lookup that finally resolves AFTER the timeout could still go on to clear a NEWER
+ * generation's already-fresher caches and publish stale evidence over it. A thrown abort here is
+ * caught by this function's own outer try/catch and resolves normally (never an unhandled
+ * rejection) - by the time that happens the guard's own deadline has already fired, so this
+ * resolution is discarded regardless of its shape (see refresh-guard.ts's `settled` flag).
  */
-export async function refreshPositionEvidenceForUser(userId: string): Promise<RefreshPositionEvidenceResult> {
+export async function refreshPositionEvidenceForUser(userId: string, signal: AbortSignal): Promise<RefreshPositionEvidenceResult> {
   try {
     const connection = await getSchwabConnectionSummaryForUser(userId);
+    signal.throwIfAborted();
     if (!connection || !connection.connected) {
       return { ok: false, reason: "NO_CONNECTION" };
     }
@@ -635,7 +658,8 @@ export async function refreshPositionEvidenceForUser(userId: string): Promise<Re
     // Fix #2 - never bypassCache here: the cache was just cleared above, so this normal call
     // already misses it and fetches fresh, while ALSO populating the same cache Dashboard/Tracker
     // will read from moments later (see this function's own doc comment).
-    const positions = await getSchwabOpenPositionsForUser(userId);
+    const positions = await getSchwabOpenPositionsForUser(userId, { signal });
+    signal.throwIfAborted();
     if (positions === null) {
       return { ok: false, reason: "BROKER_REFRESH_FAILED" };
     }
@@ -645,14 +669,16 @@ export async function refreshPositionEvidenceForUser(userId: string): Promise<Re
     // + session evidence to genuinely succeed before ever reporting overall success.
     const now = new Date();
     const campaigns = await loadOpenAndAssignedCampaignsForUser(userId);
+    signal.throwIfAborted();
     const { relevant, legByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
     const tickers = tickersNeedingReviewQuotes(relevant, legByCampaignId);
 
     if (tickers.length > 0) {
       const [quoteEvidenceByTicker, sessionEvidence] = await Promise.all([
-        getQuoteReviewEvidenceForUser(userId, tickers),
-        getEquityMarketSessionEvidenceForUser(userId, nyCalendarDateOf(now)),
+        getQuoteReviewEvidenceForUser(userId, tickers, signal),
+        getEquityMarketSessionEvidenceForUser(userId, nyCalendarDateOf(now), signal),
       ]);
+      signal.throwIfAborted();
 
       const quotesOk = tickers.every((ticker) => quoteEvidenceByTicker.get(ticker)?.status === "AVAILABLE");
       const sessionOk = sessionEvidence.status === "AVAILABLE";
@@ -661,12 +687,14 @@ export async function refreshPositionEvidenceForUser(userId: string): Promise<Re
       }
     }
 
+    signal.throwIfAborted();
     return { ok: true, refreshedAt: new Date().toISOString() };
   } catch {
     // Defensive only - every call above already fails closed internally (getSchwabOpenPositionsForUser
     // never throws; getQuoteReviewEvidenceForUser/getEquityMarketSessionEvidenceForUser never throw).
-    // An unexpected exception (e.g. a DB error resolving campaigns/accounts) must still resolve to a
-    // typed failure, never an unhandled rejection reaching the server action/client.
+    // An unexpected exception (e.g. a DB error resolving campaigns/accounts, or one of this
+    // function's own explicit `signal.throwIfAborted()` calls) must still resolve to a typed
+    // failure, never an unhandled rejection reaching the server action/client.
     return { ok: false, reason: "BROKER_REFRESH_FAILED" };
   }
 }
@@ -723,7 +751,7 @@ export type GuardedRefreshPositionEvidenceResult = RefreshPositionEvidenceResult
  *    running operation is prevented from later corrupting a newer attempt's result.
  */
 export async function refreshPositionEvidenceForUserGuarded(userId: string): Promise<GuardedRefreshPositionEvidenceResult> {
-  const { result, availableAgainAt, disposition } = await runGuarded(`refresh-position-evidence:${userId}`, () => refreshPositionEvidenceForUser(userId), {
+  const { result, availableAgainAt, disposition } = await runGuarded(`refresh-position-evidence:${userId}`, (signal) => refreshPositionEvidenceForUser(userId, signal), {
     cooldownMs: REFRESH_POSITION_EVIDENCE_COOLDOWN_MS,
     timeoutMs: REFRESH_POSITION_EVIDENCE_TIMEOUT_MS,
     onTimeout: (): RefreshPositionEvidenceResult => ({ ok: false, reason: "TIMEOUT" }),

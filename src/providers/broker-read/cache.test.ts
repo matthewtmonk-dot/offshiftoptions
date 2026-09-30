@@ -155,6 +155,49 @@ describe("withBrokerReadCache", () => {
     ]);
     expect(fake.calls.accounts).toBe(2);
   });
+
+  describe("Post-Phase-2 UX follow-up (end-to-end abandonment repair) - cache publication fencing", () => {
+    it("forwards the caller's own signal down to the underlying provider call", async () => {
+      const fake = fakeBrokerReadProvider("A");
+      const provider = withBrokerReadCache(fake.provider, "schwab:user:user-a:connection:conn-a");
+      const controller = new AbortController();
+
+      await provider.getAccounts(controller.signal);
+
+      expect(fake.calls.accountsSignal).toBe(controller.signal);
+    });
+
+    it("defense in depth - never publishes a result to cache when the caller's own signal is already aborted, even if the underlying provider call resolved anyway (the narrow abort-vs-completion race)", async () => {
+      const account: BrokerAccount = { id: "account-A", label: "Account A", accountValue: 100_000, cash: 12_500, liquidationValue: 100_000 };
+      const provider = withBrokerReadCache(
+        { ...fakeBrokerReadProvider("A").provider, getAccounts: async () => account && [account] },
+        "schwab:user:user-a:connection:conn-a",
+      );
+      const controller = new AbortController();
+      controller.abort(); // simulates the fetch having already resolved right as the deadline fired
+
+      await expect(provider.getAccounts(controller.signal)).rejects.toThrow(BrokerReadProviderError);
+
+      // A subsequent, non-aborted call must genuinely re-fetch - proving nothing was cached above.
+      let secondCallHappened = false;
+      const freshProvider = withBrokerReadCache(
+        { ...fakeBrokerReadProvider("A").provider, getAccounts: async () => { secondCallHappened = true; return [account]; } },
+        "schwab:user:user-a:connection:conn-a",
+      );
+      await freshProvider.getAccounts();
+      expect(secondCallHappened).toBe(true);
+    });
+
+    it("a normal (non-aborted) call still publishes to cache as usual - the abort guard is additive, never a regression for ordinary callers", async () => {
+      const fake = fakeBrokerReadProvider("A");
+      const provider = withBrokerReadCache(fake.provider, "schwab:user:user-a:connection:conn-a", { accountsTtlMs: 30_000 });
+
+      await provider.getAccounts(); // no signal at all - existing behavior
+      await provider.getAccounts(new AbortController().signal); // a fresh, non-aborted signal
+
+      expect(fake.calls.accounts).toBe(1); // second call served from cache, never a second Schwab fetch
+    });
+  });
 });
 
 function fakeBrokerReadProvider(label: string, shouldFail: () => boolean = () => false) {
@@ -190,7 +233,7 @@ function fakeBrokerReadProvider(label: string, shouldFail: () => boolean = () =>
     status: "FILLED",
     enteredAt: new Date("2026-01-01T00:00:00.000Z"),
   };
-  const calls = { account: 0, accounts: 0, orders: 0, positions: 0, transactions: 0 };
+  const calls = { account: 0, accounts: 0, orders: 0, positions: 0, transactions: 0, accountsSignal: undefined as AbortSignal | undefined };
   const maybeFail = async <T>(value: T) => {
     if (shouldFail()) {
       throw new Error("broker unavailable");
@@ -198,8 +241,9 @@ function fakeBrokerReadProvider(label: string, shouldFail: () => boolean = () =>
     return value;
   };
   const provider: BrokerReadProvider = {
-    getAccounts: async () => {
+    getAccounts: async (signal?: AbortSignal) => {
       calls.accounts += 1;
+      calls.accountsSignal = signal;
       return maybeFail([account]);
     },
     getAccount: async () => {

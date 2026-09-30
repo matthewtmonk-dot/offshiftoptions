@@ -19,12 +19,20 @@ export async function schwabGetJson<T>({
   path,
   searchParams,
   fetchFn = fetch,
+  signal,
 }: {
   accessToken: string;
   baseUrl: string;
   path: string;
   searchParams?: URLSearchParams;
   fetchFn?: SchwabFetch;
+  /** Post-Phase-2 UX follow-up ("Universal Refresh Status" - end-to-end abandonment repair) -
+   * optional and purely additive: every existing caller that omits it keeps its exact prior
+   * behavior (an `undefined` signal is a no-op for `fetch`). Only the manual "Refresh status"
+   * control's own bounded-operation path (see refresh-guard.ts) passes one, so a timed-out
+   * generation's outstanding HTTP request actually aborts instead of running to completion in the
+   * background and later publishing stale evidence. */
+  signal?: AbortSignal;
 }): Promise<T> {
   const url = new URL(`${baseUrl}${path}`);
   if (searchParams) {
@@ -38,6 +46,7 @@ export async function schwabGetJson<T>({
       Accept: "application/json",
       Authorization: `Bearer ${accessToken}`,
     },
+    signal,
   });
 
   if (!response.ok) {

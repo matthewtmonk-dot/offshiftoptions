@@ -46,8 +46,8 @@ const invalidationVersions = new Map<string, number>();
  * guess, and never a thrown error. */
 export type CachedMarketDataProvider = MarketDataProvider & {
   getQuotes(symbols: string[]): Promise<Map<string, MarketQuote>>;
-  getQuoteReviewEvidence(symbol: string): Promise<QuoteReviewEvidence>;
-  getEquityMarketSessionEvidence(nyDate: string): Promise<EquityMarketSessionEvidence>;
+  getQuoteReviewEvidence(symbol: string, signal?: AbortSignal): Promise<QuoteReviewEvidence>;
+  getEquityMarketSessionEvidence(nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence>;
 };
 
 export function withMarketDataCache(
@@ -141,23 +141,31 @@ export function withMarketDataCache(
      * QuoteReviewEvidence object `cached()` already stored - its tradeTime/requestStartedAt/
      * responseReceivedAt are never touched or re-derived on a hit.
      */
-    getQuoteReviewEvidence(symbol) {
+    getQuoteReviewEvidence(symbol, signal) {
       if (!provider.getQuoteReviewEvidence) {
         return Promise.resolve({ status: "UNAVAILABLE", reason: "Provider does not support review-evidence quotes." });
       }
-      return cached(`${providerKey}:reviewEvidence:${symbol.toUpperCase()}`, ttl.quoteReviewEvidence, now, () =>
-        provider.getQuoteReviewEvidence!(symbol),
+      return cached(
+        `${providerKey}:reviewEvidence:${symbol.toUpperCase()}`,
+        ttl.quoteReviewEvidence,
+        now,
+        () => provider.getQuoteReviewEvidence!(symbol, signal),
+        signal,
       );
     },
     /** Dashboard V2 Phase 2 - same UNAVAILABLE-when-unsupported contract as getQuoteReviewEvidence
      * above; a cache hit returns the same evidence object, preserving its original interval
      * instants untouched. */
-    getEquityMarketSessionEvidence(nyDate) {
+    getEquityMarketSessionEvidence(nyDate, signal) {
       if (!provider.getEquityMarketSessionEvidence) {
         return Promise.resolve({ status: "UNAVAILABLE", reason: "Provider does not support equity market-session evidence." });
       }
-      return cached(`${providerKey}:marketSession:${nyDate}`, ttl.equityMarketSessionEvidence, now, () =>
-        provider.getEquityMarketSessionEvidence!(nyDate),
+      return cached(
+        `${providerKey}:marketSession:${nyDate}`,
+        ttl.equityMarketSessionEvidence,
+        now,
+        () => provider.getEquityMarketSessionEvidence!(nyDate, signal),
+        signal,
       );
     },
   };
@@ -209,6 +217,7 @@ async function cached<T>(
   ttlMs: number,
   now: () => number,
   load: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const existing = cache.get(key);
   const currentTime = now();
@@ -224,6 +233,15 @@ async function cached<T>(
   const version = invalidationVersionForKey(key);
   const promise = load()
     .then((value) => {
+      // Post-Phase-2 UX follow-up (end-to-end abandonment repair) - a request whose OWN generation
+      // was aborted (the manual "Refresh status" bounded-operation timeout fired) must never
+      // publish a result, even in the narrow race where its underlying fetch happened to resolve
+      // at almost the same instant. In practice an aborted fetch already rejects before reaching
+      // here (see schwabGetJson) - this is defense in depth, on top of (never instead of) the
+      // existing invalidationVersions cache-key-boundary protection below.
+      if (signal?.aborted) {
+        throw new DOMException("Refresh operation was aborted.", "AbortError");
+      }
       // Codex UX follow-up - a fetch that was already in flight when clearMarketDataCacheForUser
       // ran must never repopulate the cache with a value effectively fetched before that clear.
       if (invalidationVersionForKey(key) === version) {

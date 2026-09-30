@@ -156,6 +156,72 @@ describe("runGuarded - bounded operations (timeout + generation-safe abandonment
     expect(calls).toBe(2);
   });
 
+  it("TEST 12 - coalesced-caller reproduction: a caller that joins a generation BEFORE it times out receives the IDENTICAL TIMEOUT outcome as the executor - never a late success neither can ever observe", async () => {
+    let resolveOp: ((value: string) => void) | undefined;
+    const operation = () =>
+      new Promise<string>((resolve) => {
+        resolveOp = resolve;
+      });
+
+    // Executor starts generation 1 (real timeout, not a mocked clock, since this test needs BOTH
+    // callers to race the SAME real setTimeout-driven deadline concurrently).
+    const executor = runGuarded("matt", operation, { cooldownMs: 15_000, timeoutMs: 20, onTimeout });
+    // A second caller joins the SAME in-flight generation before it has settled either way.
+    const joiner = runGuarded("matt", operation, { cooldownMs: 15_000, timeoutMs: 20, onTimeout });
+
+    const [executorOutcome, joinerOutcome] = await Promise.all([executor, joiner]);
+
+    expect(executorOutcome.disposition).toBe("EXECUTED");
+    expect(joinerOutcome.disposition).toBe("COALESCED");
+    expect(executorOutcome.result).toBe("TIMED_OUT");
+    expect(joinerOutcome.result).toBe("TIMED_OUT"); // never SUCCESS just because it joined slightly later
+    expect(executorOutcome.availableAgainAt).toBe(joinerOutcome.availableAgainAt); // one shared cooldown, not two
+
+    // The underlying operation FINALLY resolves "success" late - neither caller's already-returned
+    // outcome can change (they've already returned; this only proves the shared terminal promise
+    // itself never flips after the fact, which is what protects any THIRD, even-later joiner too).
+    resolveOp!("late-success");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(executorOutcome.result).toBe("TIMED_OUT");
+    expect(joinerOutcome.result).toBe("TIMED_OUT");
+  });
+
+  it("TEST 13 - success before deadline: executor and a coalesced joiner both observe the SAME success, and the timeout is cancelled (never fires as a separate, later outcome)", async () => {
+    let resolveOp: ((value: string) => void) | undefined;
+    const operation = () =>
+      new Promise<string>((resolve) => {
+        resolveOp = resolve;
+      });
+
+    const executor = runGuarded("matt", operation, { cooldownMs: 15_000, timeoutMs: 20_000, onTimeout });
+    const joiner = runGuarded("matt", operation, { cooldownMs: 15_000, timeoutMs: 20_000, onTimeout });
+    resolveOp!("success-value");
+
+    const [executorOutcome, joinerOutcome] = await Promise.all([executor, joiner]);
+
+    expect(executorOutcome.disposition).toBe("EXECUTED");
+    expect(joinerOutcome.disposition).toBe("COALESCED");
+    expect(executorOutcome.result).toBe("success-value");
+    expect(joinerOutcome.result).toBe("success-value");
+    expect(executorOutcome.availableAgainAt).toBe(joinerOutcome.availableAgainAt); // cooldown established once
+  });
+
+  it("TEST 14 - failure before deadline: the provider rejects normally, the timeout is cancelled, and every waiter (executor and joiner) sees the identical rejection", async () => {
+    let rejectOp: ((error: Error) => void) | undefined;
+    const operation = () =>
+      new Promise<string>((_resolve, reject) => {
+        rejectOp = reject;
+      });
+
+    const executor = runGuarded("matt", operation, { cooldownMs: 15_000, timeoutMs: 20_000, onTimeout });
+    const joiner = runGuarded("matt", operation, { cooldownMs: 15_000, timeoutMs: 20_000, onTimeout });
+    rejectOp!(new Error("provider rejected"));
+
+    await expect(executor).rejects.toThrow("provider rejected");
+    await expect(joiner).rejects.toThrow("provider rejected");
+  });
+
   it("a request that JOINS an already-timed-out (but still-running) operation also receives the timeout result, not an indefinite wait", async () => {
     let now = 0;
     const operation = () => neverSettles<string>();

@@ -368,7 +368,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
 
-    const result = await refreshPositionEvidenceForUser("matt");
+    const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
     expect(result).toEqual({ ok: false, reason: "NO_CONNECTION" });
     // Never even attempts to clear caches or fetch positions when there's nothing to refresh.
@@ -379,7 +379,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary({ connected: false, status: "DISCONNECTED" }) as never);
 
-    const result = await refreshPositionEvidenceForUser("matt");
+    const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
     expect(result).toEqual({ ok: false, reason: "NO_CONNECTION" });
   });
@@ -389,7 +389,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
     m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: async () => { throw new Error("Schwab unavailable"); } }));
 
-    const result = await refreshPositionEvidenceForUser("matt");
+    const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
     expect(result).toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
   });
@@ -398,7 +398,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     const m = await mocks();
     connectedWithNoCampaigns(m);
 
-    const result = await refreshPositionEvidenceForUser("matt");
+    const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
     expect(result.ok).toBe(true);
     expect(result).toEqual({ ok: true, refreshedAt: expect.any(String) });
@@ -413,7 +413,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts }));
       m.campaignFindMany.mockResolvedValue([]);
 
-      const result = await refreshPositionEvidenceForUser("matt");
+      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
       expect(getAccounts).toHaveBeenCalled();
       expect(result.ok).toBe(true);
@@ -427,9 +427,9 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
       m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
 
-      const result = await refreshPositionEvidenceForUser("matt");
+      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
-      expect(m.getQuoteReviewEvidenceForUser).toHaveBeenCalledWith("matt", ["UPST"]);
+      expect(m.getQuoteReviewEvidenceForUser).toHaveBeenCalledWith("matt", ["UPST"], expect.any(AbortSignal));
       expect(result.ok).toBe(true);
     });
 
@@ -441,9 +441,9 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
       m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
 
-      await refreshPositionEvidenceForUser("matt");
+      await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
-      expect(m.getEquityMarketSessionEvidenceForUser).toHaveBeenCalledWith("matt", expect.any(String));
+      expect(m.getEquityMarketSessionEvidenceForUser).toHaveBeenCalledWith("matt", expect.any(String), expect.any(AbortSignal));
     });
 
     it("success is not returned before quote/session retrieval finishes - both are awaited, not fired-and-forgotten", async () => {
@@ -464,7 +464,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       );
       m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
 
-      const result = await refreshPositionEvidenceForUser("matt");
+      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
       expect(quoteResolved).toBe(true); // the quote fetch had genuinely completed by the time this resolved
       expect(result.ok).toBe(true);
@@ -478,7 +478,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "UNAVAILABLE", reason: "Schwab quote request failed." }]]) as never);
       m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
 
-      const result = await refreshPositionEvidenceForUser("matt");
+      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
       expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
     });
@@ -491,7 +491,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
       m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "UNAVAILABLE", reason: "Schwab market-session request failed." } as never);
 
-      const result = await refreshPositionEvidenceForUser("matt");
+      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
       expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
     });
@@ -502,7 +502,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       const m = await mocks();
       connectedWithNoCampaigns(m);
 
-      await refreshPositionEvidenceForUser("matt");
+      await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
       expect(m.clearSchwabBrokerReadCacheForUser).toHaveBeenCalledWith("matt");
       // getSchwabBrokerReadProviderForUser is called via getSchwabOpenPositionsForUser with NO
@@ -519,7 +519,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
       m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
 
-      await refreshPositionEvidenceForUser("matt");
+      await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
       expect(m.clearSchwabMarketDataCacheForUser).toHaveBeenCalledWith("matt");
     });
@@ -529,7 +529,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     const m = await mocks();
     connectedWithNoCampaigns(m);
 
-    await refreshPositionEvidenceForUser("eric");
+    await refreshPositionEvidenceForUser("eric", new AbortController().signal);
 
     expect(m.clearSchwabBrokerReadCacheForUser).toHaveBeenCalledWith("eric");
     expect(m.clearSchwabMarketDataCacheForUser).toHaveBeenCalledWith("eric");
@@ -541,8 +541,8 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     const m = await mocks();
     connectedWithNoCampaigns(m);
 
-    await refreshPositionEvidenceForUser("matt");
-    await refreshPositionEvidenceForUser("eric");
+    await refreshPositionEvidenceForUser("matt", new AbortController().signal);
+    await refreshPositionEvidenceForUser("eric", new AbortController().signal);
 
     expect(m.clearSchwabBrokerReadCacheForUser).toHaveBeenNthCalledWith(1, "matt");
     expect(m.clearSchwabBrokerReadCacheForUser).toHaveBeenNthCalledWith(2, "eric");
@@ -564,7 +564,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     m.getSchwabBrokerReadProviderForUser.mockResolvedValue(provider);
     m.campaignFindMany.mockResolvedValue([]);
 
-    const result = await refreshPositionEvidenceForUser("matt");
+    const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
     expect(result.ok).toBe(true);
   });
@@ -575,7 +575,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
       m.getSchwabBrokerReadProviderForUser.mockRejectedValue(new Error("resolver exploded"));
 
-      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+      await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
 
     it("an accounts-fetch throw resolves to BROKER_REFRESH_FAILED", async () => {
@@ -583,7 +583,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
       m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: async () => { throw new Error("boom"); } }));
 
-      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+      await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
 
     it("a positions-fetch throw resolves to BROKER_REFRESH_FAILED", async () => {
@@ -593,7 +593,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
         fakeReadProvider({ getAccounts: async () => [{ id: "acct-1", label: "Individual", accountValue: 1, cash: 1, liquidationValue: 1 }], getPositions: async () => { throw new Error("boom"); } }),
       );
 
-      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+      await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
 
     it("a quote-fetch throw resolves to a typed failure, never an unhandled rejection", async () => {
@@ -604,7 +604,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getQuoteReviewEvidenceForUser.mockRejectedValue(new Error("quote provider exploded"));
       m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "AVAILABLE" } as never);
 
-      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+      await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
 
     it("a session-fetch throw resolves to a typed failure, never an unhandled rejection", async () => {
@@ -615,7 +615,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
       m.getEquityMarketSessionEvidenceForUser.mockRejectedValue(new Error("session provider exploded"));
 
-      await expect(refreshPositionEvidenceForUser("matt")).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
+      await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
   });
 });

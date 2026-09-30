@@ -141,8 +141,11 @@ export interface MarketDataProvider {
    * QuoteReviewEvidence above). Optional so no existing provider/mock is broken by its addition;
    * a provider that omits this simply can never produce an active colored advisory (positionReview
    * treats the missing capability as UNAVAILABLE evidence, never a guess). */
-  getQuoteReviewEvidence?(symbol: string): Promise<QuoteReviewEvidence>;
+  /** `signal` is optional and purely additive - see schwabGetJson's own doc comment
+   * (providers/schwab/client.ts). Only the manual "Refresh status" bounded-operation path ever
+   * passes one; every other existing caller keeps its exact prior behavior. */
+  getQuoteReviewEvidence?(symbol: string, signal?: AbortSignal): Promise<QuoteReviewEvidence>;
   /** Dashboard V2 Phase 2 - full equity regular-session evidence for one NY calendar date
    * ("YYYY-MM-DD"). Optional for the same reason as getQuoteReviewEvidence above. */
-  getEquityMarketSessionEvidence?(nyDate: string): Promise<EquityMarketSessionEvidence>;
+  getEquityMarketSessionEvidence?(nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence>;
 }
