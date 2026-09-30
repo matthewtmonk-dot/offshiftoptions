@@ -108,9 +108,9 @@ export function PositionReviewEvidenceLine({ result }: { result: PositionReviewR
   parts.push(POSITION_EVIDENCE_LABELS[evidence.position]);
 
   return (
-    <p className="text-xs text-zinc-400">
+    <p className="mt-0.5 text-xs text-zinc-400">
       {parts.join(" · ")}
-      {explanation.quoteTradeTime ? <span className="block text-zinc-500">Price as of {formatEtTime(explanation.quoteTradeTime)}</span> : null}
+      {explanation.quoteTradeTime ? <span className="block text-[11px] text-zinc-500">Price as of {formatEtTime(explanation.quoteTradeTime)}</span> : null}
     </p>
   );
 }

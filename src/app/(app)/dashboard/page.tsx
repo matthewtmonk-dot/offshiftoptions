@@ -123,9 +123,9 @@ export default async function DashboardPage() {
   const checkpointLabel = getNextLstCheckpointLabel();
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* 1. Compact header */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-400">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-400">
         <span>
           <span className="font-semibold text-zinc-100">Hey {user.name}</span> -{" "}
           <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "SCHWAB SCAN" : "DEMO SCANNER"}</Badge>{" "}
@@ -179,7 +179,7 @@ export default async function DashboardPage() {
       </section>
 
       {/* 3 & 4. Main row: Positions to Review (dominant) + Capital & Cash */}
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-3 xl:grid-cols-3">
         <div className="xl:col-span-2">
           <Panel
             title="Positions to Review"
@@ -220,10 +220,10 @@ export default async function DashboardPage() {
         </div>
 
         <Panel title="Capital & Cash">
-          <div className="space-y-3">
+          <div className="space-y-2">
             <CapitalLine label="Tracked put collateral" value={capitalPanel.securedPutCollateral.value} detail={capitalPanel.securedPutCollateral.detail} />
             <CapitalLine label="Assigned shares at cost" value={capitalPanel.assignedShareCapital.value} detail={capitalPanel.assignedShareCapital.detail} />
-            <div className="border-t border-zinc-800 pt-3">
+            <div className="border-t border-zinc-800 pt-2">
               <CapitalLine
                 label="Tracked LST capital committed"
                 value={capitalPanel.lstCapitalCommitted.value}
@@ -240,7 +240,7 @@ export default async function DashboardPage() {
       </div>
 
       {/* 5 & 6. Lower row: Closed This Week + Scanner Insight */}
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-3 lg:grid-cols-2">
         <Panel
           title="Closed This Week"
           action={
@@ -276,11 +276,11 @@ export default async function DashboardPage() {
             </div>
           }
         >
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {scannerInsight.items.map((item) => (
-              <div key={item.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 p-2.5">
+              <div key={item.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2">
                 <div>
-                  <div className="text-base font-semibold text-zinc-100">{item.ticker}</div>
+                  <div className="text-sm font-semibold text-zinc-100">{item.ticker}</div>
                   <div className="text-xs text-zinc-400">{item.explanation}</div>
                 </div>
                 <Badge tone={item.readiness === "PASS" ? "good" : "neutral"}>{item.readiness} - {item.label}</Badge>
@@ -349,11 +349,11 @@ function SummaryCard({
 }) {
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   return (
-    <IntentPrefetchLink href={href} className="block rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 transition hover:border-emerald-400/40">
-      <div className="text-sm font-medium text-zinc-300">{label}</div>
-      <div className={`mt-1 text-xl font-semibold tabular-nums ${toneClass}`}>{value}</div>
-      {detail ? <div className="mt-1 text-xs text-zinc-500">{detail}</div> : null}
-      {reason ? <div className="mt-1 text-xs text-amber-300">{reason}</div> : null}
+    <IntentPrefetchLink href={href} className="block rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 transition hover:border-emerald-400/40">
+      <div className="text-xs font-medium uppercase tracking-normal text-zinc-400">{label}</div>
+      <div className={`mt-0.5 text-xl font-semibold tabular-nums ${toneClass}`}>{value}</div>
+      {detail ? <div className="mt-0.5 text-xs text-zinc-500">{detail}</div> : null}
+      {reason ? <div className="mt-0.5 text-xs text-amber-300">{reason}</div> : null}
     </IntentPrefetchLink>
   );
 }
@@ -361,10 +361,10 @@ function SummaryCard({
 function CapitalLine({ label, value, detail, emphasize = false }: { label: string; value: string; detail?: string | null; emphasize?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <span className="text-sm text-zinc-400">{label}</span>
+      <span className="text-xs text-zinc-400">{label}</span>
       <div className="text-right">
         <div className={`tabular-nums ${emphasize ? "text-base font-semibold text-zinc-50" : "text-sm text-zinc-200"}`}>{value}</div>
-        {detail ? <div className="text-xs text-zinc-500">{detail}</div> : null}
+        {detail ? <div className="text-[11px] text-zinc-500">{detail}</div> : null}
       </div>
     </div>
   );
@@ -418,22 +418,22 @@ async function PositionsToReviewWithStatus({
 
 function PositionsToReviewTable({ rows, loading = false }: { rows: PositionToReviewDisplayRow[]; loading?: boolean }) {
   return (
-    <div className="space-y-2">
+    <div className="space-y-1.5">
       {rows.map((row) => (
-        <div key={row.campaignId} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+        <div key={row.campaignId} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-baseline gap-2">
               <span className="text-base font-semibold text-zinc-100">{row.ticker}</span>
               {row.legType ? (
                 <span className="text-sm text-zinc-300 tabular-nums">
                   {money(row.strike)} {row.legType === "PUT" ? "Put" : "Call"}
-                  {row.expiration ? ` - ${shortCalendarDate(row.expiration)}` : ""}
+                  {row.expiration ? ` · ${shortCalendarDate(row.expiration)}` : ""}
                 </span>
               ) : null}
             </div>
-            <div className="text-sm text-zinc-400">
+            <div className="text-xs text-zinc-500">
               {row.stage}
-              {row.quantity !== null ? ` - ${row.quantity} ${row.quantityUnit}` : ""}
+              {row.quantity !== null ? ` · ${row.quantity} ${row.quantityUnit}` : ""}
             </div>
             {row.review ? <LivePositionReviewEvidenceLine result={row.review} /> : null}
           </div>

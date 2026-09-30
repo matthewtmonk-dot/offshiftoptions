@@ -379,7 +379,7 @@ export default async function PositionsPage({
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p className="text-sm font-medium text-emerald-300">Campaign &amp; account tracker</p>
@@ -446,7 +446,7 @@ export default async function PositionsPage({
       </div>
 
       {view === "open" ? (
-        <section className="space-y-4">
+        <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-400" data-testid="tracker-snapshot-status">
             <div className="space-y-1">
               <p>Snapshot checked: {snapshotTime(snapshotCheckedAt)} · {quoteSnapshots.size ? `${Array.from(quoteSnapshots.values()).filter(Boolean).length}/${quoteSnapshots.size} stock prices available` : "No unexpired puts need prices"}</p>
@@ -459,7 +459,7 @@ export default async function PositionsPage({
             </div>
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             {openRows.map((row) => (
               <CampaignCard
                 key={row.campaign.id}
@@ -493,8 +493,8 @@ export default async function PositionsPage({
       ) : null}
 
       {view === "history" ? (
-        <section className="space-y-3" data-testid="campaign-history-table">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <section className="space-y-2.5" data-testid="campaign-history-table">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3.5">
             <div>
               <p className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Campaign History</p>
               <h2 className="mt-1 inline-flex items-center gap-2 text-lg font-semibold text-zinc-50">
@@ -746,10 +746,10 @@ function CampaignCard({
 
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
-      <summary className="relative grid cursor-pointer list-none gap-3 p-4 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
+      <summary className="relative grid cursor-pointer list-none gap-2.5 p-3.5 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
         <div className="min-w-0 pr-5 xl:pr-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-2xl font-semibold text-zinc-50">{campaign.ticker}</span>
+            <span className="text-xl font-semibold text-zinc-50">{campaign.ticker}</span>
             <Badge tone={statusTone(campaign.status, plValue)}>{campaign.status}</Badge>
             {campaign.status === "CLOSED" ? (
               <Badge tone={plValue === null ? "neutral" : plValue < 0 ? "bad" : "good"}>
@@ -788,7 +788,7 @@ function CampaignCard({
               ) : null}
             </div>
           ) : null}
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-400">
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
             <span>{isOwner ? "You" : campaign.owner.name}</span>
             <span>{accountVisibleToViewer ? campaign.account.name : "Private account"}</span>
             <span>{summary.currentStage}</span>
@@ -2164,13 +2164,13 @@ function TrackerStat({
   helpTestId?: string;
 }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 shadow-sm shadow-black/20">
       <div className="flex items-center gap-2 text-xs uppercase tracking-normal text-zinc-500">
         <span className="text-zinc-400">{icon}</span>
         <HelpLabel label={label} help={help} testId={helpTestId} />
       </div>
-      <div className={`mt-2 text-2xl font-semibold ${toneClass(tone)}`}>{value}</div>
-      <div className="mt-1 text-xs text-zinc-500">{detail}</div>
+      <div className={`mt-0.5 text-xl font-semibold ${toneClass(tone)}`}>{value}</div>
+      <div className="mt-0.5 text-xs text-zinc-500">{detail}</div>
     </div>
   );
 }

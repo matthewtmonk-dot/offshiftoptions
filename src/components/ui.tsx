@@ -13,9 +13,9 @@ const badgeTone: Record<Tone, string> = {
 
 export function Panel({ title, action, children }: { title?: string; action?: ReactNode; children: ReactNode }) {
   return (
-    <section className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4 shadow-sm shadow-black/20">
+    <section className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-3.5 shadow-sm shadow-black/20">
       {(title || action) && (
-        <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="mb-3 flex items-center justify-between gap-3">
           {title ? <h2 className="text-sm font-semibold uppercase tracking-normal text-zinc-300">{title}</h2> : <span />}
           {action}
         </div>

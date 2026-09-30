@@ -25,10 +25,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               available on every authenticated page (never in the left nav rail - that's navigation,
               this is a global status/action). Reuses the exact same action/component Tracker's own
               refresh button now uses (see positions/page.tsx) - never a second implementation. */}
-          <div className="flex justify-end border-b border-zinc-800 bg-zinc-950/60 px-4 py-2 md:px-6 lg:px-8">
+          <div className="flex justify-end border-b border-zinc-800 bg-zinc-950/60 px-4 py-1.5 md:px-6 lg:px-8">
             <RefreshStatusControl />
           </div>
-          <main className="min-w-0 flex-1 px-4 py-5 md:px-6 lg:px-8">{children}</main>
+          <main className="min-w-0 flex-1 px-4 py-4 md:px-6 lg:px-8">{children}</main>
         </div>
       </div>
     </div>

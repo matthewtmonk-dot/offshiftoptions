@@ -38,7 +38,7 @@ export function LivePositionReviewEvidenceLine({ result }: { result: PositionRev
   const expired = useActiveGuidanceExpired(result.explanation.activeGuidanceDeadline, result.explanation.evaluatedAt);
 
   if (expired) {
-    return <p className="text-xs text-zinc-500">Evidence expired - refresh to check current status.</p>;
+    return <p className="mt-0.5 text-xs text-zinc-500">Evidence expired - refresh to check current status.</p>;
   }
 
   return <PositionReviewEvidenceLine result={result} />;
