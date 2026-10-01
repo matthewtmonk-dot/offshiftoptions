@@ -13,6 +13,7 @@ import {
 import { getAlphaVantageApiKey } from "@/providers/alpha-vantage/config";
 import { fetchAlphaVantageEarningsCalendar, type EarningsCalendarEntry } from "@/providers/alpha-vantage/earnings-calendar";
 import type { AlphaVantageFetch } from "@/providers/alpha-vantage/client";
+import { selectEarningsEvidenceFromRows, type TickerEarningsEvidence } from "@/domain/finance/earningsEvidence";
 
 /**
  * How long a successful refresh stays "fresh" before the scanner should try again - a bit under
@@ -46,7 +47,7 @@ export type EarningsCalendarRefreshResult =
   | { status: "BUDGET_EXHAUSTED"; usage: AlphaVantageUsageSnapshot }
   | { status: "ALREADY_FRESH"; cache: EarningsCalendarCacheStatus }
   | { status: "FETCH_FAILED"; outcome: "RATE_LIMITED" | "ERROR_MESSAGE" | "EMPTY" | "HTTP_ERROR"; message?: string; httpStatus?: number }
-  | { status: "SUCCESS"; entryCount: number; prunedCount: number; usage: AlphaVantageUsageSnapshot };
+  | { status: "SUCCESS"; entryCount: number; prunedCount: number; supersededCount: number; usage: AlphaVantageUsageSnapshot };
 
 type RefreshOptions = {
   now?: Date;
@@ -65,9 +66,21 @@ type RefreshOptions = {
  * ERROR_MESSAGE / EMPTY / HTTP_ERROR outcome returns immediately without touching
  * EarningsCalendarEntry at all - the prior day's cache (now correctly reported as stale via
  * getEarningsCalendarCacheStatus) remains fully queryable. Only a genuinely successful fetch
- * writes anything, and pruning (deleting now-past reportDates) only ever runs after that write
- * has fully succeeded - a crash between upsert and prune simply leaves a few already-past rows
- * to be pruned on the next successful refresh, never a destroyed cache.
+ * writes anything.
+ *
+ * Response coherence: a successful response represents ONE coherent observation of each
+ * mentioned ticker's schedule. The upsert (write/refresh fetchedAt for every row this response
+ * confirmed) and the "supersede" delete (remove any OTHER future-dated row this response's own
+ * tickers already had cached, from an earlier observation) run together in a single DB
+ * transaction - either both apply or neither does, so a ticker can never end up with two
+ * competing future report dates where one is simply forgotten stale data (see
+ * EARNINGS_CALENDAR_REFRESH_INTERVAL_MS's own evidence-contract notes and
+ * domain/finance/earningsEvidence.ts). A ticker NOT mentioned in this response is never touched -
+ * absence from one response is not proof of "no earnings," so its prior evidence (if any) is left
+ * exactly as it was. Pruning already-past reportDates (for ANY ticker, not just this response's)
+ * remains its own separate, slightly looser-timing step after the transaction - a crash between
+ * the transaction and this prune simply leaves a few already-past rows to be pruned on the next
+ * successful refresh, never a destroyed or incoherent "current schedule" cache.
  */
 export async function refreshEarningsCalendarCache(options: RefreshOptions = {}): Promise<EarningsCalendarRefreshResult> {
   const now = options.now ?? new Date();
@@ -105,8 +118,13 @@ export async function refreshEarningsCalendarCache(options: RefreshOptions = {})
     }
 
     const deduped = dedupeEntries(result.entries);
+    let supersededCount = 0;
     if (deduped.length > 0) {
-      await bulkUpsertEntries(deduped, now);
+      const [, supersedeResult] = await prisma.$transaction([
+        buildUpsertQuery(deduped, now),
+        buildSupersedeDeleteQuery(deduped, now),
+      ]);
+      supersededCount = supersedeResult;
     }
 
     // Retention rule: a report date that has already passed is never useful to an
@@ -114,7 +132,13 @@ export async function refreshEarningsCalendarCache(options: RefreshOptions = {})
     // only now, after the fresh batch is durably written.
     const pruned = await prisma.earningsCalendarEntry.deleteMany({ where: { reportDate: { lt: dateOnlyUtc(now) } } });
 
-    return { status: "SUCCESS", entryCount: deduped.length, prunedCount: pruned.count, usage: await getAlphaVantageUsageToday(now) };
+    return {
+      status: "SUCCESS",
+      entryCount: deduped.length,
+      prunedCount: pruned.count,
+      supersededCount,
+      usage: await getAlphaVantageUsageToday(now),
+    };
   } finally {
     await releaseAlphaVantageRunLock(now);
   }
@@ -137,17 +161,47 @@ function dedupeEntries(entries: EarningsCalendarEntry[]): EarningsCalendarEntry[
  * one round trip and one atomic statement instead of thousands of individual queries.
  * `fetchedAt` is touched on every row this refresh confirmed (new or already-known), so
  * getEarningsCalendarCacheStatus's MAX(fetchedAt) always reflects the most recent full,
- * successful refresh.
+ * successful refresh. Returns the un-awaited query so the caller can run it inside a
+ * `prisma.$transaction([...])` together with buildSupersedeDeleteQuery.
  */
-async function bulkUpsertEntries(entries: EarningsCalendarEntry[], fetchedAt: Date): Promise<void> {
+function buildUpsertQuery(entries: EarningsCalendarEntry[], fetchedAt: Date) {
   const values = Prisma.join(
     entries.map((entry) => Prisma.sql`(${entry.ticker}, ${entry.reportDate}::date, ${fetchedAt})`),
   );
 
-  await prisma.$executeRaw`
+  return prisma.$executeRaw`
     INSERT INTO "EarningsCalendarEntry" ("ticker", "reportDate", "fetchedAt")
     VALUES ${values}
     ON CONFLICT ("ticker", "reportDate") DO UPDATE SET "fetchedAt" = EXCLUDED."fetchedAt"
+  `;
+}
+
+/**
+ * Deletes any OTHER future-dated row this response's own tickers already had cached from an
+ * earlier observation - the fix for "earliest stored future date is not necessarily the
+ * provider's current next scheduled report" / "multiple future dates can coexist" (see this
+ * module's own refreshEarningsCalendarCache doc comment). Scoped to:
+ *  - only tickers mentioned in THIS response (a ticker this response is silent about is never
+ *    touched - absence is not proof of "no earnings")
+ *  - only reportDate >= today (already-past rows are left to the existing separate prune step)
+ *  - only rows whose exact (ticker, reportDate) pair is NOT part of this response's own batch
+ * Returns the un-awaited query so the caller can run it in the same transaction as the upsert -
+ * both must apply together or neither does, or a ticker could transiently end up with zero
+ * current rows (crash after delete, before upsert) or two competing ones (crash after upsert,
+ * before delete).
+ */
+function buildSupersedeDeleteQuery(entries: EarningsCalendarEntry[], now: Date) {
+  const tickers = [...new Set(entries.map((entry) => entry.ticker))];
+  const batchValues = Prisma.join(entries.map((entry) => Prisma.sql`(${entry.ticker}, ${entry.reportDate}::date)`));
+
+  return prisma.$executeRaw`
+    DELETE FROM "EarningsCalendarEntry" e
+    WHERE e."ticker" = ANY(${tickers}::text[])
+      AND e."reportDate" >= ${dateOnlyUtc(now)}::date
+      AND NOT EXISTS (
+        SELECT 1 FROM (VALUES ${batchValues}) AS batch("ticker", "reportDate")
+        WHERE batch."ticker" = e."ticker" AND batch."reportDate" = e."reportDate"
+      )
   `;
 }
 
@@ -188,4 +242,33 @@ export async function getEarningsCalendarLookup(tickers: string[], now: Date = n
     map.set(row.ticker, { reportDate: row.reportDate, daysUntilReport });
   }
   return map;
+}
+
+/**
+ * Evidence-oriented earnings lookup for future Trade Prep (see domain/finance/earningsEvidence.ts
+ * for the full status/selection contract). Strictly additive - existing Scanner behavior keeps
+ * using getEarningsCalendarLookup above, unchanged, so this function has no production call site
+ * yet and does not alter what the Scanner sees.
+ *
+ * Unlike getEarningsCalendarLookup, EVERY requested ticker gets an explicit entry in the returned
+ * Map, even ones with no cached row at all (status: NO_EVIDENCE) - so a caller can distinguish
+ * "we checked and found nothing" from "we never checked this ticker," which an omitted Map key
+ * cannot express on its own.
+ */
+export async function getEarningsEvidenceLookup(
+  tickers: string[],
+  now: Date = new Date(),
+  freshnessWindowMs: number = EARNINGS_CALENDAR_REFRESH_INTERVAL_MS,
+): Promise<Map<string, TickerEarningsEvidence>> {
+  const normalized = [...new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
+  if (!normalized.length) {
+    return new Map();
+  }
+
+  const today = dateOnlyUtc(now);
+  const rows = await prisma.earningsCalendarEntry.findMany({
+    where: { ticker: { in: normalized }, reportDate: { gte: today } },
+  });
+
+  return selectEarningsEvidenceFromRows(normalized, rows, now, freshnessWindowMs);
 }

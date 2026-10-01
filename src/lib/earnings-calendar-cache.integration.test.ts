@@ -23,12 +23,15 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
   let refreshEarningsCalendarCache: typeof import("./earnings-calendar-cache").refreshEarningsCalendarCache;
   let getEarningsCalendarCacheStatus: typeof import("./earnings-calendar-cache").getEarningsCalendarCacheStatus;
   let getEarningsCalendarLookup: typeof import("./earnings-calendar-cache").getEarningsCalendarLookup;
+  let getEarningsEvidenceLookup: typeof import("./earnings-calendar-cache").getEarningsEvidenceLookup;
   let getAlphaVantageUsageToday: typeof import("./alpha-vantage-budget").getAlphaVantageUsageToday;
   let originalApiKey: string | undefined;
 
   beforeAll(async () => {
     prisma = (await import("./prisma")).prisma;
-    ({ refreshEarningsCalendarCache, getEarningsCalendarCacheStatus, getEarningsCalendarLookup } = await import("./earnings-calendar-cache"));
+    ({ refreshEarningsCalendarCache, getEarningsCalendarCacheStatus, getEarningsCalendarLookup, getEarningsEvidenceLookup } = await import(
+      "./earnings-calendar-cache"
+    ));
     ({ getAlphaVantageUsageToday } = await import("./alpha-vantage-budget"));
     originalApiKey = process.env.ALPHA_VANTAGE_API_KEY;
     process.env.ALPHA_VANTAGE_API_KEY = "test-earnings-calendar-key";
@@ -152,5 +155,134 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
     if (result.status !== "SUCCESS") throw new Error("expected SUCCESS");
     expect(result.prunedCount).toBe(1);
     expect(await prisma.earningsCalendarEntry.findFirst({ where: { ticker: "STALEENTRY" } })).toBeNull();
+  });
+
+  it("a reschedule (ticker moves from date A to date B) does not leave date A as a surviving current row", async () => {
+    const refreshOne = new Date(TEST_NOW.getTime());
+    await refreshEarningsCalendarCache({
+      now: refreshOne,
+      fetchFn: fetchFnReturning("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nAAPL,APPLE INC,2099-12-01,2099-09-30,,USD,\n"),
+    });
+    const afterFirst = await prisma.earningsCalendarEntry.findMany({ where: { ticker: "AAPL" } });
+    expect(afterFirst.map((row) => row.reportDate.toISOString().slice(0, 10))).toEqual(["2099-12-01"]);
+
+    // Provider reschedules AAPL to a later date in the very next coherent refresh.
+    const refreshTwo = new Date(refreshOne.getTime() + 21 * 60 * 60 * 1000); // past the 20h freshness window
+    const result = await refreshEarningsCalendarCache({
+      now: refreshTwo,
+      fetchFn: fetchFnReturning("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nAAPL,APPLE INC,2099-12-10,2099-09-30,,USD,\n"),
+    });
+    expect(result.status).toBe("SUCCESS");
+    if (result.status !== "SUCCESS") throw new Error("expected SUCCESS");
+    expect(result.supersededCount).toBe(1); // the old 2099-12-01 row was removed as part of this coherent refresh
+
+    const afterSecond = await prisma.earningsCalendarEntry.findMany({ where: { ticker: "AAPL" } });
+    expect(afterSecond).toHaveLength(1);
+    expect(afterSecond[0].reportDate.toISOString().slice(0, 10)).toBe("2099-12-10");
+
+    // The legacy Scanner-facing lookup must also now see only the new date - never both.
+    const legacyLookup = await getEarningsCalendarLookup(["AAPL"], refreshTwo);
+    expect(legacyLookup.get("AAPL")?.reportDate.toISOString().slice(0, 10)).toBe("2099-12-10");
+  });
+
+  it("multiple old future dates for a ticker do not survive as competing 'next' candidates after a coherent refresh", async () => {
+    // Simulate leftover rows from before this coherence fix existed: two old future dates for one ticker.
+    await prisma.earningsCalendarEntry.createMany({
+      data: [
+        { ticker: "MULTI", reportDate: new Date("2099-12-05"), fetchedAt: new Date(TEST_NOW.getTime() - 48 * 60 * 60 * 1000) },
+        { ticker: "MULTI", reportDate: new Date("2099-12-20"), fetchedAt: new Date(TEST_NOW.getTime() - 48 * 60 * 60 * 1000) },
+      ],
+    });
+
+    const result = await refreshEarningsCalendarCache({
+      now: TEST_NOW,
+      force: true,
+      fetchFn: fetchFnReturning("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nMULTI,MULTI CORP,2099-12-15,2099-09-30,,USD,\n"),
+    });
+    expect(result.status).toBe("SUCCESS");
+    if (result.status !== "SUCCESS") throw new Error("expected SUCCESS");
+
+    const rows = await prisma.earningsCalendarEntry.findMany({ where: { ticker: "MULTI" } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reportDate.toISOString().slice(0, 10)).toBe("2099-12-15");
+  });
+
+  it("a ticker absent from a successful response keeps its prior evidence untouched - absence is not proof of no earnings", async () => {
+    await prisma.earningsCalendarEntry.create({
+      data: { ticker: "UNMENTIONED", reportDate: new Date("2099-12-25"), fetchedAt: new Date(TEST_NOW.getTime() - 1000) },
+    });
+
+    const result = await refreshEarningsCalendarCache({ now: TEST_NOW, force: true, fetchFn: fetchFnReturning(SAMPLE_CSV) });
+    expect(result.status).toBe("SUCCESS");
+    if (result.status !== "SUCCESS") throw new Error("expected SUCCESS");
+    expect(result.supersededCount).toBe(0); // UNMENTIONED was never part of this batch, so nothing to supersede
+
+    const stillThere = await prisma.earningsCalendarEntry.findFirst({ where: { ticker: "UNMENTIONED" } });
+    expect(stillThere).not.toBeNull();
+    expect(stillThere?.reportDate.toISOString().slice(0, 10)).toBe("2099-12-25");
+  });
+
+  it("an empty-but-valid provider response (parsed successfully, zero usable rows) leaves the existing cache untouched", async () => {
+    await refreshEarningsCalendarCache({ now: TEST_NOW, fetchFn: fetchFnReturning(SAMPLE_CSV) });
+    const before = await prisma.earningsCalendarEntry.findMany({ where: { ticker: { in: ["AAPL", "MSFT"] } } });
+
+    // Valid header, zero data rows - the adapter classifies this as EMPTY, not SUCCESS. Forced
+    // (rather than waiting out the freshness window) so the attempt actually reaches the fetch,
+    // while staying well within the freshness window so AAPL's untouched evidence stays SCHEDULED
+    // below (freshness-driven STALE is covered by its own dedicated test).
+    const emptyButValidNow = new Date(TEST_NOW.getTime() + 60 * 60 * 1000);
+    const result = await refreshEarningsCalendarCache({
+      now: emptyButValidNow,
+      force: true,
+      fetchFn: fetchFnReturning("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n"),
+    });
+    expect(result.status).toBe("FETCH_FAILED");
+    if (result.status !== "FETCH_FAILED") throw new Error("expected FETCH_FAILED");
+    expect(result.outcome).toBe("EMPTY");
+
+    const after = await prisma.earningsCalendarEntry.findMany({ where: { ticker: { in: ["AAPL", "MSFT"] } } });
+    expect(after).toEqual(before);
+
+    // An empty response must never be read as "no tickers have earnings" by the evidence lookup.
+    const evidence = await getEarningsEvidenceLookup(["AAPL", "NEVERSEEN"], emptyButValidNow);
+    expect(evidence.get("AAPL")?.status).toBe("SCHEDULED");
+    expect(evidence.get("NEVERSEEN")?.status).toBe("NO_EVIDENCE");
+  });
+
+  it("getEarningsEvidenceLookup: a missing ticker is NO_EVIDENCE, never CLEAR/fabricated", async () => {
+    const evidence = await getEarningsEvidenceLookup(["TOTALLYUNKNOWNTICKER"], TEST_NOW);
+    expect(evidence.get("TOTALLYUNKNOWNTICKER")).toEqual({
+      ticker: "TOTALLYUNKNOWNTICKER",
+      status: "NO_EVIDENCE",
+      reportDate: null,
+      observedAt: null,
+      candidateReportDates: [],
+    });
+  });
+
+  it("getEarningsEvidenceLookup: evidence older than the freshness window is reported STALE, not SCHEDULED", async () => {
+    await prisma.earningsCalendarEntry.create({
+      data: { ticker: "OLDOBS", reportDate: new Date("2099-12-30"), fetchedAt: new Date(TEST_NOW.getTime() - 25 * 60 * 60 * 1000) },
+    });
+
+    const evidence = await getEarningsEvidenceLookup(["OLDOBS"], TEST_NOW);
+    expect(evidence.get("OLDOBS")?.status).toBe("STALE");
+  });
+
+  it("getEarningsEvidenceLookup preserves fetchedAt as observedAt, distinct from reportDate", async () => {
+    const observedAt = new Date(TEST_NOW.getTime() - 60 * 60 * 1000);
+    await prisma.earningsCalendarEntry.create({ data: { ticker: "OBSERVED", reportDate: new Date("2099-12-28"), fetchedAt: observedAt } });
+
+    const evidence = await getEarningsEvidenceLookup(["OBSERVED"], TEST_NOW);
+    expect(evidence.get("OBSERVED")?.observedAt?.toISOString()).toBe(observedAt.toISOString());
+    expect(evidence.get("OBSERVED")?.reportDate?.toISOString()).toBe(new Date("2099-12-28").toISOString());
+  });
+
+  it("Scanner compatibility: getEarningsCalendarLookup's shape and soonest-date behavior are unchanged by the coherence fix", async () => {
+    await refreshEarningsCalendarCache({ now: TEST_NOW, fetchFn: fetchFnReturning(SAMPLE_CSV) });
+    const lookup = await getEarningsCalendarLookup(["AAPL"], TEST_NOW);
+    const entry = lookup.get("AAPL");
+    expect(entry).toBeDefined();
+    expect(Object.keys(entry!).sort()).toEqual(["daysUntilReport", "reportDate"]);
   });
 });
