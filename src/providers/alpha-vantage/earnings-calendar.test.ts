@@ -130,6 +130,68 @@ describe("fetchAlphaVantageEarningsCalendar", () => {
     it("accepts a valid ordinary date", () => expectAccepted("2026-09-15", "2026-09-15T00:00:00.000Z"));
   });
 
+  describe("CSV quote-structure handling", () => {
+    it("rejects the exact malformed fixture (unterminated quote swallows a later real schedule row) as non-SUCCESS, never fabricating a one-row schedule", async () => {
+      const csv =
+        'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nXYZ,XYZ,2026-11-20,2026-09-30,,USD,"\nXYZ,XYZ,2026-10-12,2026-09-30,,USD,\n';
+      const result = await fetchAlphaVantageEarningsCalendar({ apiKey: "test-key", fetchFn: fetchFnReturning(csv) });
+      expect(result.outcome).not.toBe("SUCCESS");
+      expect(result.outcome).toBe("ERROR_MESSAGE");
+      if (result.outcome !== "ERROR_MESSAGE") throw new Error("expected ERROR_MESSAGE");
+      // No entries field exists on a non-SUCCESS result - there is nothing a caller could
+      // mistakenly treat as "the accepted replacement entries" from this malformed response.
+      expect("entries" in result).toBe(false);
+    });
+
+    it("still parses a normal quoted field containing a comma", async () => {
+      const csv = 'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nGOOD,"GOOD, CORP",2026-09-10,2026-06-30,,USD,\n';
+      const result = await fetchAlphaVantageEarningsCalendar({ apiKey: "test-key", fetchFn: fetchFnReturning(csv) });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome !== "SUCCESS") throw new Error("expected SUCCESS");
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].ticker).toBe("GOOD");
+    });
+
+    it("still parses an escaped \"\" quote inside a quoted field", async () => {
+      const csv = 'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nGOOD,"GOOD ""THE"" CORP",2026-09-10,2026-06-30,,USD,\n';
+      const result = await fetchAlphaVantageEarningsCalendar({ apiKey: "test-key", fetchFn: fetchFnReturning(csv) });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome !== "SUCCESS") throw new Error("expected SUCCESS");
+      expect(result.entries).toHaveLength(1);
+    });
+
+    it("still parses a properly-terminated quoted field containing a newline, followed by a real next row", async () => {
+      const csv =
+        'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nGOOD,"GOOD\nCORP",2026-09-10,2026-06-30,,USD,\nNEXT,NEXT CORP,2026-09-11,2026-06-30,,USD,\n';
+      const result = await fetchAlphaVantageEarningsCalendar({ apiKey: "test-key", fetchFn: fetchFnReturning(csv) });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome !== "SUCCESS") throw new Error("expected SUCCESS");
+      expect(result.entries.map((entry) => entry.ticker).sort()).toEqual(["GOOD", "NEXT"]);
+    });
+
+    it("still parses a closing quote immediately followed by a comma, then more real fields", async () => {
+      const csv = 'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nGOOD,"GOOD CORP",2026-09-10,2026-06-30,,USD,\n';
+      const result = await fetchAlphaVantageEarningsCalendar({ apiKey: "test-key", fetchFn: fetchFnReturning(csv) });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome !== "SUCCESS") throw new Error("expected SUCCESS");
+      expect(result.entries[0].ticker).toBe("GOOD");
+    });
+
+    it("still parses a closing quote immediately followed by row termination (quoted last field)", async () => {
+      const csv = 'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nGOOD,GOOD CORP,2026-09-10,2026-06-30,,USD,"pre-market"\n';
+      const result = await fetchAlphaVantageEarningsCalendar({ apiKey: "test-key", fetchFn: fetchFnReturning(csv) });
+      expect(result.outcome).toBe("SUCCESS");
+      if (result.outcome !== "SUCCESS") throw new Error("expected SUCCESS");
+      expect(result.entries[0].ticker).toBe("GOOD");
+    });
+
+    it("rejects a bare unmatched quote at EOF with no further rows at all", async () => {
+      const csv = 'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nGOOD,"unterminated';
+      const result = await fetchAlphaVantageEarningsCalendar({ apiKey: "test-key", fetchFn: fetchFnReturning(csv) });
+      expect(result.outcome).toBe("ERROR_MESSAGE");
+    });
+  });
+
   it("never leaks the API key in a rate-limited message", async () => {
     const sentinelKey = "sentinel-earnings-calendar-key-must-never-leak";
     const result = await fetchAlphaVantageEarningsCalendar({

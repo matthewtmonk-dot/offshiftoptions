@@ -339,10 +339,21 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
     // statement guaranteed to fail at the database level (division by zero) - proves Postgres
     // really does roll back the whole transaction, including the upsert, when any statement in it
     // fails. Does not modify or bypass refreshEarningsCalendarCache's own real control flow.
+    //
+    // Asserted on the SPECIFIC expected failure (Postgres SQLSTATE 22012, division_by_zero) via
+    // the driver adapter's own error detail, not a generic rejects.toThrow() - a bare toThrow()
+    // would also pass if the FIRST statement (the real upsert) were the one that failed for some
+    // unrelated reason, which would prove nothing about rollback atomicity specifically.
     const entries = [{ ticker: "ROLLBACK", reportDate: new Date("2099-12-20") }];
-    await expect(
-      prisma.$transaction([buildUpsertQuery(entries, TEST_NOW), prisma.$executeRaw`SELECT 1/0`]),
-    ).rejects.toThrow();
+    let caught: unknown;
+    try {
+      await prisma.$transaction([buildUpsertQuery(entries, TEST_NOW), prisma.$executeRaw`SELECT 1/0`]);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const driverCause = (caught as { meta?: { driverAdapterError?: { cause?: { originalCode?: string } } } }).meta?.driverAdapterError?.cause;
+    expect(driverCause?.originalCode).toBe("22012"); // Postgres division_by_zero - confirms it was the deliberately-failing second statement
 
     const rows = await prisma.earningsCalendarEntry.findMany({ where: { ticker: "ROLLBACK" } });
     expect(rows).toHaveLength(1); // the upsert's new row was NOT committed
@@ -363,5 +374,29 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
     const evidence = await getEarningsEvidenceLookup(["ROLLOVER"], rolloverNow);
     expect(evidence.get("ROLLOVER")?.status).toBe("SCHEDULED");
     expect(evidence.get("ROLLOVER")?.reportDate?.toISOString()).toBe("2099-11-30T00:00:00.000Z");
+  });
+
+  it("a malformed-CSV response (unterminated quote swallowing a later real row) makes zero writes - existing schedule survives intact", async () => {
+    await prisma.earningsCalendarEntry.create({
+      data: { ticker: "XYZ", reportDate: new Date("2099-10-12"), fetchedAt: new Date(TEST_NOW.getTime() - 1000) },
+    });
+
+    // The exact Codex-reported fixture: an unterminated quote in the first XYZ row's last field
+    // swallows the entire second XYZ row (including its 2099-10-12 date) into one field value. A
+    // lenient parser could recover only the first (2099-11-20) row and let it coherently supersede
+    // the real cached 2099-10-12 date - that must never happen.
+    const malformedCsv =
+      'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\nXYZ,XYZ,2099-11-20,2099-09-30,,USD,"\nXYZ,XYZ,2099-10-12,2099-09-30,,USD,\n';
+
+    const result = await refreshEarningsCalendarCache({ now: TEST_NOW, force: true, fetchFn: fetchFnReturning(malformedCsv) });
+    expect(result.status).toBe("FETCH_FAILED");
+    if (result.status !== "FETCH_FAILED") throw new Error("expected FETCH_FAILED");
+    expect(result.outcome).toBe("ERROR_MESSAGE");
+
+    // No upsert, no supersede-delete - the real, correct 2099-10-12 row is exactly as it was.
+    const rows = await prisma.earningsCalendarEntry.findMany({ where: { ticker: "XYZ" } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reportDate.toISOString().slice(0, 10)).toBe("2099-10-12");
+    expect(rows[0].reportDate.toISOString().slice(0, 10)).not.toBe("2099-11-20"); // the malformed response's own date never got written
   });
 });

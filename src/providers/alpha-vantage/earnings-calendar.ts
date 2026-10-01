@@ -86,6 +86,14 @@ export async function fetchAlphaVantageEarningsCalendar({
   }
 
   const rows = parseCsvRows(trimmed);
+  if (rows === null) {
+    // Malformed CSV structure (an unterminated quoted field) - never auto-close the quote and
+    // never reinterpret the swallowed remainder as a valid row. Whatever rows a lenient parser
+    // might have recovered could easily omit or corrupt a real, meaningful schedule row (see this
+    // function's own PARTIAL_UNTRUSTED precedent for why an incomplete picture of the response is
+    // never trusted for destructive schedule replacement) - treated as a hard parse failure.
+    return { outcome: "ERROR_MESSAGE", message: "Alpha Vantage earnings calendar response had malformed CSV (unterminated quoted field)." };
+  }
   const header = (rows[0] ?? []).map((cell) => cell.trim().toLowerCase());
   const symbolIndex = header.indexOf("symbol");
   const reportDateIndex = header.indexOf("reportdate");
@@ -193,11 +201,21 @@ function sanitizeMessage(message: string, apiKey: string): string {
   return withoutKey.length > 300 ? `${withoutKey.slice(0, 297)}...` : withoutKey;
 }
 
-/** Minimal quoted-CSV row parser - mirrors providers/schwab/csv.ts's parseCsvRows, kept as its
- * own copy rather than a cross-provider shared utility (each provider's CSV quirks are its
- * own). Handles quoted fields (company names sometimes contain commas) and CRLF/LF/CR line
- * endings. */
-function parseCsvRows(input: string): string[][] {
+/**
+ * Minimal quoted-CSV row parser - mirrors providers/schwab/csv.ts's parseCsvRows, kept as its own
+ * copy rather than a cross-provider shared utility (each provider's CSV quirks are its own).
+ * Handles quoted fields (company names sometimes contain commas), escaped `""` quotes inside a
+ * quoted field, newlines inside a quoted field (intentionally supported - a quote only closes on
+ * an actual `"`, never on a bare line ending), and CRLF/LF/CR line endings.
+ *
+ * Returns `null` if EOF is reached while still inside a quoted field (an unterminated quote) -
+ * this is a structurally malformed CSV, not a recoverable one: silently auto-closing the quote or
+ * treating everything after it as unparsed could swallow a real, later data row (including one
+ * that would have mattered for schedule coherence) without any sign anything was lost. The caller
+ * must treat `null` as a hard parse failure, never attempt to use whatever rows were recovered so
+ * far.
+ */
+function parseCsvRows(input: string): string[][] | null {
   const rows: string[][] = [];
   let row: string[] = [];
   let value = "";
@@ -235,6 +253,10 @@ function parseCsvRows(input: string): string[][] {
     }
 
     value += char;
+  }
+
+  if (inQuotes) {
+    return null; // EOF reached inside an unterminated quoted field - malformed, not recoverable
   }
 
   if (value.length || row.length) {
