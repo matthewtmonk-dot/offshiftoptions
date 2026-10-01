@@ -7,6 +7,7 @@ import {
   evaluateQuoteFreshness,
   STRICT_QUOTE_MAX_AGE_MS,
   evaluateChainDelay,
+  evaluateChainEnvelopeStatus,
   evaluateSessionEligibility,
   evaluateStandardContractTerms,
   evaluateUnderlyingOptionAlignment,
@@ -22,7 +23,7 @@ const QUOTE_TIME = new Date("2026-10-01T17:59:59.950Z"); // 50ms before now - fr
 const REQUEST_STARTED_AT = new Date("2026-10-01T17:59:59.000Z");
 const RESPONSE_RECEIVED_AT = new Date("2026-10-01T17:59:59.950Z");
 
-const BASE_ENVELOPE = { rootSymbol: "SPY", isDelayed: false };
+const BASE_ENVELOPE = { status: "SUCCESS", rootSymbol: "SPY", isDelayed: false };
 
 // SYNTHETIC evaluator-unit-test fixture - deliberately NOT derived from any live Schwab capture
 // (see src/providers/schwab/__fixtures__/strict-option-chain-live-derived.json for the repo's one
@@ -37,7 +38,7 @@ function baseContract(): StrictOptionContractSnapshot {
       putCall: "PUT",
       strikePrice: 655,
       expirationDate: new Date("2026-10-16T20:00:00.000Z"),
-      optionRoot: "SPY",
+      optionRoot: "SPY", // synthetic - the real capture never preserved this raw field's value
     },
     quote: { bid: 1.2, ask: 1.3, quoteTimeInLong: QUOTE_TIME.getTime() },
     terms: {
@@ -84,7 +85,7 @@ function sessionEvidenceFor(nyDate: string, overrides: Partial<EquityMarketSessi
 
 const BASE_SESSION = sessionEvidenceFor("2026-10-01");
 
-function underlyingEvidenceAt(tradeTime: Date): QuoteReviewEvidence {
+function underlyingEvidenceAt(tradeTime: Date, overrides: Partial<Extract<QuoteReviewEvidence, { status: "AVAILABLE" }>> = {}): QuoteReviewEvidence {
   return {
     status: "AVAILABLE",
     requestedSymbol: "SPY",
@@ -95,6 +96,7 @@ function underlyingEvidenceAt(tradeTime: Date): QuoteReviewEvidence {
     tradeTime,
     requestStartedAt: tradeTime,
     responseReceivedAt: tradeTime,
+    ...overrides,
   };
 }
 
@@ -110,9 +112,39 @@ describe("evaluateOptionIdentity", () => {
     expect(result).toEqual({ status: "PASS", reasonCode: "IDENTITY_VALID", detail: expect.any(String) });
   });
 
-  it("fails with IDENTITY_MISSING when the provider symbol is absent - never synthesized", () => {
+  it("is UNKNOWN (never FAIL, never PASS) when the provider symbol is absent - insufficient evidence, not a fabricated mismatch", () => {
     const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { providerSymbol: null } }) });
-    expect(result.status).toBe("FAIL");
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("IDENTITY_MISSING");
+  });
+
+  it("is UNKNOWN when structured expirationDate is absent", () => {
+    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { expirationDate: null } }) });
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("IDENTITY_MISSING");
+  });
+
+  it("is UNKNOWN when the raw optionRoot field is absent (the real live-derived capture's own shape)", () => {
+    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { optionRoot: null } }) });
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("IDENTITY_MISSING");
+  });
+
+  it("is UNKNOWN when chain root symbol is absent", () => {
+    const result = evaluateOptionIdentity({ ...base(), envelope: { rootSymbol: null } });
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("IDENTITY_MISSING");
+  });
+
+  it("is UNKNOWN when structured putCall is absent", () => {
+    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { putCall: null } }) });
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("IDENTITY_MISSING");
+  });
+
+  it("is UNKNOWN when structured strikePrice is absent", () => {
+    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: null } }) });
+    expect(result.status).toBe("UNKNOWN");
     expect(result.reasonCode).toBe("IDENTITY_MISSING");
   });
 
@@ -122,14 +154,8 @@ describe("evaluateOptionIdentity", () => {
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
 
-  it("fails on chain root symbol mismatch", () => {
+  it("fails (actual disagreement) on chain root symbol mismatch", () => {
     const result = evaluateOptionIdentity({ ...base(), envelope: { rootSymbol: "QQQ" } });
-    expect(result.status).toBe("FAIL");
-    expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
-  });
-
-  it("fails on missing chain root symbol", () => {
-    const result = evaluateOptionIdentity({ ...base(), envelope: { rootSymbol: null } });
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
@@ -146,13 +172,25 @@ describe("evaluateOptionIdentity", () => {
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
 
+  it("fails (wrong optionRoot) when the raw optionRoot disagrees with the requested underlying", () => {
+    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { optionRoot: "QQQ" } }) });
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
+  });
+
+  it("never derives/fills optionRoot from the provider symbol - a present-but-wrong optionRoot fails even when the symbol itself would parse to the right underlying", () => {
+    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { optionRoot: "QQQ" } }) }); // symbol is still "SPY   261016P00655000"
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
+  });
+
   it("fails on a strike mismatch between structured strikePrice and the strike map key", () => {
     const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ location: { strikeMapKey: "660.0" } }) });
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
 
-  it("fails on a strike mismatch between the provider symbol's own encoded strike and strikePrice", () => {
+  it("fails (wrong strike) on a strike mismatch between the provider symbol's own encoded strike and strikePrice", () => {
     const result = evaluateOptionIdentity({
       ...base(),
       contract: contractWith({ identity: { strikePrice: 660 }, location: { strikeMapKey: "660.0" } }),
@@ -161,9 +199,15 @@ describe("evaluateOptionIdentity", () => {
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
 
-  it("accepts a strike that matches under decimal-normalized equality (655 vs 655.0000)", () => {
-    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: 655.0 }, location: { strikeMapKey: "655.0000" } }) });
-    expect(result.status).toBe("PASS");
+  it("accepts decimal-equivalent strike representations (655, 655.0, 655.00) as equal", () => {
+    expect(evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: 655.0 }, location: { strikeMapKey: "655.0000" } }) }).status).toBe("PASS");
+    expect(evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: 655 }, location: { strikeMapKey: "655.00" } }) }).status).toBe("PASS");
+  });
+
+  it("does NOT silently round a materially different decimal strike (655.0001 vs 655) into equality", () => {
+    const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: 655.0001 } }) }); // map key/provider symbol still say 655
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
 
   it("fails on a non-finite/non-positive strikePrice", () => {
@@ -172,7 +216,7 @@ describe("evaluateOptionIdentity", () => {
     expect(evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: NaN } }) }).status).toBe("FAIL");
   });
 
-  it("fails on an expiration mismatch between the expiration map key and the provider symbol's encoded expiration", () => {
+  it("fails (wrong expiration) on a mismatch between the expiration map key and the provider symbol's encoded expiration", () => {
     const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ location: { expirationMapKey: "2026-11-20:51" } }) });
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
@@ -180,12 +224,6 @@ describe("evaluateOptionIdentity", () => {
 
   it("fails on an expiration mismatch between structured expirationDate and the expiration map key", () => {
     const result = evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { expirationDate: new Date("2026-11-20T20:00:00.000Z") } }) });
-    expect(result.status).toBe("FAIL");
-    expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
-  });
-
-  it("fails on an optionRoot (derived from the provider symbol) mismatch against the requested underlying", () => {
-    const result = evaluateOptionIdentity({ ...base(), requestedUnderlying: "QQQ" });
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
@@ -203,6 +241,18 @@ describe("evaluateOptionIdentity", () => {
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
     expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(true);
+  });
+
+  it("flags a conflicting duplicate even when the provider symbol matches but OTHER evidence (e.g. bid) differs", () => {
+    const a = contractWith({ quote: { bid: 1.2 } });
+    const b = contractWith({ quote: { bid: 1.5 } }); // identical identity, same symbol, but a different bid
+    expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(true);
+  });
+
+  it("does NOT flag a harmless identical duplicate observation (fully evidence-identical)", () => {
+    const a = contractWith({});
+    const b = contractWith({}); // structurally identical to a in every field
+    expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(false);
   });
 
   it("does NOT flag duplicates for two genuinely different contracts (different strikes)", () => {
@@ -277,6 +327,18 @@ describe("evaluateQuoteFreshness", () => {
     expect(result.reasonCode).toBe("QUOTE_TIMESTAMP_INVALID");
   });
 
+  it("rejects the exact Codex-reproduced 1e20 timestamp (an astronomically large but finite integer that produces an Invalid Date) rather than PASSing with ageMs: NaN", () => {
+    const result = evaluateQuoteFreshness({ quoteTimeInLong: 1e20, ...transport, evaluationNow: EVALUATION_NOW });
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("QUOTE_TIMESTAMP_INVALID");
+    expect(result.ageMs).toBeNull();
+  });
+
+  it("rejects NaN and Infinity quoteTimeInLong", () => {
+    expect(evaluateQuoteFreshness({ quoteTimeInLong: NaN, ...transport, evaluationNow: EVALUATION_NOW }).status).toBe("FAIL");
+    expect(evaluateQuoteFreshness({ quoteTimeInLong: Infinity, ...transport, evaluationNow: EVALUATION_NOW }).status).toBe("FAIL");
+  });
+
   it("rejects (never clamps) a quote timestamp after responseReceivedAt", () => {
     const future = RESPONSE_RECEIVED_AT.getTime() + 1000;
     const result = evaluateQuoteFreshness({ quoteTimeInLong: future, ...transport, evaluationNow: EVALUATION_NOW });
@@ -285,9 +347,6 @@ describe("evaluateQuoteFreshness", () => {
   });
 
   it("treats a far-future timestamp (seconds mistaken as milliseconds, inverted) honestly - rejected as future, not silently accepted", () => {
-    // A seconds-unit timestamp (~10 digits) is actually smaller than a real ms timestamp, so it
-    // resolves to 1970 and fails as QUOTE_STALE (covered below) - here we cover the inverse
-    // mistake shape (a value larger than responseReceivedAt) to prove it is always rejected.
     const result = evaluateQuoteFreshness({ quoteTimeInLong: RESPONSE_RECEIVED_AT.getTime() * 1000, ...transport, evaluationNow: EVALUATION_NOW });
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("QUOTE_TIMESTAMP_FUTURE");
@@ -331,6 +390,12 @@ describe("evaluateQuoteFreshness", () => {
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("TRANSPORT_TIMESTAMPS_INVALID");
   });
+
+  it("fails on an invalid transport timestamp (Invalid Date)", () => {
+    const result = evaluateQuoteFreshness({ quoteTimeInLong: QUOTE_TIME.getTime(), requestStartedAt: new Date(NaN), responseReceivedAt: RESPONSE_RECEIVED_AT, evaluationNow: EVALUATION_NOW });
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("TRANSPORT_TIMESTAMPS_INVALID");
+  });
 });
 
 // =================================================================================================
@@ -349,6 +414,30 @@ describe("evaluateChainDelay", () => {
     const result = evaluateChainDelay(null);
     expect(result.status).toBe("UNKNOWN");
     expect(result.reasonCode).toBe("CHAIN_DELAY_UNKNOWN");
+  });
+});
+
+// =================================================================================================
+// CHAIN ENVELOPE STATUS
+// =================================================================================================
+
+describe("evaluateChainEnvelopeStatus", () => {
+  it("PASSes for SUCCESS", () => {
+    const result = evaluateChainEnvelopeStatus("SUCCESS");
+    expect(result.status).toBe("PASS");
+    expect(result.reasonCode).toBe("CHAIN_ENVELOPE_SUCCESS");
+  });
+
+  it("is UNKNOWN for missing status", () => {
+    const result = evaluateChainEnvelopeStatus(null);
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("CHAIN_ENVELOPE_UNKNOWN");
+  });
+
+  it("fails closed for a non-success actual status (e.g. ERROR)", () => {
+    const result = evaluateChainEnvelopeStatus("ERROR");
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("CHAIN_ENVELOPE_FAILED");
   });
 });
 
@@ -389,9 +478,9 @@ describe("evaluateSessionEligibility", () => {
     expect(evaluateSessionEligibility(params({ evaluationNow: afterClose })).status).toBe("FAIL");
   });
 
-  it("is UNKNOWN on a holiday (session evidence reports no intervals)", () => {
+  it("is a FAIL (genuinely closed, AVAILABLE evidence) on a holiday with no intervals - not UNKNOWN", () => {
     const holiday = sessionEvidenceFor("2026-12-25", { isOpen: false, regularMarketIntervals: [] });
-    expect(evaluateSessionEligibility(params({ sessionEvidence: holiday })).status).toBe("FAIL"); // AVAILABLE evidence, genuinely closed -> SESSION_CLOSED, not UNKNOWN
+    expect(evaluateSessionEligibility(params({ sessionEvidence: holiday })).status).toBe("FAIL");
   });
 
   it("is UNKNOWN when session evidence itself is unavailable", () => {
@@ -489,6 +578,31 @@ describe("evaluateStandardContractTerms", () => {
     expect(result.status).toBe("UNKNOWN");
     expect(result.reasonCode).toBe("CONTRACT_TERMS_UNKNOWN");
   });
+
+  it("is UNSUPPORTED (Codex reproduction) when settlementType=\"C\" and deliverableNote=\"CASH ONLY\" contradict an otherwise-standard-looking shape", () => {
+    const result = evaluateStandardContractTerms(params({ settlementType: "C", deliverableNote: "CASH ONLY" }));
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("CONTRACT_UNSUPPORTED");
+  });
+
+  it("is UNSUPPORTED for a non-physical settlementType alone", () => {
+    expect(evaluateStandardContractTerms(params({ settlementType: "C" })).reasonCode).toBe("CONTRACT_UNSUPPORTED");
+  });
+
+  it("is UNSUPPORTED for a deliverableNote contradicting physical delivery alone", () => {
+    expect(evaluateStandardContractTerms(params({ deliverableNote: "CASH SETTLEMENT ONLY" })).reasonCode).toBe("CONTRACT_UNSUPPORTED");
+  });
+
+  it("is UNSUPPORTED for an unsupported deliverable currencyType (foreign-currency deliverable)", () => {
+    const result = evaluateStandardContractTerms(params({ optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: "EUR" }] }));
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("CONTRACT_UNSUPPORTED");
+  });
+
+  it("still PASSes with the supported physical settlementType \"P\" and a null (absent) deliverableNote/currencyType - the real live-derived capture's own shape", () => {
+    const result = evaluateStandardContractTerms(params({ settlementType: "P", deliverableNote: null, optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: null }] }));
+    expect(result.status).toBe("PASS");
+  });
 });
 
 // =================================================================================================
@@ -520,11 +634,12 @@ describe("evaluateUnderlyingOptionAlignment", () => {
     expect(result.separationMs).toBe(STRICT_QUOTE_MAX_AGE_MS);
   });
 
-  it("fails at 60,001ms of separation", () => {
-    const underlyingTradeTime = new Date(QUOTE_TIME.getTime() - (STRICT_QUOTE_MAX_AGE_MS + 1));
-    const result = evaluateUnderlyingOptionAlignment(params({ underlyingTradeTime, evaluationNow: new Date(underlyingTradeTime.getTime() + 100) }));
+  it("fails when separation exceeds 60,001ms (by construction this also always exceeds at least one side's own individual 60s freshness bound, since separation can never exceed the larger of the two ages)", () => {
+    const quoteTime = EVALUATION_NOW; // age 0
+    const underlyingTradeTime = new Date(EVALUATION_NOW.getTime() - (STRICT_QUOTE_MAX_AGE_MS + 1)); // age 60,001 - separation 60,001 too
+    const result = evaluateUnderlyingOptionAlignment(params({ quoteTime, underlyingTradeTime }));
     expect(result.status).toBe("FAIL");
-    expect(result.reasonCode).toBe("ALIGNMENT_MISALIGNED");
+    expect(result.reasonCode).toBe("ALIGNMENT_STALE_UNDERLYING");
   });
 
   it("fails when the underlying is individually stale (even if separation from option is small)", () => {
@@ -542,21 +657,52 @@ describe("evaluateUnderlyingOptionAlignment", () => {
     expect(result.reasonCode).toBe("ALIGNMENT_STALE_OPTION");
   });
 
+  it("fails (never passes on proximity alone) when either timestamp is in the future relative to the evaluation clock", () => {
+    const future = new Date(EVALUATION_NOW.getTime() + 1000);
+    expect(evaluateUnderlyingOptionAlignment(params({ underlyingTradeTime: future, quoteTime: future })).status).toBe("FAIL");
+    expect(evaluateUnderlyingOptionAlignment(params({ underlyingTradeTime: future })).reasonCode).toBe("ALIGNMENT_STALE_UNDERLYING");
+    expect(evaluateUnderlyingOptionAlignment(params({ quoteTime: future })).reasonCode).toBe("ALIGNMENT_STALE_OPTION");
+  });
+
   it("is UNKNOWN when either timestamp is missing", () => {
     expect(evaluateUnderlyingOptionAlignment(params({ underlyingTradeTime: null })).status).toBe("UNKNOWN");
     expect(evaluateUnderlyingOptionAlignment(params({ quoteTime: null })).status).toBe("UNKNOWN");
   });
 
-  it("fails when quote time and underlying trade time fall in different session intervals", () => {
-    const priorDay = new Date("2026-09-30T18:00:00.000Z");
-    const result = evaluateUnderlyingOptionAlignment(params({ underlyingTradeTime: priorDay, evaluationNow: new Date(priorDay.getTime() + 10) }));
+  it("is UNKNOWN (never PASS merely because two stale-relative-to-session observations are close to each other) when session evidence is unavailable", () => {
+    const unavailable: EquityMarketSessionEvidence = { status: "UNAVAILABLE", reason: "test" };
+    const result = evaluateUnderlyingOptionAlignment(params({ sessionEvidence: unavailable }));
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("ALIGNMENT_UNKNOWN");
+  });
+
+  it("fails when quote time and underlying trade time fall in different regular-session intervals, even though both are individually fresh and close together", () => {
+    // Two intervals within the same session evidence (e.g. a mid-day halt/resumption), with only a
+    // 30-second gap between them - small enough that staleness/separation alone would not catch it.
+    const twoIntervalSession: EquityMarketSessionEvidence = {
+      status: "AVAILABLE",
+      requestedDate: "2026-10-01",
+      returnedDate: "2026-10-01",
+      marketType: "EQUITY",
+      product: "EQ",
+      isOpen: true,
+      regularMarketIntervals: [
+        { start: new Date("2026-10-01T13:30:00.000Z"), end: new Date("2026-10-01T14:00:00.000Z") },
+        { start: new Date("2026-10-01T14:00:30.000Z"), end: new Date("2026-10-01T20:00:00.000Z") },
+      ],
+    };
+    const quoteTime = new Date("2026-10-01T13:59:59.990Z"); // inside interval A
+    const underlyingTradeTime = new Date("2026-10-01T14:00:30.010Z"); // inside interval B
+    const evaluationNow = new Date(underlyingTradeTime.getTime() + 10);
+
+    const result = evaluateUnderlyingOptionAlignment({ sessionEvidence: twoIntervalSession, quoteTime, underlyingTradeTime, evaluationNow });
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("ALIGNMENT_MISALIGNED");
   });
 });
 
 // =================================================================================================
-// FRESHNESS BOUNDARY CONSTANT SHARED
+// OI / VOLUME / DELTA
 // =================================================================================================
 
 describe("OI / volume / delta safe semantics", () => {
@@ -574,10 +720,24 @@ describe("OI / volume / delta safe semantics", () => {
     expect(evaluateTotalVolume(NaN)).toEqual({ status: "UNKNOWN" });
   });
 
+  it("a fractional openInterest (2.9) is UNKNOWN, never truncated to 2", () => {
+    expect(evaluateOpenInterest(2.9)).toEqual({ status: "UNKNOWN" });
+  });
+
+  it("a fractional totalVolume (2.9) is UNKNOWN, never truncated to 2", () => {
+    expect(evaluateTotalVolume(2.9)).toEqual({ status: "UNKNOWN" });
+  });
+
   it("putDelta: reports the absolute value (Scanner convention), UNKNOWN when missing/non-finite", () => {
     expect(evaluatePutDelta(-0.22)).toEqual({ status: "KNOWN", value: 0.22 });
     expect(evaluatePutDelta(null)).toEqual({ status: "UNKNOWN" });
     expect(evaluatePutDelta(NaN)).toEqual({ status: "UNKNOWN" });
+  });
+
+  it("putDelta: rejects an impossible magnitude (|delta| > 1)", () => {
+    expect(evaluatePutDelta(-1.5)).toEqual({ status: "UNKNOWN" });
+    expect(evaluatePutDelta(1.0000001)).toEqual({ status: "UNKNOWN" });
+    expect(evaluatePutDelta(-1)).toEqual({ status: "KNOWN", value: 1 }); // exactly 1 is the valid boundary
   });
 });
 
@@ -586,17 +746,53 @@ describe("OI / volume / delta safe semantics", () => {
 // =================================================================================================
 
 describe("computeStrictOptionEconomics", () => {
-  it("computes gross bid-based economics for a standard contract", () => {
-    const result = computeStrictOptionEconomics({ standardTermsPassed: true, bid: 1.2, strike: 655, quantity: 1 });
+  const valid = () => ({ identityStatus: "PASS" as const, quoteStatus: "PASS" as const, standardTermsStatus: "PASS" as const, bid: 1.2, strike: 655, quantity: 1 });
+
+  it("computes gross bid-based economics when identity/quote/terms all PASS", () => {
+    const result = computeStrictOptionEconomics(valid());
     expect(result).toEqual({ basis: "GROSS_BID_BEFORE_FEES", grossBidProceeds: 120, grossSecuredCapital: 65500, grossBidReturnOnSecuredCapitalPercent: expect.any(Number) });
   });
 
-  it("is null (unavailable) when standard terms did not pass - unknown contract terms", () => {
-    expect(computeStrictOptionEconomics({ standardTermsPassed: false, bid: 1.2, strike: 655, quantity: 1 })).toBeNull();
+  it("is null when identity did not PASS, even with otherwise-valid numbers", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), identityStatus: "UNKNOWN" })).toBeNull();
+    expect(computeStrictOptionEconomics({ ...valid(), identityStatus: "FAIL" })).toBeNull();
   });
 
-  it("is null for adjusted/unsupported terms (caller passes standardTermsPassed: false)", () => {
-    expect(computeStrictOptionEconomics({ standardTermsPassed: false, bid: 5, strike: 100, quantity: 2 })).toBeNull();
+  it("is null when quote did not PASS", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), quoteStatus: "FAIL" })).toBeNull();
+  });
+
+  it("is null when standard terms did not PASS", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), standardTermsStatus: "UNKNOWN" })).toBeNull();
+    expect(computeStrictOptionEconomics({ ...valid(), standardTermsStatus: "FAIL" })).toBeNull();
+  });
+
+  it("is null for quantity 0", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), quantity: 0 })).toBeNull();
+  });
+
+  it("is null for a negative quantity", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), quantity: -1 })).toBeNull();
+  });
+
+  it("is null for a fractional quantity", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), quantity: 1.5 })).toBeNull();
+  });
+
+  it("is null for zero or negative bid", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), bid: 0 })).toBeNull();
+    expect(computeStrictOptionEconomics({ ...valid(), bid: -1 })).toBeNull();
+  });
+
+  it("is null for a non-finite bid", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), bid: NaN })).toBeNull();
+  });
+
+  it("is null for an invalid strike (null, zero, negative, non-finite)", () => {
+    expect(computeStrictOptionEconomics({ ...valid(), strike: null })).toBeNull();
+    expect(computeStrictOptionEconomics({ ...valid(), strike: 0 })).toBeNull();
+    expect(computeStrictOptionEconomics({ ...valid(), strike: -1 })).toBeNull();
+    expect(computeStrictOptionEconomics({ ...valid(), strike: Infinity })).toBeNull();
   });
 });
 
@@ -618,16 +814,28 @@ describe("evaluateStrictOptionEvidence (composable bundle)", () => {
     quantity: 1,
   });
 
-  it("produces a fully-passing bundle with computed economics for an all-valid standard contract", () => {
+  it("produces a fully-passing bundle with computed economics for an all-valid standard contract and a valid underlying", () => {
     const result = evaluateStrictOptionEvidence(baseParams());
+    expect(result.envelopeStatus.status).toBe("PASS");
     expect(result.identity.status).toBe("PASS");
     expect(result.quote.status).toBe("PASS");
     expect(result.quoteTimestamp.status).toBe("PASS");
     expect(result.chainDelay.status).toBe("PASS");
+    expect(result.underlyingEligibility.eligible).toBe(true);
     expect(result.session.status).toBe("PASS");
     expect(result.contractTerms.status).toBe("PASS");
     expect(result.alignment.status).toBe("PASS");
     expect(result.economics).not.toBeNull();
+  });
+
+  it("the chain envelope gate fails closed for a non-SUCCESS status - never authorizing strict evidence from an unsuccessful response", () => {
+    const result = evaluateStrictOptionEvidence({ ...baseParams(), envelope: { ...BASE_ENVELOPE, status: "ERROR" } });
+    expect(result.envelopeStatus.status).toBe("FAIL");
+  });
+
+  it("the chain envelope gate is UNKNOWN for a missing status", () => {
+    const result = evaluateStrictOptionEvidence({ ...baseParams(), envelope: { ...BASE_ENVELOPE, status: null as unknown as string } });
+    expect(result.envelopeStatus.status).toBe("UNKNOWN");
   });
 
   it("has no economics when the quote is a zero bid (the observed live-capture shape)", () => {
@@ -643,8 +851,53 @@ describe("evaluateStrictOptionEvidence (composable bundle)", () => {
   });
 
   it("independent gates can each independently fail without crashing the overall bundle", () => {
-    const result = evaluateStrictOptionEvidence({ ...baseParams(), envelope: { rootSymbol: "SPY", isDelayed: true } });
+    const result = evaluateStrictOptionEvidence({ ...baseParams(), envelope: { ...BASE_ENVELOPE, isDelayed: true } });
     expect(result.chainDelay.status).toBe("FAIL");
     expect(result.identity.status).toBe("PASS"); // unaffected by the unrelated chain-delay failure
+  });
+
+  describe("strict underlying eligibility gates session/alignment - a bundle can never show all-PASS from a failed/unavailable underlying (Codex reproduction)", () => {
+    it("a wrong (mismatched) underlying symbol blocks session/alignment from PASSing", () => {
+      const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { returnedSymbol: "QQQ" }) });
+      expect(result.underlyingEligibility.eligible).toBe(false);
+      expect(result.session.status).not.toBe("PASS");
+      expect(result.alignment.status).not.toBe("PASS");
+    });
+
+    it("non-realtime underlying evidence blocks session/alignment from PASSing", () => {
+      const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { realtime: false }) });
+      expect(result.underlyingEligibility.eligible).toBe(false);
+      expect(result.session.status).not.toBe("PASS");
+      expect(result.alignment.status).not.toBe("PASS");
+    });
+
+    it("an unsupported underlying asset type (e.g. BOND) blocks session/alignment from PASSing", () => {
+      const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { assetMainType: "BOND" }) });
+      expect(result.underlyingEligibility.eligible).toBe(false);
+      expect(result.session.status).not.toBe("PASS");
+      expect(result.alignment.status).not.toBe("PASS");
+    });
+
+    it("a nonpositive underlying price blocks session/alignment from PASSing", () => {
+      const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { price: -1 }) });
+      expect(result.underlyingEligibility.eligible).toBe(false);
+      expect(result.session.status).not.toBe("PASS");
+      expect(result.alignment.status).not.toBe("PASS");
+    });
+
+    it("a stale underlying trade time blocks session/alignment from PASSing", () => {
+      const staleTradeTime = new Date(EVALUATION_NOW.getTime() - 130_000); // beyond the 120s Phase-2 freshness window
+      const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: underlyingEvidenceAt(staleTradeTime) });
+      expect(result.underlyingEligibility.eligible).toBe(false);
+      expect(result.session.status).not.toBe("PASS");
+      expect(result.alignment.status).not.toBe("PASS");
+    });
+
+    it("an unavailable underlying evidence blocks session/alignment from PASSing", () => {
+      const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: { status: "UNAVAILABLE", reason: "test" } });
+      expect(result.underlyingEligibility.eligible).toBe(false);
+      expect(result.session.status).not.toBe("PASS");
+      expect(result.alignment.status).not.toBe("PASS");
+    });
   });
 });

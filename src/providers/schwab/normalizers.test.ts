@@ -11,7 +11,7 @@ import {
 } from "./normalizers";
 import strictOptionChainLiveDerived from "./__fixtures__/strict-option-chain-live-derived.json";
 import { makeSyntheticStandardSpyChainPayload } from "./__fixtures__/synthetic-option-chain";
-import { evaluateBidAsk } from "@/domain/trade-prep/optionEvidence";
+import { evaluateBidAsk, evaluateOptionIdentity } from "@/domain/trade-prep/optionEvidence";
 
 const TRANSPORT = { requestStartedAt: new Date("2026-09-25T19:58:00.000Z"), responseReceivedAt: new Date("2026-09-25T19:58:00.250Z") };
 
@@ -250,11 +250,11 @@ describe("normalizeSchwabStrictOptionChainSnapshot (Trade Prep strict evidence f
     expect(contract.identity.putCall).toBe("PUT");
     expect(contract.identity.strikePrice).toBe(550);
     expect(contract.identity.expirationDate?.toISOString()).toBe("2026-10-01T20:00:00.000Z");
-    // optionRoot is DERIVED by this normalizer from the real preserved symbol above (OCC parsing,
-    // a consistency-check input only) - never a raw Schwab "optionRoot" field. The sanitized
-    // diagnostic confirmed Schwab's own raw optionRoot key exists in rawKeys but did NOT preserve
-    // its literal value, so it is never asserted on here as captured evidence.
-    expect(contract.identity.optionRoot).toBe("SPY");
+    // optionRoot is Schwab's own RAW field, read as-is - NEVER derived from the provider symbol.
+    // The sanitized diagnostic confirmed the raw optionRoot key exists in rawKeys but did NOT
+    // preserve its literal value, so this correctly stays null - never guessed as "SPY" just
+    // because the symbol happens to parse that way under OCC convention.
+    expect(contract.identity.optionRoot).toBeNull();
 
     expect(contract.quote).toEqual({ bid: 0, ask: 0.01, quoteTimeInLong: 1790866052584 }); // real observed zero bid
     expect(contract.terms).toEqual({
@@ -326,6 +326,49 @@ describe("normalizeSchwabStrictOptionChainSnapshot (Trade Prep strict evidence f
     const result = normalizeSchwabStrictOptionChainSnapshot(makeSyntheticStandardSpyChainPayload(), REQUEST, TRANSPORT_WITH_DATE);
     if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
     expect(evaluateBidAsk(result.contracts[0]!).status).toBe("PASS"); // synthetic positive bid - never claimed as captured evidence
+  });
+
+  it("the live-derived capture's missing raw optionRoot keeps strict identity at UNKNOWN (insufficient evidence), never a false PASS or a guessed value", () => {
+    const result = normalizeSchwabStrictOptionChainSnapshot(strictOptionChainLiveDerived, REQUEST, TRANSPORT_WITH_DATE);
+    if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    expect(result.contracts[0]!.identity.optionRoot).toBeNull();
+    const identity = evaluateOptionIdentity({ requestedUnderlying: "SPY", envelope: result.envelope, contract: result.contracts[0]! });
+    expect(identity.status).toBe("UNKNOWN");
+    expect(identity.reasonCode).toBe("IDENTITY_MISSING");
+  });
+
+  describe("strict numeric readers reject coercion (Codex blocker repair)", () => {
+    const payloadWith = (contractOverrides: Record<string, unknown>) => makeSyntheticStandardSpyChainPayload({ contractOverrides });
+
+    it("a numeric-string bid never becomes a valid number", () => {
+      const result = normalizeSchwabStrictOptionChainSnapshot(payloadWith({ bid: "1" }), REQUEST, TRANSPORT_WITH_DATE);
+      if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+      expect(result.contracts[0]!.quote.bid).toBeNull();
+    });
+
+    it("a boolean ask never becomes a valid number", () => {
+      const result = normalizeSchwabStrictOptionChainSnapshot(payloadWith({ ask: true }), REQUEST, TRANSPORT_WITH_DATE);
+      if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+      expect(result.contracts[0]!.quote.ask).toBeNull();
+    });
+
+    it("a numeric-string multiplier never becomes a valid number", () => {
+      const result = normalizeSchwabStrictOptionChainSnapshot(payloadWith({ multiplier: "100" }), REQUEST, TRANSPORT_WITH_DATE);
+      if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+      expect(result.contracts[0]!.terms.multiplier).toBeNull();
+    });
+
+    it("a fractional openInterest is preserved exactly (2.9), never truncated to 2", () => {
+      const result = normalizeSchwabStrictOptionChainSnapshot(payloadWith({ openInterest: 2.9 }), REQUEST, TRANSPORT_WITH_DATE);
+      if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+      expect(result.contracts[0]!.ruleInputs.openInterest).toBe(2.9);
+    });
+
+    it("a fractional totalVolume is preserved exactly (2.9), never truncated to 2", () => {
+      const result = normalizeSchwabStrictOptionChainSnapshot(payloadWith({ totalVolume: 2.9 }), REQUEST, TRANSPORT_WITH_DATE);
+      if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+      expect(result.contracts[0]!.ruleInputs.totalVolume).toBe(2.9);
+    });
   });
 });
 

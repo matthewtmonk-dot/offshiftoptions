@@ -13,7 +13,6 @@ import type {
 } from "@/providers/market-data/types";
 import { STRICT_OPTION_EVIDENCE_POLICY_VERSION } from "@/providers/market-data/types";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
-import { parseOccOptionSymbol } from "@/domain/finance/occOption";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -134,11 +133,14 @@ export function normalizeSchwabOptionChainResponse(payload: unknown): OptionCont
  * normalizeSchwabOptionChainResponse above, which stays completely unmodified. Where that
  * function synthesizes a fallback symbol and flattens/drops contract-terms and quote-timing
  * evidence for the production-approved Scanner, this function does the opposite: it is a purely
- * mechanical, lossless extraction of every field the strict evidence contract needs, preserving
- * `null` for anything missing or the wrong type rather than ever fabricating or falling back to a
- * different field. It performs NO cross-field consistency checking or validation itself (no
- * identity/quote/terms/session judgment calls) - that is entirely the job of the pure evaluators
- * in src/domain/trade-prep/optionEvidence.ts, which this function's output feeds.
+ * mechanical extraction of every field the strict evidence contract needs, preserving `null` for
+ * anything missing, the wrong JavaScript type, or not finite, rather than ever fabricating,
+ * coercing, or falling back to a different field (see `strictNumber`'s own doc comment - a numeric
+ * string, a boolean, or a fractional value where an integer is later required all become `null`/
+ * the raw value as-is, never a manufactured number). It performs NO cross-field consistency
+ * checking or validation itself (no identity/quote/terms/session judgment calls) - that is
+ * entirely the job of the pure evaluators in src/domain/trade-prep/optionEvidence.ts, which this
+ * function's output feeds.
  */
 export function normalizeSchwabStrictOptionChainSnapshot(
   payload: unknown,
@@ -204,21 +206,20 @@ function strictContractFrom(
     identity: {
       providerSymbol,
       putCall: record ? exactStringValue(record.putCall) : null,
-      strikePrice: record ? numberValue(record.strikePrice) : null,
+      strikePrice: record ? strictNumber(record.strikePrice) : null,
       expirationDate: record ? dateValueWithExplicitOffset(record.expirationDate) : null,
-      // Derived via OCC-style parsing of the provider's own exact symbol - a consistency-check
-      // input only, never an authoritative raw field (Schwab's chain response has no field named
-      // "optionRoot"). Null when the symbol is absent or doesn't parse as a recognizable
-      // OCC-style option symbol.
-      optionRoot: providerSymbol ? (parseOccOptionSymbol(providerSymbol)?.underlying ?? null) : null,
+      // Schwab's own raw `optionRoot` field, read as-is - NEVER derived from the provider symbol
+      // (OCC-style parsing of the symbol is a consistency-check input for the pure evaluators
+      // only, never a source of truth for this structured field - see optionEvidence.ts).
+      optionRoot: record ? exactStringValue(record.optionRoot) : null,
     },
     quote: {
-      bid: record ? numberValue(record.bid) : null,
-      ask: record ? numberValue(record.ask) : null,
-      quoteTimeInLong: record ? numberValue(record.quoteTimeInLong) : null,
+      bid: record ? strictNumber(record.bid) : null,
+      ask: record ? strictNumber(record.ask) : null,
+      quoteTimeInLong: record ? strictNumber(record.quoteTimeInLong) : null,
     },
     terms: {
-      multiplier: record ? numberValue(record.multiplier) : null,
+      multiplier: record ? strictNumber(record.multiplier) : null,
       nonStandard: record && typeof record.nonStandard === "boolean" ? record.nonStandard : null,
       mini: record && typeof record.mini === "boolean" ? record.mini : null,
       optionDeliverablesList: record ? deliverablesListValue(record.optionDeliverablesList) : null,
@@ -226,11 +227,27 @@ function strictContractFrom(
       deliverableNote: record ? stringValue(record.deliverableNote) : null,
     },
     ruleInputs: {
-      openInterest: record ? integerValue(record.openInterest) : null,
-      totalVolume: record ? integerValue(record.totalVolume) : null,
-      delta: record ? numberValue(record.delta) : null,
+      // strictNumber, never integerValue - a fractional raw value (e.g. 2.9) must be preserved
+      // exactly so the strict evaluators (which independently require Number.isInteger) can
+      // honestly report it as UNKNOWN, rather than having the normalizer silently truncate it
+      // into a false-looking valid integer (2.9 must never become 2).
+      openInterest: record ? strictNumber(record.openInterest) : null,
+      totalVolume: record ? strictNumber(record.totalVolume) : null,
+      delta: record ? strictNumber(record.delta) : null,
     },
   };
+}
+
+/**
+ * STRICT raw-type numeric reader for Trade Prep evidence - an actual JavaScript `number`, finite,
+ * full stop. Never `Number(...)`, never coerces a numeric string ("1"), a boolean (`true`/`false`
+ * -> 1/0), or any other type - those must all become `null` (invalid/unavailable evidence) rather
+ * than a manufactured valid number. Deliberately separate from the legacy `numberValue` below,
+ * which intentionally stays coercive for the existing, unmodified normalizers that already depend
+ * on that leniency - this function exists so strict evidence can never inherit it.
+ */
+function strictNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /** `null` = the field itself was absent/not-an-array; `[]` = present and genuinely empty - see

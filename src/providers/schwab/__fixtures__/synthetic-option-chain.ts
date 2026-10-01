@@ -16,6 +16,7 @@ export function makeSyntheticStandardSpyContract(overrides: SyntheticContractOve
   return {
     putCall: "PUT",
     symbol: "SPY   261016P00655000",
+    optionRoot: "SPY", // synthetic - the real sanitized capture never preserved this raw field's value
     strikePrice: 655,
     expirationDate: "2026-10-16T20:00:00.000+00:00",
     bid: 1.25,

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MarketDataProvider, MarketQuote, PriceCandle } from "./types";
 import { clearMarketDataCacheForTests, clearMarketDataCacheForUser, MarketDataProviderError, withMarketDataCache } from "./cache";
+import { evaluateQuoteFreshness } from "@/domain/trade-prep/optionEvidence";
 
 function quote(symbol: string, price: number): MarketQuote {
   return { symbol, price, asOf: new Date("2026-08-31T12:00:00.000Z") };
@@ -367,6 +368,36 @@ describe("withMarketDataCache", () => {
       }
     });
 
+    it("Codex blocker repair item 15.A - a quote cached while fresh still evaluates as STALE once real elapsed time (re-derived evaluationNow) exceeds the freshness window, even though the 30s cache entry itself is still live", async () => {
+      const fetchedAtMs = 1_700_000_000_000;
+      const snapshot = strictSnapshot(fetchedAtMs);
+      const getStrictOptionChainSnapshot = vi.fn(async () => snapshot);
+      const inner = provider({ getStrictOptionChainSnapshot });
+      let currentTime = fetchedAtMs; // cache's own `now()` clock - independent of evaluationNow below
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one", { strictOptionChainTtlMs: 30_000, now: () => currentTime });
+
+      await cached.getStrictOptionChainSnapshot("SPY");
+      currentTime = fetchedAtMs + 10_000; // 10s later - well inside the 30s cache TTL, so this is a cache HIT
+      const second = await cached.getStrictOptionChainSnapshot("SPY");
+      expect(getStrictOptionChainSnapshot).toHaveBeenCalledTimes(1); // confirms the second call was indeed served from cache
+
+      if (second.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+      // The evaluator re-derives freshness from a REAL evaluation clock 70 seconds after the quote
+      // was fetched - well past the 60s strict freshness window - never from the cache's own TTL,
+      // which (at 10s elapsed) would still call this entry "live."
+      const evaluationNow = new Date(fetchedAtMs + 70_000);
+      const freshness = evaluateQuoteFreshness({
+        quoteTimeInLong: second.contracts[0]!.quote.quoteTimeInLong,
+        requestStartedAt: second.transport.requestStartedAt,
+        responseReceivedAt: second.transport.responseReceivedAt,
+        evaluationNow,
+      });
+      expect(freshness.status).toBe("FAIL");
+      expect(freshness.reasonCode).toBe("QUOTE_STALE");
+    });
+
+    // Codex blocker repair item 15.B - strict cache namespace cannot collide with the legacy chain
+    // cache (already proven below by "never shares cache state with the legacy getOptionChain path").
     it("isolates the strict cache key by request window/contract type, same as the legacy getOptionChain key", async () => {
       const getStrictOptionChainSnapshot = vi.fn(async () => strictSnapshot(1_700_000_000_000));
       const cached = withMarketDataCache(provider({ getStrictOptionChainSnapshot }), "schwab:user:user-a:connection:one");
@@ -399,6 +430,7 @@ describe("withMarketDataCache", () => {
       expect(getStrictOptionChainSnapshot).toHaveBeenCalledWith("SPY", undefined, controller.signal);
     });
 
+    // Codex blocker repair item 15.C - strict in-flight aborted/invalidation result cannot publish late.
     it("never publishes a result to cache when the caller's own signal is already aborted, even if the provider call resolved anyway", async () => {
       const cached = withMarketDataCache(provider({ getStrictOptionChainSnapshot: async () => strictSnapshot(1_700_000_000_000) }), "schwab:user:user-a:connection:one");
       const controller = new AbortController();
