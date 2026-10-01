@@ -321,6 +321,10 @@ describe("withMarketDataCache", () => {
   });
 
   describe("getStrictOptionChainSnapshot (Trade Prep strict evidence foundation)", () => {
+    // SYNTHETIC cache-mechanics fixture - not derived from any live Schwab capture (see
+    // src/providers/schwab/__fixtures__/strict-option-chain-live-derived.json for the repo's one
+    // real sanitized observation). This file only needs *some* StrictOptionChainSnapshot-shaped
+    // object to exercise caching/invalidation/abort behavior, never provider-evidence claims.
     function strictSnapshot(quoteTimeInLong: number) {
       return {
         status: "AVAILABLE" as const,

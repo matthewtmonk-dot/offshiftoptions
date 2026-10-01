@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SCHWAB_QUOTE_BATCH_SIZE, SchwabMarketDataProvider } from "./market-data";
-import strictOptionChainCapture from "./__fixtures__/strict-option-chain-capture.json";
+import strictOptionChainLiveDerived from "./__fixtures__/strict-option-chain-live-derived.json";
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), { status });
@@ -297,7 +297,7 @@ describe("SchwabMarketDataProvider.getStrictOptionChainSnapshot (Trade Prep stri
     const urls: URL[] = [];
     const fetchFn = (async (url: string | URL) => {
       urls.push(new URL(url));
-      return jsonResponseWithHeaders(strictOptionChainCapture, { date: "Wed, 30 Sep 2026 14:00:00 GMT" });
+      return jsonResponseWithHeaders(strictOptionChainLiveDerived, { date: "Thu, 01 Oct 2026 14:47:33 GMT" });
     }) as unknown as typeof fetch;
 
     const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
@@ -312,17 +312,17 @@ describe("SchwabMarketDataProvider.getStrictOptionChainSnapshot (Trade Prep stri
 
     expect(result.status).toBe("AVAILABLE");
     if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
-    expect(result.transport.httpDateHeader).toBe("Wed, 30 Sep 2026 14:00:00 GMT");
+    expect(result.transport.httpDateHeader).toBe("Thu, 01 Oct 2026 14:47:33 GMT");
     expect(result.transport.requestStartedAt).toBeInstanceOf(Date);
     expect(result.transport.responseReceivedAt.getTime()).toBeGreaterThanOrEqual(result.transport.requestStartedAt.getTime());
-    expect(result.contracts[0]!.identity.providerSymbol).toBe("SPY   261016P00655000");
+    expect(result.contracts[0]!.identity.providerSymbol).toBe("SPY   261001P00550000");
   });
 
   it("never calls or depends on getOptionChain/normalizeSchwabOptionChainResponse - its own independent request/response path", async () => {
     let callCount = 0;
     const fetchFn = (async () => {
       callCount += 1;
-      return jsonResponse(strictOptionChainCapture);
+      return jsonResponse(strictOptionChainLiveDerived);
     }) as unknown as typeof fetch;
 
     const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
@@ -343,7 +343,7 @@ describe("SchwabMarketDataProvider.getStrictOptionChainSnapshot (Trade Prep stri
     let receivedSignal: AbortSignal | undefined;
     const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
       receivedSignal = init?.signal ?? undefined;
-      return jsonResponse(strictOptionChainCapture);
+      return jsonResponse(strictOptionChainLiveDerived);
     }) as unknown as typeof fetch;
 
     const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });

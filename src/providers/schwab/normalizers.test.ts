@@ -9,7 +9,9 @@ import {
   normalizeSchwabQuotesResponse,
   normalizeSchwabStrictOptionChainSnapshot,
 } from "./normalizers";
-import strictOptionChainCapture from "./__fixtures__/strict-option-chain-capture.json";
+import strictOptionChainLiveDerived from "./__fixtures__/strict-option-chain-live-derived.json";
+import { makeSyntheticStandardSpyChainPayload } from "./__fixtures__/synthetic-option-chain";
+import { evaluateBidAsk } from "@/domain/trade-prep/optionEvidence";
 
 const TRANSPORT = { requestStartedAt: new Date("2026-09-25T19:58:00.000Z"), responseReceivedAt: new Date("2026-09-25T19:58:00.250Z") };
 
@@ -225,10 +227,18 @@ describe("Schwab market-data normalizers", () => {
 
 describe("normalizeSchwabStrictOptionChainSnapshot (Trade Prep strict evidence foundation)", () => {
   const REQUEST = { requestedUnderlying: "SPY", fromDate: null, toDate: null, contractType: "PUT" as const };
-  const TRANSPORT_WITH_DATE = { requestStartedAt: new Date("2026-09-30T14:00:00.000Z"), responseReceivedAt: new Date("2026-09-30T14:00:00.300Z"), httpDateHeader: "Wed, 30 Sep 2026 14:00:00 GMT" };
+  const TRANSPORT_WITH_DATE = { requestStartedAt: new Date("2026-10-01T14:47:32.861Z"), responseReceivedAt: new Date("2026-10-01T14:47:33.602Z"), httpDateHeader: "Thu, 01 Oct 2026 14:47:33 GMT" };
 
-  it("extracts the full strict evidence shape from the sanitized live-derived capture, preserving the exact provider symbol including its padding", () => {
-    const result = normalizeSchwabStrictOptionChainSnapshot(strictOptionChainCapture, REQUEST, TRANSPORT_WITH_DATE);
+  /**
+   * strict-option-chain-live-derived.json is the ONE real sanitized observation this repo has (a
+   * single approved one-call read-only diagnostic against SPY, captured 2026-10-01T14:47:33.602Z -
+   * see PROJECT_HANDOFF.md). Every value asserted below is literally what that diagnostic
+   * preserved - a zero-bid, same-day (0 DTE) contract. It is correct and expected for this
+   * contract to FAIL strict quote eligibility (see the dedicated zero-bid test further down) -
+   * that is exactly what was observed, not a test-construction mistake.
+   */
+  it("mechanically preserves every real observed field from the live-derived capture, including the exact padded provider symbol", () => {
+    const result = normalizeSchwabStrictOptionChainSnapshot(strictOptionChainLiveDerived, REQUEST, TRANSPORT_WITH_DATE);
     expect(result.status).toBe("AVAILABLE");
     if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
 
@@ -236,29 +246,33 @@ describe("normalizeSchwabStrictOptionChainSnapshot (Trade Prep strict evidence f
     expect(result.contracts).toHaveLength(1);
     const contract = result.contracts[0]!;
 
-    expect(contract.identity.providerSymbol).toBe("SPY   261016P00655000"); // exact, including Schwab's own padding - never trimmed
+    expect(contract.identity.providerSymbol).toBe("SPY   261001P00550000"); // exact, including Schwab's own padding - never trimmed
     expect(contract.identity.putCall).toBe("PUT");
-    expect(contract.identity.strikePrice).toBe(655);
-    expect(contract.identity.expirationDate?.toISOString()).toBe("2026-10-16T20:00:00.000Z");
-    expect(contract.identity.optionRoot).toBe("SPY"); // derived via OCC parsing, consistency-check only
+    expect(contract.identity.strikePrice).toBe(550);
+    expect(contract.identity.expirationDate?.toISOString()).toBe("2026-10-01T20:00:00.000Z");
+    // optionRoot is DERIVED by this normalizer from the real preserved symbol above (OCC parsing,
+    // a consistency-check input only) - never a raw Schwab "optionRoot" field. The sanitized
+    // diagnostic confirmed Schwab's own raw optionRoot key exists in rawKeys but did NOT preserve
+    // its literal value, so it is never asserted on here as captured evidence.
+    expect(contract.identity.optionRoot).toBe("SPY");
 
-    expect(contract.quote).toEqual({ bid: 0, ask: 0.02, quoteTimeInLong: 1769533800123 });
+    expect(contract.quote).toEqual({ bid: 0, ask: 0.01, quoteTimeInLong: 1790866052584 }); // real observed zero bid
     expect(contract.terms).toEqual({
       multiplier: 100,
       nonStandard: false,
       mini: false,
-      optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: "USD" }],
+      optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: null }], // currencyType genuinely absent in the sanitized capture
       settlementType: "P",
-      deliverableNote: "100 shares of SPY",
+      deliverableNote: null, // not present in the sanitized capture - never invented
     });
-    expect(contract.ruleInputs).toEqual({ openInterest: 312, totalVolume: 0, delta: -0.015 });
-    expect(contract.location).toEqual({ expirationMapKey: "2026-10-16:16", strikeMapKey: "655.0", originatingMap: "PUT" });
+    expect(contract.ruleInputs).toEqual({ openInterest: 10, totalVolume: 1, delta: 0 });
+    expect(contract.location).toEqual({ expirationMapKey: "2026-10-01:0", strikeMapKey: "550.0", originatingMap: "PUT" });
 
     expect(result.transport).toEqual({
       provider: "SCHWAB",
       requestStartedAt: TRANSPORT_WITH_DATE.requestStartedAt,
       responseReceivedAt: TRANSPORT_WITH_DATE.responseReceivedAt,
-      httpDateHeader: "Wed, 30 Sep 2026 14:00:00 GMT",
+      httpDateHeader: "Thu, 01 Oct 2026 14:47:33 GMT",
       evidencePolicyVersion: "v1",
     });
   });
@@ -295,9 +309,23 @@ describe("normalizeSchwabStrictOptionChainSnapshot (Trade Prep strict evidence f
   });
 
   it("does not modify or call the legacy normalizeSchwabOptionChainResponse output for the same payload", () => {
-    const legacy = normalizeSchwabOptionChainResponse(strictOptionChainCapture);
+    const legacy = normalizeSchwabOptionChainResponse(strictOptionChainLiveDerived);
     expect(legacy).toHaveLength(1);
-    expect(legacy[0]!.symbol).toBe("SPY   261016P00655000"); // legacy path still works, completely independently
+    expect(legacy[0]!.symbol).toBe("SPY   261001P00550000"); // legacy path still works, completely independently
+  });
+
+  it("the live-derived capture's own real zero bid fails strict quote eligibility (a valuable real-data regression, not a constructed failing case)", () => {
+    const result = normalizeSchwabStrictOptionChainSnapshot(strictOptionChainLiveDerived, REQUEST, TRANSPORT_WITH_DATE);
+    if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    const quoteResult = evaluateBidAsk(result.contracts[0]!);
+    expect(quoteResult.status).toBe("FAIL");
+    expect(quoteResult.reasonCode).toBe("ZERO_BID");
+  });
+
+  it("a SYNTHETIC fully-standard chain payload parses to a passing-eligible shape - clearly distinct from the live-derived capture above", () => {
+    const result = normalizeSchwabStrictOptionChainSnapshot(makeSyntheticStandardSpyChainPayload(), REQUEST, TRANSPORT_WITH_DATE);
+    if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    expect(evaluateBidAsk(result.contracts[0]!).status).toBe("PASS"); // synthetic positive bid - never claimed as captured evidence
   });
 });
 

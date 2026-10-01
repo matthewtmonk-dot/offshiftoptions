@@ -1,0 +1,53 @@
+{
+  "symbol": "SPY",
+  "status": "SUCCESS",
+  "underlying": null,
+  "underlyingPrice": 761.16,
+  "strategy": "SINGLE",
+  "interval": 0,
+  "isDelayed": false,
+  "isIndex": false,
+  "putExpDateMap": {
+    "2026-10-01:0": {
+      "550.0": [
+        {
+          "putCall": "PUT",
+          "symbol": "SPY   261001P00550000",
+          "exchangeName": "OPR",
+          "bid": 0,
+          "ask": 0.01,
+          "last": 0.01,
+          "mark": 0.01,
+          "totalVolume": 1,
+          "tradeTimeInLong": 1790862098925,
+          "quoteTimeInLong": 1790866052584,
+          "delta": 0,
+          "gamma": 0,
+          "theta": -0.005,
+          "vega": 0,
+          "rho": 0,
+          "openInterest": 10,
+          "timeValue": 0.01,
+          "intrinsicValue": -211.16,
+          "strikePrice": 550,
+          "expirationDate": "2026-10-01T20:00:00.000+00:00",
+          "daysToExpiration": 0,
+          "expirationType": "W",
+          "lastTradingDay": 1790899200000,
+          "multiplier": 100,
+          "settlementType": "P",
+          "nonStandard": false,
+          "optionDeliverablesList": [
+            {
+              "symbol": "SPY",
+              "assetType": "STOCK",
+              "deliverableUnits": 100,
+              "currencyType": null
+            }
+          ],
+          "mini": false
+        }
+      ]
+    }
+  }
+}

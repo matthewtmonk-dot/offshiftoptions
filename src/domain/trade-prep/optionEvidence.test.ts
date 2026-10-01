@@ -24,6 +24,11 @@ const RESPONSE_RECEIVED_AT = new Date("2026-10-01T17:59:59.950Z");
 
 const BASE_ENVELOPE = { rootSymbol: "SPY", isDelayed: false };
 
+// SYNTHETIC evaluator-unit-test fixture - deliberately NOT derived from any live Schwab capture
+// (see src/providers/schwab/__fixtures__/strict-option-chain-live-derived.json for the repo's one
+// real sanitized observation, which has a zero bid and no reliable optionRoot source value). This
+// factory exists purely to exercise each pure evaluator's own logic in isolation with controlled,
+// always-standard-and-passing inputs that individual tests then deviate from one field at a time.
 function baseContract(): StrictOptionContractSnapshot {
   return {
     location: { expirationMapKey: "2026-10-16:16", strikeMapKey: "655.0", originatingMap: "PUT" },
