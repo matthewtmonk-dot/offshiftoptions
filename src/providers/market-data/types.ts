@@ -120,6 +120,132 @@ export type EquityMarketSessionEvidence =
     }
   | { status: "UNAVAILABLE"; reason: string };
 
+/**
+ * Trade Prep strict option-evidence foundation - an ADDITIVE, parallel path to
+ * OptionContractSnapshot/getOptionChain above, never a replacement. The legacy snapshot path
+ * (OptionContractSnapshot, normalizeSchwabOptionChainResponse) stays exactly as it is for the
+ * production-approved Scanner: it may synthesize a fallback symbol when the provider omits one,
+ * and it drops strict timing/contract-terms evidence entirely. Strict evidence exists because a
+ * future Trade Prep READY/VERIFY/BLOCKED decision needs exactly the opposite guarantees: never a
+ * synthesized identity, and every missing/invalid field preserved as an explicit state rather than
+ * silently dropped. See src/domain/trade-prep/optionEvidence.ts for the pure evaluators built on
+ * these types, and src/providers/schwab/normalizers.ts's normalizeSchwabStrictOptionChainSnapshot
+ * for the one producer. `null` always means "this field was missing, present-but-wrong-type, or
+ * otherwise unusable" - never a fabricated/assumed value (e.g. a missing multiplier is `null`,
+ * never 100).
+ */
+/** Bumped whenever the strict normalizer's field-extraction semantics change. Shared by the
+ * normalizer (stamps it onto every produced snapshot) and the market-data cache (folds it into the
+ * strict cache key), so a cache entry produced under an older policy can never be read back as if
+ * it satisfied a newer one - see StrictOptionChainTransportEvidence.evidencePolicyVersion. */
+export const STRICT_OPTION_EVIDENCE_POLICY_VERSION = "v1";
+
+export type StrictOptionDeliverableEvidence = {
+  symbol: string | null;
+  assetType: string | null;
+  deliverableUnits: number | null;
+  currencyType: string | null;
+};
+
+/** Where this contract was found within the raw chain response - distinct from its own claimed
+ * identity fields (see StrictOptionContractIdentity), so a mismatch between "where we found it"
+ * and "what it claims to be" is independently detectable. */
+export type StrictOptionContractLocation = {
+  expirationMapKey: string;
+  strikeMapKey: string;
+  originatingMap: "PUT" | "CALL";
+};
+
+/** `optionRoot` is DERIVED (via OCC-style parsing of `providerSymbol`, consistency-check only -
+ * see the ticket's own "structured provider fields remain authoritative" rule), never a raw field
+ * Schwab's chain response supplies under that name. `providerSymbol` is preserved EXACTLY as
+ * returned, including any padding - never trimmed, never synthesized when absent. */
+export type StrictOptionContractIdentity = {
+  providerSymbol: string | null;
+  putCall: string | null;
+  strikePrice: number | null;
+  expirationDate: Date | null;
+  optionRoot: string | null;
+};
+
+/** `quoteTimeInLong` is preserved as the raw epoch-millisecond number exactly as returned -
+ * `tradeTimeInLong` is deliberately never captured here at all (see the ticket's own "never use
+ * tradeTimeInLong for bid/ask freshness" rule) - there is nothing for a caller to accidentally
+ * reach for. */
+export type StrictOptionContractQuote = {
+  bid: number | null;
+  ask: number | null;
+  quoteTimeInLong: number | null;
+};
+
+export type StrictOptionContractTerms = {
+  multiplier: number | null;
+  nonStandard: boolean | null;
+  mini: boolean | null;
+  /** `null` = the field itself was absent/invalid; `[]` = the field was present and genuinely
+   * empty - these are two different claims and must never be collapsed into one. */
+  optionDeliverablesList: StrictOptionDeliverableEvidence[] | null;
+  settlementType: string | null;
+  deliverableNote: string | null;
+};
+
+/** Provider-reported rule inputs, preserved as-is. Never described as "live" - only that they were
+ * reported in this one chain response (see this type's own evaluators in optionEvidence.ts). */
+export type StrictOptionContractRuleInputs = {
+  openInterest: number | null;
+  totalVolume: number | null;
+  delta: number | null;
+};
+
+export type StrictOptionContractSnapshot = {
+  location: StrictOptionContractLocation;
+  identity: StrictOptionContractIdentity;
+  quote: StrictOptionContractQuote;
+  terms: StrictOptionContractTerms;
+  ruleInputs: StrictOptionContractRuleInputs;
+};
+
+/** Chain-root, response-level evidence - distinct from any one contract. `isDelayed` is `null`
+ * unless the raw field was an ACTUAL boolean (a string "false", a missing key, or any other shape
+ * all normalize to `null`, never to `false`) - see evaluateChainDelay's own strict-boolean gate. */
+export type StrictOptionChainEnvelope = {
+  status: string | null;
+  /** The chain root's own reported underlying symbol - compared against the requested underlying
+   * and each contract's derived optionRoot for identity consistency. */
+  rootSymbol: string | null;
+  isDelayed: boolean | null;
+};
+
+export type StrictOptionChainRequestEvidence = {
+  requestedUnderlying: string;
+  fromDate: Date | null;
+  toDate: Date | null;
+  contractType: "PUT" | "CALL" | "ALL";
+};
+
+/** This app's own observation evidence around the one Schwab request - never substituted for any
+ * provider-reported quote/trade time. `httpDateHeader` is kept separate and purely informational
+ * (transport evidence, not option-quote evidence - never used by any strict evaluator). */
+export type StrictOptionChainTransportEvidence = {
+  provider: "SCHWAB";
+  requestStartedAt: Date;
+  responseReceivedAt: Date;
+  httpDateHeader: string | null;
+  /** Bumped whenever this normalizer's field-extraction semantics change, so a cache entry keyed
+   * on an older policy version can never be read back as if it satisfied a newer one. */
+  evidencePolicyVersion: string;
+};
+
+export type StrictOptionChainSnapshot =
+  | {
+      status: "AVAILABLE";
+      envelope: StrictOptionChainEnvelope;
+      request: StrictOptionChainRequestEvidence;
+      contracts: StrictOptionContractSnapshot[];
+      transport: StrictOptionChainTransportEvidence;
+    }
+  | { status: "UNAVAILABLE"; reason: string; transport: StrictOptionChainTransportEvidence };
+
 export interface MarketDataProvider {
   getQuote(symbol: string): Promise<MarketQuote>;
   /**
@@ -148,4 +274,9 @@ export interface MarketDataProvider {
   /** Dashboard V2 Phase 2 - full equity regular-session evidence for one NY calendar date
    * ("YYYY-MM-DD"). Optional for the same reason as getQuoteReviewEvidence above. */
   getEquityMarketSessionEvidence?(nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence>;
+  /** Trade Prep strict option-evidence foundation - the additive raw-evidence path (see
+   * StrictOptionChainSnapshot's own doc comment above). Optional for the same reason as the other
+   * Phase-2 evidence methods; a provider that omits this can never produce strict Trade Prep
+   * evidence (never a guess, never a fallback to the legacy getOptionChain shape). */
+  getStrictOptionChainSnapshot?(symbol: string, request?: OptionChainRequest, signal?: AbortSignal): Promise<StrictOptionChainSnapshot>;
 }

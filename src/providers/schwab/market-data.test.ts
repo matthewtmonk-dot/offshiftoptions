@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { SCHWAB_QUOTE_BATCH_SIZE, SchwabMarketDataProvider } from "./market-data";
+import strictOptionChainCapture from "./__fixtures__/strict-option-chain-capture.json";
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), { status });
+}
+
+function jsonResponseWithHeaders(payload: unknown, headers: Record<string, string>) {
+  return new Response(JSON.stringify(payload), { status: 200, headers });
 }
 
 describe("SchwabMarketDataProvider.getQuotes (batch)", () => {
@@ -284,5 +289,67 @@ describe("SchwabMarketDataProvider.getEquityMarketSessionEvidence", () => {
 
     const evidence = await provider.getEquityMarketSessionEvidence("2026-06-15");
     expect(evidence.status).toBe("UNAVAILABLE");
+  });
+});
+
+describe("SchwabMarketDataProvider.getStrictOptionChainSnapshot (Trade Prep strict evidence foundation)", () => {
+  it("requests /chains with the exact same query shape as getOptionChain, and extracts the HTTP Date header as transport evidence", async () => {
+    const urls: URL[] = [];
+    const fetchFn = (async (url: string | URL) => {
+      urls.push(new URL(url));
+      return jsonResponseWithHeaders(strictOptionChainCapture, { date: "Wed, 30 Sep 2026 14:00:00 GMT" });
+    }) as unknown as typeof fetch;
+
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+    const result = await provider.getStrictOptionChainSnapshot("spy", { contractType: "PUT" });
+
+    expect(urls[0]!.pathname.endsWith("/chains")).toBe(true);
+    expect(urls[0]!.searchParams.get("symbol")).toBe("SPY");
+    expect(urls[0]!.searchParams.get("contractType")).toBe("PUT");
+    expect(urls[0]!.searchParams.get("strategy")).toBe("SINGLE");
+    expect(urls[0]!.searchParams.get("includeQuotes")).toBe("TRUE");
+    expect(urls[0]!.searchParams.get("range")).toBe("OTM");
+
+    expect(result.status).toBe("AVAILABLE");
+    if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    expect(result.transport.httpDateHeader).toBe("Wed, 30 Sep 2026 14:00:00 GMT");
+    expect(result.transport.requestStartedAt).toBeInstanceOf(Date);
+    expect(result.transport.responseReceivedAt.getTime()).toBeGreaterThanOrEqual(result.transport.requestStartedAt.getTime());
+    expect(result.contracts[0]!.identity.providerSymbol).toBe("SPY   261016P00655000");
+  });
+
+  it("never calls or depends on getOptionChain/normalizeSchwabOptionChainResponse - its own independent request/response path", async () => {
+    let callCount = 0;
+    const fetchFn = (async () => {
+      callCount += 1;
+      return jsonResponse(strictOptionChainCapture);
+    }) as unknown as typeof fetch;
+
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+    await provider.getStrictOptionChainSnapshot("SPY");
+
+    expect(callCount).toBe(1); // exactly one request - no secondary legacy-path call
+  });
+
+  it("is UNAVAILABLE, never thrown, for a malformed payload", async () => {
+    const fetchFn = (async () => jsonResponse(null)) as unknown as typeof fetch;
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+
+    const result = await provider.getStrictOptionChainSnapshot("SPY");
+    expect(result.status).toBe("UNAVAILABLE");
+  });
+
+  it("forwards an AbortSignal down to the underlying fetch", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      receivedSignal = init?.signal ?? undefined;
+      return jsonResponse(strictOptionChainCapture);
+    }) as unknown as typeof fetch;
+
+    const provider = new SchwabMarketDataProvider({ accessToken: "test-token", fetchFn });
+    const controller = new AbortController();
+    await provider.getStrictOptionChainSnapshot("SPY", {}, controller.signal);
+
+    expect(receivedSignal).toBe(controller.signal);
   });
 });

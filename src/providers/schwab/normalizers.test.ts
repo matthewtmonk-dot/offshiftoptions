@@ -7,7 +7,9 @@ import {
   normalizeSchwabQuoteResponse,
   normalizeSchwabQuoteReviewEvidence,
   normalizeSchwabQuotesResponse,
+  normalizeSchwabStrictOptionChainSnapshot,
 } from "./normalizers";
+import strictOptionChainCapture from "./__fixtures__/strict-option-chain-capture.json";
 
 const TRANSPORT = { requestStartedAt: new Date("2026-09-25T19:58:00.000Z"), responseReceivedAt: new Date("2026-09-25T19:58:00.250Z") };
 
@@ -218,6 +220,84 @@ describe("Schwab market-data normalizers", () => {
 
     expect(quote.companyDescription).toBeNull();
     expect(quote.fundamentals).toBeNull();
+  });
+});
+
+describe("normalizeSchwabStrictOptionChainSnapshot (Trade Prep strict evidence foundation)", () => {
+  const REQUEST = { requestedUnderlying: "SPY", fromDate: null, toDate: null, contractType: "PUT" as const };
+  const TRANSPORT_WITH_DATE = { requestStartedAt: new Date("2026-09-30T14:00:00.000Z"), responseReceivedAt: new Date("2026-09-30T14:00:00.300Z"), httpDateHeader: "Wed, 30 Sep 2026 14:00:00 GMT" };
+
+  it("extracts the full strict evidence shape from the sanitized live-derived capture, preserving the exact provider symbol including its padding", () => {
+    const result = normalizeSchwabStrictOptionChainSnapshot(strictOptionChainCapture, REQUEST, TRANSPORT_WITH_DATE);
+    expect(result.status).toBe("AVAILABLE");
+    if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+
+    expect(result.envelope).toEqual({ status: "SUCCESS", rootSymbol: "SPY", isDelayed: false });
+    expect(result.contracts).toHaveLength(1);
+    const contract = result.contracts[0]!;
+
+    expect(contract.identity.providerSymbol).toBe("SPY   261016P00655000"); // exact, including Schwab's own padding - never trimmed
+    expect(contract.identity.putCall).toBe("PUT");
+    expect(contract.identity.strikePrice).toBe(655);
+    expect(contract.identity.expirationDate?.toISOString()).toBe("2026-10-16T20:00:00.000Z");
+    expect(contract.identity.optionRoot).toBe("SPY"); // derived via OCC parsing, consistency-check only
+
+    expect(contract.quote).toEqual({ bid: 0, ask: 0.02, quoteTimeInLong: 1769533800123 });
+    expect(contract.terms).toEqual({
+      multiplier: 100,
+      nonStandard: false,
+      mini: false,
+      optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: "USD" }],
+      settlementType: "P",
+      deliverableNote: "100 shares of SPY",
+    });
+    expect(contract.ruleInputs).toEqual({ openInterest: 312, totalVolume: 0, delta: -0.015 });
+    expect(contract.location).toEqual({ expirationMapKey: "2026-10-16:16", strikeMapKey: "655.0", originatingMap: "PUT" });
+
+    expect(result.transport).toEqual({
+      provider: "SCHWAB",
+      requestStartedAt: TRANSPORT_WITH_DATE.requestStartedAt,
+      responseReceivedAt: TRANSPORT_WITH_DATE.responseReceivedAt,
+      httpDateHeader: "Wed, 30 Sep 2026 14:00:00 GMT",
+      evidencePolicyVersion: "v1",
+    });
+  });
+
+  it("is UNAVAILABLE (never a fabricated empty-AVAILABLE shape) when the payload is not a usable object", () => {
+    const result = normalizeSchwabStrictOptionChainSnapshot(null, REQUEST, TRANSPORT_WITH_DATE);
+    expect(result.status).toBe("UNAVAILABLE");
+  });
+
+  it("never synthesizes a fallback provider symbol - a contract missing its symbol stays null", () => {
+    const payload = { symbol: "SPY", isDelayed: false, putExpDateMap: { "2026-10-16:16": { "655.0": [{ putCall: "PUT", strikePrice: 655 }] } } };
+    const result = normalizeSchwabStrictOptionChainSnapshot(payload, REQUEST, TRANSPORT_WITH_DATE);
+    if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    expect(result.contracts[0]!.identity.providerSymbol).toBeNull();
+    expect(result.contracts[0]!.identity.optionRoot).toBeNull();
+  });
+
+  it("normalizes isDelayed to null (never false) for a non-boolean or missing value", () => {
+    const stringFalse = normalizeSchwabStrictOptionChainSnapshot({ symbol: "SPY", isDelayed: "false" }, REQUEST, TRANSPORT_WITH_DATE);
+    const missing = normalizeSchwabStrictOptionChainSnapshot({ symbol: "SPY" }, REQUEST, TRANSPORT_WITH_DATE);
+    if (stringFalse.status !== "AVAILABLE" || missing.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    expect(stringFalse.envelope.isDelayed).toBeNull();
+    expect(missing.envelope.isDelayed).toBeNull();
+  });
+
+  it("preserves optionDeliverablesList presence distinctly: null when absent, [] when present and empty", () => {
+    const absent = { symbol: "SPY", isDelayed: false, putExpDateMap: { "2026-10-16:16": { "655.0": [{ symbol: "SPY   261016P00655000", putCall: "PUT", strikePrice: 655 }] } } };
+    const empty = { symbol: "SPY", isDelayed: false, putExpDateMap: { "2026-10-16:16": { "655.0": [{ symbol: "SPY   261016P00655000", putCall: "PUT", strikePrice: 655, optionDeliverablesList: [] }] } } };
+    const absentResult = normalizeSchwabStrictOptionChainSnapshot(absent, REQUEST, TRANSPORT_WITH_DATE);
+    const emptyResult = normalizeSchwabStrictOptionChainSnapshot(empty, REQUEST, TRANSPORT_WITH_DATE);
+    if (absentResult.status !== "AVAILABLE" || emptyResult.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    expect(absentResult.contracts[0]!.terms.optionDeliverablesList).toBeNull();
+    expect(emptyResult.contracts[0]!.terms.optionDeliverablesList).toEqual([]);
+  });
+
+  it("does not modify or call the legacy normalizeSchwabOptionChainResponse output for the same payload", () => {
+    const legacy = normalizeSchwabOptionChainResponse(strictOptionChainCapture);
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0]!.symbol).toBe("SPY   261016P00655000"); // legacy path still works, completely independently
   });
 });
 

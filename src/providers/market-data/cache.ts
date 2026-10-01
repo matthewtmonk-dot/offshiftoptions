@@ -1,4 +1,5 @@
-import type { EquityMarketSessionEvidence, MarketDataProvider, MarketQuote, QuoteReviewEvidence } from "./types";
+import type { EquityMarketSessionEvidence, MarketDataProvider, MarketQuote, OptionChainRequest, QuoteReviewEvidence, StrictOptionChainSnapshot } from "./types";
+import { STRICT_OPTION_EVIDENCE_POLICY_VERSION } from "./types";
 
 type CacheEntry<T> = {
   expiresAt: number;
@@ -20,6 +21,15 @@ type CachePolicy = {
   /** Session evidence for a given NY calendar date is effectively immutable once Schwab reports
    * it, so this can share marketHoursTtlMs's own conservative default rather than needing its own. */
   equityMarketSessionEvidenceTtlMs?: number;
+  /** Trade Prep strict option-evidence foundation - CACHE AGE is never QUOTE AGE: a cache HIT
+   * returns the exact same StrictOptionChainSnapshot object, with its original quoteTimeInLong/
+   * requestStartedAt/responseReceivedAt untouched - this TTL only bounds how often a fresh Schwab
+   * request is made, never how "current" a served snapshot's own evidence is allowed to claim to
+   * be (every strict evaluator re-derives freshness from the current evaluation clock on every
+   * call - see src/domain/trade-prep/optionEvidence.ts). Defaults to the same 30s as the legacy
+   * optionChainTtlMs, per the ticket's own "existing option chain cache TTL may remain 30 seconds"
+   * allowance. */
+  strictOptionChainTtlMs?: number;
   now?: () => number;
 };
 
@@ -48,6 +58,7 @@ export type CachedMarketDataProvider = MarketDataProvider & {
   getQuotes(symbols: string[]): Promise<Map<string, MarketQuote>>;
   getQuoteReviewEvidence(symbol: string, signal?: AbortSignal): Promise<QuoteReviewEvidence>;
   getEquityMarketSessionEvidence(nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence>;
+  getStrictOptionChainSnapshot(symbol: string, request?: OptionChainRequest, signal?: AbortSignal): Promise<StrictOptionChainSnapshot>;
 };
 
 export function withMarketDataCache(
@@ -64,6 +75,7 @@ export function withMarketDataCache(
     marketHours: policy.marketHoursTtlMs ?? 5 * 60_000,
     quoteReviewEvidence: policy.quoteReviewEvidenceTtlMs ?? 5_000,
     equityMarketSessionEvidence: policy.equityMarketSessionEvidenceTtlMs ?? 5 * 60_000,
+    strictOptionChain: policy.strictOptionChainTtlMs ?? 30_000,
   };
 
   return {
@@ -165,6 +177,44 @@ export function withMarketDataCache(
         ttl.equityMarketSessionEvidence,
         now,
         () => provider.getEquityMarketSessionEvidence!(nyDate, signal),
+        signal,
+      );
+    },
+    /**
+     * Trade Prep strict option-evidence foundation. A provider that doesn't implement this
+     * resolves directly to UNAVAILABLE (never cached, never thrown, never a fallback to the
+     * legacy getOptionChain shape - "legacy normalized option snapshots" must never satisfy
+     * strict evidence). The cache key is deliberately isolated from the legacy `chain:` key by
+     * namespace AND folds in STRICT_OPTION_EVIDENCE_POLICY_VERSION, so neither path can ever be
+     * confused with the other and a policy-version bump can never read back an older-shaped
+     * cached snapshot. A cache HIT returns the exact same snapshot object `cached()` already
+     * stored - its quoteTimeInLong/requestStartedAt/responseReceivedAt are never touched,
+     * re-derived, or renewed on a hit (see CachePolicy.strictOptionChainTtlMs's own doc comment).
+     */
+    getStrictOptionChainSnapshot(symbol, request, signal) {
+      if (!provider.getStrictOptionChainSnapshot) {
+        return Promise.resolve({
+          status: "UNAVAILABLE",
+          reason: "Provider does not support strict option-chain evidence.",
+          transport: {
+            provider: "SCHWAB",
+            requestStartedAt: new Date(now()),
+            responseReceivedAt: new Date(now()),
+            httpDateHeader: null,
+            evidencePolicyVersion: STRICT_OPTION_EVIDENCE_POLICY_VERSION,
+          },
+        });
+      }
+      const windowKey = [
+        request?.fromDate ? request.fromDate.toISOString().slice(0, 10) : "any",
+        request?.toDate ? request.toDate.toISOString().slice(0, 10) : "any",
+        request?.contractType ?? "ALL",
+      ].join(":");
+      return cached(
+        `${providerKey}:strictChain:${STRICT_OPTION_EVIDENCE_POLICY_VERSION}:${symbol.toUpperCase()}:${windowKey}`,
+        ttl.strictOptionChain,
+        now,
+        () => provider.getStrictOptionChainSnapshot!(symbol, request, signal),
         signal,
       );
     },

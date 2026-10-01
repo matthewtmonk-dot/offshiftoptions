@@ -320,6 +320,103 @@ describe("withMarketDataCache", () => {
     });
   });
 
+  describe("getStrictOptionChainSnapshot (Trade Prep strict evidence foundation)", () => {
+    function strictSnapshot(quoteTimeInLong: number) {
+      return {
+        status: "AVAILABLE" as const,
+        envelope: { status: "SUCCESS", rootSymbol: "SPY", isDelayed: false },
+        request: { requestedUnderlying: "SPY", fromDate: null, toDate: null, contractType: "PUT" as const },
+        contracts: [
+          {
+            location: { expirationMapKey: "2026-10-16:16", strikeMapKey: "655.0", originatingMap: "PUT" as const },
+            identity: { providerSymbol: "SPY   261016P00655000", putCall: "PUT", strikePrice: 655, expirationDate: new Date("2026-10-16T20:00:00.000Z"), optionRoot: "SPY" },
+            quote: { bid: 1.2, ask: 1.3, quoteTimeInLong },
+            terms: { multiplier: 100, nonStandard: false, mini: false, optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: "USD" }], settlementType: "P", deliverableNote: null },
+            ruleInputs: { openInterest: 312, totalVolume: 0, delta: -0.015 },
+          },
+        ],
+        transport: { provider: "SCHWAB" as const, requestStartedAt: new Date(quoteTimeInLong), responseReceivedAt: new Date(quoteTimeInLong), httpDateHeader: null, evidencePolicyVersion: "v1" },
+      };
+    }
+
+    it("resolves to UNAVAILABLE, never throws, when the underlying provider does not implement it", async () => {
+      const inner = provider(); // no getStrictOptionChainSnapshot override
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one");
+
+      const result = await cached.getStrictOptionChainSnapshot("SPY");
+      expect(result.status).toBe("UNAVAILABLE");
+    });
+
+    it("caches a fetched snapshot and serves the identical object on a hit - never renewing quoteTimeInLong/transport timestamps", async () => {
+      const snapshot = strictSnapshot(1_700_000_000_000);
+      const getStrictOptionChainSnapshot = vi.fn(async () => snapshot);
+      const inner = provider({ getStrictOptionChainSnapshot });
+      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one", { strictOptionChainTtlMs: 30_000 });
+
+      const first = await cached.getStrictOptionChainSnapshot("spy");
+      const second = await cached.getStrictOptionChainSnapshot("SPY");
+
+      expect(getStrictOptionChainSnapshot).toHaveBeenCalledTimes(1);
+      expect(second).toBe(first); // same object reference - a cache hit can never renew/regenerate evidence
+      if (second.status === "AVAILABLE") {
+        expect(second.contracts[0]!.quote.quoteTimeInLong).toBe(1_700_000_000_000);
+      }
+    });
+
+    it("isolates the strict cache key by request window/contract type, same as the legacy getOptionChain key", async () => {
+      const getStrictOptionChainSnapshot = vi.fn(async () => strictSnapshot(1_700_000_000_000));
+      const cached = withMarketDataCache(provider({ getStrictOptionChainSnapshot }), "schwab:user:user-a:connection:one");
+
+      await cached.getStrictOptionChainSnapshot("SPY", { contractType: "PUT" });
+      await cached.getStrictOptionChainSnapshot("SPY", { contractType: "CALL" });
+
+      expect(getStrictOptionChainSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it("never shares cache state with the legacy getOptionChain path - fetching one never satisfies the other", async () => {
+      const getOptionChain = vi.fn(async () => []);
+      const getStrictOptionChainSnapshot = vi.fn(async () => strictSnapshot(1_700_000_000_000));
+      const cached = withMarketDataCache(provider({ getOptionChain, getStrictOptionChainSnapshot }), "schwab:user:user-a:connection:one");
+
+      await cached.getOptionChain("SPY");
+      await cached.getStrictOptionChainSnapshot("SPY");
+
+      expect(getOptionChain).toHaveBeenCalledTimes(1);
+      expect(getStrictOptionChainSnapshot).toHaveBeenCalledTimes(1); // not served from the legacy chain's cache entry
+    });
+
+    it("forwards the caller's own signal down to the underlying provider call", async () => {
+      const getStrictOptionChainSnapshot = vi.fn(async () => strictSnapshot(1_700_000_000_000));
+      const cached = withMarketDataCache(provider({ getStrictOptionChainSnapshot }), "schwab:user:user-a:connection:one");
+      const controller = new AbortController();
+
+      await cached.getStrictOptionChainSnapshot("SPY", undefined, controller.signal);
+
+      expect(getStrictOptionChainSnapshot).toHaveBeenCalledWith("SPY", undefined, controller.signal);
+    });
+
+    it("never publishes a result to cache when the caller's own signal is already aborted, even if the provider call resolved anyway", async () => {
+      const cached = withMarketDataCache(provider({ getStrictOptionChainSnapshot: async () => strictSnapshot(1_700_000_000_000) }), "schwab:user:user-a:connection:one");
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(cached.getStrictOptionChainSnapshot("SPY", undefined, controller.signal)).rejects.toThrow(MarketDataProviderError);
+
+      let secondCallHappened = false;
+      const freshCached = withMarketDataCache(
+        provider({
+          getStrictOptionChainSnapshot: async () => {
+            secondCallHappened = true;
+            return strictSnapshot(1_700_000_000_000);
+          },
+        }),
+        "schwab:user:user-a:connection:one",
+      );
+      await freshCached.getStrictOptionChainSnapshot("SPY");
+      expect(secondCallHappened).toBe(true); // proves nothing was cached by the aborted call above
+    });
+  });
+
   describe("Post-Phase-2 UX follow-up (end-to-end abandonment repair) - cache publication fencing", () => {
     function reviewEvidence() {
       return {

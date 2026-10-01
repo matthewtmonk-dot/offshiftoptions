@@ -13,14 +13,7 @@ export class SchwabApiError extends Error {
   }
 }
 
-export async function schwabGetJson<T>({
-  accessToken,
-  baseUrl,
-  path,
-  searchParams,
-  fetchFn = fetch,
-  signal,
-}: {
+type SchwabRequestOptions = {
   accessToken: string;
   baseUrl: string;
   path: string;
@@ -33,7 +26,17 @@ export async function schwabGetJson<T>({
    * generation's outstanding HTTP request actually aborts instead of running to completion in the
    * background and later publishing stale evidence. */
   signal?: AbortSignal;
-}): Promise<T> {
+};
+
+/**
+ * The one shared request-building/error-classification path for every Schwab GET - factored out
+ * of schwabGetJson (Trade Prep strict-evidence foundation) so a caller that needs the raw
+ * `Response` itself (e.g. to read the HTTP `Date` header as pure transport evidence - see
+ * StrictOptionChainTransportEvidence) can reuse the exact same URL-building, auth-header, and
+ * error-classification behavior instead of duplicating it. `schwabGetJson` below is unchanged in
+ * behavior/signature - it is now a thin wrapper over this function.
+ */
+export async function schwabFetchResponse({ accessToken, baseUrl, path, searchParams, fetchFn = fetch, signal }: SchwabRequestOptions): Promise<Response> {
   const url = new URL(`${baseUrl}${path}`);
   if (searchParams) {
     for (const [key, value] of searchParams.entries()) {
@@ -61,5 +64,10 @@ export async function schwabGetJson<T>({
     );
   }
 
+  return response;
+}
+
+export async function schwabGetJson<T>(options: SchwabRequestOptions): Promise<T> {
+  const response = await schwabFetchResponse(options);
   return (await response.json()) as T;
 }

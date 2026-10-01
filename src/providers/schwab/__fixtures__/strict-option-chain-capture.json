@@ -1,0 +1,69 @@
+{
+  "symbol": "SPY",
+  "status": "SUCCESS",
+  "underlying": null,
+  "strategy": "SINGLE",
+  "isDelayed": false,
+  "isIndex": false,
+  "interval": 0,
+  "putExpDateMap": {
+    "2026-10-16:16": {
+      "655.0": [
+        {
+          "putCall": "PUT",
+          "symbol": "SPY   261016P00655000",
+          "description": "SPY 10/16/2026 655.00 P",
+          "exchangeName": "OPR",
+          "bid": 0.0,
+          "ask": 0.02,
+          "last": 0.0,
+          "mark": 0.01,
+          "bidSize": 0,
+          "askSize": 50,
+          "lastSize": 0,
+          "highPrice": 0.0,
+          "lowPrice": 0.0,
+          "openPrice": 0.0,
+          "closePrice": 0.01,
+          "totalVolume": 0,
+          "tradeTimeInLong": 0,
+          "quoteTimeInLong": 1769533800123,
+          "netChange": -0.01,
+          "volatility": 14.212,
+          "delta": -0.015,
+          "gamma": 0.001,
+          "theta": -0.012,
+          "vega": 0.012,
+          "rho": -0.001,
+          "openInterest": 312,
+          "timeValue": 0.0,
+          "theoreticalOptionValue": 0.009,
+          "theoreticalVolatility": 29.0,
+          "strikePrice": 655.0,
+          "expirationDate": "2026-10-16T20:00:00.000+00:00",
+          "daysToExpiration": 16,
+          "expirationType": "R",
+          "lastTradingDay": 1792396800000,
+          "multiplier": 100.0,
+          "settlementType": "P",
+          "deliverableNote": "100 shares of SPY",
+          "percentChange": -50.0,
+          "markChange": -0.01,
+          "markPercentChange": -50.0,
+          "nonStandard": false,
+          "optionDeliverablesList": [
+            {
+              "symbol": "SPY",
+              "assetType": "STOCK",
+              "deliverableUnits": 100.0,
+              "currencyType": "USD"
+            }
+          ],
+          "mini": false,
+          "inTheMoney": false
+        }
+      ]
+    }
+  },
+  "callExpDateMap": {}
+}

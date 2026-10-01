@@ -6,9 +6,10 @@ import type {
   MarketQuote,
   OptionChainRequest,
   QuoteReviewEvidence,
+  StrictOptionChainSnapshot,
 } from "@/providers/market-data/types";
 import { SCHWAB_MARKET_DATA_BASE_URL } from "./config";
-import { schwabGetJson, type SchwabFetch } from "./client";
+import { schwabGetJson, schwabFetchResponse, type SchwabFetch } from "./client";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import {
   normalizeSchwabEquityMarketSessionEvidence,
@@ -19,6 +20,7 @@ import {
   normalizeSchwabQuoteResponse,
   normalizeSchwabQuoteReviewEvidence,
   normalizeSchwabQuotesResponse,
+  normalizeSchwabStrictOptionChainSnapshot,
 } from "./normalizers";
 
 /**
@@ -214,6 +216,57 @@ export class SchwabMarketDataProvider implements MarketDataProvider {
    * than reusing getMarketHours's "equity,option" call - this path only needs equity sessions,
    * and normalizeSchwabEquityMarketSessionEvidence parses the shape strictly through equity.EQ.
    */
+  /**
+   * Trade Prep strict option-evidence foundation - an ADDITIVE raw-evidence request, deliberately
+   * its own call (never reusing getOptionChain's cached/normalized result): it needs the raw
+   * `Response` itself (for the HTTP Date header, purely informational transport evidence) via
+   * schwabFetchResponse rather than schwabGetJson, and captures this app's own
+   * requestStartedAt/responseReceivedAt around the exact same call the legacy path makes, for
+   * normalizeSchwabStrictOptionChainSnapshot. Never calls or is called by getOptionChain - the two
+   * paths request from the same `/chains` endpoint with the same query shape, but produce
+   * completely independent result objects (see StrictOptionChainSnapshot's own doc comment).
+   */
+  async getStrictOptionChainSnapshot(symbol: string, request: OptionChainRequest = {}, signal?: AbortSignal): Promise<StrictOptionChainSnapshot> {
+    const normalized = symbol.toUpperCase();
+    const params: Record<string, string> = {
+      symbol: normalized,
+      contractType: request.contractType ?? "ALL",
+      strategy: "SINGLE",
+      includeQuotes: "TRUE",
+      range: "OTM",
+    };
+    if (request.fromDate) {
+      params.fromDate = formatDate(request.fromDate);
+    }
+    if (request.toDate) {
+      params.toDate = formatDate(request.toDate);
+    }
+
+    const requestStartedAt = new Date();
+    const response = await schwabFetchResponse({
+      accessToken: this.options.accessToken,
+      baseUrl: this.options.baseUrl ?? SCHWAB_MARKET_DATA_BASE_URL,
+      path: "/chains",
+      searchParams: new URLSearchParams(params),
+      fetchFn: this.options.fetchFn,
+      signal,
+    });
+    const responseReceivedAt = new Date();
+    const httpDateHeader = response.headers.get("date");
+    const payload: unknown = await response.json();
+
+    return normalizeSchwabStrictOptionChainSnapshot(
+      payload,
+      {
+        requestedUnderlying: normalized,
+        fromDate: request.fromDate ?? null,
+        toDate: request.toDate ?? null,
+        contractType: request.contractType ?? "ALL",
+      },
+      { requestStartedAt, responseReceivedAt, httpDateHeader },
+    );
+  }
+
   async getEquityMarketSessionEvidence(nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence> {
     const payload = await this.get(
       "/markets",

@@ -5,8 +5,15 @@ import type {
   OptionContractSnapshot,
   PriceCandle,
   QuoteReviewEvidence,
+  StrictOptionChainRequestEvidence,
+  StrictOptionChainSnapshot,
+  StrictOptionChainTransportEvidence,
+  StrictOptionContractSnapshot,
+  StrictOptionDeliverableEvidence,
 } from "@/providers/market-data/types";
+import { STRICT_OPTION_EVIDENCE_POLICY_VERSION } from "@/providers/market-data/types";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
+import { parseOccOptionSymbol } from "@/domain/finance/occOption";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -120,6 +127,137 @@ export function normalizeSchwabOptionChainResponse(payload: unknown): OptionCont
     ...contractsFromMap(root?.putExpDateMap, "PUT", underlyingSymbol),
     ...contractsFromMap(root?.callExpDateMap, "CALL", underlyingSymbol),
   ];
+}
+
+/**
+ * Trade Prep strict option-evidence foundation - ADDITIVE and deliberately separate from
+ * normalizeSchwabOptionChainResponse above, which stays completely unmodified. Where that
+ * function synthesizes a fallback symbol and flattens/drops contract-terms and quote-timing
+ * evidence for the production-approved Scanner, this function does the opposite: it is a purely
+ * mechanical, lossless extraction of every field the strict evidence contract needs, preserving
+ * `null` for anything missing or the wrong type rather than ever fabricating or falling back to a
+ * different field. It performs NO cross-field consistency checking or validation itself (no
+ * identity/quote/terms/session judgment calls) - that is entirely the job of the pure evaluators
+ * in src/domain/trade-prep/optionEvidence.ts, which this function's output feeds.
+ */
+export function normalizeSchwabStrictOptionChainSnapshot(
+  payload: unknown,
+  request: StrictOptionChainRequestEvidence,
+  transport: Omit<StrictOptionChainTransportEvidence, "provider" | "evidencePolicyVersion">,
+): StrictOptionChainSnapshot {
+  const transportEvidence: StrictOptionChainTransportEvidence = {
+    provider: "SCHWAB",
+    requestStartedAt: transport.requestStartedAt,
+    responseReceivedAt: transport.responseReceivedAt,
+    httpDateHeader: transport.httpDateHeader,
+    evidencePolicyVersion: STRICT_OPTION_EVIDENCE_POLICY_VERSION,
+  };
+
+  const root = objectValue(payload);
+  if (!root) {
+    return { status: "UNAVAILABLE", reason: "Schwab option chain response was not a usable object.", transport: transportEvidence };
+  }
+
+  return {
+    status: "AVAILABLE",
+    envelope: {
+      status: stringValue(root.status),
+      rootSymbol: exactStringValue(root.symbol),
+      isDelayed: typeof root.isDelayed === "boolean" ? root.isDelayed : null,
+    },
+    request: { ...request, requestedUnderlying: request.requestedUnderlying.toUpperCase() },
+    contracts: [...strictContractsFromMap(root.putExpDateMap, "PUT"), ...strictContractsFromMap(root.callExpDateMap, "CALL")],
+    transport: transportEvidence,
+  };
+}
+
+function strictContractsFromMap(mapValue: unknown, originatingMap: "PUT" | "CALL"): StrictOptionContractSnapshot[] {
+  const expirationMap = objectValue(mapValue);
+  if (!expirationMap) {
+    return [];
+  }
+
+  const contracts: StrictOptionContractSnapshot[] = [];
+  for (const [expirationMapKey, strikesValue] of Object.entries(expirationMap)) {
+    const strikes = objectValue(strikesValue);
+    if (!strikes) {
+      continue;
+    }
+    for (const [strikeMapKey, optionsValue] of Object.entries(strikes)) {
+      for (const option of arrayValue(optionsValue)) {
+        contracts.push(strictContractFrom(objectValue(option), expirationMapKey, strikeMapKey, originatingMap));
+      }
+    }
+  }
+  return contracts;
+}
+
+function strictContractFrom(
+  record: UnknownRecord | null,
+  expirationMapKey: string,
+  strikeMapKey: string,
+  originatingMap: "PUT" | "CALL",
+): StrictOptionContractSnapshot {
+  const providerSymbol = record ? exactStringValue(record.symbol) : null;
+  return {
+    location: { expirationMapKey, strikeMapKey, originatingMap },
+    identity: {
+      providerSymbol,
+      putCall: record ? exactStringValue(record.putCall) : null,
+      strikePrice: record ? numberValue(record.strikePrice) : null,
+      expirationDate: record ? dateValueWithExplicitOffset(record.expirationDate) : null,
+      // Derived via OCC-style parsing of the provider's own exact symbol - a consistency-check
+      // input only, never an authoritative raw field (Schwab's chain response has no field named
+      // "optionRoot"). Null when the symbol is absent or doesn't parse as a recognizable
+      // OCC-style option symbol.
+      optionRoot: providerSymbol ? (parseOccOptionSymbol(providerSymbol)?.underlying ?? null) : null,
+    },
+    quote: {
+      bid: record ? numberValue(record.bid) : null,
+      ask: record ? numberValue(record.ask) : null,
+      quoteTimeInLong: record ? numberValue(record.quoteTimeInLong) : null,
+    },
+    terms: {
+      multiplier: record ? numberValue(record.multiplier) : null,
+      nonStandard: record && typeof record.nonStandard === "boolean" ? record.nonStandard : null,
+      mini: record && typeof record.mini === "boolean" ? record.mini : null,
+      optionDeliverablesList: record ? deliverablesListValue(record.optionDeliverablesList) : null,
+      settlementType: record ? stringValue(record.settlementType) : null,
+      deliverableNote: record ? stringValue(record.deliverableNote) : null,
+    },
+    ruleInputs: {
+      openInterest: record ? integerValue(record.openInterest) : null,
+      totalVolume: record ? integerValue(record.totalVolume) : null,
+      delta: record ? numberValue(record.delta) : null,
+    },
+  };
+}
+
+/** `null` = the field itself was absent/not-an-array; `[]` = present and genuinely empty - see
+ * StrictOptionContractTerms.optionDeliverablesList's own doc comment on why these must stay
+ * distinct. Each entry is normalized independently - one malformed entry's fields become `null`
+ * rather than discarding the whole list or throwing. */
+function deliverablesListValue(value: unknown): StrictOptionDeliverableEvidence[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  return value.map((item) => {
+    const entry = objectValue(item);
+    return {
+      symbol: entry ? exactStringValue(entry.symbol) : null,
+      assetType: entry ? stringValue(entry.assetType) : null,
+      deliverableUnits: entry ? numberValue(entry.deliverableUnits) : null,
+      currencyType: entry ? stringValue(entry.currencyType) : null,
+    };
+  });
+}
+
+/** Type-checks only - never trims/reshapes. Used wherever a field's EXACT raw string value must
+ * survive (provider symbol, putCall, deliverable symbol) - contrast `stringValue` below, which
+ * trims and treats an all-whitespace string as absent (correct for display/lookup fields, wrong
+ * for anything strict identity must preserve byte-for-byte, including Schwab's own padding). */
+function exactStringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 export function normalizeSchwabInstrument(symbol: string, payload: unknown) {
