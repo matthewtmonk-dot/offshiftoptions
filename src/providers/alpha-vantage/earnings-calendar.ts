@@ -23,6 +23,17 @@ export type AlphaVantageEarningsCalendarFetchResult =
   | { outcome: "RATE_LIMITED"; message: string }
   | { outcome: "ERROR_MESSAGE"; message: string }
   | { outcome: "EMPTY"; message: string }
+  /**
+   * At least one data row (symbol/reportDate columns both present in the response) could not be
+   * parsed into a usable entry - missing symbol, missing reportDate, or an unparseable/impossible
+   * calendar date. The response as a whole is untrustworthy for destructive schedule replacement:
+   * a dropped malformed row could just as easily have been the row that would have told us a
+   * ticker's prior cached date was superseded, so silently keeping only the "good" rows and
+   * proceeding as SUCCESS could delete correct prior evidence based on an incomplete picture. The
+   * caller (refreshEarningsCalendarCache) must treat this exactly like any other failed fetch:
+   * zero writes, prior cache fully preserved.
+   */
+  | { outcome: "PARTIAL_UNTRUSTED"; message: string; malformedRowCount: number; validEntryCount: number }
   | { outcome: "HTTP_ERROR"; status: number; message: string };
 
 const BLOCKED_VALUE_PATTERN = /\b(api[_\s-]*key|access[_\s-]*token|secret|password|credential|authorization|bearer)\b/i;
@@ -82,21 +93,37 @@ export async function fetchAlphaVantageEarningsCalendar({
     return { outcome: "ERROR_MESSAGE", message: "Alpha Vantage earnings calendar response did not include the expected columns." };
   }
 
-  const entries = rows.slice(1).flatMap((row) => {
+  // A genuinely blank line (all cells empty - e.g. stray CSV formatting noise) is not a data row
+  // at all and is ignored entirely, never counted as "malformed" - only a row that actually
+  // carries some data but fails to produce a usable entry is treated as malformed below.
+  const dataRows = rows.slice(1).filter((row) => row.some((cell) => cell.trim() !== ""));
+  if (dataRows.length === 0) {
+    return { outcome: "EMPTY", message: "Alpha Vantage earnings calendar contained no usable rows." };
+  }
+
+  const entries: EarningsCalendarEntry[] = [];
+  let malformedRowCount = 0;
+  for (const row of dataRows) {
     const ticker = row[symbolIndex]?.trim().toUpperCase();
     const reportDateText = row[reportDateIndex]?.trim();
-    if (!ticker || !reportDateText) {
-      return [];
+    const reportDate = reportDateText ? parseIsoDateOnly(reportDateText) : null;
+    if (!ticker || !reportDateText || !reportDate) {
+      malformedRowCount += 1;
+      continue;
     }
-    const reportDate = parseIsoDateOnly(reportDateText);
-    if (!reportDate) {
-      return [];
-    }
-    return [{ ticker, reportDate }];
-  });
+    entries.push({ ticker, reportDate });
+  }
 
-  if (!entries.length) {
-    return { outcome: "EMPTY", message: "Alpha Vantage earnings calendar contained no usable rows." };
+  // Any malformed data row makes the WHOLE response untrustworthy for destructive schedule
+  // replacement - see this type's own doc comment on PARTIAL_UNTRUSTED. Never silently drop a
+  // malformed row and proceed as SUCCESS with only the "good" entries.
+  if (malformedRowCount > 0) {
+    return {
+      outcome: "PARTIAL_UNTRUSTED",
+      message: `Alpha Vantage earnings calendar response contained ${malformedRowCount} malformed row(s) out of ${dataRows.length} - refusing to use for schedule replacement.`,
+      malformedRowCount,
+      validEntryCount: entries.length,
+    };
   }
 
   return { outcome: "SUCCESS", entries };
@@ -124,17 +151,38 @@ function classifyJsonErrorBody(text: string, apiKey: string): AlphaVantageEarnin
   return { outcome: "ERROR_MESSAGE", message: "Alpha Vantage returned an unexpected JSON response instead of CSV." };
 }
 
-/** Alpha Vantage's earnings calendar reports plain `YYYY-MM-DD` calendar dates (a date-only
- * financial concept, like an option expiration - see shortCalendarDate in format.ts) - parsed
- * as UTC midnight, never local-timezone-shifted. */
+/**
+ * Alpha Vantage's earnings calendar reports plain `YYYY-MM-DD` calendar dates (a date-only
+ * financial concept, like an option expiration - see shortCalendarDate in format.ts) - parsed as
+ * UTC midnight, never local-timezone-shifted.
+ *
+ * Strict by construction: `Date.UTC` silently NORMALIZES out-of-range components (e.g. day 32
+ * rolls into the next month) rather than rejecting them, so a naive `new Date(Date.UTC(...))`
+ * would happily turn "2026-10-32" into 2026-11-01 - a real but wrong date, not a parse failure.
+ * This rejects anything whose exact format doesn't match `YYYY-MM-DD` first, then round-trips the
+ * constructed date's own UTC year/month/day back against the parsed components - any mismatch
+ * (impossible day-of-month, Feb 29 in a non-leap year, month 00/13, day 00, etc.) is rejected.
+ */
 function parseIsoDateOnly(value: string): Date | null {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) {
     return null;
   }
-  const [, year, month, day] = match;
-  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-  return Number.isNaN(date.getTime()) ? null : date;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null; // Date.UTC silently normalized an impossible date - reject it instead of trusting the rollover
+  }
+  return date;
 }
 
 function sanitizeMessage(message: string, apiKey: string): string {

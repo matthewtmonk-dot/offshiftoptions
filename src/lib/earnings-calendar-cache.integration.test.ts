@@ -24,14 +24,19 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
   let getEarningsCalendarCacheStatus: typeof import("./earnings-calendar-cache").getEarningsCalendarCacheStatus;
   let getEarningsCalendarLookup: typeof import("./earnings-calendar-cache").getEarningsCalendarLookup;
   let getEarningsEvidenceLookup: typeof import("./earnings-calendar-cache").getEarningsEvidenceLookup;
+  let buildUpsertQuery: typeof import("./earnings-calendar-cache").buildUpsertQuery;
   let getAlphaVantageUsageToday: typeof import("./alpha-vantage-budget").getAlphaVantageUsageToday;
   let originalApiKey: string | undefined;
 
   beforeAll(async () => {
     prisma = (await import("./prisma")).prisma;
-    ({ refreshEarningsCalendarCache, getEarningsCalendarCacheStatus, getEarningsCalendarLookup, getEarningsEvidenceLookup } = await import(
-      "./earnings-calendar-cache"
-    ));
+    ({
+      refreshEarningsCalendarCache,
+      getEarningsCalendarCacheStatus,
+      getEarningsCalendarLookup,
+      getEarningsEvidenceLookup,
+      buildUpsertQuery,
+    } = await import("./earnings-calendar-cache"));
     ({ getAlphaVantageUsageToday } = await import("./alpha-vantage-budget"));
     originalApiKey = process.env.ALPHA_VANTAGE_API_KEY;
     process.env.ALPHA_VANTAGE_API_KEY = "test-earnings-calendar-key";
@@ -284,5 +289,79 @@ maybeDescribe("Earnings calendar cache - one shared Alpha Vantage refresh, never
     const entry = lookup.get("AAPL");
     expect(entry).toBeDefined();
     expect(Object.keys(entry!).sort()).toEqual(["daysUntilReport", "reportDate"]);
+  });
+
+  it("a mixed valid+malformed response (PARTIAL_UNTRUSTED) makes zero writes and preserves all prior cached future evidence", async () => {
+    await prisma.earningsCalendarEntry.create({
+      data: { ticker: "PRIORGOOD", reportDate: new Date("2099-12-05"), fetchedAt: new Date(TEST_NOW.getTime() - 1000) },
+    });
+    const before = await prisma.earningsCalendarEntry.findMany({ where: { reportDate: { gte: new Date("2099-01-01T00:00:00.000Z") } } });
+
+    // PRIORGOOD itself has a valid new row here (would normally supersede its old one), but XYZ's
+    // row is malformed (impossible date) - the whole response must be rejected, so even
+    // PRIORGOOD's otherwise-legitimate new date must NOT be written.
+    const mixedCsv =
+      "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n" +
+      "PRIORGOOD,PRIOR GOOD CORP,2099-12-20,2099-09-30,,USD,\n" +
+      "XYZ,XYZ CORP,2099-10-32,2099-09-30,,USD,\n";
+    const result = await refreshEarningsCalendarCache({ now: TEST_NOW, force: true, fetchFn: fetchFnReturning(mixedCsv) });
+    expect(result.status).toBe("FETCH_FAILED");
+    if (result.status !== "FETCH_FAILED") throw new Error("expected FETCH_FAILED");
+    expect(result.outcome).toBe("PARTIAL_UNTRUSTED");
+
+    const after = await prisma.earningsCalendarEntry.findMany({ where: { reportDate: { gte: new Date("2099-01-01T00:00:00.000Z") } } });
+    expect(after).toEqual(before); // zero writes - PRIORGOOD's old row untouched, XYZ never created
+  });
+
+  it("multiple distinct valid report dates for one ticker in the same successful response both persist and become AMBIGUOUS evidence", async () => {
+    const csv =
+      "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n" +
+      "TWODATES,TWO DATES CORP,2099-12-05,2099-09-30,,USD,\n" +
+      "TWODATES,TWO DATES CORP,2099-12-20,2099-09-30,,USD,\n";
+    const result = await refreshEarningsCalendarCache({ now: TEST_NOW, fetchFn: fetchFnReturning(csv) });
+    expect(result.status).toBe("SUCCESS");
+    if (result.status !== "SUCCESS") throw new Error("expected SUCCESS");
+
+    const rows = await prisma.earningsCalendarEntry.findMany({ where: { ticker: "TWODATES" } });
+    expect(rows).toHaveLength(2); // both genuinely distinct dates persisted - neither silently dropped
+
+    const evidence = await getEarningsEvidenceLookup(["TWODATES"], TEST_NOW);
+    expect(evidence.get("TWODATES")?.status).toBe("AMBIGUOUS");
+    expect(evidence.get("TWODATES")?.candidateReportDates.map((d) => d.toISOString().slice(0, 10))).toEqual(["2099-12-05", "2099-12-20"]);
+  });
+
+  it("a real DB transaction rollback leaves no partial new schedule committed and preserves old evidence intact", async () => {
+    await prisma.earningsCalendarEntry.create({
+      data: { ticker: "ROLLBACK", reportDate: new Date("2099-12-01"), fetchedAt: new Date(TEST_NOW.getTime() - 1000) },
+    });
+
+    // Compose the exact real production upsert statement (buildUpsertQuery) alongside a second
+    // statement guaranteed to fail at the database level (division by zero) - proves Postgres
+    // really does roll back the whole transaction, including the upsert, when any statement in it
+    // fails. Does not modify or bypass refreshEarningsCalendarCache's own real control flow.
+    const entries = [{ ticker: "ROLLBACK", reportDate: new Date("2099-12-20") }];
+    await expect(
+      prisma.$transaction([buildUpsertQuery(entries, TEST_NOW), prisma.$executeRaw`SELECT 1/0`]),
+    ).rejects.toThrow();
+
+    const rows = await prisma.earningsCalendarEntry.findMany({ where: { ticker: "ROLLBACK" } });
+    expect(rows).toHaveLength(1); // the upsert's new row was NOT committed
+    expect(rows[0].reportDate.toISOString().slice(0, 10)).toBe("2099-12-01"); // old evidence intact, never partially replaced
+  });
+
+  it("NY/UTC rollover: a report dated the current New York calendar day is not discarded as already-past merely because UTC has advanced past midnight", async () => {
+    // 2099-12-01T02:00:00Z is 2099-11-30 21:00 America/New_York (EST, UTC-5) - still Nov 30 in NY,
+    // even though UTC has already rolled over to Dec 1.
+    const rolloverNow = new Date("2099-12-01T02:00:00.000Z");
+    await prisma.earningsCalendarEntry.create({
+      data: { ticker: "ROLLOVER", reportDate: new Date("2099-11-30T00:00:00.000Z"), fetchedAt: new Date(rolloverNow.getTime() - 1000) },
+    });
+
+    const legacyLookup = await getEarningsCalendarLookup(["ROLLOVER"], rolloverNow);
+    expect(legacyLookup.has("ROLLOVER")).toBe(true); // a naive UTC-only "today" would have wrongly excluded this as already-past
+
+    const evidence = await getEarningsEvidenceLookup(["ROLLOVER"], rolloverNow);
+    expect(evidence.get("ROLLOVER")?.status).toBe("SCHEDULED");
+    expect(evidence.get("ROLLOVER")?.reportDate?.toISOString()).toBe("2099-11-30T00:00:00.000Z");
   });
 });

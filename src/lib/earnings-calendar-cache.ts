@@ -14,6 +14,7 @@ import { getAlphaVantageApiKey } from "@/providers/alpha-vantage/config";
 import { fetchAlphaVantageEarningsCalendar, type EarningsCalendarEntry } from "@/providers/alpha-vantage/earnings-calendar";
 import type { AlphaVantageFetch } from "@/providers/alpha-vantage/client";
 import { selectEarningsEvidenceFromRows, type TickerEarningsEvidence } from "@/domain/finance/earningsEvidence";
+import { marketDate } from "@/domain/finance/marketCalendar";
 
 /**
  * How long a successful refresh stays "fresh" before the scanner should try again - a bit under
@@ -46,7 +47,12 @@ export type EarningsCalendarRefreshResult =
   | { status: "LOCK_UNAVAILABLE" }
   | { status: "BUDGET_EXHAUSTED"; usage: AlphaVantageUsageSnapshot }
   | { status: "ALREADY_FRESH"; cache: EarningsCalendarCacheStatus }
-  | { status: "FETCH_FAILED"; outcome: "RATE_LIMITED" | "ERROR_MESSAGE" | "EMPTY" | "HTTP_ERROR"; message?: string; httpStatus?: number }
+  | {
+      status: "FETCH_FAILED";
+      outcome: "RATE_LIMITED" | "ERROR_MESSAGE" | "EMPTY" | "PARTIAL_UNTRUSTED" | "HTTP_ERROR";
+      message?: string;
+      httpStatus?: number;
+    }
   | { status: "SUCCESS"; entryCount: number; prunedCount: number; supersededCount: number; usage: AlphaVantageUsageSnapshot };
 
 type RefreshOptions = {
@@ -130,7 +136,7 @@ export async function refreshEarningsCalendarCache(options: RefreshOptions = {})
     // Retention rule: a report date that has already passed is never useful to an
     // earnings-distance rule (which only ever measures days UNTIL a future report) - prune it
     // only now, after the fresh batch is durably written.
-    const pruned = await prisma.earningsCalendarEntry.deleteMany({ where: { reportDate: { lt: dateOnlyUtc(now) } } });
+    const pruned = await prisma.earningsCalendarEntry.deleteMany({ where: { reportDate: { lt: marketDate(now) } } });
 
     return {
       status: "SUCCESS",
@@ -162,9 +168,12 @@ function dedupeEntries(entries: EarningsCalendarEntry[]): EarningsCalendarEntry[
  * `fetchedAt` is touched on every row this refresh confirmed (new or already-known), so
  * getEarningsCalendarCacheStatus's MAX(fetchedAt) always reflects the most recent full,
  * successful refresh. Returns the un-awaited query so the caller can run it inside a
- * `prisma.$transaction([...])` together with buildSupersedeDeleteQuery.
+ * `prisma.$transaction([...])` together with buildSupersedeDeleteQuery. Exported (otherwise only
+ * used internally) so a DB integration test can compose this exact real statement into its own
+ * transaction to prove rollback atomicity without weakening production control flow - see
+ * earnings-calendar-cache.integration.test.ts's "transaction rollback" test.
  */
-function buildUpsertQuery(entries: EarningsCalendarEntry[], fetchedAt: Date) {
+export function buildUpsertQuery(entries: EarningsCalendarEntry[], fetchedAt: Date) {
   const values = Prisma.join(
     entries.map((entry) => Prisma.sql`(${entry.ticker}, ${entry.reportDate}::date, ${fetchedAt})`),
   );
@@ -183,7 +192,11 @@ function buildUpsertQuery(entries: EarningsCalendarEntry[], fetchedAt: Date) {
  * module's own refreshEarningsCalendarCache doc comment). Scoped to:
  *  - only tickers mentioned in THIS response (a ticker this response is silent about is never
  *    touched - absence is not proof of "no earnings")
- *  - only reportDate >= today (already-past rows are left to the existing separate prune step)
+ *  - only reportDate >= today, where "today" is the America/New_York calendar date of `now`
+ *    (marketDate - same helper marketCalendar.ts already uses elsewhere) rather than a raw UTC
+ *    truncation, so a report dated "today" in NY terms is never discarded as already-past merely
+ *    because UTC has already rolled over to the next calendar day (already-past rows are left to
+ *    the existing separate prune step, which uses the same NY-dated cutoff)
  *  - only rows whose exact (ticker, reportDate) pair is NOT part of this response's own batch
  * Returns the un-awaited query so the caller can run it in the same transaction as the upsert -
  * both must apply together or neither does, or a ticker could transiently end up with zero
@@ -197,16 +210,12 @@ function buildSupersedeDeleteQuery(entries: EarningsCalendarEntry[], now: Date) 
   return prisma.$executeRaw`
     DELETE FROM "EarningsCalendarEntry" e
     WHERE e."ticker" = ANY(${tickers}::text[])
-      AND e."reportDate" >= ${dateOnlyUtc(now)}::date
+      AND e."reportDate" >= ${marketDate(now)}::date
       AND NOT EXISTS (
         SELECT 1 FROM (VALUES ${batchValues}) AS batch("ticker", "reportDate")
         WHERE batch."ticker" = e."ticker" AND batch."reportDate" = e."reportDate"
       )
   `;
-}
-
-function dateOnlyUtc(date: Date): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
 
 export type TickerEarningsLookup = {
@@ -220,6 +229,8 @@ export type TickerEarningsLookup = {
  * for each ticker (a ticker can appear more than once across horizons in rare cases); a ticker
  * absent from the map means "no cached earnings data" (genuinely UNKNOWN), never a fabricated
  * absence-of-earnings claim - see resolveEarningsDistanceForTicker in the scanner integration.
+ * "Today" (the gate for what counts as upcoming) is `now`'s America/New_York calendar date, not a
+ * raw UTC truncation - see buildSupersedeDeleteQuery's own note on why that distinction matters.
  */
 export async function getEarningsCalendarLookup(tickers: string[], now: Date = new Date()): Promise<Map<string, TickerEarningsLookup>> {
   const normalized = [...new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
@@ -227,7 +238,7 @@ export async function getEarningsCalendarLookup(tickers: string[], now: Date = n
     return new Map();
   }
 
-  const today = dateOnlyUtc(now);
+  const today = marketDate(now);
   const rows = await prisma.earningsCalendarEntry.findMany({
     where: { ticker: { in: normalized }, reportDate: { gte: today } },
     orderBy: { reportDate: "asc" },
@@ -265,7 +276,7 @@ export async function getEarningsEvidenceLookup(
     return new Map();
   }
 
-  const today = dateOnlyUtc(now);
+  const today = marketDate(now);
   const rows = await prisma.earningsCalendarEntry.findMany({
     where: { ticker: { in: normalized }, reportDate: { gte: today } },
   });

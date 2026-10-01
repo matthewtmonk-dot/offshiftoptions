@@ -76,6 +76,59 @@ describe("selectEarningsEvidenceFromRows", () => {
     expect(result.get("AAPL")?.observedAt).toEqual(new Date("2026-09-29T08:30:00Z"));
     expect(result.get("AAPL")?.observedAt).not.toEqual(result.get("AAPL")?.reportDate);
   });
+
+  it("deduplicates exact duplicate (ticker, reportDate, fetchedAt) rows before judging ambiguity - never a false AMBIGUOUS", () => {
+    const now = new Date("2026-09-29T12:00:00Z");
+    const sharedFetchedAt = "2026-09-29T09:00:00Z";
+    const rows = [row("AAPL", "2026-10-05", sharedFetchedAt), row("AAPL", "2026-10-05", sharedFetchedAt)];
+    const result = selectEarningsEvidenceFromRows(["AAPL"], rows, now, FRESHNESS_WINDOW_MS);
+    expect(result.get("AAPL")?.status).toBe("SCHEDULED");
+    expect(result.get("AAPL")?.reportDate).toEqual(new Date("2026-10-05"));
+  });
+
+  it("fails closed to STALE when the observation (fetchedAt) is itself in the future relative to the evaluation clock", () => {
+    const now = new Date("2026-09-29T12:00:00Z");
+    const rows = [row("AAPL", "2026-10-05", "2026-09-30T00:00:00Z")]; // fetchedAt is after `now`
+    const result = selectEarningsEvidenceFromRows(["AAPL"], rows, now, FRESHNESS_WINDOW_MS);
+    expect(result.get("AAPL")?.status).toBe("STALE");
+  });
+
+  it("fails closed to STALE when fetchedAt is an invalid Date", () => {
+    const now = new Date("2026-09-29T12:00:00Z");
+    const rows: EarningsCalendarRow[] = [{ ticker: "AAPL", reportDate: new Date("2026-10-05"), fetchedAt: new Date(NaN) }];
+    const result = selectEarningsEvidenceFromRows(["AAPL"], rows, now, FRESHNESS_WINDOW_MS);
+    // An invalid fetchedAt row is ignored entirely (as if it didn't exist), so AAPL has no usable
+    // row left at all - genuinely NO_EVIDENCE, never silently treated as current.
+    expect(result.get("AAPL")?.status).toBe("NO_EVIDENCE");
+  });
+
+  it("fails closed to STALE when `now` itself is an invalid Date", () => {
+    const rows = [row("AAPL", "2026-10-05", "2026-09-29T09:00:00Z")];
+    const result = selectEarningsEvidenceFromRows(["AAPL"], rows, new Date(NaN), FRESHNESS_WINDOW_MS);
+    expect(result.get("AAPL")?.status).toBe("STALE");
+  });
+
+  it("fails closed to STALE when freshnessWindowMs is non-positive or non-finite", () => {
+    const now = new Date("2026-09-29T12:00:01Z"); // 1 second after fetchedAt - would otherwise be fresh
+    const rows = [row("AAPL", "2026-10-05", "2026-09-29T12:00:00Z")];
+    expect(selectEarningsEvidenceFromRows(["AAPL"], rows, now, 0).get("AAPL")?.status).toBe("STALE");
+    expect(selectEarningsEvidenceFromRows(["AAPL"], rows, now, -1).get("AAPL")?.status).toBe("STALE");
+    expect(selectEarningsEvidenceFromRows(["AAPL"], rows, now, NaN).get("AAPL")?.status).toBe("STALE");
+  });
+
+  it("documents the exact freshness boundary: age strictly equal to the window still counts as current (SCHEDULED)", () => {
+    const fetchedAt = new Date("2026-09-29T00:00:00Z");
+    const now = new Date(fetchedAt.getTime() + FRESHNESS_WINDOW_MS); // age === window, exactly
+    const rows = [{ ticker: "AAPL", reportDate: new Date("2026-10-05"), fetchedAt }];
+    expect(selectEarningsEvidenceFromRows(["AAPL"], rows, now, FRESHNESS_WINDOW_MS).get("AAPL")?.status).toBe("SCHEDULED");
+  });
+
+  it("age one millisecond beyond the freshness window is STALE", () => {
+    const fetchedAt = new Date("2026-09-29T00:00:00Z");
+    const now = new Date(fetchedAt.getTime() + FRESHNESS_WINDOW_MS + 1);
+    const rows = [{ ticker: "AAPL", reportDate: new Date("2026-10-05"), fetchedAt }];
+    expect(selectEarningsEvidenceFromRows(["AAPL"], rows, now, FRESHNESS_WINDOW_MS).get("AAPL")?.status).toBe("STALE");
+  });
 });
 
 describe("evaluateEarningsConflict", () => {
@@ -122,6 +175,88 @@ describe("evaluateEarningsConflict", () => {
 
   it("is CONFLICT for a same-day report on the exact interval start, since timing is unknown", () => {
     const result = evaluateEarningsConflict({ evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-01") }, ...interval });
+    expect(result).toBe("CONFLICT");
+  });
+
+  it("is UNKNOWN - never CLEAR - when the only evidence predates the holding interval start", () => {
+    // The ticket's own example: holding Oct 10-17, only evidence is an Oct 1 report. That data
+    // point is already in the past relative to the window and says nothing trustworthy about the
+    // actual next report during/after it.
+    const result = evaluateEarningsConflict({
+      evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-01") },
+      intervalStart: new Date("2026-10-10"),
+      intervalEnd: new Date("2026-10-17"),
+    });
+    expect(result).toBe("UNKNOWN");
+  });
+
+  it("is CONFLICT, not UNKNOWN, when the report is before the buffered start but still inside the buffer window", () => {
+    const result = evaluateEarningsConflict({
+      evidence: { status: "SCHEDULED", reportDate: new Date("2026-09-29") }, // 2 days before intervalStart
+      intervalStart: new Date("2026-10-01"),
+      intervalEnd: new Date("2026-10-17"),
+      bufferDays: 3,
+    });
+    expect(result).toBe("CONFLICT");
+  });
+
+  it("is UNKNOWN for an invalid report date even when status claims SCHEDULED", () => {
+    const result = evaluateEarningsConflict({ evidence: { status: "SCHEDULED", reportDate: new Date(NaN) }, ...interval });
+    expect(result).toBe("UNKNOWN");
+  });
+
+  it("is UNKNOWN for an invalid intervalStart", () => {
+    const result = evaluateEarningsConflict({
+      evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-10") },
+      intervalStart: new Date(NaN),
+      intervalEnd: interval.intervalEnd,
+    });
+    expect(result).toBe("UNKNOWN");
+  });
+
+  it("is UNKNOWN for an invalid intervalEnd", () => {
+    const result = evaluateEarningsConflict({
+      evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-10") },
+      intervalStart: interval.intervalStart,
+      intervalEnd: new Date(NaN),
+    });
+    expect(result).toBe("UNKNOWN");
+  });
+
+  it("is UNKNOWN for a reversed interval (end before start)", () => {
+    const result = evaluateEarningsConflict({
+      evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-10") },
+      intervalStart: new Date("2026-10-17"),
+      intervalEnd: new Date("2026-10-01"),
+    });
+    expect(result).toBe("UNKNOWN");
+  });
+
+  it("is UNKNOWN for a negative buffer", () => {
+    const result = evaluateEarningsConflict({ evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-10") }, bufferDays: -1, ...interval });
+    expect(result).toBe("UNKNOWN");
+  });
+
+  it("is UNKNOWN for a non-finite buffer", () => {
+    const result = evaluateEarningsConflict({ evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-10") }, bufferDays: NaN, ...interval });
+    expect(result).toBe("UNKNOWN");
+  });
+
+  it("truncates a non-midnight report-date instant to its own calendar day before comparing - Oct 1 14:00 UTC still conflicts with an Oct 1 00:00 UTC holding start", () => {
+    const result = evaluateEarningsConflict({
+      evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-01T14:00:00Z") },
+      intervalStart: new Date("2026-10-01T00:00:00Z"),
+      intervalEnd: new Date("2026-10-17T00:00:00Z"),
+    });
+    expect(result).toBe("CONFLICT");
+  });
+
+  it("truncates a non-midnight intervalEnd instant to its own calendar day before comparing", () => {
+    const result = evaluateEarningsConflict({
+      evidence: { status: "SCHEDULED", reportDate: new Date("2026-10-17T00:00:00Z") },
+      intervalStart: new Date("2026-10-01T00:00:00Z"),
+      intervalEnd: new Date("2026-10-17T23:30:00Z"), // same calendar day as the report, non-midnight
+    });
     expect(result).toBe("CONFLICT");
   });
 });
