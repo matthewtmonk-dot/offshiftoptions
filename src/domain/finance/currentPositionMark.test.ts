@@ -9,7 +9,7 @@ import { getCurrentOpenPut, type CampaignEventInput, type CurrentOpenPut } from 
 const MARKET_DAY = new Date("2026-09-08T20:00:00Z"); // Tuesday, a real trading day
 const WEEKEND_DAY = new Date("2026-09-05T12:00:00Z"); // Saturday
 
-const activePut: CurrentOpenPut = { strike: 20, contracts: 1, expiration: new Date("2026-09-18") };
+const activePut: CurrentOpenPut = { strike: 20, contracts: 1, expiration: new Date("2026-09-18"), openingEventId: null };
 
 function linkedRecord(overrides: Partial<LinkedPositionRecordInput> = {}): LinkedPositionRecordInput {
   return {
@@ -145,7 +145,7 @@ describe("resolveCurrentCostToClose (Ticket 5: validated current-position marks)
     const validCampaign = resolve({ linkedRecords: [linkedRecord()] });
     const incompleteCampaign = resolve({
       campaignTicker: "ONON",
-      activePut: { strike: 27, contracts: 1, expiration: new Date("2026-09-25") },
+      activePut: { strike: 27, contracts: 1, expiration: new Date("2026-09-25"), openingEventId: null },
       linkedRecords: [linkedRecord({ symbol: "ONON  260918P00028000", underlyingSymbol: "ONON" })], // pre-roll leftover, wrong strike/expiration
     });
     expect(validCampaign).not.toBeNull();

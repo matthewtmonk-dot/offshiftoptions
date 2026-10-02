@@ -216,7 +216,7 @@ describe("getCurrentOpenPut", () => {
     const events: CampaignEventInput[] = [
       { type: "SELL_PUT", occurredAt: "2026-08-28T14:00:00Z", strike: 17.5, contracts: 2, premium: 0.5, expiration: "2026-09-11" },
     ];
-    expect(getCurrentOpenPut(events)).toEqual({ strike: 17.5, contracts: 2, expiration: new Date("2026-09-11") });
+    expect(getCurrentOpenPut(events)).toEqual({ strike: 17.5, contracts: 2, expiration: new Date("2026-09-11"), openingEventId: null });
   });
 
   it("returns the most recent ROLL_PUT_OPEN, not an earlier closed SELL_PUT", () => {
@@ -225,7 +225,7 @@ describe("getCurrentOpenPut", () => {
       { type: "ROLL_PUT_CLOSE", occurredAt: "2026-08-14T14:00:00Z", strike: 15, contracts: 1, premium: 0.1, expiration: "2026-08-14", groupKey: "roll1" },
       { type: "ROLL_PUT_OPEN", occurredAt: "2026-08-14T14:00:00Z", sortOrder: 1, strike: 16, contracts: 1, premium: 0.5, expiration: "2026-08-28", groupKey: "roll1" },
     ];
-    expect(getCurrentOpenPut(events)).toEqual({ strike: 16, contracts: 1, expiration: new Date("2026-08-28") });
+    expect(getCurrentOpenPut(events)).toEqual({ strike: 16, contracts: 1, expiration: new Date("2026-08-28"), openingEventId: null });
   });
 
   it("returns null when the most recent trade event closed the put (no active put right now)", () => {
@@ -249,7 +249,7 @@ describe("getCurrentOpenPut", () => {
       { type: "SELL_PUT", occurredAt: "2026-08-01T14:00:00Z", strike: 15, contracts: 1, premium: 0.4, expiration: "2026-08-14" },
       { type: "NOTE", occurredAt: "2026-08-05T14:00:00Z", notes: "watching earnings" },
     ];
-    expect(getCurrentOpenPut(events)).toEqual({ strike: 15, contracts: 1, expiration: new Date("2026-08-14") });
+    expect(getCurrentOpenPut(events)).toEqual({ strike: 15, contracts: 1, expiration: new Date("2026-08-14"), openingEventId: null });
   });
 
   it("returns null for an incomplete SELL_PUT missing strike/contracts/expiration", () => {
@@ -285,7 +285,7 @@ describe("getCurrentOpenPut", () => {
       type: "ROLL_PUT_OPEN", occurredAt: "2026-09-15T14:00:00Z", sortOrder: 1,
       strike: 14, contracts: 1, premium: 1.02, expiration: "2026-09-25", groupKey: "roll1",
     };
-    const expectedOpenPut = { strike: 14, contracts: 1, expiration: new Date("2026-09-25") };
+    const expectedOpenPut = { strike: 14, contracts: 1, expiration: new Date("2026-09-25"), openingEventId: "evt-3" };
 
     it("returns the new rolled contract regardless of the input array's order", () => {
       expect(getCurrentOpenPut([sellOld, rollClose, rollOpen])).toEqual(expectedOpenPut);
@@ -396,7 +396,7 @@ describe("getCurrentOpenCall", () => {
       assigned,
       { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 44, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
     ];
-    expect(getCurrentOpenCall(events)).toEqual({ strike: 44, contracts: 1, expiration: new Date("2026-09-11") });
+    expect(getCurrentOpenCall(events)).toEqual({ strike: 44, contracts: 1, expiration: new Date("2026-09-11"), openingEventId: null });
   });
 
   it("returns null once the call is closed", () => {
@@ -424,7 +424,7 @@ describe("getCurrentOpenCall", () => {
       { type: "COVERED_CALL_EXPIRED", occurredAt: "2026-09-12T14:00:00Z", strike: 44, contracts: 1, premium: 0, expiration: "2026-09-11" },
       { type: "SELL_COVERED_CALL", occurredAt: "2026-09-14T14:00:00Z", strike: 45, contracts: 1, premium: 0.25, expiration: "2026-09-25" },
     ];
-    expect(getCurrentOpenCall(events)).toEqual({ strike: 45, contracts: 1, expiration: new Date("2026-09-25") });
+    expect(getCurrentOpenCall(events)).toEqual({ strike: 45, contracts: 1, expiration: new Date("2026-09-25"), openingEventId: null });
   });
 
   it("keeps reporting an open call across a later STOCK_SALE on uncovered shares", () => {
@@ -435,7 +435,7 @@ describe("getCurrentOpenCall", () => {
       { type: "SELL_COVERED_CALL", occurredAt: "2026-09-01T14:00:00Z", strike: 44, contracts: 1, premium: 0.3, expiration: "2026-09-11" },
       { type: "STOCK_SALE", occurredAt: "2026-09-05T14:00:00Z", shares: 100, underlyingPrice: 43 },
     ];
-    expect(getCurrentOpenCall(events)).toEqual({ strike: 44, contracts: 1, expiration: new Date("2026-09-11") });
+    expect(getCurrentOpenCall(events)).toEqual({ strike: 44, contracts: 1, expiration: new Date("2026-09-11"), openingEventId: null });
   });
 
   it("returns null for an incomplete SELL_COVERED_CALL missing strike/contracts/expiration", () => {

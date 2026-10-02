@@ -273,6 +273,12 @@ export type CurrentOpenPut = {
   strike: number;
   contracts: number;
   expiration: Date;
+  /** The id of the CampaignEvent that OPENED this exact leg (SELL_PUT/ROLL_PUT_OPEN for a put,
+   * SELL_COVERED_CALL for a call) - the primary leg-provenance identity for durable persistence
+   * (see positionReviewAssessment.ts), distinguishing a reopened identical-terms contract from a
+   * prior one. Null only for older in-repo test fixtures that construct events without an `id`
+   * (CampaignEventInput.id is optional) - every real, persisted CampaignEvent has one. */
+  openingEventId: string | null;
 };
 
 export type CurrentOpenCall = CurrentOpenPut;
@@ -305,7 +311,7 @@ export function getCurrentOpenPut(events: CampaignEventInput[]): CurrentOpenPut 
     return null;
   }
 
-  return { contracts, strike, expiration: toDate(lastTradeEvent.expiration) };
+  return { contracts, strike, expiration: toDate(lastTradeEvent.expiration), openingEventId: lastTradeEvent.id ?? null };
 }
 
 export type OpenPutEvidenceState =
@@ -379,7 +385,7 @@ export function getCurrentOpenCall(events: CampaignEventInput[]): CurrentOpenCal
       const strike = numeric(event.strike);
       open =
         contracts !== null && contracts > 0 && strike !== null && strike > 0 && event.expiration
-          ? { contracts, strike, expiration: toDate(event.expiration) }
+          ? { contracts, strike, expiration: toDate(event.expiration), openingEventId: event.id ?? null }
           : null;
     } else if (event.type === "CLOSE_COVERED_CALL" || event.type === "COVERED_CALL_EXPIRED") {
       open = null;

@@ -45,6 +45,13 @@ export type RelevantCampaignLegs = {
   lifecycleByCampaignId: Map<string, ReturnType<typeof summarizeCampaign>["currentStage"]>;
   trackedPuts: TrackedPut[];
   trackedCalls: TrackedCall[];
+  /** LST Last-Valid-Position-Assessment Phase 1 - the current leg's originating OPENING
+   * CampaignEvent.id (from getCurrentOpenPut/getCurrentOpenCall's own openingEventId), kept as a
+   * PARALLEL map rather than added to PositionReviewLeg itself so the shared evaluator's existing
+   * input type/tests are untouched. Only set for a real (complete) PUT/CALL leg - an incomplete or
+   * "NONE" leg has no single opening event to attribute and is never eligible for durable
+   * assessment persistence in the first place. */
+  openingEventIdByCampaignId: Map<string, string | null>;
 };
 
 /** Pure/no I/O - identical to resolvePositionReviewsForUser's own former inline loop, moved here
@@ -56,6 +63,7 @@ export function resolveRelevantCampaignLegs(campaigns: PositionReviewCampaignInp
   const lifecycleByCampaignId = new Map<string, ReturnType<typeof summarizeCampaign>["currentStage"]>();
   const trackedPuts: TrackedPut[] = [];
   const trackedCalls: TrackedCall[] = [];
+  const openingEventIdByCampaignId = new Map<string, string | null>();
 
   for (const campaign of relevant) {
     const summary = summarizeCampaign({ events: campaign.events, status: campaign.status, asOf: now });
@@ -66,6 +74,7 @@ export function resolveRelevantCampaignLegs(campaigns: PositionReviewCampaignInp
 
     if (openPut) {
       legByCampaignId.set(campaign.id, { kind: "PUT", strike: openPut.strike, expiration: openPut.expiration, contracts: openPut.contracts });
+      openingEventIdByCampaignId.set(campaign.id, openPut.openingEventId);
       trackedPuts.push({
         id: campaign.id,
         ownerId: campaign.ownerId,
@@ -78,6 +87,7 @@ export function resolveRelevantCampaignLegs(campaigns: PositionReviewCampaignInp
       });
     } else if (openCall) {
       legByCampaignId.set(campaign.id, { kind: "CALL", strike: openCall.strike, expiration: openCall.expiration, contracts: openCall.contracts });
+      openingEventIdByCampaignId.set(campaign.id, openCall.openingEventId);
       trackedCalls.push({
         id: campaign.id,
         ownerId: campaign.ownerId,
@@ -122,7 +132,7 @@ export function resolveRelevantCampaignLegs(campaigns: PositionReviewCampaignInp
     }
   }
 
-  return { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls };
+  return { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls, openingEventIdByCampaignId };
 }
 
 /** The exact ticker set resolvePositionReviewsForUser itself requests quote evidence for - a

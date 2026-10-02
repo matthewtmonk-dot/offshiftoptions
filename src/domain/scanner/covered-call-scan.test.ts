@@ -48,13 +48,13 @@ describe("availableSharesForCoveredCall / maxCoveredCallContracts (universe math
   });
 
   it("test 5: 200 shares with an existing 1-contract obligation -> only 100 additional shares / 1 more contract available", () => {
-    const available = availableSharesForCoveredCall(200, { strike: 45, contracts: 1, expiration: new Date("2026-09-11") });
+    const available = availableSharesForCoveredCall(200, { strike: 45, contracts: 1, expiration: new Date("2026-09-11"), openingEventId: null });
     expect(available).toBe(100);
     expect(maxCoveredCallContracts(available)).toBe(1);
   });
 
   it("test 6: 100 shares fully covered by an existing 1-contract call -> 0 available, no naked call", () => {
-    const available = availableSharesForCoveredCall(100, { strike: 45, contracts: 1, expiration: new Date("2026-09-11") });
+    const available = availableSharesForCoveredCall(100, { strike: 45, contracts: 1, expiration: new Date("2026-09-11"), openingEventId: null });
     expect(available).toBe(0);
     expect(maxCoveredCallContracts(available)).toBe(0);
   });

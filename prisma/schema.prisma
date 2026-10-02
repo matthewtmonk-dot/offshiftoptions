@@ -317,6 +317,7 @@ model User {
   campaigns                   Campaign[]
   technicalIndicatorSnapshots TechnicalIndicatorSnapshot[]
   technicalPreparationRuns    TechnicalPreparationRun[]
+  positionReviewAssessments   PositionReviewAssessment[]
 }
 
 model Session {
@@ -378,30 +379,31 @@ model SharingPreferences {
 }
 
 model TradingAccount {
-  id                    String                        @id @default(cuid())
-  userId                String
-  name                  String
-  brokerName            String                        @default("Manual")
-  accountType           String                        @default("Demo")
-  currency              String                        @default("USD")
-  startingBalance       Decimal?                      @db.Decimal(14, 2)
-  manualBalance         Decimal?                      @db.Decimal(14, 2)
-  visibility            Visibility                    @default(PRIVATE)
-  source                AccountSource                 @default(MANUAL)
-  brokerConnectionId    String?
-  externalAccountId     String?
-  createdAt             DateTime                      @default(now())
-  updatedAt             DateTime                      @updatedAt
-  user                  User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  brokerConnection      BrokerConnection?             @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
-  fundingSyncs          AccountFundingSync[]
-  valuationObservations AccountValuationObservation[]
-  snapshots             AccountSnapshot[]
-  ledgerEntries         AccountLedgerEntry[]
-  brokerRecords         BrokerRecord[]
-  brokerImportBatches   BrokerImportBatch[]
-  trades                Trade[]
-  campaigns             Campaign[]
+  id                        String                        @id @default(cuid())
+  userId                    String
+  name                      String
+  brokerName                String                        @default("Manual")
+  accountType               String                        @default("Demo")
+  currency                  String                        @default("USD")
+  startingBalance           Decimal?                      @db.Decimal(14, 2)
+  manualBalance             Decimal?                      @db.Decimal(14, 2)
+  visibility                Visibility                    @default(PRIVATE)
+  source                    AccountSource                 @default(MANUAL)
+  brokerConnectionId        String?
+  externalAccountId         String?
+  createdAt                 DateTime                      @default(now())
+  updatedAt                 DateTime                      @updatedAt
+  user                      User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerConnection          BrokerConnection?             @relation(fields: [brokerConnectionId], references: [id], onDelete: SetNull)
+  fundingSyncs              AccountFundingSync[]
+  valuationObservations     AccountValuationObservation[]
+  snapshots                 AccountSnapshot[]
+  ledgerEntries             AccountLedgerEntry[]
+  brokerRecords             BrokerRecord[]
+  brokerImportBatches       BrokerImportBatch[]
+  trades                    Trade[]
+  campaigns                 Campaign[]
+  positionReviewAssessments PositionReviewAssessment[]
 
   @@unique([userId, externalAccountId])
   @@index([userId, visibility])
@@ -517,23 +519,24 @@ model PositionSnapshot {
 }
 
 model Campaign {
-  id                  String           @id @default(cuid())
-  ownerId             String
-  accountId           String
-  ticker              String
-  strategy            CampaignStrategy @default(CASH_SECURED_PUT)
-  status              CampaignStatus   @default(OPEN)
-  visibility          RecordVisibility @default(INHERIT)
-  openedAt            DateTime
-  closedAt            DateTime?
-  thesis              String?
-  entrySnapshotJson   Json?
-  createdAt           DateTime         @default(now())
-  updatedAt           DateTime         @updatedAt
-  owner               User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  account             TradingAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  events              CampaignEvent[]
-  linkedBrokerRecords BrokerRecord[]
+  id                        String                     @id @default(cuid())
+  ownerId                   String
+  accountId                 String
+  ticker                    String
+  strategy                  CampaignStrategy           @default(CASH_SECURED_PUT)
+  status                    CampaignStatus             @default(OPEN)
+  visibility                RecordVisibility           @default(INHERIT)
+  openedAt                  DateTime
+  closedAt                  DateTime?
+  thesis                    String?
+  entrySnapshotJson         Json?
+  createdAt                 DateTime                   @default(now())
+  updatedAt                 DateTime                   @updatedAt
+  owner                     User                       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  account                   TradingAccount             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  events                    CampaignEvent[]
+  linkedBrokerRecords       BrokerRecord[]
+  positionReviewAssessments PositionReviewAssessment[]
 
   @@index([ownerId, status])
   @@index([accountId, status])
@@ -542,24 +545,25 @@ model Campaign {
 }
 
 model CampaignEvent {
-  id              String            @id @default(cuid())
-  campaignId      String
-  type            CampaignEventType
-  occurredAt      DateTime
-  sortOrder       Int               @default(0)
-  groupKey        String?
-  optionType      OptionType?
-  contracts       Int?
-  shares          Int?
-  strike          Decimal?          @db.Decimal(12, 2)
-  expiration      DateTime?
-  premium         Decimal?          @db.Decimal(12, 4)
-  cashAmount      Decimal?          @db.Decimal(14, 2)
-  fees            Decimal           @default(0) @db.Decimal(12, 2)
-  underlyingPrice Decimal?          @db.Decimal(12, 2)
-  notes           String?
-  createdAt       DateTime          @default(now())
-  campaign        Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  id                        String                     @id @default(cuid())
+  campaignId                String
+  type                      CampaignEventType
+  occurredAt                DateTime
+  sortOrder                 Int                        @default(0)
+  groupKey                  String?
+  optionType                OptionType?
+  contracts                 Int?
+  shares                    Int?
+  strike                    Decimal?                   @db.Decimal(12, 2)
+  expiration                DateTime?
+  premium                   Decimal?                   @db.Decimal(12, 4)
+  cashAmount                Decimal?                   @db.Decimal(14, 2)
+  fees                      Decimal                    @default(0) @db.Decimal(12, 2)
+  underlyingPrice           Decimal?                   @db.Decimal(12, 2)
+  notes                     String?
+  createdAt                 DateTime                   @default(now())
+  campaign                  Campaign                   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  positionReviewAssessments PositionReviewAssessment[]
 
   @@index([campaignId, occurredAt])
   @@index([campaignId, groupKey])
@@ -1469,4 +1473,109 @@ model AccountValuationObservation {
 
   @@index([accountId, createdAt])
   @@index([accountId, provenanceStatus])
+}
+
+/// LAST VALID POSITION ASSESSMENT - Phase 1 durable foundation only (see PROJECT_HANDOFF.md).
+/// NEVER satisfies current quote freshness, current market-session eligibility, strict broker
+/// confirmation, strict option evidence, or current position-review eligibility - this table is
+/// not read by evaluatePositionReview (domain/finance/positionReview.ts) and must never be fed
+/// back into it. A row here is purely a durable record of what the app's own evaluator concluded,
+/// from real evidence, as of evaluatedAt - for later HISTORICAL DISPLAY FALLBACK only, after current
+/// evidence has expired. Only a meaningful current action (never CANNOT_ASSESS - see
+/// PositionReviewPersistedAction, which structurally excludes it) is ever persisted here; see
+/// evaluatePositionReviewWriteEligibility (domain/finance/positionReviewAssessment.ts) for the full
+/// write-eligibility predicate, and evaluateHistoricalAssessmentEligibility for the separate
+/// read-side staleness/identity check a Phase 2 reader must run before showing one of these rows.
+enum PositionReviewPersistedAction {
+  COMFORTABLE
+  WATCH
+  REVIEW_ROLL
+  REVIEW_CALL
+}
+
+model PositionReviewAssessment {
+  ownerId            String
+  /// Denormalized alongside accountId/campaignId (rather than reached only via the campaign
+  /// relation) so this row's own exact scope is self-describing and directly indexable/owner-
+  /// filterable without a join - owner isolation must never depend on correctly traversing a
+  /// relation chain at read time.
+  accountId          String
+  campaignId         String
+  /// The id of the CampaignEvent that OPENED this exact leg (SELL_PUT/ROLL_PUT_OPEN/
+  /// SELL_COVERED_CALL) - the primary leg-provenance identity distinguishing a reopened
+  /// identical-terms contract from the leg this row actually describes. Never inferred from
+  /// ticker/strike/expiration/groupKey alone - see getCurrentOpenPut/getCurrentOpenCall
+  /// (domain/finance/campaigns.ts), which now expose this id from the same authoritative
+  /// current-leg reduction Dashboard/Tracker already use.
+  openingEventId     String
+  /// Deterministic hash of the canonical position/context inputs this assessment depended on (see
+  /// computeContextFingerprint) - protects against a stored row being reused as a fallback after a
+  /// material context change (e.g. the owner's roll-buffer policy) even when every identity field
+  /// above still matches exactly.
+  contextFingerprint String
+
+  action      PositionReviewPersistedAction
+  /// The same deterministic reason-code vocabulary PositionReviewExplanation.reasonCodes already
+  /// uses - never free text, never rendered prose.
+  reasonCodes String[]
+
+  /// The server instant this assessment was computed (mirrors PositionReviewExplanation.evaluatedAt)
+  /// - never a render/display/re-check time.
+  evaluatedAt         DateTime
+  /// The America/New_York calendar date ("YYYY-MM-DD") of evaluatedAt - stored explicitly so a
+  /// later reader can classify this as "previous session" without re-deriving NY-timezone
+  /// conversion from a raw UTC instant.
+  nySessionDate       String
+  regularSessionStart DateTime
+  regularSessionEnd   DateTime
+
+  /// The exact atomic price/trade-time pair the assessment relied on (QuoteReviewEvidence) - never
+  /// independently-chosen fallback fields.
+  underlyingPrice     Decimal  @db.Decimal(12, 4)
+  underlyingTradeTime DateTime
+
+  /// POSITION terms as they were at evaluation time - duplicated here (not re-read from the live
+  /// Campaign/CampaignEvent rows) precisely so this historical row remains meaningful even after
+  /// the current campaign state has since changed (a roll, a close, a new event).
+  ticker     String
+  optionType OptionType
+  strike     Decimal    @db.Decimal(12, 2)
+  expiration DateTime
+  contracts  Int
+
+  dollarDistance           Decimal @db.Decimal(12, 2)
+  percentageDistance       Decimal @db.Decimal(12, 4)
+  appliedRollBufferPercent Decimal @db.Decimal(5, 2)
+
+  /// The PositionEvidenceState this assessment relied on (e.g. "SCHWAB_CONFIRMED") - provenance
+  /// only, never re-interpreted as current evidence.
+  positionEvidenceSource  String
+  /// The broker position read's own observation time (PositionReviewExplanation.positionEvidenceAsOf)
+  /// when positionEvidenceSource required one - null for a manual position.
+  brokerReceiptAt         DateTime?
+  /// Bumped whenever this write-eligibility/fingerprint policy's semantics change, so a row written
+  /// under an older policy can be told apart from one written under the current policy.
+  evaluationPolicyVersion Int       @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner        User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  account      TradingAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  campaign     Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  /// Deliberately NOT a plain string column - a real FK proves this id corresponds to an actual
+  /// CampaignEvent row (campaign events are never hard-deleted in this app's accounting model, so
+  /// this relation is safe to require).
+  openingEvent CampaignEvent  @relation(fields: [openingEventId], references: [id], onDelete: Cascade)
+
+  /// One latest-valid row per exact scoped leg, keyed by the natural compound identity directly
+  /// (no separate synthetic id) - this is also what makes the newer-only raw-SQL upsert in
+  /// positionReviewAssessmentStore.ts possible without a client-side id generator: a DB-level
+  /// "only if evaluatedAt is newer" INSERT ... ON CONFLICT targets this exact primary key, never a
+  /// blind overwrite by a late-arriving older evaluation. Old rows for a PRIOR openingEventId (a
+  /// roll, a reopened contract) are a different primary key entirely and are left alone - they
+  /// simply become ineligible for display, never deleted by this model.
+  @@id([ownerId, accountId, campaignId, openingEventId])
+  @@index([ownerId])
+  @@index([campaignId])
 }

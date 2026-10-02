@@ -245,7 +245,7 @@ describe("covered call Roll Status end to end with the event ledger", () => {
       { type: "SELL_COVERED_CALL", occurredAt: "2026-09-09T14:00:00Z", strike: 35, contracts: 1, premium: 0.28, expiration: "2026-09-25" },
     ];
     const openCall = getCurrentOpenCall(events);
-    expect(openCall).toEqual({ strike: 35, contracts: 1, expiration: new Date("2026-09-25") });
+    expect(openCall).toEqual({ strike: 35, contracts: 1, expiration: new Date("2026-09-25"), openingEventId: null });
 
     // Stock at 30.50 would have been ITM against the first ($30) call but is comfortably below
     // the actual current ($35) call.

@@ -520,7 +520,7 @@ function baseLifecycleFromStage(stage: CampaignCurrentStage, legKind: "PUT" | "C
   return legKind === "PUT" ? "CURRENT_PUT" : "COVERED_CALL";
 }
 
-function validatedBufferPercent(rollBufferPercent: number): number {
+export function validatedBufferPercent(rollBufferPercent: number): number {
   return Number.isFinite(rollBufferPercent) && rollBufferPercent >= 0.1 && rollBufferPercent <= 25
     ? rollBufferPercent
     : DEFAULT_ROLL_BUFFER_PERCENT;
