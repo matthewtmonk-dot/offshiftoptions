@@ -368,30 +368,50 @@ describe("withMarketDataCache", () => {
       }
     });
 
-    it("Codex blocker repair item 15.A - a quote cached while fresh still evaluates as STALE once real elapsed time (re-derived evaluationNow) exceeds the freshness window, even though the 30s cache entry itself is still live", async () => {
-      const fetchedAtMs = 1_700_000_000_000;
-      const snapshot = strictSnapshot(fetchedAtMs);
+    it("Codex final-review repair item 15.A - one coherent clock: a quote already 50s old when fetched/cached evaluates STALE at exactly 61s after the SAME clock advances 11s further, and the still-live 30s cache entry renews nothing", async () => {
+      const fetchedAt = 1_700_000_000_000; // this app's own request/response instant
+      const quoteTimeInLong = fetchedAt - 50_000; // the PROVIDER's own quote was already 50s old at that moment
+      const snapshot = {
+        status: "AVAILABLE" as const,
+        envelope: { status: "SUCCESS", rootSymbol: "SPY", isDelayed: false },
+        request: { requestedUnderlying: "SPY", fromDate: null, toDate: null, contractType: "PUT" as const },
+        contracts: [
+          {
+            location: { expirationMapKey: "2026-10-16:16", strikeMapKey: "655.0", originatingMap: "PUT" as const },
+            identity: { providerSymbol: "SPY   261016P00655000", putCall: "PUT", strikePrice: 655, expirationDate: new Date("2026-10-16T20:00:00.000Z"), optionRoot: "SPY" },
+            quote: { bid: 1.2, ask: 1.3, quoteTimeInLong },
+            terms: { multiplier: 100, nonStandard: false, mini: false, optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: "USD" }], settlementType: "P", deliverableNote: null },
+            ruleInputs: { openInterest: 312, totalVolume: 0, delta: -0.015 },
+          },
+        ],
+        transport: { provider: "SCHWAB" as const, requestStartedAt: new Date(fetchedAt), responseReceivedAt: new Date(fetchedAt), httpDateHeader: null, evidencePolicyVersion: "v1" },
+      };
       const getStrictOptionChainSnapshot = vi.fn(async () => snapshot);
-      const inner = provider({ getStrictOptionChainSnapshot });
-      let currentTime = fetchedAtMs; // cache's own `now()` clock - independent of evaluationNow below
-      const cached = withMarketDataCache(inner, "schwab:user:user-a:connection:one", { strictOptionChainTtlMs: 30_000, now: () => currentTime });
+      let currentTime = fetchedAt; // the ONE clock driving both the cache's own now() and (below) the evaluation instant
+      const cached = withMarketDataCache(provider({ getStrictOptionChainSnapshot }), "schwab:user:user-a:connection:one", { strictOptionChainTtlMs: 30_000, now: () => currentTime });
 
-      await cached.getStrictOptionChainSnapshot("SPY");
-      currentTime = fetchedAtMs + 10_000; // 10s later - well inside the 30s cache TTL, so this is a cache HIT
+      const first = await cached.getStrictOptionChainSnapshot("SPY");
+      currentTime += 11_000; // advance the SAME clock by 11s - still well within the 30s cache TTL
       const second = await cached.getStrictOptionChainSnapshot("SPY");
-      expect(getStrictOptionChainSnapshot).toHaveBeenCalledTimes(1); // confirms the second call was indeed served from cache
+
+      expect(getStrictOptionChainSnapshot).toHaveBeenCalledTimes(1); // confirms the second call was a genuine cache HIT at 11s elapsed
+      expect(second).toBe(first); // identical object reference - nothing renewed on the hit
 
       if (second.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
-      // The evaluator re-derives freshness from a REAL evaluation clock 70 seconds after the quote
-      // was fetched - well past the 60s strict freshness window - never from the cache's own TTL,
-      // which (at 10s elapsed) would still call this entry "live."
-      const evaluationNow = new Date(fetchedAtMs + 70_000);
+      expect(second.contracts[0]!.quote.quoteTimeInLong).toBe(quoteTimeInLong); // provider timestamp unchanged by the hit
+      expect(second.transport.requestStartedAt.getTime()).toBe(fetchedAt); // transport timestamps unchanged by the hit
+      expect(second.transport.responseReceivedAt.getTime()).toBe(fetchedAt);
+
+      // Evaluated against the SAME advanced clock (11s after fetch): the quote, already 50s old
+      // when fetched, is now 61s old in total - one millisecond over the strict 60s limit.
+      const evaluationNow = new Date(currentTime);
       const freshness = evaluateQuoteFreshness({
         quoteTimeInLong: second.contracts[0]!.quote.quoteTimeInLong,
         requestStartedAt: second.transport.requestStartedAt,
         responseReceivedAt: second.transport.responseReceivedAt,
         evaluationNow,
       });
+      expect(freshness.ageMs).toBe(61_000);
       expect(freshness.status).toBe("FAIL");
       expect(freshness.reasonCode).toBe("QUOTE_STALE");
     });
@@ -450,6 +470,36 @@ describe("withMarketDataCache", () => {
       );
       await freshCached.getStrictOptionChainSnapshot("SPY");
       expect(secondCallHappened).toBe(true); // proves nothing was cached by the aborted call above
+    });
+
+    it("Codex final-review repair item 4.C - genuine mid-flight invalidation: aborting WHILE the strict provider call is still pending prevents a LATE-completing result from ever being published", async () => {
+      const controller = new AbortController();
+      let resolveProvider!: (value: ReturnType<typeof strictSnapshot>) => void;
+      const pending = new Promise<ReturnType<typeof strictSnapshot>>((resolve) => {
+        resolveProvider = resolve;
+      });
+      const cached = withMarketDataCache(provider({ getStrictOptionChainSnapshot: () => pending }), "schwab:user:user-a:connection:one");
+
+      const inFlight = cached.getStrictOptionChainSnapshot("SPY", undefined, controller.signal);
+      controller.abort(); // invalidate WHILE the real provider call is still outstanding
+      resolveProvider(strictSnapshot(1_700_000_000_000)); // the provider call completes LATE, after the abort
+
+      await expect(inFlight).rejects.toThrow(MarketDataProviderError);
+
+      // A subsequent, non-aborted call must genuinely re-fetch - proving the late completion above
+      // was never published to this cache key.
+      let secondCallHappened = false;
+      const freshCached = withMarketDataCache(
+        provider({
+          getStrictOptionChainSnapshot: async () => {
+            secondCallHappened = true;
+            return strictSnapshot(1_700_000_000_000);
+          },
+        }),
+        "schwab:user:user-a:connection:one",
+      );
+      await freshCached.getStrictOptionChainSnapshot("SPY");
+      expect(secondCallHappened).toBe(true);
     });
   });
 

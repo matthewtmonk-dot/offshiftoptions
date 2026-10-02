@@ -210,55 +210,94 @@ export function evaluateOptionIdentity(params: {
 }
 
 /**
- * A full-evidence fingerprint of everything that could make two apparently-identical-identity
- * records actually conflict - not just the provider symbol. Two contracts with the SAME
- * strike/expiration/PUT-CALL "apparent identity" but ANY differing evidence here (quote values,
- * quote timestamp, optionRoot, contract terms, deliverables, or the rule inputs strict evaluation
- * depends on) are conflicting duplicates, not a harmless repeated observation.
+ * A full-evidence fingerprint of EVERYTHING that could make two records actually conflict -
+ * location (which map/expiration-key/strike-key they were found at), every identity field
+ * (including structured strikePrice/expirationDate - NOT just the provider symbol), quote values
+ * and timing, contract terms/deliverables, and the rule inputs strict evaluation depends on. Two
+ * records with an identical fingerprint are a harmless repeated/retried observation; ANY
+ * difference makes them a genuine conflict.
  */
 function contractEvidenceFingerprint(contract: StrictOptionContractSnapshot): string {
   return JSON.stringify({
-    providerSymbol: contract.identity.providerSymbol,
-    putCall: contract.identity.putCall,
-    optionRoot: contract.identity.optionRoot,
-    bid: contract.quote.bid,
-    ask: contract.quote.ask,
-    quoteTimeInLong: contract.quote.quoteTimeInLong,
-    multiplier: contract.terms.multiplier,
-    nonStandard: contract.terms.nonStandard,
-    mini: contract.terms.mini,
-    settlementType: contract.terms.settlementType,
-    deliverableNote: contract.terms.deliverableNote,
-    optionDeliverablesList: contract.terms.optionDeliverablesList,
-    openInterest: contract.ruleInputs.openInterest,
-    totalVolume: contract.ruleInputs.totalVolume,
-    delta: contract.ruleInputs.delta,
+    location: {
+      originatingMap: contract.location.originatingMap,
+      expirationMapKey: contract.location.expirationMapKey,
+      strikeMapKey: contract.location.strikeMapKey,
+    },
+    identity: {
+      providerSymbol: contract.identity.providerSymbol,
+      putCall: contract.identity.putCall,
+      strikePrice: contract.identity.strikePrice,
+      expirationDate: contract.identity.expirationDate ? contract.identity.expirationDate.toISOString() : null,
+      optionRoot: contract.identity.optionRoot,
+    },
+    quote: {
+      bid: contract.quote.bid,
+      ask: contract.quote.ask,
+      quoteTimeInLong: contract.quote.quoteTimeInLong,
+    },
+    terms: {
+      multiplier: contract.terms.multiplier,
+      nonStandard: contract.terms.nonStandard,
+      mini: contract.terms.mini,
+      settlementType: contract.terms.settlementType,
+      deliverableNote: contract.terms.deliverableNote,
+      optionDeliverablesList: contract.terms.optionDeliverablesList,
+    },
+    ruleInputs: {
+      openInterest: contract.ruleInputs.openInterest,
+      totalVolume: contract.ruleInputs.totalVolume,
+      delta: contract.ruleInputs.delta,
+    },
   });
 }
 
 /**
- * True when some OTHER contract in `contracts` shares `target`'s strike/expiration/PUT "apparent
- * identity" but its full evidence fingerprint differs in ANY way - a genuinely conflicting
- * duplicate that must remain ambiguous rather than have one record arbitrarily preferred.
- * Two records that are fully evidence-identical (e.g. a harmless repeated/retried observation)
- * are NOT a conflict and may be treated as the same observation.
+ * True when some OTHER contract in `contracts` conflicts with `target` under EITHER of two
+ * independent tests - a genuinely conflicting duplicate must remain ambiguous rather than have one
+ * record arbitrarily preferred, and neither test may be skipped just because the other's
+ * pre-filter doesn't match:
+ *
+ *  1. SAME APPARENT IDENTITY (strike/expiration/PUT-CALL side) with a differing fingerprint - e.g.
+ *     two DIFFERENT provider symbols both claiming the same strike/expiration/side.
+ *  2. SAME EXACT PROVIDER SYMBOL with a differing fingerprint, REGARDLESS of whether structured
+ *     strike/expiration/location happen to agree. This is the case the apparent-identity pre-filter
+ *     in (1) alone would miss: a record whose own structured strikePrice disagrees with another
+ *     record sharing its exact provider symbol would simply fail that pre-filter and never be
+ *     compared, letting the first-seen record look internally valid in isolation. Evidence
+ *     compared here - via the fingerprint - already covers location, full identity, quote, terms,
+ *     and rule inputs (see contractEvidenceFingerprint's own doc comment).
+ *
+ * Two records that are fully evidence-identical (e.g. a harmless repeated/retried observation) are
+ * NOT a conflict under either test and may be treated as the same observation.
  */
 export function hasConflictingDuplicateIdentity(contracts: StrictOptionContractSnapshot[], target: StrictOptionContractSnapshot): boolean {
-  if (target.identity.strikePrice === null || !target.identity.expirationDate) {
-    return false; // nothing well-formed enough to compare against
-  }
-  const targetCalendarDate = calendarDateOfUtc(target.identity.expirationDate);
   const targetFingerprint = contractEvidenceFingerprint(target);
-  for (const other of contracts) {
-    if (other === target) continue;
-    if (other.location.originatingMap !== target.location.originatingMap) continue;
-    if (other.identity.strikePrice === null || !other.identity.expirationDate) continue;
-    if (!strikesEqual(other.identity.strikePrice, target.identity.strikePrice)) continue;
-    if (calendarDateOfUtc(other.identity.expirationDate) !== targetCalendarDate) continue;
-    if (contractEvidenceFingerprint(other) !== targetFingerprint) {
-      return true;
+
+  if (target.identity.strikePrice !== null && target.identity.expirationDate) {
+    const targetCalendarDate = calendarDateOfUtc(target.identity.expirationDate);
+    for (const other of contracts) {
+      if (other === target) continue;
+      if (other.location.originatingMap !== target.location.originatingMap) continue;
+      if (other.identity.strikePrice === null || !other.identity.expirationDate) continue;
+      if (!strikesEqual(other.identity.strikePrice, target.identity.strikePrice)) continue;
+      if (calendarDateOfUtc(other.identity.expirationDate) !== targetCalendarDate) continue;
+      if (contractEvidenceFingerprint(other) !== targetFingerprint) {
+        return true;
+      }
     }
   }
+
+  if (target.identity.providerSymbol) {
+    for (const other of contracts) {
+      if (other === target) continue;
+      if (other.identity.providerSymbol !== target.identity.providerSymbol) continue;
+      if (contractEvidenceFingerprint(other) !== targetFingerprint) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -496,12 +535,16 @@ function deliverableNoteContradictsPhysicalDelivery(note: string): boolean {
  * cash-settled, non-equity, adjusted, or mini contracts - all of those fall out as UNSUPPORTED by
  * these same checks, never a separate code path.
  *
- * `deliverable.currencyType === null` is explicitly NOT a failure: the real sanitized SPY capture
- * (strict-option-chain-live-derived.json) never supplied this field at all for an otherwise
- * perfectly standard physical 100-share deliverable, and the ticket's own architecture note is
- * explicit that an absent currency field does not itself establish - and must never be guessed
- * into - a foreign-currency or cash-settled claim. Only an ACTUAL present value other than "USD"
- * fails closed as an explicit, evidenced incompatibility.
+ * `settlementType` and `deliverable.currencyType` are separate fields with DELIBERATELY different
+ * missing-value semantics - never conflated:
+ *  - `settlementType === null` (missing) is UNKNOWN - this field IS required for the supported
+ *    physical-settlement shape, so its absence is insufficient evidence, not a pass.
+ *  - `deliverable.currencyType === null` is explicitly NOT a failure: the real sanitized SPY
+ *    capture (strict-option-chain-live-derived.json) never supplied this field at all for an
+ *    otherwise perfectly standard physical 100-share deliverable, and the ticket's own
+ *    architecture note is explicit that an absent currency field does not itself establish - and
+ *    must never be guessed into - a foreign-currency or cash-settled claim. Only an ACTUAL present
+ *    value other than "USD" fails closed as an explicit, evidenced incompatibility.
  */
 export function evaluateStandardContractTerms(params: {
   terms: StrictOptionContractTerms;
@@ -509,13 +552,23 @@ export function evaluateStandardContractTerms(params: {
 }): { status: CriterionStatus; reasonCode: ContractTermsReasonCode; detail: string } {
   const { terms, supportedUnderlying } = params;
 
-  if (terms.multiplier === null || terms.nonStandard === null || terms.mini === null || terms.optionDeliverablesList === null) {
-    return mandatory("UNKNOWN", "CONTRACT_TERMS_UNKNOWN", "One or more required contract-terms fields (multiplier/nonStandard/mini/optionDeliverablesList) is missing.");
+  // settlementType is a REQUIRED field for the supported physical-settlement shape (unlike
+  // deliverable currencyType, which is a separate field with separate semantics - see
+  // evaluateStandardContractTerms's own doc comment on why an absent currency is never treated the
+  // same as an absent settlement type). Missing settlementType is UNKNOWN, never silently accepted.
+  if (
+    terms.multiplier === null ||
+    terms.nonStandard === null ||
+    terms.mini === null ||
+    terms.optionDeliverablesList === null ||
+    terms.settlementType === null
+  ) {
+    return mandatory("UNKNOWN", "CONTRACT_TERMS_UNKNOWN", "One or more required contract-terms fields (multiplier/nonStandard/mini/optionDeliverablesList/settlementType) is missing.");
   }
-  // Contradiction checks run before the "supported shape" checks below - a contract that LOOKS
-  // standard on multiplier/deliverable-count but carries explicit cash-settlement metadata must
-  // never pass just because the other fields happen to look right.
-  if (terms.settlementType !== null && terms.settlementType.toUpperCase() !== SUPPORTED_SETTLEMENT_TYPE) {
+  // Contradiction/support checks run before the "supported shape" checks below - a contract that
+  // LOOKS standard on multiplier/deliverable-count but carries an unsupported or contradictory
+  // settlement value must never pass just because the other fields happen to look right.
+  if (terms.settlementType.toUpperCase() !== SUPPORTED_SETTLEMENT_TYPE) {
     return mandatory("FAIL", "CONTRACT_UNSUPPORTED", `settlementType "${terms.settlementType}" is not the supported physical-settlement value.`);
   }
   if (terms.deliverableNote !== null && deliverableNoteContradictsPhysicalDelivery(terms.deliverableNote)) {
@@ -707,6 +760,46 @@ export function computeStrictOptionEconomics(params: {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 9b. Underlying/option cross-domain symbol binding
+// ---------------------------------------------------------------------------------------------
+
+export type UnderlyingBindingReasonCode = "UNDERLYING_BOUND" | "UNDERLYING_UNBOUND" | "UNDERLYING_BINDING_UNKNOWN";
+
+/**
+ * `evaluateQuoteEligibility` (the Phase-2-approved strict underlying helper) only proves ITS OWN
+ * `requestedSymbol`/`returnedSymbol` agree with each other - it has no way to know which option
+ * candidate is asking, so it cannot by itself prove the underlying evidence is for the SAME
+ * underlying the option actually belongs to. Without this explicit cross-domain check, internally
+ * valid equity evidence for a completely different symbol (e.g. QQQ) could silently satisfy a SPY
+ * option's session/alignment gates. Exact, case-insensitive equality only - never a substring
+ * match, and never inferred from `optionRoot` or an OCC-parsed symbol (those are option-side
+ * identity concerns; this is strictly "is the underlying evidence even about the right ticker").
+ */
+export function evaluateUnderlyingBinding(params: {
+  requestedUnderlying: string;
+  underlyingEvidence: QuoteReviewEvidence;
+}): { status: CriterionStatus; reasonCode: UnderlyingBindingReasonCode; detail: string } {
+  const { requestedUnderlying, underlyingEvidence } = params;
+
+  if (underlyingEvidence.status !== "AVAILABLE") {
+    return mandatory("UNKNOWN", "UNDERLYING_BINDING_UNKNOWN", "Underlying evidence is unavailable - cannot establish which underlying it describes.");
+  }
+
+  const requestedUpper = requestedUnderlying.toUpperCase();
+  const evidenceRequested = underlyingEvidence.requestedSymbol.toUpperCase();
+  const evidenceReturned = underlyingEvidence.returnedSymbol.toUpperCase();
+  if (evidenceRequested !== requestedUpper || evidenceReturned !== requestedUpper) {
+    return mandatory(
+      "FAIL",
+      "UNDERLYING_UNBOUND",
+      `Underlying evidence symbol(s) requestedSymbol="${underlyingEvidence.requestedSymbol}"/returnedSymbol="${underlyingEvidence.returnedSymbol}" do not match the option's requested underlying "${requestedUpper}".`,
+    );
+  }
+
+  return mandatory("PASS", "UNDERLYING_BOUND", `Underlying evidence symbol matches the option's requested underlying "${requestedUpper}".`);
+}
+
+// ---------------------------------------------------------------------------------------------
 // 10. Composable evaluation result
 // ---------------------------------------------------------------------------------------------
 
@@ -723,6 +816,11 @@ export type StrictOptionEvidenceEvaluation = {
    * strict eligibility (wrong symbol, non-realtime, unsupported asset type, nonpositive price,
    * stale, invalid timestamp) can never let `session`/`alignment` reach PASS. */
   underlyingEligibility: ReturnType<typeof evaluateQuoteEligibility>;
+  /** Cross-domain binding proving the underlying evidence above is actually for THIS option's own
+   * requested underlying - see evaluateUnderlyingBinding's own doc comment. `session`/`alignment`
+   * only ever receive the underlying's trade time when BOTH this is `PASS` AND
+   * `underlyingEligibility.eligible` is true. */
+  underlyingBinding: ReturnType<typeof evaluateUnderlyingBinding>;
   session: ReturnType<typeof evaluateSessionEligibility>;
   contractTerms: ReturnType<typeof evaluateStandardContractTerms>;
   alignment: ReturnType<typeof evaluateUnderlyingOptionAlignment>;
@@ -764,7 +862,8 @@ export function evaluateStrictOptionEvidence(params: {
   // below - an ineligible underlying's trade time is treated as entirely unavailable (null), never
   // read anyway "because the number looked fine."
   const underlyingEligibility = evaluateQuoteEligibility(underlyingEvidence, sessionEvidence, evaluationNow);
-  const underlyingTradeTime = underlyingEligibility.eligible ? underlyingEligibility.evidence.tradeTime : null;
+  const underlyingBinding = evaluateUnderlyingBinding({ requestedUnderlying, underlyingEvidence });
+  const underlyingTradeTime = underlyingEligibility.eligible && underlyingBinding.status === "PASS" ? underlyingEligibility.evidence.tradeTime : null;
 
   const session = evaluateSessionEligibility({ sessionEvidence, quoteTime: quoteTimestamp.quoteTime, underlyingTradeTime, evaluationNow });
   const alignment = evaluateUnderlyingOptionAlignment({ sessionEvidence, underlyingTradeTime, quoteTime: quoteTimestamp.quoteTime, evaluationNow });
@@ -786,6 +885,7 @@ export function evaluateStrictOptionEvidence(params: {
     quoteTimestamp,
     chainDelay,
     underlyingEligibility,
+    underlyingBinding,
     session,
     contractTerms,
     alignment,

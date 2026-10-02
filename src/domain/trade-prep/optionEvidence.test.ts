@@ -11,6 +11,7 @@ import {
   evaluateSessionEligibility,
   evaluateStandardContractTerms,
   evaluateUnderlyingOptionAlignment,
+  evaluateUnderlyingBinding,
   evaluateOpenInterest,
   evaluateTotalVolume,
   evaluatePutDelta,
@@ -292,6 +293,42 @@ describe("evaluateOptionIdentity", () => {
     const a = contractWith({});
     const b = contractWith({}); // structurally identical to a in every field
     expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(false);
+  });
+
+  describe("same exact provider symbol with contradictory evidence (Codex final review - the apparent-identity pre-filter must not hide this)", () => {
+    it("flags ambiguous when two records share the exact same provider symbol but disagree on structured strikePrice (550 vs 551)", () => {
+      // Both records claim the SAME provider symbol, which itself encodes strike 655 - but B's own
+      // structured strikePrice field contradicts it. The OLD pre-filter (requiring strike agreement
+      // BEFORE comparing fingerprints) would skip this pair entirely, letting A look valid alone.
+      const a = contractWith({ identity: { strikePrice: 655 }, location: { strikeMapKey: "655.0" } });
+      const b = contractWith({ identity: { strikePrice: 656 }, location: { strikeMapKey: "655.0" } }); // same symbol, contradictory structured strike
+      expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(true);
+      expect(evaluateOptionIdentity({ ...base(), contract: a, siblingContracts: [a, b] }).status).not.toBe("PASS");
+    });
+
+    it("flags ambiguous when two records share the exact same provider symbol but disagree on structured expirationDate", () => {
+      const a = contractWith({});
+      const b = contractWith({ identity: { expirationDate: new Date("2026-11-20T20:00:00.000Z") } }); // same symbol, different structured expiration
+      expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(true);
+    });
+
+    it("flags ambiguous when two records share the exact same provider symbol but were found at a different map location (originating map side)", () => {
+      const a = contractWith({});
+      const b = contractWith({ location: { originatingMap: "CALL" } }); // same symbol, different location
+      expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(true);
+    });
+
+    it("flags ambiguous when two records share the exact same provider symbol but disagree on quote values", () => {
+      const a = contractWith({ quote: { bid: 1.2, ask: 1.3 } });
+      const b = contractWith({ quote: { bid: 1.5, ask: 1.6 } });
+      expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(true);
+    });
+
+    it("exact duplicate (same symbol, fully identical evidence) remains harmless", () => {
+      const a = contractWith({});
+      const b = contractWith({});
+      expect(hasConflictingDuplicateIdentity([a, b], a)).toBe(false);
+    });
   });
 
   it("does NOT flag duplicates for two genuinely different contracts (different strikes)", () => {
@@ -628,6 +665,12 @@ describe("evaluateStandardContractTerms", () => {
     expect(evaluateStandardContractTerms(params({ settlementType: "C" })).reasonCode).toBe("CONTRACT_UNSUPPORTED");
   });
 
+  it("is UNKNOWN (never assumed standard) when settlementType is missing - it is a REQUIRED field, unlike deliverable currencyType", () => {
+    const result = evaluateStandardContractTerms(params({ settlementType: null }));
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("CONTRACT_TERMS_UNKNOWN");
+  });
+
   it("is UNSUPPORTED for a deliverableNote contradicting physical delivery alone", () => {
     expect(evaluateStandardContractTerms(params({ deliverableNote: "CASH SETTLEMENT ONLY" })).reasonCode).toBe("CONTRACT_UNSUPPORTED");
   });
@@ -742,6 +785,42 @@ describe("evaluateUnderlyingOptionAlignment", () => {
     const result = evaluateUnderlyingOptionAlignment({ sessionEvidence: twoIntervalSession, quoteTime, underlyingTradeTime, evaluationNow });
     expect(result.status).toBe("FAIL");
     expect(result.reasonCode).toBe("ALIGNMENT_MISALIGNED");
+  });
+});
+
+// =================================================================================================
+// UNDERLYING / OPTION CROSS-DOMAIN SYMBOL BINDING
+// =================================================================================================
+
+describe("evaluateUnderlyingBinding (Codex final review - cross-domain symbol binding)", () => {
+  it("PASSes when the underlying evidence's requested/returned symbol both match the option's requested underlying", () => {
+    const result = evaluateUnderlyingBinding({ requestedUnderlying: "SPY", underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME) }); // SPY/SPY
+    expect(result.status).toBe("PASS");
+    expect(result.reasonCode).toBe("UNDERLYING_BOUND");
+  });
+
+  it("fails (never PASS) when the underlying evidence is for an entirely different ticker (QQQ/QQQ) than the SPY option", () => {
+    const result = evaluateUnderlyingBinding({
+      requestedUnderlying: "SPY",
+      underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { requestedSymbol: "QQQ", returnedSymbol: "QQQ" }),
+    });
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("UNDERLYING_UNBOUND");
+  });
+
+  it("fails when requestedSymbol and returnedSymbol disagree with each other (SPY/QQQ) even if one matches the option", () => {
+    const result = evaluateUnderlyingBinding({
+      requestedUnderlying: "SPY",
+      underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { requestedSymbol: "SPY", returnedSymbol: "QQQ" }),
+    });
+    expect(result.status).toBe("FAIL");
+    expect(result.reasonCode).toBe("UNDERLYING_UNBOUND");
+  });
+
+  it("is UNKNOWN when underlying symbol evidence is unavailable", () => {
+    const result = evaluateUnderlyingBinding({ requestedUnderlying: "SPY", underlyingEvidence: { status: "UNAVAILABLE", reason: "test" } });
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reasonCode).toBe("UNDERLYING_BINDING_UNKNOWN");
   });
 });
 
@@ -901,9 +980,18 @@ describe("evaluateStrictOptionEvidence (composable bundle)", () => {
   });
 
   describe("strict underlying eligibility gates session/alignment - a bundle can never show all-PASS from a failed/unavailable underlying (Codex reproduction)", () => {
-    it("a wrong (mismatched) underlying symbol blocks session/alignment from PASSing", () => {
+    it("an internally-inconsistent underlying symbol (requestedSymbol != returnedSymbol) blocks session/alignment from PASSing", () => {
       const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { returnedSymbol: "QQQ" }) });
       expect(result.underlyingEligibility.eligible).toBe(false);
+      expect(result.session.status).not.toBe("PASS");
+      expect(result.alignment.status).not.toBe("PASS");
+    });
+
+    it("Codex final-review reproduction: underlying evidence that is INTERNALLY valid but for a completely different ticker (QQQ/QQQ) must NOT let a SPY option bundle all-pass", () => {
+      const result = evaluateStrictOptionEvidence({ ...baseParams(), underlyingEvidence: underlyingEvidenceAt(QUOTE_TIME, { requestedSymbol: "QQQ", returnedSymbol: "QQQ" }) });
+      expect(result.underlyingEligibility.eligible).toBe(true); // internally valid in isolation - requestedSymbol === returnedSymbol
+      expect(result.underlyingBinding.status).toBe("FAIL"); // but NOT bound to this SPY option
+      expect(result.underlyingBinding.reasonCode).toBe("UNDERLYING_UNBOUND");
       expect(result.session.status).not.toBe("PASS");
       expect(result.alignment.status).not.toBe("PASS");
     });
