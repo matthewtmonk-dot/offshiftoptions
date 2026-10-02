@@ -1,6 +1,9 @@
 import type { EquityMarketSessionEvidence } from "@/providers/market-data/types";
-import { expirationCalendarDate } from "./marketSession";
-import type { PositionEvidenceState, PositionReviewAction, PositionReviewLifecycle, PositionReviewResult } from "./positionReview";
+import { expirationCalendarDate, nyCalendarDateOf, regularSessionIntervalContaining } from "./marketSession";
+import { evaluatePositionReview, validatedBufferPercent, type PositionReviewInput, type PositionEvidenceState, type PositionReviewAction, type PositionReviewLifecycle, type PositionReviewResult } from "./positionReview";
+import { evaluateQuoteEligibility } from "./quoteEvidence";
+
+export const POSITION_REVIEW_POLICY_VERSION = 1;
 
 /**
  * LST "Last Valid Position Assessment" - Phase 1 durable domain foundation. Pure/no I/O: this
@@ -52,6 +55,10 @@ export type PositionReviewContextFingerprintInput = {
   appliedRollBufferPercent: number;
   evaluationPolicyVersion: number;
 };
+
+function sameScope(a: PositionReviewAssessmentScope, b: PositionReviewAssessmentScope): boolean {
+  return a.ownerId === b.ownerId && a.accountId === b.accountId && a.campaignId === b.campaignId && a.openingEventId === b.openingEventId;
+}
 
 /**
  * Deterministic canonical-data fingerprint (JSON.stringify of a fixed-shape, fixed-key-order
@@ -106,6 +113,10 @@ export type CurrentPositionAssessmentCandidate = {
   scope: PositionReviewAssessmentScope;
   context: PositionReviewContextFingerprintInput;
   result: PositionReviewResult;
+  /** Original evaluator inputs; replayed, never reconstructed from rounded output. */
+  evaluationInput: PositionReviewInput;
+  /** Scope captured with the original evaluation, independently of the write target. */
+  evaluationScope: PositionReviewAssessmentScope;
   /** The same regular-session evidence the evaluator itself validated this result's quote/session
    * against - carried alongside `result` (never re-fetched independently) purely so the
    * persistence layer can store the regular-session interval/NY session date without re-deriving
@@ -114,6 +125,9 @@ export type CurrentPositionAssessmentCandidate = {
 };
 
 export type PositionReviewWriteIneligibleReason =
+  | "INVALID_CLOCK"
+  | "INVALID_SESSION_EVIDENCE"
+  | "RESULT_CONTEXT_MISMATCH"
   | "NOT_MEANINGFUL_ACTION"
   | "POSITION_EVIDENCE_NOT_TRUSTED"
   | "QUOTE_NOT_ELIGIBLE"
@@ -152,6 +166,24 @@ export function evaluatePositionReviewWriteEligibility(candidate: CurrentPositio
   if (result.explanation.activeGuidanceDeadline === null) {
     return { eligible: false, reasonCode: "GUIDANCE_DEADLINE_MISSING" };
   }
+  const validDate = (value: unknown): value is Date => value instanceof Date && Number.isFinite(value.getTime());
+  const e = result.explanation;
+  if (!validDate(now) || !validDate(e.evaluatedAt) || !validDate(e.activeGuidanceDeadline) || now < e.evaluatedAt) {
+    return { eligible: false, reasonCode: "INVALID_CLOCK" };
+  }
+  const session = candidate.sessionEvidence;
+  if (session.status !== "AVAILABLE" || session.marketType !== "EQUITY" || session.product !== "EQ" || !session.isOpen ||
+      session.requestedDate !== nyCalendarDateOf(e.evaluatedAt) || session.returnedDate !== session.requestedDate ||
+      session.regularMarketIntervals.length === 0 || session.regularMarketIntervals.some(({ start, end }, index, intervals) =>
+        !validDate(start) || !validDate(end) || start >= end || nyCalendarDateOf(start) !== session.returnedDate ||
+        nyCalendarDateOf(end) !== session.returnedDate || (index > 0 && start < intervals[index - 1].end))) {
+    return { eligible: false, reasonCode: "INVALID_SESSION_EVIDENCE" };
+  }
+  const interval = regularSessionIntervalContaining(session, e.evaluatedAt);
+  const writeInterval = regularSessionIntervalContaining(session, now);
+  if (!interval || !writeInterval || interval.start.getTime() !== writeInterval.start.getTime() || interval.end.getTime() !== writeInterval.end.getTime()) {
+    return { eligible: false, reasonCode: "INVALID_SESSION_EVIDENCE" };
+  }
   if (result.explanation.activeGuidanceDeadline.getTime() <= now.getTime()) {
     return { eligible: false, reasonCode: "GUIDANCE_DEADLINE_EXPIRED" };
   }
@@ -166,6 +198,28 @@ export function evaluatePositionReviewWriteEligibility(candidate: CurrentPositio
     return { eligible: false, reasonCode: "INCOMPLETE_DISTANCE_EVIDENCE" };
   }
 
+  const { context: c, scope, evaluationInput: input } = candidate;
+  const leg = input.leg;
+  const quote = input.quote;
+  if (!validDate(c.expiration) || !validDate(e.expiration) || !validDate(input.now) ||
+      !sameScope(scope, c.scope) || !sameScope(scope, candidate.evaluationScope) ||
+      input.now.getTime() !== e.evaluatedAt.getTime() ||
+      input.campaignId !== scope.campaignId || input.accountId !== scope.accountId ||
+      input.ticker !== c.ticker.toUpperCase() || input.lifecycleStage !== c.campaignLifecycleStage ||
+      validatedBufferPercent(input.rollBufferPercent) !== c.appliedRollBufferPercent ||
+      c.evaluationPolicyVersion !== POSITION_REVIEW_POLICY_VERSION ||
+      leg.kind === "NONE" || leg.kind !== c.optionType || leg.strike !== c.strike || leg.contracts !== c.contracts ||
+      !validDate(leg.expiration) || expirationCalendarDate(leg.expiration) !== expirationCalendarDate(c.expiration) ||
+      JSON.stringify(input.session) !== JSON.stringify(session) ||
+      (c.accountSource === "MANUAL" ? input.position.state !== "MANUAL_POSITION" : input.position.state !== "SCHWAB_CONFIRMED") ||
+      quote.status !== "AVAILABLE" || quote.requestedSymbol !== c.ticker.toUpperCase() ||
+      !validDate(quote.requestStartedAt) || !validDate(quote.responseReceivedAt) ||
+      quote.requestStartedAt > quote.responseReceivedAt || quote.responseReceivedAt > e.evaluatedAt ||
+      !evaluateQuoteEligibility(quote, session, now).eligible ||
+      JSON.stringify(evaluatePositionReview(input)) !== JSON.stringify(result) ||
+      !isPersistablePositionReviewAction(evaluatePositionReview({ ...input, now }).action)) {
+    return { eligible: false, reasonCode: "RESULT_CONTEXT_MISMATCH" };
+  }
   return { eligible: true };
 }
 
@@ -190,6 +244,7 @@ export type StoredLastValidAssessment = {
   strike: number;
   expiration: Date;
   contracts: number;
+  moneyness: NonNullable<PositionReviewResult["explanation"]["moneyness"]>;
   dollarDistance: number;
   percentageDistance: number;
   appliedRollBufferPercent: number;
@@ -209,6 +264,8 @@ export type CurrentLegMatchContext = {
   contextFingerprint: string;
   positionEvidenceState: PositionEvidenceState;
   lifecycle: PositionReviewLifecycle;
+  /** Actual evaluator failure reasons. Unknown/new reasons deny fallback. */
+  reasonCodes: readonly string[];
 };
 
 export type StoredAssessmentMatchInput = {
@@ -217,6 +274,7 @@ export type StoredAssessmentMatchInput = {
 };
 
 export type HistoricalAssessmentIneligibleReason =
+  | "FALLBACK_REASON_NOT_ALLOWED"
   | "NO_CURRENT_LEG"
   | "OWNER_MISMATCH"
   | "ACCOUNT_MISMATCH"
@@ -235,12 +293,14 @@ export type HistoricalAssessmentEligibility = { eligible: true } | { eligible: f
  * event - assignment/expiration - is actually recorded). */
 const LIFECYCLE_STAGES_BLOCKING_FALLBACK: readonly PositionReviewLifecycle[] = ["EXPIRATION_PENDING", "EXPIRATION_SESSION_ENDED"];
 
-/** Ticket item 10 - a structural position-interpretation problem (ambiguous match, insufficient or
- * unprovable covered-call coverage) invalidates a stored fallback regardless of fingerprint match.
- * Deliberately excludes BROKER_UNAVAILABLE/AWAITING_CONFIRMATION/NOT_ASSESSED - those are exactly
- * the transient evidence gaps this whole feature exists to fall back through, not a changed
- * position. */
-const POSITION_STATES_BLOCKING_FALLBACK: readonly PositionEvidenceState[] = ["POSITION_MISMATCH_AMBIGUOUS", "INSUFFICIENT_SHARE_COVERAGE", "UNSUPPORTED_CONTRACT_DELIVERABLE"];
+/** NOT_ASSESSED also represents absent/wrong-contract/nonexact-quantity positions in
+ * resolvePositionEvidence. No existing reason separates those from missing receipts: deny all.
+ * Unknown states/reasons also deny. These codes are emitted by the existing evaluator. */
+const ALLOWED_POSITION_STATES: readonly PositionEvidenceState[] = ["SCHWAB_CONFIRMED", "MANUAL_POSITION", "BROKER_UNAVAILABLE", "AWAITING_CONFIRMATION"];
+const ALLOWED_FALLBACK_REASONS = new Set([
+  "POSITION_BROKER_UNAVAILABLE", "POSITION_AWAITING_CONFIRMATION",
+  "MARKET_CLOSED", "QUOTE_EVIDENCE_UNAVAILABLE", "QUOTE_STALE_TIMESTAMP", "QUOTE_SESSION_EVIDENCE_UNAVAILABLE",
+]);
 
 /**
  * Pure predicate: is a stored assessment still eligible to be shown as a LAST_VALID fallback for
@@ -274,9 +334,14 @@ export function evaluateHistoricalAssessmentEligibility(input: StoredAssessmentM
   if (LIFECYCLE_STAGES_BLOCKING_FALLBACK.includes(current.lifecycle)) {
     return { eligible: false, reasonCode: "EXPIRATION_LIFECYCLE_PRIMARY" };
   }
-  if (POSITION_STATES_BLOCKING_FALLBACK.includes(current.positionEvidenceState)) {
+  if (["POSITION_MISMATCH_AMBIGUOUS", "INSUFFICIENT_SHARE_COVERAGE", "UNSUPPORTED_CONTRACT_DELIVERABLE"].includes(current.positionEvidenceState)) {
     return { eligible: false, reasonCode: "COVERAGE_AMBIGUOUS_OR_UNSUPPORTED" };
   }
 
+  if (!["CURRENT_PUT", "ROLLED_PUT", "COVERED_CALL"].includes(current.lifecycle) ||
+      !ALLOWED_POSITION_STATES.includes(current.positionEvidenceState) ||
+      current.reasonCodes.some((reason) => !ALLOWED_FALLBACK_REASONS.has(reason))) {
+    return { eligible: false, reasonCode: "FALLBACK_REASON_NOT_ALLOWED" };
+  }
   return { eligible: true };
 }

@@ -1,3 +1,5 @@
+CREATE TYPE "PositionReviewMoneyness" AS ENUM ('ITM', 'ATM', 'OTM');
+
 -- CreateEnum
 CREATE TYPE "PositionReviewPersistedAction" AS ENUM ('COMFORTABLE', 'WATCH', 'REVIEW_ROLL', 'REVIEW_CALL');
 
@@ -8,6 +10,7 @@ CREATE TABLE "PositionReviewAssessment" (
     "campaignId" TEXT NOT NULL,
     "openingEventId" TEXT NOT NULL,
     "contextFingerprint" TEXT NOT NULL,
+    "moneyness" "PositionReviewMoneyness" NOT NULL,
     "action" "PositionReviewPersistedAction" NOT NULL,
     "reasonCodes" TEXT[],
     "evaluatedAt" TIMESTAMP(3) NOT NULL,

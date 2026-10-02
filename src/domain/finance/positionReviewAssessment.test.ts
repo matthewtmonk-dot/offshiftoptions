@@ -81,8 +81,14 @@ function contextInput(overrides: Partial<PositionReviewContextFingerprintInput> 
 }
 
 function candidateFor(result: PositionReviewResult, overrides: Partial<PositionReviewContextFingerprintInput> = {}): CurrentPositionAssessmentCandidate {
-  const context = contextInput(overrides);
-  return { scope: SCOPE, context, result, sessionEvidence: ordinarySession() };
+  const context = contextInput({ ...(result.evidence.position === "MANUAL_POSITION" ? { accountSource: "MANUAL" as const } : {}), ...overrides });
+  const evaluationInput = baseInput({
+      now: result.explanation.evaluatedAt,
+      leg: { kind: result.explanation.optionType ?? "PUT", strike: 25, contracts: 1, expiration: new Date("2026-10-02T00:00:00.000Z") },
+      quote: quote(result.explanation.stockPrice ?? 30, result.explanation.quoteTradeTime ?? NOON),
+      position: result.evidence.position === "MANUAL_POSITION" ? { state: "MANUAL_POSITION" } : { state: "SCHWAB_CONFIRMED", asOf: result.explanation.positionEvidenceAsOf ?? NOON },
+    });
+  return { scope: SCOPE, context, result, evaluationInput, evaluationScope: { ...SCOPE }, sessionEvidence: ordinarySession() };
 }
 
 describe("computePositionReviewContextFingerprint", () => {
@@ -252,6 +258,7 @@ describe("evaluateHistoricalAssessmentEligibility", () => {
       contextFingerprint: storedFingerprint,
       positionEvidenceState: "SCHWAB_CONFIRMED",
       lifecycle: "CURRENT_PUT",
+      reasonCodes: [],
       ...overrides,
     };
   }
@@ -323,4 +330,70 @@ describe("evaluateHistoricalAssessmentEligibility", () => {
     const current = currentContext({ positionEvidenceState: "AWAITING_CONFIRMATION" });
     expect(evaluateHistoricalAssessmentEligibility({ stored, current })).toEqual({ eligible: true });
   });
+});
+
+describe("repair: current-session evidence and result binding", () => {
+  function validCandidate() { return candidateFor(evaluatePositionReview(baseInput())); }
+  it.each([
+    ["invalid evaluation", (c: CurrentPositionAssessmentCandidate) => { c.result.explanation.evaluatedAt = new Date(NaN); }],
+    ["invalid deadline", (c: CurrentPositionAssessmentCandidate) => { c.result.explanation.activeGuidanceDeadline = new Date(NaN); }],
+    ["unavailable session", (c: CurrentPositionAssessmentCandidate) => { c.sessionEvidence = { status: "UNAVAILABLE", reason: "offline" }; }],
+    ["missing interval", (c: CurrentPositionAssessmentCandidate) => { c.sessionEvidence = ordinarySession({ regularMarketIntervals: [] }); }],
+    ["zero interval", (c: CurrentPositionAssessmentCandidate) => { c.sessionEvidence = ordinarySession({ regularMarketIntervals: [{ start: NOON, end: NOON }] }); }],
+    ["reversed interval", (c: CurrentPositionAssessmentCandidate) => { c.sessionEvidence = ordinarySession({ regularMarketIntervals: [{ start: SESSION_CLOSE, end: SESSION_OPEN }] }); }],
+    ["invalid interval", (c: CurrentPositionAssessmentCandidate) => { c.sessionEvidence = ordinarySession({ regularMarketIntervals: [{ start: new Date(NaN), end: SESSION_CLOSE }] }); }],
+    ["wrong session date", (c: CurrentPositionAssessmentCandidate) => { c.sessionEvidence = ordinarySession({ returnedDate: "2026-06-16" }); }],
+    ["before open", (c: CurrentPositionAssessmentCandidate) => { c.result.explanation.evaluatedAt = new Date(SESSION_OPEN.getTime() - 1); }],
+    ["at close", (c: CurrentPositionAssessmentCandidate) => { c.result.explanation.evaluatedAt = SESSION_CLOSE; }],
+    ["after close", (c: CurrentPositionAssessmentCandidate) => { c.result.explanation.evaluatedAt = new Date(SESSION_CLOSE.getTime() + 1); }],
+    ["quote transport NaN", (c: CurrentPositionAssessmentCandidate) => { if (c.evaluationInput.quote.status === "AVAILABLE") c.evaluationInput.quote.responseReceivedAt = new Date(NaN); }],
+    ["wrong quote ticker", (c: CurrentPositionAssessmentCandidate) => { c.evaluationInput.quote = { ...quote(26), requestedSymbol: "OTHER", returnedSymbol: "OTHER" } as QuoteReviewEvidence; }],
+    ["fabricated price", (c: CurrentPositionAssessmentCandidate) => { c.result.explanation.stockPrice = 999; }],
+    ["quantity", (c: CurrentPositionAssessmentCandidate) => { c.context.contracts = 2; }],
+    ["scope", (c: CurrentPositionAssessmentCandidate) => { c.scope = { ...SCOPE, campaignId: "other" }; }],
+  ] as const)("rejects %s", (_name, mutate) => {
+    const c = validCandidate(); mutate(c);
+    expect(evaluatePositionReviewWriteEligibility(c, NOON).eligible).toBe(false);
+  });
+  it("rejects NaN write clock", () => {
+    expect(evaluatePositionReviewWriteEligibility(validCandidate(), new Date(NaN))).toEqual({ eligible: false, reasonCode: "INVALID_CLOCK" });
+  });
+  it("rejects write at session close", () => {
+    expect(evaluatePositionReviewWriteEligibility(validCandidate(), SESSION_CLOSE).eligible).toBe(false);
+  });
+});
+
+describe("repair: explicit historical fallback allowlist", () => {
+  const stored = { scope: SCOPE, contextFingerprint: computePositionReviewContextFingerprint(contextInput()) };
+  const current: CurrentLegMatchContext = { ...stored, positionEvidenceState: "SCHWAB_CONFIRMED", lifecycle: "CURRENT_PUT", reasonCodes: [] };
+  it.each(["MARKET_CLOSED", "QUOTE_STALE_TIMESTAMP", "QUOTE_EVIDENCE_UNAVAILABLE", "QUOTE_SESSION_EVIDENCE_UNAVAILABLE"])("allows actual transient %s", reason => {
+    expect(evaluateHistoricalAssessmentEligibility({ stored, current: { ...current, reasonCodes: [reason] } }).eligible).toBe(true);
+  });
+  it.each(["absent broker position", "nonexact quantity", "wrong contract", "missing receipt"])("denies overloaded NOT_ASSESSED: %s", () => {
+    expect(evaluateHistoricalAssessmentEligibility({ stored, current: { ...current, positionEvidenceState: "NOT_ASSESSED", reasonCodes: ["POSITION_NOT_ASSESSED"] } }).eligible).toBe(false);
+  });
+  it.each(["UNKNOWN_FUTURE_REASON", "QUOTE_SYMBOL_MISMATCH", "ASSIGNED_SHARES_NO_CALL", "PAST_EXPIRATION_UNRESOLVED", "POSITION_POSITION_MISMATCH_AMBIGUOUS", "POSITION_INSUFFICIENT_SHARE_COVERAGE", "POSITION_UNSUPPORTED_CONTRACT_DELIVERABLE"])("denies %s", reason => {
+    expect(evaluateHistoricalAssessmentEligibility({ stored, current: { ...current, reasonCodes: [reason] } }).eligible).toBe(false);
+  });
+  it("denies assignment even if caller retained the old fingerprint", () => {
+    expect(evaluateHistoricalAssessmentEligibility({ stored, current: { ...current, lifecycle: "ASSIGNED_SHARES" } }).eligible).toBe(false);
+  });
+  it.each([
+    ["closed market", baseInput({ now: new Date("2026-06-15T21:00:00Z"), quote: quote(26, new Date("2026-06-15T21:00:00Z")) })],
+    ["stale quote", baseInput({ quote: quote(26, new Date(NOON.getTime() - 180000)) })],
+    ["provider outage", baseInput({ quote: { status: "UNAVAILABLE", reason: "offline" } })],
+    ["broker outage", baseInput({ position: { state: "BROKER_UNAVAILABLE" } })],
+    ["stale confirmation", baseInput({ position: { state: "SCHWAB_CONFIRMED", asOf: new Date(NOON.getTime() - 600000) } })],
+  ] as const)("accepts real evaluator reasons from %s", (_name, input) => {
+    const result = evaluatePositionReview(input);
+    expect(result.action).toBe("CANNOT_ASSESS");
+    expect(evaluateHistoricalAssessmentEligibility({ stored, current: { ...current, positionEvidenceState: result.evidence.position, lifecycle: result.lifecycle, reasonCodes: result.explanation.reasonCodes } }).eligible).toBe(true);
+  });
+  it("rejects relabeling the evaluated opening event even when every financial term matches", () => {
+    const candidate = candidateFor(evaluatePositionReview(baseInput()));
+    candidate.scope = { ...candidate.scope, openingEventId: "new-identical-terms-leg" };
+    candidate.context.scope = candidate.scope;
+    expect(evaluatePositionReviewWriteEligibility(candidate, NOON)).toEqual({ eligible: false, reasonCode: "RESULT_CONTEXT_MISMATCH" });
+  });
+
 });

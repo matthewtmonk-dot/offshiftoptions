@@ -2,6 +2,7 @@ import "server-only";
 
 import {
   computePositionReviewContextFingerprint,
+  POSITION_REVIEW_POLICY_VERSION,
   evaluateHistoricalAssessmentEligibility,
   evaluatePositionReviewWriteEligibility,
   type CurrentLegMatchContext,
@@ -11,70 +12,90 @@ import {
   type PositionReviewWriteIneligibleReason,
   type StoredLastValidAssessment,
 } from "@/domain/finance/positionReviewAssessment";
-import type { PositionEvidenceState } from "@/domain/finance/positionReview";
+import { validatedBufferPercent, type PositionEvidenceState } from "@/domain/finance/positionReview";
 import { nyCalendarDateOf, regularSessionIntervalContaining } from "@/domain/finance/marketSession";
+import type { Prisma } from "@/generated/prisma/client";
+import { resolveRelevantCampaignLegs } from "./position-review-scope";
 import { toNumber } from "./format";
 import { prisma } from "./prisma";
-
-/**
- * LST "Last Valid Position Assessment" - Phase 1 durable persistence/read service. This is the
- * ONLY place that reads or writes PositionReviewAssessment rows. Every responsibility here is
- * thin I/O composed around the pure predicates in domain/finance/positionReviewAssessment.ts - no
- * eligibility/matching LOGIC lives in this file, and no presentation text is ever produced here.
- * Deliberately imports nothing from workflows.ts (and workflows.ts never needs to import this file
- * either) so a future Phase 2 shared evaluation service can sit between the two without creating a
- * cycle - see position-review-scope.ts's own doc comment for the same layering concern.
- */
 
 export type SavePositionReviewAssessmentResult =
   /** Written - this is now the latest-valid row for its scoped leg. */
   | { status: "SAVED" }
-  /** The pure write-eligibility predicate rejected this evaluation before any DB access occurred. */
+  | { status: "UNAUTHORIZED" }
+  /** Write eligibility failed, either before DB access or at the final fresh-clock recheck. */
   | { status: "INELIGIBLE"; reasonCode: PositionReviewWriteIneligibleReason }
-  /** The caller-supplied fresh recheck found the leg/context had changed since the evaluation was
-   * computed (a roll, a close, a policy change) - never written. */
+  /** Authoritative account/campaign/current-leg/policy disagrees with the evaluated context. */
   | { status: "CONTEXT_CHANGED" }
-  /** A newer evaluation (by evaluatedAt) already occupies this scoped leg's row - the DB-level
+  /** A newer or equal-time evaluation (by evaluatedAt) already occupies this scoped leg's row - the DB-level
    * "only if newer" condition rejected this write. The ticket's own example: snapshot A evaluated
    * 10:05, B evaluated 10:06, B writes first, A arrives late - A lands here, never overwriting B. */
   | { status: "SUPERSEDED_BY_NEWER" };
 
-/**
- * Saves `candidate` as the latest-valid assessment for its scoped leg, but ONLY when every one of
- * the following holds:
- *   1. The pure write-eligibility predicate accepts it (meaningful action, eligible quote, open
- *      session, valid unexpired guidance deadline, complete distance evidence - see
- *      evaluatePositionReviewWriteEligibility's own doc comment for the full list).
- *   2. `verifyFreshContext` - supplied by the caller, which alone knows how to re-resolve the
- *      CURRENT campaign/account/policy state (this phase does not wire that orchestration; a
- *      Phase 2 caller re-runs resolveRelevantCampaignLegs + its own account/policy lookups) -
- *      returns a context whose fingerprint still matches `candidate.context`'s. This is the
- *      "recheck current leg/context before committing" the ticket requires - a real, fresh
- *      re-verification against current state, never a bare AbortSignal check.
- *   3. The DB-level newer-only upsert actually applies - `evaluatedAt` on any existing row for this
- *      exact scoped leg must be strictly older than `candidate.result.explanation.evaluatedAt`, or
- *      there must be no existing row at all. This is enforced by Postgres itself via
- *      `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE <existing is older>`, never by
- *      read-then-write application logic that a second concurrent writer could race.
- */
+/** Authenticated ownership, authoritative current leg and policy, and newer-only write
+ * share one transaction. READ COMMITTED deliberately obtains fresh snapshots AFTER lock waits;
+ * SERIALIZABLE can retain a pre-wait snapshot and miss a just-committed roll. Parent FOR UPDATE
+ * locks block new child inserts through their FK key-share locks; existing children are locked
+ * too. This protects the current context through the write without distributed locking.
+ * Bounded transaction-conflict retries redo ALL checks.
+ * Clock injection is for deterministic tests; production defaults to a fresh server Date. */
 export async function savePositionReviewAssessmentIfEligible(
-  candidate: CurrentPositionAssessmentCandidate,
-  now: Date,
-  options: { verifyFreshContext: () => Promise<PositionReviewContextFingerprintInput | null> },
+  authenticatedOwnerId: string,
+  candidateInput: CurrentPositionAssessmentCandidate,
+  options: { clock?: () => Date } = {},
 ): Promise<SavePositionReviewAssessmentResult> {
-  const eligibility = evaluatePositionReviewWriteEligibility(candidate, now);
-  if (!eligibility.eligible) {
-    return { status: "INELIGIBLE", reasonCode: eligibility.reasonCode };
+  const candidate = structuredClone(candidateInput);
+  if (authenticatedOwnerId !== candidate.scope.ownerId) return { status: "UNAUTHORIZED" };
+  const clock = options.clock ?? (() => new Date());
+  const initial = evaluatePositionReviewWriteEligibility(candidate, clock());
+  if (!initial.eligible) return { status: "INELIGIBLE", reasonCode: initial.reasonCode };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(async (tx): Promise<SavePositionReviewAssessmentResult> => {
+        const { scope } = candidate;
+        await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${authenticatedOwnerId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "TradingAccount" WHERE "id" = ${scope.accountId} AND "userId" = ${authenticatedOwnerId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "Campaign" WHERE "id" = ${scope.campaignId} AND "ownerId" = ${authenticatedOwnerId} AND "accountId" = ${scope.accountId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "UserSettings" WHERE "userId" = ${authenticatedOwnerId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT e."id" FROM "CampaignEvent" e JOIN "Campaign" c ON c."id" = e."campaignId"
+          WHERE c."id" = ${scope.campaignId} AND c."ownerId" = ${authenticatedOwnerId} AND c."accountId" = ${scope.accountId} FOR SHARE OF e`;
+        const account = await tx.tradingAccount.findFirst({ where: { id: scope.accountId, userId: authenticatedOwnerId } });
+        const campaign = await tx.campaign.findFirst({ where: { id: scope.campaignId, ownerId: authenticatedOwnerId, accountId: scope.accountId }, include: { events: true } });
+        const settings = await tx.userSettings.findUnique({ where: { userId: authenticatedOwnerId } });
+        if (!account || !campaign || !campaign.events.some(event => event.id === scope.openingEventId)) return { status: "CONTEXT_CHANGED" };
+        // No more awaited reads below this point: construct authoritative context at write time.
+        const now = clock();
+        const eligibility = evaluatePositionReviewWriteEligibility(candidate, now);
+        if (!eligibility.eligible) return { status: "INELIGIBLE", reasonCode: eligibility.reasonCode };
+        const resolved = resolveRelevantCampaignLegs([campaign], now);
+        const leg = resolved.legByCampaignId.get(campaign.id);
+        const stage = resolved.lifecycleByCampaignId.get(campaign.id);
+        if (!leg || leg.kind === "NONE" || leg.strike === null || leg.expiration === null || leg.contracts === null || !stage ||
+            resolved.openingEventIdByCampaignId.get(campaign.id) !== scope.openingEventId) return { status: "CONTEXT_CHANGED" };
+        const authoritative: PositionReviewContextFingerprintInput = {
+          scope, ticker: campaign.ticker, optionType: leg.kind, strike: leg.strike,
+          expiration: leg.expiration, contracts: leg.contracts, campaignStatus: campaign.status,
+          campaignLifecycleStage: stage, accountSource: account.source,
+          brokerageMappingIdentity: account.externalAccountId,
+          appliedRollBufferPercent: validatedBufferPercent(settings ? toNumber(settings.rollBufferPercent) : NaN),
+          evaluationPolicyVersion: POSITION_REVIEW_POLICY_VERSION,
+        };
+        const fingerprint = computePositionReviewContextFingerprint(authoritative);
+        if (fingerprint !== computePositionReviewContextFingerprint(candidate.context)) return { status: "CONTEXT_CHANGED" };
+        const affected = await executeNewerOnlyUpsert(tx, candidate, fingerprint);
+        return affected > 0 ? { status: "SAVED" } : { status: "SUPERSEDED_BY_NEWER" };
+      }, { isolationLevel: "ReadCommitted" });
+    } catch (error) {
+      // Prisma 7's pg adapter nests SQLSTATE under driverAdapterError.cause.
+      const failure = error as { code?: string; meta?: { code?: string; driverAdapterError?: { cause?: { originalCode?: string; code?: string } } } } | null;
+      const cause = failure?.meta?.driverAdapterError?.cause;
+      const sqlState = failure?.meta?.code ?? cause?.originalCode ?? cause?.code;
+      const retryable = failure?.code === "P2034" ||
+        (failure?.code === "P2010" && (sqlState === "40001" || sqlState === "40P01"));
+      if (attempt < 2 && retryable) continue;
+      throw error;
+    }
   }
-
-  const expectedFingerprint = computePositionReviewContextFingerprint(candidate.context);
-  const freshContext = await options.verifyFreshContext();
-  if (!freshContext || computePositionReviewContextFingerprint(freshContext) !== expectedFingerprint) {
-    return { status: "CONTEXT_CHANGED" };
-  }
-
-  const affected = await executeNewerOnlyUpsert(candidate, expectedFingerprint);
-  return affected > 0 ? { status: "SAVED" } : { status: "SUPERSEDED_BY_NEWER" };
 }
 
 /**
@@ -84,20 +105,18 @@ export async function savePositionReviewAssessmentIfEligible(
  * already proven in earnings-calendar-cache.ts's buildUpsertQuery, adapted with a WHERE clause so a
  * late-arriving OLDER evaluation can never overwrite a newer one already written. Returns the
  * number of rows actually inserted or updated (0 means the WHERE condition rejected the write -
- * SUPERSEDED_BY_NEWER - never an error).
+ * SUPERSEDED_BY_NEWER - never an error). Equal evaluatedAt is intentionally first-writer-wins.
  */
-function executeNewerOnlyUpsert(candidate: CurrentPositionAssessmentCandidate, contextFingerprint: string) {
+function executeNewerOnlyUpsert(tx: Prisma.TransactionClient, candidate: CurrentPositionAssessmentCandidate, contextFingerprint: string) {
   const { scope, context, result, sessionEvidence } = candidate;
   const explanation = result.explanation;
-  // Write-eligibility already required evidence.session === "OPEN", so a containing interval is
-  // guaranteed to exist in practice; the evaluatedAt fallback is defensive only (never reachable
-  // through the public savePositionReviewAssessmentIfEligible entry point).
-  const interval = regularSessionIntervalContaining(sessionEvidence, explanation.evaluatedAt) ?? { start: explanation.evaluatedAt, end: explanation.evaluatedAt };
+  const interval = regularSessionIntervalContaining(sessionEvidence, explanation.evaluatedAt);
+  if (!interval) throw new Error("Assessment session validation failed");
 
-  return prisma.$executeRaw`
+  return tx.$executeRaw`
     INSERT INTO "PositionReviewAssessment" (
       "ownerId", "accountId", "campaignId", "openingEventId", "contextFingerprint",
-      "action", "reasonCodes",
+      "action", "reasonCodes", "moneyness",
       "evaluatedAt", "nySessionDate", "regularSessionStart", "regularSessionEnd",
       "underlyingPrice", "underlyingTradeTime",
       "ticker", "optionType", "strike", "expiration", "contracts",
@@ -106,7 +125,7 @@ function executeNewerOnlyUpsert(candidate: CurrentPositionAssessmentCandidate, c
       "updatedAt"
     ) VALUES (
       ${scope.ownerId}, ${scope.accountId}, ${scope.campaignId}, ${scope.openingEventId}, ${contextFingerprint},
-      ${result.action}::"PositionReviewPersistedAction", ${explanation.reasonCodes}::text[],
+      ${result.action}::"PositionReviewPersistedAction", ${explanation.reasonCodes}::text[], ${explanation.moneyness}::"PositionReviewMoneyness",
       ${explanation.evaluatedAt}, ${nyCalendarDateOf(explanation.evaluatedAt)}, ${interval.start}, ${interval.end},
       ${explanation.stockPrice}, ${explanation.quoteTradeTime},
       ${context.ticker.toUpperCase()}, ${context.optionType}::"OptionType", ${explanation.strike}, ${context.expiration}, ${context.contracts},
@@ -117,6 +136,7 @@ function executeNewerOnlyUpsert(candidate: CurrentPositionAssessmentCandidate, c
     ON CONFLICT ("ownerId", "accountId", "campaignId", "openingEventId") DO UPDATE SET
       "contextFingerprint" = EXCLUDED."contextFingerprint",
       "action" = EXCLUDED."action",
+      "moneyness" = EXCLUDED."moneyness",
       "reasonCodes" = EXCLUDED."reasonCodes",
       "evaluatedAt" = EXCLUDED."evaluatedAt",
       "nySessionDate" = EXCLUDED."nySessionDate",
@@ -147,6 +167,7 @@ type PositionReviewAssessmentRow = {
   openingEventId: string;
   contextFingerprint: string;
   action: string;
+  moneyness: StoredLastValidAssessment["moneyness"];
   reasonCodes: string[];
   evaluatedAt: Date;
   nySessionDate: string;
@@ -173,6 +194,7 @@ function rowToStoredLastValidAssessment(row: PositionReviewAssessmentRow): Store
     contextFingerprint: row.contextFingerprint,
     action: row.action as StoredLastValidAssessment["action"],
     reasonCodes: row.reasonCodes,
+    moneyness: row.moneyness,
     evaluatedAt: row.evaluatedAt,
     nySessionDate: row.nySessionDate,
     regularSessionStart: row.regularSessionStart,

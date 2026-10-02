@@ -1475,6 +1475,12 @@ model AccountValuationObservation {
   @@index([accountId, provenanceStatus])
 }
 
+enum PositionReviewMoneyness {
+  ITM
+  ATM
+  OTM
+}
+
 /// LAST VALID POSITION ASSESSMENT - Phase 1 durable foundation only (see PROJECT_HANDOFF.md).
 /// NEVER satisfies current quote freshness, current market-session eligibility, strict broker
 /// confirmation, strict option evidence, or current position-review eligibility - this table is
@@ -1508,12 +1514,13 @@ model PositionReviewAssessment {
   /// (domain/finance/campaigns.ts), which now expose this id from the same authoritative
   /// current-leg reduction Dashboard/Tracker already use.
   openingEventId     String
-  /// Deterministic hash of the canonical position/context inputs this assessment depended on (see
+  /// Deterministic serialization of the canonical position/context inputs this assessment depended on (see
   /// computeContextFingerprint) - protects against a stored row being reused as a fallback after a
   /// material context change (e.g. the owner's roll-buffer policy) even when every identity field
   /// above still matches exactly.
   contextFingerprint String
 
+  moneyness   PositionReviewMoneyness
   action      PositionReviewPersistedAction
   /// The same deterministic reason-code vocabulary PositionReviewExplanation.reasonCodes already
   /// uses - never free text, never rendered prose.
