@@ -43,14 +43,25 @@ function mandatory<ReasonCode extends string>(status: CriterionStatus, reasonCod
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Deterministic decimal-string equality (4 decimal places - one more than OCC's own 3-decimal
- * strike scale) via `toFixed`, never raw floating-point multiplication (`Math.round(a * 10_000)`),
- * which can itself introduce representation artifacts for some decimal inputs. `25`, `25.0`, and
- * `25.00` all compare equal (same fixed-point string); `25.0001` does NOT equal `25` - it is a
- * materially different decimal value, never silently rounded away.
+ * EXACT strike equality - plain `===`, never `toFixed`/`Math.round(x * N)`/an epsilon tolerance.
+ * `toFixed(4)` ROUNDS to 4 decimal places before comparing, which is exactly the defect this
+ * function must avoid: `(25.00004).toFixed(4)` is `"25.0000"`, which would wrongly compare equal
+ * to `25` - silently hiding genuine provider disagreement.
+ *
+ * Plain `===` is correct here (not merely convenient) because every strike value this function
+ * ever receives was produced by parsing a plain decimal numeral exactly once, with no further
+ * arithmetic beyond it: the structured `strikePrice` field is read directly from the JSON number
+ * Schwab sent; the strike-map-key is read via `parseDecimalMapKey`'s own `Number(text)` parse of a
+ * validated `-?\d+(\.\d+)?` numeral; the OCC-derived strike is `Number(eightDigits) / 1000`, an
+ * exact integer divided by an exact power-of-ten, which IEEE754 double division correctly rounds
+ * to the SAME nearest-representable double that parsing the equivalent decimal text directly would
+ * produce. All three paths therefore land on bit-identical doubles for the same intended decimal
+ * value - `25`, `25.0`, `25.00`, and `"25.000"` all parse to the exact double `25` - while any
+ * materially different decimal (`25.00004`, `25.0001`, `24.99999`) parses to a genuinely different
+ * double and is correctly never equal. No decimal-normalization library is needed for this.
  */
 function strikesEqual(a: number, b: number): boolean {
-  return a.toFixed(4) === b.toFixed(4);
+  return a === b;
 }
 
 /**
@@ -479,11 +490,18 @@ function deliverableNoteContradictsPhysicalDelivery(note: string): boolean {
  * exactly one deliverable entry of 100 shares of the supported underlying's own stock, settled
  * physically. Any missing top-level or deliverable-entry field is UNKNOWN (never assumed standard
  * - multiplier absent is never treated as 100). Any explicit deviation (nonStandard/mini true,
- * wrong multiplier, wrong deliverable count/shape/units/symbol/currency, a non-physical
- * settlementType, or a deliverableNote contradicting physical stock delivery) is UNSUPPORTED. This
- * gate deliberately does NOT attempt to generalize to foreign-currency, cash-settled, non-equity,
- * adjusted, or mini contracts - all of those fall out as UNSUPPORTED by these same checks, never a
- * separate code path.
+ * wrong multiplier, wrong deliverable count/shape/symbol/units, an explicit incompatible currency,
+ * a non-physical settlementType, or a deliverableNote contradicting physical stock delivery) is
+ * UNSUPPORTED. This gate deliberately does NOT attempt to generalize to foreign-currency,
+ * cash-settled, non-equity, adjusted, or mini contracts - all of those fall out as UNSUPPORTED by
+ * these same checks, never a separate code path.
+ *
+ * `deliverable.currencyType === null` is explicitly NOT a failure: the real sanitized SPY capture
+ * (strict-option-chain-live-derived.json) never supplied this field at all for an otherwise
+ * perfectly standard physical 100-share deliverable, and the ticket's own architecture note is
+ * explicit that an absent currency field does not itself establish - and must never be guessed
+ * into - a foreign-currency or cash-settled claim. Only an ACTUAL present value other than "USD"
+ * fails closed as an explicit, evidenced incompatibility.
  */
 export function evaluateStandardContractTerms(params: {
   terms: StrictOptionContractTerms;

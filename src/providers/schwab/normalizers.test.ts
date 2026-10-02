@@ -11,7 +11,7 @@ import {
 } from "./normalizers";
 import strictOptionChainLiveDerived from "./__fixtures__/strict-option-chain-live-derived.json";
 import { makeSyntheticStandardSpyChainPayload } from "./__fixtures__/synthetic-option-chain";
-import { evaluateBidAsk, evaluateOptionIdentity } from "@/domain/trade-prep/optionEvidence";
+import { evaluateBidAsk, evaluateOptionIdentity, evaluateStandardContractTerms } from "@/domain/trade-prep/optionEvidence";
 
 const TRANSPORT = { requestStartedAt: new Date("2026-09-25T19:58:00.000Z"), responseReceivedAt: new Date("2026-09-25T19:58:00.250Z") };
 
@@ -335,6 +335,26 @@ describe("normalizeSchwabStrictOptionChainSnapshot (Trade Prep strict evidence f
     const identity = evaluateOptionIdentity({ requestedUnderlying: "SPY", envelope: result.envelope, contract: result.contracts[0]! });
     expect(identity.status).toBe("UNKNOWN");
     expect(identity.reasonCode).toBe("IDENTITY_MISSING");
+  });
+
+  it("the live-derived capture's literal terms (currencyType genuinely null) satisfy the standard physical-share TERMS gate on their own - a null currency must not by itself make a real, otherwise-standard SPY deliverable unsupported (Codex self-review repair)", () => {
+    const result = normalizeSchwabStrictOptionChainSnapshot(strictOptionChainLiveDerived, REQUEST, TRANSPORT_WITH_DATE);
+    if (result.status !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    const terms = result.contracts[0]!.terms;
+
+    // Confirm the literal preserved shape first - this is testing the TERMS gate specifically, not
+    // claiming the whole contract is READY. The same contract's identity stays UNKNOWN (missing raw
+    // optionRoot - see the test above) and its quote stays FAIL/ZERO_BID (see the dedicated zero-bid
+    // test) - neither of those is affected by or relevant to this terms-only assertion.
+    expect(terms.optionDeliverablesList).toEqual([{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: null }]);
+    expect(terms.multiplier).toBe(100);
+    expect(terms.nonStandard).toBe(false);
+    expect(terms.mini).toBe(false);
+    expect(terms.settlementType).toBe("P");
+
+    const termsResult = evaluateStandardContractTerms({ terms, supportedUnderlying: "SPY" });
+    expect(termsResult.status).toBe("PASS");
+    expect(termsResult.reasonCode).toBe("CONTRACT_STANDARD");
   });
 
   describe("strict numeric readers reject coercion (Codex blocker repair)", () => {

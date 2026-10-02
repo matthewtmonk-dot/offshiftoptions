@@ -210,6 +210,45 @@ describe("evaluateOptionIdentity", () => {
     expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
   });
 
+  describe("exact strike equality (Codex self-review repair - toFixed(4) previously rounded 25.00004 into 25)", () => {
+    // Build a $25-strike contract so the strike map key/provider symbol both literally encode "25" -
+    // only identity.strikePrice is varied per case, isolating strikesEqual's own exact-equality
+    // behavior from every other identity check.
+    const strike25Contract = (strikePrice: number, strikeMapKey: string = "25.0") =>
+      contractWith({
+        identity: { providerSymbol: "SPY   261016P00025000", strikePrice },
+        location: { strikeMapKey },
+      });
+
+    it("25 equals 25.0 (structured strikePrice vs a differently-formatted structured strikePrice)", () => {
+      expect(evaluateOptionIdentity({ ...base(), contract: strike25Contract(25) }).status).toBe("PASS");
+      expect(evaluateOptionIdentity({ ...base(), contract: strike25Contract(25.0) }).status).toBe("PASS");
+    });
+
+    it("25 equals a strike map key written as \"25.000\"", () => {
+      const result = evaluateOptionIdentity({ ...base(), contract: strike25Contract(25, "25.000") });
+      expect(result.status).toBe("PASS");
+    });
+
+    it("25 does NOT equal 25.00004 - the exact Codex-reproduced toFixed(4) rounding failure", () => {
+      const result = evaluateOptionIdentity({ ...base(), contract: strike25Contract(25.00004) }); // map key still says "25.0"
+      expect(result.status).toBe("FAIL");
+      expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
+    });
+
+    it("25 does NOT equal 25.0001", () => {
+      const result = evaluateOptionIdentity({ ...base(), contract: strike25Contract(25.0001) });
+      expect(result.status).toBe("FAIL");
+      expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
+    });
+
+    it("25 does NOT equal 24.99999", () => {
+      const result = evaluateOptionIdentity({ ...base(), contract: strike25Contract(24.99999) });
+      expect(result.status).toBe("FAIL");
+      expect(result.reasonCode).toBe("IDENTITY_MISMATCH");
+    });
+  });
+
   it("fails on a non-finite/non-positive strikePrice", () => {
     expect(evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: 0 } }) }).status).toBe("FAIL");
     expect(evaluateOptionIdentity({ ...base(), contract: contractWith({ identity: { strikePrice: -5 } }) }).status).toBe("FAIL");
@@ -601,6 +640,11 @@ describe("evaluateStandardContractTerms", () => {
 
   it("still PASSes with the supported physical settlementType \"P\" and a null (absent) deliverableNote/currencyType - the real live-derived capture's own shape", () => {
     const result = evaluateStandardContractTerms(params({ settlementType: "P", deliverableNote: null, optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: null }] }));
+    expect(result.status).toBe("PASS");
+  });
+
+  it("also PASSes when currencyType is explicitly present and USD", () => {
+    const result = evaluateStandardContractTerms(params({ optionDeliverablesList: [{ symbol: "SPY", assetType: "STOCK", deliverableUnits: 100, currencyType: "USD" }] }));
     expect(result.status).toBe("PASS");
   });
 });
