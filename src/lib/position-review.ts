@@ -1,6 +1,7 @@
 import "server-only";
 
 import { OPTION_MULTIPLIER } from "@/domain/finance/campaigns";
+import type { EquityMarketSessionEvidence } from "@/providers/market-data/types";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 import { formatOccSymbol, occContractKey, parseOccOptionSymbol } from "@/domain/finance/occOption";
 import {
@@ -50,6 +51,20 @@ export { resolveRelevantCampaignLegs, tickersNeedingReviewQuotes };
 export type ResolvedPositionReview = {
   campaignId: string;
   result: PositionReviewResult;
+  /** LST Last-Valid-Position-Assessment Phase 2A - the exact evaluatePositionReview input used to
+   * produce `result`, carried alongside it (never reconstructed from the result's own rounded
+   * output) so the orchestration layer (positionAssessmentOrchestration.ts) can bind a persistence
+   * candidate's context to this identical evaluation without a second, independent evaluation. */
+  input: PositionReviewInput;
+  /** The resolved regular-session evidence this evaluation actually used - carried alongside
+   * `result` for the same reason as `input` above (Phase 1's persistence service needs it to
+   * derive the stored regular-session interval). */
+  sessionEvidence: EquityMarketSessionEvidence;
+  /** The originating OPENING CampaignEvent.id for this campaign's current leg (from
+   * resolveRelevantCampaignLegs's own openingEventIdByCampaignId map) - null when there is no
+   * current leg, or the leg's own terms are incomplete. The durable scoped-identity component
+   * Phase 1 persistence requires; never inferred independently here. */
+  openingEventId: string | null;
 };
 
 export async function resolvePositionReviewsForUser(
@@ -69,7 +84,7 @@ export async function resolvePositionReviewsForUser(
    */
   clock: () => Date = () => now,
 ): Promise<ResolvedPositionReview[]> {
-  const { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls } = resolveRelevantCampaignLegs(campaigns, now);
+  const { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls, openingEventIdByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
   if (relevant.length === 0) {
     return [];
   }
@@ -132,7 +147,13 @@ export async function resolvePositionReviewsForUser(
       now: evaluationTime,
     };
 
-    results.push({ campaignId: campaign.id, result: evaluatePositionReview(input) });
+    results.push({
+      campaignId: campaign.id,
+      result: evaluatePositionReview(input),
+      input,
+      sessionEvidence,
+      openingEventId: openingEventIdByCampaignId.get(campaign.id) ?? null,
+    });
   }
 
   return results;

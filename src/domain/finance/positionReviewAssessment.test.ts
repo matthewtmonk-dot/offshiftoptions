@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/providers/market-data/types";
 import { evaluatePositionReview, type PositionReviewInput, type PositionReviewResult } from "./positionReview";
 import {
+  classifyLastValidTiming,
+  composePositionAssessmentDisplay,
   computePositionReviewContextFingerprint,
   evaluateHistoricalAssessmentEligibility,
   evaluatePositionReviewWriteEligibility,
@@ -10,6 +12,7 @@ import {
   type CurrentPositionAssessmentCandidate,
   type PositionReviewAssessmentScope,
   type PositionReviewContextFingerprintInput,
+  type StoredLastValidAssessment,
 } from "./positionReviewAssessment";
 
 const NY_DATE = "2026-06-15";
@@ -396,4 +399,126 @@ describe("repair: explicit historical fallback allowlist", () => {
     expect(evaluatePositionReviewWriteEligibility(candidate, NOON)).toEqual({ eligible: false, reasonCode: "RESULT_CONTEXT_MISMATCH" });
   });
 
+});
+
+describe("composePositionAssessmentDisplay (Phase 2A)", () => {
+  function storedFixture(overrides: Partial<StoredLastValidAssessment> = {}): StoredLastValidAssessment {
+    return {
+      scope: SCOPE,
+      contextFingerprint: computePositionReviewContextFingerprint(contextInput()),
+      action: "COMFORTABLE",
+      reasonCodes: [],
+      evaluatedAt: NOON,
+      nySessionDate: NY_DATE,
+      regularSessionStart: SESSION_OPEN,
+      regularSessionEnd: SESSION_CLOSE,
+      underlyingPrice: 30,
+      underlyingTradeTime: NOON,
+      ticker: "UPST",
+      optionType: "PUT",
+      strike: 25,
+      expiration: new Date("2026-10-02T00:00:00.000Z"),
+      contracts: 1,
+      moneyness: "OTM",
+      dollarDistance: 5,
+      percentageDistance: 20,
+      appliedRollBufferPercent: 3,
+      positionEvidenceSource: "SCHWAB_CONFIRMED",
+      brokerReceiptAt: NOON,
+      evaluationPolicyVersion: 1,
+      ...overrides,
+    };
+  }
+
+  it("CURRENT always wins for a meaningful action, with the verified fallback attached", () => {
+    const current = evaluatePositionReview(baseInput({ quote: quote(30) }));
+    expect(current.action).toBe("COMFORTABLE");
+    const stored = storedFixture();
+    expect(composePositionAssessmentDisplay({ current, verifiedFallback: stored })).toEqual({ state: "CURRENT", current, lastValid: stored });
+  });
+
+  it("CURRENT with no verified fallback never fabricates one", () => {
+    const current = evaluatePositionReview(baseInput({ quote: quote(30) }));
+    expect(composePositionAssessmentDisplay({ current, verifiedFallback: null })).toEqual({ state: "CURRENT", current, lastValid: null });
+  });
+
+  it.each(["WATCH", "REVIEW_ROLL", "REVIEW_CALL"] as const)("CURRENT wins for %s just like COMFORTABLE", (action) => {
+    const quoteFor = { WATCH: 25.3, REVIEW_ROLL: 20, REVIEW_CALL: 30 }[action];
+    const leg = action === "REVIEW_CALL" ? { kind: "CALL" as const, strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), contracts: 1 } : undefined;
+    const current = evaluatePositionReview(baseInput({ quote: quote(quoteFor), ...(leg ? { leg } : {}) }));
+    expect(current.action).toBe(action);
+    expect(composePositionAssessmentDisplay({ current, verifiedFallback: null }).state).toBe("CURRENT");
+  });
+
+  it("CANNOT_ASSESS with a verified fallback composes LAST_VALID, never discarding the current failure reason", () => {
+    const current = evaluatePositionReview(baseInput({ leg: { kind: "NONE" } }));
+    expect(current.action).toBe("CANNOT_ASSESS");
+    const stored = storedFixture();
+    expect(composePositionAssessmentDisplay({ current, verifiedFallback: stored })).toEqual({ state: "LAST_VALID", currentUnavailable: current, lastValid: stored });
+  });
+
+  it("CANNOT_ASSESS with no verified fallback composes UNAVAILABLE", () => {
+    const current = evaluatePositionReview(baseInput({ leg: { kind: "NONE" } }));
+    expect(composePositionAssessmentDisplay({ current, verifiedFallback: null })).toEqual({ state: "UNAVAILABLE", currentUnavailable: current });
+  });
+
+  it("never lets a verified fallback upgrade CANNOT_ASSESS back into CURRENT", () => {
+    const current = evaluatePositionReview(baseInput({ leg: { kind: "NONE" } }));
+    const display = composePositionAssessmentDisplay({ current, verifiedFallback: storedFixture() });
+    expect(display.state).not.toBe("CURRENT");
+  });
+});
+
+describe("classifyLastValidTiming (Phase 2A)", () => {
+  // 2026-06-15 is a Monday (confirmed by this file's own NY_DATE/SESSION fixtures above).
+  // The WEEK BEFORE (June 8-12) is used for the weekend tests below, deliberately avoiding
+  // June 19 (Juneteenth, an actual NYSE holiday that week) so the weekend behavior itself is
+  // isolated from the separate holiday-handling test further down.
+  const MONDAY = new Date("2026-06-15T16:00:00Z");
+  const TUESDAY = new Date("2026-06-16T16:00:00Z");
+  const PRIOR_FRIDAY = new Date("2026-06-12T16:00:00Z");
+  const PRIOR_SATURDAY = new Date("2026-06-13T16:00:00Z");
+  const PRIOR_SUNDAY = new Date("2026-06-14T16:00:00Z");
+
+  it("classifies an evaluation from today (a real trading day) as TODAY", () => {
+    expect(classifyLastValidTiming(MONDAY, MONDAY)).toBe("TODAY");
+  });
+
+  it("classifies yesterday's close as PREVIOUS_SESSION on the very next trading day", () => {
+    expect(classifyLastValidTiming(MONDAY, TUESDAY)).toBe("PREVIOUS_SESSION");
+  });
+
+  it("classifies Friday's close as PREVIOUS_SESSION when viewed on Saturday (weekend must not make it look older)", () => {
+    expect(classifyLastValidTiming(PRIOR_FRIDAY, PRIOR_SATURDAY)).toBe("PREVIOUS_SESSION");
+  });
+
+  it("classifies Friday's close as PREVIOUS_SESSION when viewed on Sunday too", () => {
+    expect(classifyLastValidTiming(PRIOR_FRIDAY, PRIOR_SUNDAY)).toBe("PREVIOUS_SESSION");
+  });
+
+  it("classifies Friday's close as PREVIOUS_SESSION when viewed the following Monday", () => {
+    expect(classifyLastValidTiming(PRIOR_FRIDAY, MONDAY)).toBe("PREVIOUS_SESSION");
+  });
+
+  it("classifies something older than the last completed session as OLDER", () => {
+    const twoWeeksAgo = new Date("2026-06-01T16:00:00Z");
+    expect(classifyLastValidTiming(twoWeeksAgo, TUESDAY)).toBe("OLDER");
+  });
+
+  it("classifies a future-dated evaluation (invalid) as OLDER, never TODAY or PREVIOUS_SESSION", () => {
+    const future = new Date(MONDAY.getTime() + 86_400_000);
+    expect(classifyLastValidTiming(future, MONDAY)).toBe("OLDER");
+  });
+
+  it("classifies an invalid (NaN) evaluatedAt as OLDER rather than throwing", () => {
+    expect(classifyLastValidTiming(new Date(NaN), MONDAY)).toBe("OLDER");
+  });
+
+  it("handles a holiday correctly - the last trading day before Independence Day week's next session is still correctly the prior session", () => {
+    // July 4, 2026 is a Saturday (observed Friday July 3 is the holiday); July 2 (Thursday) is
+    // the last real trading day before the long weekend, and July 6 (Monday) is the next one.
+    const thursdayBeforeHoliday = new Date("2026-07-02T16:00:00Z");
+    const mondayAfterHoliday = new Date("2026-07-06T16:00:00Z");
+    expect(classifyLastValidTiming(thursdayBeforeHoliday, mondayAfterHoliday)).toBe("PREVIOUS_SESSION");
+  });
 });

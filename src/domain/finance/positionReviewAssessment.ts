@@ -1,4 +1,5 @@
 import type { EquityMarketSessionEvidence } from "@/providers/market-data/types";
+import { isNyseMarketDay, marketDate, previousNyseMarketDay } from "./marketCalendar";
 import { expirationCalendarDate, nyCalendarDateOf, regularSessionIntervalContaining } from "./marketSession";
 import { evaluatePositionReview, validatedBufferPercent, type PositionReviewInput, type PositionEvidenceState, type PositionReviewAction, type PositionReviewLifecycle, type PositionReviewResult } from "./positionReview";
 import { evaluateQuoteEligibility } from "./quoteEvidence";
@@ -344,4 +345,82 @@ export function evaluateHistoricalAssessmentEligibility(input: StoredAssessmentM
     return { eligible: false, reasonCode: "FALLBACK_REASON_NOT_ALLOWED" };
   }
   return { eligible: true };
+}
+
+/**
+ * LST "Last Valid Position Assessment" - Phase 2A display composition. A current valid assessment
+ * always wins; historical data is DISPLAY FALLBACK ONLY and is composed here from an ALREADY
+ * fetched/verified `StoredLastValidAssessment` - this function never queries anything itself and
+ * never re-derives eligibility (that remains evaluatePositionReviewWriteEligibility/
+ * evaluateHistoricalAssessmentEligibility's own job, enforced by the orchestration service in
+ * src/lib before it ever calls this composer).
+ */
+export type PositionAssessmentDisplay =
+  | {
+      state: "CURRENT";
+      /** The real, live evaluatePositionReview result - never reconstructed. */
+      current: PositionReviewResult;
+      /** Present ONLY when a durable row was verified (freshly read back) as still valid during
+       * THIS orchestration call - either because this exact evaluation was just persisted, or
+       * because persisting it revealed a newer durable row already occupies the same scoped leg.
+       * Null whenever persistence was not verified this call - a client must never be told a
+       * fallback exists when it wasn't actually confirmed durable just now. */
+      lastValid: StoredLastValidAssessment | null;
+    }
+  | {
+      state: "LAST_VALID";
+      /** The real CANNOT_ASSESS (or otherwise non-meaningful) current result explaining WHY
+       * current guidance is unavailable - never reinterpreted, never discarded just because a
+       * fallback exists. */
+      currentUnavailable: PositionReviewResult;
+      lastValid: StoredLastValidAssessment;
+    }
+  | {
+      state: "UNAVAILABLE";
+      currentUnavailable: PositionReviewResult;
+    };
+
+/**
+ * Pure 3-way composition: CURRENT always wins when the live result is persistable/meaningful,
+ * regardless of whether a fallback exists; otherwise LAST_VALID only when the caller already
+ * verified (via evaluateHistoricalAssessmentEligibility, through getLastValidPositionAssessment)
+ * that an exact-leg historical row is eligible; otherwise UNAVAILABLE. This is the ONE place the
+ * three display states are decided - callers never branch on `current.action` themselves.
+ */
+export function composePositionAssessmentDisplay(args: {
+  current: PositionReviewResult;
+  verifiedFallback: StoredLastValidAssessment | null;
+}): PositionAssessmentDisplay {
+  if (isPersistablePositionReviewAction(args.current.action)) {
+    return { state: "CURRENT", current: args.current, lastValid: args.verifiedFallback };
+  }
+  if (args.verifiedFallback) {
+    return { state: "LAST_VALID", currentUnavailable: args.current, lastValid: args.verifiedFallback };
+  }
+  return { state: "UNAVAILABLE", currentUnavailable: args.current };
+}
+
+/**
+ * Pure presentation-METADATA classification only (never rendered text) for how to later label a
+ * stored assessment's `evaluatedAt` relative to `now`: the exact same TODAY/PREVIOUS_SESSION
+ * tiering `classifyMarkFreshness` (marketCalendar.ts) already uses for CURRENT_SESSION/
+ * LAST_SESSION - weekends and NYSE holidays correctly resolve Friday's close as the previous
+ * session on a Saturday/Sunday "now", since `previousNyseMarketDay` already skips them. Never
+ * claims PREVIOUS_SESSION unless the evaluated day actually IS the last completed NYSE market day
+ * before `now`'s own calendar day - anything else (including a future or unparseable instant)
+ * falls back to the honest, undated-claim-free OLDER tier. Phase 2B maps this to copy ("Last valid
+ * today" / "Previous session" / "Last valid <date>") - this module never produces that text itself.
+ */
+export type LastValidTimingTier = "TODAY" | "PREVIOUS_SESSION" | "OLDER";
+
+export function classifyLastValidTiming(evaluatedAt: Date, now: Date): LastValidTimingTier {
+  if (!Number.isFinite(evaluatedAt.getTime()) || !Number.isFinite(now.getTime()) || evaluatedAt.getTime() > now.getTime()) {
+    return "OLDER";
+  }
+  const today = marketDate(now);
+  const evaluatedDay = marketDate(evaluatedAt);
+  if (isNyseMarketDay(today) && evaluatedDay.getTime() === today.getTime()) {
+    return "TODAY";
+  }
+  return evaluatedDay.getTime() === previousNyseMarketDay(today).getTime() ? "PREVIOUS_SESSION" : "OLDER";
 }
