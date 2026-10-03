@@ -382,7 +382,7 @@ export default async function PositionsPage({
     <div className="space-y-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <p className="text-sm font-medium text-emerald-300">Campaign &amp; account tracker</p>
+          <p className="text-sm font-medium text-sky-300">Campaign &amp; account tracker</p>
           <h1 className="text-2xl font-semibold text-zinc-50">Tracker</h1>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -571,7 +571,7 @@ function NewCampaignPanel({
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" open={accounts.length === 0}>
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
         <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
-          <Plus className="size-4 text-emerald-300" aria-hidden />
+          <Plus className="size-4 text-sky-300" aria-hidden />
           New Campaign
         </span>
         <ChevronDown className="size-4 text-zinc-500 transition group-open:rotate-180" aria-hidden />
@@ -746,10 +746,14 @@ function CampaignCard({
 
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
-      <summary className="relative grid cursor-pointer list-none gap-2.5 p-3.5 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
+      <summary className="relative grid cursor-pointer list-none gap-3 p-4 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
         <div className="min-w-0 pr-5 xl:pr-0">
+          {/* Ticker + lifecycle status dominate this line - the assessment badge gets its own
+              line below so it reads as a distinct, scannable signal rather than competing with
+              status pills for the same visual weight (ticket's "assessment badge immediately
+              recognizable" goal). */}
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xl font-semibold text-zinc-50">{campaign.ticker}</span>
+            <span className="text-2xl font-bold tracking-tight text-zinc-50">{campaign.ticker}</span>
             <Badge tone={statusTone(campaign.status, plValue)}>{campaign.status}</Badge>
             {campaign.status === "CLOSED" ? (
               <Badge tone={plValue === null ? "neutral" : plValue < 0 ? "bad" : "good"}>
@@ -758,11 +762,9 @@ function CampaignCard({
               </Badge>
             ) : null}
             {!openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
-            {review ? <LivePositionReviewBadge result={review} /> : null}
           </div>
-          {openView && review ? <LivePositionReviewEvidenceLine result={review} /> : null}
           {openView && openPut ? (
-            <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-put-contract">
+            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[15px]" data-testid="active-put-contract">
               <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>
               <span className="text-zinc-300">{shortCalendarDate(openPut.expiration)}</span>
               {/* Codex P2 - the shared review evaluator's own NY-calendar DTE, matching exactly
@@ -773,22 +775,32 @@ function CampaignCard({
                   right next to it. Shows "-" rather than an incompatible number when review
                   evaluation didn't populate this leg. */}
               <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? "-"} DTE</span>
-              <span className="text-xs text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
+              <span className="text-[13px] text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
             </div>
           ) : null}
           {openView && openCall ? (
-            <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-testid="active-call-contract">
+            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[15px]" data-testid="active-call-contract">
               <span className="font-semibold text-amber-200">{campaign.ticker} {money(openCall.strike)} Call</span>
               <span className="text-zinc-300">{shortCalendarDate(openCall.expiration)}</span>
               {/* Codex P2 - same NY-calendar-only DTE as the put contract above, no legacy fallback. */}
               <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? "-"} DTE</span>
-              <span className="text-xs text-zinc-400">Short {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}</span>
+              <span className="text-[13px] text-zinc-400">Short {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}</span>
               {openCallEventRow ? (
-                <span className="text-xs text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>
+                <span className="text-[13px] text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>
               ) : null}
             </div>
           ) : null}
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
+          {/* The dominant assessment signal (Comfortable/Watch/Review roll/Review call/Cannot
+              assess), on its own line with real breathing room - immediately recognizable before
+              a reader even reaches the smaller provenance line below. */}
+          {openView && review ? (
+            <div className="mt-2">
+              <LivePositionReviewBadge result={review} />
+              <LivePositionReviewEvidenceLine result={review} />
+            </div>
+          ) : null}
+          {/* Provenance/context - deliberately the smallest, most muted text in the card. */}
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
             <span>{isOwner ? "You" : campaign.owner.name}</span>
             <span>{accountVisibleToViewer ? campaign.account.name : "Private account"}</span>
             <span>{summary.currentStage}</span>
@@ -870,7 +882,7 @@ function CampaignCard({
         <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
           <div>
             <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
-              <History className="size-4 text-emerald-300" aria-hidden />
+              <History className="size-4 text-sky-300" aria-hidden />
               Lifecycle
             </div>
             <div className="space-y-3">
@@ -1319,11 +1331,11 @@ function AccountsSection({
             {isOwner ? (
               <p className="mt-3 text-xs text-zinc-500">
                 Log a deposit, withdrawal, or adjustment from{" "}
-                <IntentPrefetchLink href="/account" className="text-emerald-300 hover:text-emerald-200">
+                <IntentPrefetchLink href="/account" className="text-sky-300 hover:text-sky-200">
                   Account
                 </IntentPrefetchLink>
                 . Whole-account gain and return live on{" "}
-                <IntentPrefetchLink href="/dashboard" className="text-emerald-300 hover:text-emerald-200">
+                <IntentPrefetchLink href="/dashboard" className="text-sky-300 hover:text-sky-200">
                   Dashboard
                 </IntentPrefetchLink>
                 .
@@ -1781,7 +1793,7 @@ function PerformanceSection({
         className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20"
         data-testid="this-week-summary"
       >
-        <p className="text-xs font-semibold uppercase tracking-normal text-emerald-300">This Week</p>
+        <p className="text-xs font-semibold uppercase tracking-wide text-sky-300">This Week</p>
         {thisWeek.completedCount === 0 ? (
           <p className="text-sm text-zinc-400">No campaigns closed yet this week.</p>
         ) : (
@@ -1811,7 +1823,7 @@ function PerformanceSection({
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-normal text-emerald-300">Trading Record</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-sky-300">Trading Record</p>
               <h2 className="mt-1 text-xl font-semibold text-zinc-50">Confirmed, current, projected</h2>
             </div>
             <Badge tone="info">Mine only</Badge>
@@ -1855,7 +1867,7 @@ function PerformanceSection({
           </dl>
           <p className="mt-3 text-xs text-zinc-500">
             Account value, whole-account gain, and total return live on{" "}
-            <IntentPrefetchLink href="/dashboard" className="text-emerald-300 hover:text-emerald-200">
+            <IntentPrefetchLink href="/dashboard" className="text-sky-300 hover:text-sky-200">
               Dashboard
             </IntentPrefetchLink>
             .
@@ -1864,7 +1876,7 @@ function PerformanceSection({
 
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
           <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
-            <Target className="size-4 text-emerald-300" aria-hidden />
+            <Target className="size-4 text-sky-300" aria-hidden />
             Return on campaigns closed this week
           </div>
           <div className={`text-2xl font-semibold ${toneClass(report.tradeReturnStatus === "OK" ? report.tradeReturnPercent : null)}`}>
@@ -1885,7 +1897,7 @@ function PerformanceSection({
       <div className="grid gap-4">
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
           <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
-            <BarChart3 className="size-4 text-emerald-300" aria-hidden />
+            <BarChart3 className="size-4 text-sky-300" aria-hidden />
             Closed Campaign Stats
           </div>
           <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
@@ -1981,7 +1993,7 @@ function CampaignPerformanceTable({ rows }: { rows: PerformanceCampaignViewRow[]
     <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" data-testid="performance-campaign-table">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
-          <ClipboardList className="size-4 text-emerald-300" aria-hidden />
+          <ClipboardList className="size-4 text-sky-300" aria-hidden />
           Campaign Performance
         </div>
         <Badge tone="neutral">{rows.length} total</Badge>
@@ -2190,10 +2202,10 @@ function SummaryCell({
 }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-normal text-zinc-500">
+      <div className="text-xs uppercase tracking-wide text-zinc-500">
         <HelpLabel label={label} help={help} testId={helpTestId} />
       </div>
-      <div className={`mt-1 text-sm font-semibold ${toneClass(tone)}`}>{value}</div>
+      <div className={`mt-1 text-[17px] font-semibold leading-tight ${toneClass(tone)}`}>{value}</div>
     </div>
   );
 }
@@ -2213,10 +2225,10 @@ function ResultItem({
 }) {
   return (
     <div className="border-t border-zinc-800 pt-2">
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">
+      <dt className="text-xs uppercase tracking-wide text-zinc-500">
         <HelpLabel label={label} help={help} testId={helpTestId} />
       </dt>
-      <dd className={`mt-1 font-medium ${toneClass(tone)}`}>{value}</dd>
+      <dd className={`mt-1 text-[15px] font-medium ${toneClass(tone)}`}>{value}</dd>
     </div>
   );
 }
@@ -2413,7 +2425,7 @@ function trackerHref(scope: TrackerScope, view: ViewMode) {
 function segmentClass(active: boolean) {
   return `rounded-md border px-3 py-2 text-sm transition ${
     active
-      ? "border-emerald-400/70 bg-emerald-400/15 text-emerald-100"
+      ? "border-sky-400/70 bg-sky-400/15 text-sky-100"
       : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-600 hover:text-zinc-50"
   }`;
 }
@@ -2488,11 +2500,14 @@ function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
+// visual-tradingview-refresh: action controls (input focus, primary/secondary/tiny buttons) use
+// the neutral/action blue accent, not green - green stays reserved for a genuinely positive
+// financial value (see toneClass above). No change to any control's behavior, only its color.
 const inputClass =
-  "min-h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/70";
+  "min-h-11 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-[15px] text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-sky-400/70";
 const primaryButtonClass =
-  "inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black transition hover:bg-emerald-300";
+  "inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-sky-400 px-4 text-sm font-semibold text-black transition hover:bg-sky-300";
 const secondaryButtonClass =
-  "inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-zinc-700 px-4 text-sm font-semibold text-zinc-100 transition hover:border-sky-400/70 hover:text-sky-100";
+  "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-zinc-700 px-4 text-sm font-semibold text-zinc-100 transition hover:border-sky-400/70 hover:text-sky-100";
 const tinyButtonClass =
-  "inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-xs font-medium text-zinc-300 transition hover:border-emerald-400/60 hover:text-emerald-100";
+  "inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-xs font-medium text-zinc-300 transition hover:border-sky-400/60 hover:text-sky-100";

@@ -184,7 +184,7 @@ export default async function DashboardPage() {
           <Panel
             title="Positions to Review"
             action={
-              <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/positions">
+              <IntentPrefetchLink className="text-sm font-medium text-sky-300 hover:text-sky-200" href="/positions">
                 Open in Tracker
               </IntentPrefetchLink>
             }
@@ -192,7 +192,7 @@ export default async function DashboardPage() {
             {allReviewRows.length === 0 ? (
               <EmptyState>
                 No open campaigns.{" "}
-                <IntentPrefetchLink href="/positions" className="text-emerald-300 hover:text-emerald-200">
+                <IntentPrefetchLink href="/positions" className="text-sky-300 hover:text-sky-200">
                   Start one in the Tracker.
                 </IntentPrefetchLink>
               </EmptyState>
@@ -232,7 +232,7 @@ export default async function DashboardPage() {
               />
             </div>
             {capitalPanel.ambiguousNotice ? <p className="text-xs text-amber-300">{capitalPanel.ambiguousNotice}</p> : null}
-            <IntentPrefetchLink href="/account" className="block text-xs text-emerald-300 hover:text-emerald-200">
+            <IntentPrefetchLink href="/account" className="block text-xs text-sky-300 hover:text-sky-200">
               View account detail
             </IntentPrefetchLink>
           </div>
@@ -244,7 +244,7 @@ export default async function DashboardPage() {
         <Panel
           title="Closed This Week"
           action={
-            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href={TRACKER_PERFORMANCE_HREF}>
+            <IntentPrefetchLink className="text-sm font-medium text-sky-300 hover:text-sky-200" href={TRACKER_PERFORMANCE_HREF}>
               Performance
             </IntentPrefetchLink>
           }
@@ -252,9 +252,9 @@ export default async function DashboardPage() {
           {!closedThisWeek.hasClosures ? (
             <EmptyState>{closedThisWeek.countLabel}</EmptyState>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               <div className="text-sm text-zinc-300">{closedThisWeek.countLabel}</div>
-              <div className={`text-xl font-semibold ${closedThisWeek.returnLabel === null ? "text-zinc-50" : closedThisWeek.returnLabel.startsWith("-") ? "text-red-300" : "text-emerald-300"}`}>
+              <div className={`text-2xl font-bold leading-tight tabular-nums ${closedThisWeek.returnLabel === null ? "text-zinc-50" : closedThisWeek.returnLabel.startsWith("-") ? "text-red-300" : "text-emerald-300"}`}>
                 {closedThisWeek.returnLabel ?? "Unavailable"}
               </div>
               <div className="text-xs text-zinc-500">Net return on capital those campaigns secured</div>
@@ -267,10 +267,10 @@ export default async function DashboardPage() {
           title="Scanner Insight"
           action={
             <div className="flex items-center gap-3">
-              <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/research">
+              <IntentPrefetchLink className="text-sm font-medium text-sky-300 hover:text-sky-200" href="/research">
                 Research
               </IntentPrefetchLink>
-              <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/scanner">
+              <IntentPrefetchLink className="text-sm font-medium text-sky-300 hover:text-sky-200" href="/scanner">
                 Scanner
               </IntentPrefetchLink>
             </div>
@@ -305,17 +305,17 @@ export default async function DashboardPage() {
         <Panel
           title="Chat"
           action={
-            <IntentPrefetchLink className="text-sm font-medium text-emerald-300 hover:text-emerald-200" href="/chat">
+            <IntentPrefetchLink className="text-sm font-medium text-sky-300 hover:text-sky-200" href="/chat">
               Open
             </IntentPrefetchLink>
           }
         >
           <div className="flex items-center justify-between gap-3">
             {chatPreview.latestMessage ? (
-              <div className="flex min-w-0 items-center gap-2">
+              <div className="flex min-w-0 items-center gap-2.5">
                 <Initials name={chatPreview.latestMessage.senderName} />
                 <div className="min-w-0">
-                  <div className="truncate text-sm text-zinc-300">
+                  <div className="truncate text-[15px] text-zinc-300">
                     <span className="font-medium text-zinc-100">{chatPreview.latestMessage.senderName}:</span> {chatPreview.latestMessage.body}
                   </div>
                   <EventTime value={chatPreview.latestMessage.createdAt} asOf={asOf} />
@@ -347,13 +347,15 @@ function SummaryCard({
   detail?: string | null;
   reason?: string | null;
 }) {
+  // Semantic financial color only when a real tone was computed upstream (dashboard-view.ts) -
+  // never applied decoratively, and never for every card (undefined/neutral stays near-white).
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   return (
-    <IntentPrefetchLink href={href} className="block rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 transition hover:border-emerald-400/40">
-      <div className="text-xs font-medium uppercase tracking-normal text-zinc-400">{label}</div>
-      <div className={`mt-0.5 text-xl font-semibold tabular-nums ${toneClass}`}>{value}</div>
-      {detail ? <div className="mt-0.5 text-xs text-zinc-500">{detail}</div> : null}
-      {reason ? <div className="mt-0.5 text-xs text-amber-300">{reason}</div> : null}
+    <IntentPrefetchLink href={href} className="block rounded-lg border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400/50">
+      <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className={`mt-1.5 text-[26px] font-bold leading-tight tabular-nums ${toneClass}`}>{value}</div>
+      {detail ? <div className="mt-1 text-[13px] text-zinc-400">{detail}</div> : null}
+      {reason ? <div className="mt-1 text-[13px] text-amber-300">{reason}</div> : null}
     </IntentPrefetchLink>
   );
 }
@@ -361,10 +363,10 @@ function SummaryCard({
 function CapitalLine({ label, value, detail, emphasize = false }: { label: string; value: string; detail?: string | null; emphasize?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <span className="text-xs text-zinc-400">{label}</span>
+      <span className="text-[13px] text-zinc-400">{label}</span>
       <div className="text-right">
-        <div className={`tabular-nums ${emphasize ? "text-base font-semibold text-zinc-50" : "text-sm text-zinc-200"}`}>{value}</div>
-        {detail ? <div className="text-[11px] text-zinc-500">{detail}</div> : null}
+        <div className={`tabular-nums ${emphasize ? "text-lg font-bold text-zinc-50" : "text-[15px] font-medium text-zinc-200"}`}>{value}</div>
+        {detail ? <div className="text-xs text-zinc-500">{detail}</div> : null}
       </div>
     </div>
   );
@@ -408,7 +410,7 @@ async function PositionsToReviewWithStatus({
     <div className="space-y-2">
       <PositionsToReviewTable rows={visibleRows} />
       {hiddenCount > 0 ? (
-        <IntentPrefetchLink href="/positions" className="block text-center text-xs text-zinc-500 hover:text-emerald-300">
+        <IntentPrefetchLink href="/positions" className="block text-center text-xs text-zinc-500 hover:text-sky-300">
           +{hiddenCount} more in Tracker
         </IntentPrefetchLink>
       ) : null}
@@ -420,18 +422,18 @@ function PositionsToReviewTable({ rows, loading = false }: { rows: PositionToRev
   return (
     <div className="space-y-1.5">
       {rows.map((row) => (
-        <div key={row.campaignId} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
+        <div key={row.campaignId} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3.5 py-2.5">
           <div className="min-w-0">
             <div className="flex items-baseline gap-2">
-              <span className="text-base font-semibold text-zinc-100">{row.ticker}</span>
+              <span className="text-lg font-bold text-zinc-100">{row.ticker}</span>
               {row.legType ? (
-                <span className="text-sm text-zinc-300 tabular-nums">
+                <span className="text-[15px] text-zinc-300 tabular-nums">
                   {money(row.strike)} {row.legType === "PUT" ? "Put" : "Call"}
                   {row.expiration ? ` · ${shortCalendarDate(row.expiration)}` : ""}
                 </span>
               ) : null}
             </div>
-            <div className="text-xs text-zinc-500">
+            <div className="mt-0.5 text-xs text-zinc-500">
               {row.stage}
               {row.quantity !== null ? ` · ${row.quantity} ${row.quantityUnit}` : ""}
             </div>
