@@ -129,16 +129,16 @@ export function AppSidebar({
                 href={item.href}
                 aria-label={collapsed ? item.label : undefined}
                 aria-current={active ? "page" : undefined}
-                className={`group relative flex min-h-11 items-center gap-3 rounded-md text-sm transition ${
+                className={`group relative flex min-h-12 items-center gap-3 rounded-md border-l-2 text-[15px] transition ${
                   collapsed ? "justify-center px-0" : "px-3"
-                } ${active ? "bg-zinc-900 text-zinc-50" : "text-zinc-300 hover:bg-zinc-900 hover:text-zinc-50"}`}
+                } ${active ? "border-sky-400 bg-zinc-900 text-zinc-50" : "border-transparent text-zinc-300 hover:bg-zinc-900 hover:text-zinc-50"}`}
               >
-                <Icon className="size-4 shrink-0" aria-hidden />
+                <Icon className={`size-[18px] shrink-0 ${active ? "text-sky-300" : ""}`} aria-hidden />
                 {!collapsed ? <span>{item.label}</span> : null}
                 {unreadCount > 0 ? (
                   <span
                     aria-label={`${unreadCount} unread`}
-                    className={`rounded-md bg-emerald-400 px-1.5 py-0.5 text-xs font-bold text-black ${
+                    className={`rounded-md bg-sky-400 px-1.5 py-0.5 text-xs font-bold text-black ${
                       collapsed ? "absolute -right-1 -top-1" : "ml-auto"
                     }`}
                   >
@@ -196,7 +196,7 @@ export function AppSidebar({
       <header className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/95 px-4 py-3 backdrop-blur md:hidden">
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <HeartHandshake className="size-5 text-emerald-300" aria-hidden />
+            <HeartHandshake className="size-5 text-sky-300" aria-hidden />
             <span className="font-semibold">Off Shift Options</span>
           </div>
           <div className="flex items-center gap-3 text-sm text-zinc-300">
@@ -215,12 +215,12 @@ export function AppSidebar({
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={`relative flex min-h-12 flex-col items-center justify-center gap-1 rounded-md text-xs transition ${
-                  active ? "bg-zinc-800 text-zinc-50" : "bg-zinc-900 text-zinc-300"
+                  active ? "bg-zinc-800 text-sky-200" : "bg-zinc-900 text-zinc-300"
                 }`}
               >
                 <Icon className="size-4" aria-hidden />
                 {item.label}
-                {unreadCount > 0 ? <span aria-label={`${unreadCount} unread`} className="absolute right-1 top-1 rounded bg-emerald-400 px-1 text-xs font-bold text-black">{unreadCount}</span> : null}
+                {unreadCount > 0 ? <span aria-label={`${unreadCount} unread`} className="absolute right-1 top-1 rounded bg-sky-400 px-1 text-xs font-bold text-black">{unreadCount}</span> : null}
               </IntentPrefetchLink>
             );
           })}
@@ -241,13 +241,13 @@ function NotificationBellLink({ unread }: { unread: number }) {
     <IntentPrefetchLink
       href="/notifications"
       aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
-      className="relative inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-zinc-700 text-zinc-300 transition hover:border-emerald-400/60 hover:text-emerald-200"
+      className="relative inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-zinc-700 text-zinc-300 transition hover:border-sky-400/60 hover:text-sky-200"
     >
       <Bell className="size-4" aria-hidden />
       {unread > 0 ? (
         <span
           aria-hidden
-          className="absolute -right-1 -top-1 rounded-full bg-emerald-400 px-1 text-[10px] font-bold leading-tight text-black"
+          className="absolute -right-1 -top-1 rounded-full bg-sky-400 px-1 text-[10px] font-bold leading-tight text-black"
         >
           {unread > 99 ? "99+" : unread}
         </span>

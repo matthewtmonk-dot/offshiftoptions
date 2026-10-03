@@ -11,11 +11,15 @@ import { formatEtTime } from "@/lib/format";
  * one dominant status accent per row" instruction.
  */
 
+// visual-tradingview-refresh: REVIEW_ROLL/REVIEW_CALL now render AMBER (warn), not RED (bad) -
+// per the ticket's own explicit semantic-color rule ("AMBER: Watch / Review / warning states"),
+// reserving RED strictly for an already-negative financial VALUE (e.g. a realized loss), never
+// for "this still-open position now needs a decision." No change to action/evidence logic.
 const TONE_BY_ACTION = {
   COMFORTABLE: "good",
   WATCH: "warn",
-  REVIEW_ROLL: "bad",
-  REVIEW_CALL: "bad",
+  REVIEW_ROLL: "warn",
+  REVIEW_CALL: "warn",
   CANNOT_ASSESS: "neutral",
 } as const;
 
@@ -78,7 +82,7 @@ export function PositionReviewActionBadge({ result }: { result: PositionReviewRe
   const Icon = ICON_BY_ACTION[result.action];
   return (
     <Badge tone={TONE_BY_ACTION[result.action]}>
-      <Icon aria-hidden size={14} />
+      <Icon aria-hidden size={15} />
       <span className="ml-1">{actionLabel(result)}</span>
     </Badge>
   );
@@ -108,9 +112,9 @@ export function PositionReviewEvidenceLine({ result }: { result: PositionReviewR
   parts.push(POSITION_EVIDENCE_LABELS[evidence.position]);
 
   return (
-    <p className="mt-0.5 text-xs text-zinc-400">
+    <p className="mt-1 text-[13px] text-zinc-400">
       {parts.join(" · ")}
-      {explanation.quoteTradeTime ? <span className="block text-[11px] text-zinc-500">Price as of {formatEtTime(explanation.quoteTradeTime)}</span> : null}
+      {explanation.quoteTradeTime ? <span className="block text-xs text-zinc-500">Price as of {formatEtTime(explanation.quoteTradeTime)}</span> : null}
     </p>
   );
 }

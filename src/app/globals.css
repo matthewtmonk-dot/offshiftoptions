@@ -22,7 +22,47 @@
  */
 
 :root {
-  /* Semantic tokens - aliases onto the (theme-aware) Tailwind scale below, so they never
+  /*
+   * TradingView-inspired visual pass (visual-tradingview-refresh) - DARK's own zinc/emerald/
+   * red/amber/sky scale is now explicitly overridden here (previously just stock Tailwind
+   * values) for a true/near-black background with deliberately MORE separated surface/border
+   * steps - the old scheme used the identical zinc-800 for border, surface-elevated, AND
+   * surface-hover, which is exactly why borders could disappear into an elevated/hovered
+   * panel. Light mode's own override blocks below are untouched.
+   */
+  --color-zinc-950: #0a0c0f; /* app background - near-black */
+  --color-zinc-900: #12151a; /* panel/surface */
+  --color-zinc-800: #242b34; /* THE workhorse border color app-wide (`border-zinc-800`), also
+    raised/hover panel - deliberately a clear step up from the panel fills above, never the
+    same value a border sits next to */
+  --color-zinc-700: #3a4350; /* border-strong / emphasized control borders */
+  --color-zinc-600: #4c5563;
+  --color-zinc-500: #7e8793; /* muted text */
+  --color-zinc-400: #99a1ac;
+  --color-zinc-300: #b1b8c2; /* secondary text */
+  --color-zinc-200: #cdd3db;
+  --color-zinc-100: #e4e8ed;
+  --color-zinc-50: #f4f6f8; /* primary text - near-white, not pure white */
+
+  --color-emerald-400: #22c55e;
+  --color-emerald-300: #4ade80;
+  --color-emerald-200: #86efac;
+
+  --color-red-400: #ef4444;
+  --color-red-300: #f87171;
+  --color-red-200: #fca5a5;
+
+  --color-amber-400: #f59e0b;
+  --color-amber-300: #fbbf24;
+  --color-amber-200: #fcd34d;
+
+  /* TradingView-style action blue - navigation/links/selection/neutral actions, deliberately
+   * never used for a positive financial value (that stays emerald's exclusive meaning). */
+  --color-sky-400: #3b82f6;
+  --color-sky-300: #60a5fa;
+  --color-sky-200: #93c5fd;
+
+  /* Semantic tokens - aliases onto the (theme-aware) Tailwind scale above, so they never
    * need a separate per-theme override block of their own. New/shared UI should prefer
    * these names; the bulk of the existing app already re-themes via the raw scale itself. */
   --background: var(--color-zinc-950);
@@ -35,8 +75,8 @@
   --text-muted: var(--color-zinc-500);
   --border: var(--color-zinc-800);
   --border-strong: var(--color-zinc-700);
-  --accent: var(--color-emerald-400);
-  --accent-hover: var(--color-emerald-300);
+  --accent: var(--color-sky-400);
+  --accent-hover: var(--color-sky-300);
   --accent-foreground: #000000;
   --positive: var(--color-emerald-300);
   --positive-muted: var(--color-emerald-400);
@@ -47,7 +87,7 @@
   --unknown: var(--color-zinc-400);
   --input-background: var(--color-zinc-950);
   --table-header: var(--color-zinc-900);
-  --table-row-hover: var(--color-zinc-900);
+  --table-row-hover: var(--color-zinc-800);
 }
 
 @theme inline {
@@ -129,6 +169,20 @@
   --color-sky-300: #0284c7;
 }
 
+/*
+ * Structural native-scale increase (visual-tradingview-refresh) - every Tailwind utility in
+ * this project is rem-based (spacing, sizing, radii, most font sizes), so this single root bump
+ * cascades through the whole app's existing classes without a CSS transform/zoom and without
+ * touching a single component. It is deliberately modest on its own (~6%) - the rest of the
+ * "feels like 125% zoom" target comes from the explicit per-component scale increases (Tracker
+ * row hierarchy, Panel/Metric/Badge sizing - see ui.tsx and positions/page.tsx), not from pushing
+ * this one number further, which would start to feel oversized/mobile rather than a denser,
+ * more readable desktop trading terminal.
+ */
+html {
+  font-size: 17px;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
@@ -143,11 +197,12 @@ textarea {
 }
 
 ::selection {
-  background: rgba(52, 211, 153, 0.35);
+  background: rgba(59, 130, 246, 0.35);
 }
 
-/* Keyboard focus must stay visible in both themes. */
+/* Keyboard focus must stay visible in both themes - the neutral/action blue accent, never the
+ * positive-value green (focus is a navigation/selection signal, not a financial outcome). */
 :focus-visible {
-  outline: 2px solid var(--color-emerald-400);
+  outline: 2px solid var(--color-sky-400);
   outline-offset: 2px;
 }
