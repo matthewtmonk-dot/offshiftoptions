@@ -50,7 +50,10 @@ function trackerHref(scope: TrackerScope, view: ViewMode) {
 }
 
 function tabClass(active: boolean) {
+  // visual-tradingview-refresh: a selected tab is a navigation/selection control, not a
+  // financial value - blue, not green (verified via real rendering: this was the one tab
+  // control still using the old green-everywhere treatment).
   return `inline-flex items-center rounded px-3 py-1.5 text-sm transition ${
-    active ? "bg-emerald-400 text-black" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
+    active ? "bg-sky-400 text-black" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
   }`;
 }
