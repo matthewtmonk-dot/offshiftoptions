@@ -864,9 +864,11 @@ describe("Codex P1 - rolled-position orchestration (realistic history, not a pre
   });
 });
 
-describe("Codex blocker repair (C) - resolvePositionReviewsForUser options.skipLiveEvidence", () => {
+describe("Codex blocker repair (C, final) - resolvePositionReviewsForUser options.retainedEvidence", () => {
+  const emptyRetained = { brokerPositions: null, quoteEvidenceByTicker: new Map<string, never>(), sessionEvidence: { status: "UNAVAILABLE" as const, reason: "retained: genuinely unavailable" } };
+
   it("never calls the live Schwab/market-data functions at all", async () => {
-    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { retainedEvidence: emptyRetained });
 
     expect(getPositions).not.toHaveBeenCalled();
     expect(getQuoteEvidence).not.toHaveBeenCalled();
@@ -874,16 +876,49 @@ describe("Codex blocker repair (C) - resolvePositionReviewsForUser options.skipL
     expect(results).toHaveLength(1);
   });
 
-  it("produces CANNOT_ASSESS / BROKER_UNAVAILABLE for every relevant campaign - the exact same path a genuine Schwab outage already takes", async () => {
-    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+  it("with genuinely nothing retained (broker fetch itself failed), produces CANNOT_ASSESS / BROKER_UNAVAILABLE - the exact same path a genuine Schwab outage already takes", async () => {
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { retainedEvidence: emptyRetained });
 
     expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
     expect(results[0]?.result.evidence.position).toBe("BROKER_UNAVAILABLE");
     expect(results[0]?.result.explanation.reasonCodes).toEqual(["POSITION_BROKER_UNAVAILABLE"]);
   });
 
-  it("still never fabricates CURRENT for a manual account - skip-live is uniformly conservative", async () => {
-    const results = await resolvePositionReviewsForUser("matt", [putCampaign({ accountId: "account-2" })], [manualAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+  // Codex blocker repair (C, final) - Part 7 test B: a REAL quantity mismatch retained from the
+  // failed attempt (positions succeeded, only quote/session failed) must stay correctly detected
+  // and must still deny fallback - never masked into a blanket BROKER_UNAVAILABLE that the prior
+  // (rejected) design would have produced.
+  it("a REAL retained quantity mismatch (expected 1 contract, broker reports 2) resolves NOT_ASSESSED, never a fabricated BROKER_UNAVAILABLE", async () => {
+    const mismatchedPositions = [{ accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -2, marketValue: -200, accountLabel: "Test", positionReadReceivedAt: NOON }];
+    const retained = { brokerPositions: mismatchedPositions, quoteEvidenceByTicker: new Map<string, QuoteReviewEvidence>(), sessionEvidence: SESSION };
+
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { retainedEvidence: retained });
+
+    expect(results[0]?.result.evidence.position).toBe("NOT_ASSESSED");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+  });
+
+  // Codex blocker repair (C, final) - Part 7 test C: REAL retained session evidence showing the
+  // expiration-day regular session has already closed must still correctly produce
+  // EXPIRATION_SESSION_ENDED (lifecycle-primacy, fallback-blocking) even though the quote for
+  // that same attempt failed - never silently lost because "some evidence failed."
+  it("REAL retained session evidence showing the expiration session already ended stays EXPIRATION_SESSION_ENDED, even though the quote failed", async () => {
+    const todayExpiringCampaign = putCampaign({
+      events: [{ type: "SELL_PUT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 25, expiration: new Date(`${NY_DATE}T00:00:00.000Z`), premium: 1 }],
+    });
+    const confirmedPositions = [{ accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, accountLabel: "Test", positionReadReceivedAt: NOON }];
+    const retained = { brokerPositions: confirmedPositions, quoteEvidenceByTicker: new Map<string, QuoteReviewEvidence>(), sessionEvidence: SESSION };
+    const afterClose = new Date(`${NY_DATE}T20:00:01.000Z`); // just after the real session's own 4:00 PM ET close
+
+    const results = await resolvePositionReviewsForUser("matt", [todayExpiringCampaign], [schwabAccount], 3, afterClose, undefined, { retainedEvidence: retained });
+
+    expect(results[0]?.result.lifecycle).toBe("EXPIRATION_SESSION_ENDED");
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.explanation.reasonCodes).toEqual(["EXPIRATION_SESSION_ENDED"]);
+  });
+
+  it("still never fabricates CURRENT for a manual account - retained evidence is never trusted to grant more than live evidence would", async () => {
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign({ accountId: "account-2" })], [manualAccount], 3, NOON, undefined, { retainedEvidence: emptyRetained });
 
     expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
   });
@@ -892,7 +927,7 @@ describe("Codex blocker repair (C) - resolvePositionReviewsForUser options.skipL
     const expired = putCampaign({
       events: [{ type: "SELL_PUT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 25, expiration: new Date("2026-01-01T00:00:00.000Z"), premium: 1 }],
     });
-    const results = await resolvePositionReviewsForUser("matt", [expired], [schwabAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+    const results = await resolvePositionReviewsForUser("matt", [expired], [schwabAccount], 3, NOON, undefined, { retainedEvidence: emptyRetained });
 
     expect(results[0]?.result.lifecycle).toBe("EXPIRATION_PENDING");
     expect(results[0]?.result.explanation.reasonCodes).toEqual(["PAST_EXPIRATION_UNRESOLVED"]);

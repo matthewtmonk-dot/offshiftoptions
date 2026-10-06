@@ -30,6 +30,7 @@ import {
   type RelevantCampaignLegs,
 } from "./position-review-scope";
 import { getSchwabOpenPositionsForUser } from "./workflows";
+import type { RetainedPositionEvidence } from "./failed-refresh-receipt";
 
 /**
  * Dashboard V2 Phase 2 - the ONE place Dashboard and Tracker both call to get position-review
@@ -84,21 +85,21 @@ export async function resolvePositionReviewsForUser(
    */
   clock: () => Date = () => now,
   /**
-   * Codex blocker repair (C) - `skipLiveEvidence: true` skips the three live Schwab/market-data
-   * calls below entirely (zero network/provider calls) and treats evidence as uniformly
-   * unavailable instead. Used ONLY right after a manual refresh attempt genuinely failed (see
-   * workflows.ts's refreshPositionEvidenceForUserGuarded/RefreshStatusControl) - that attempt
-   * already cleared the relevant caches, so a normal re-render would otherwise MISS cache and
-   * make a second real provider call for the same click. This reuses the EXACT existing
-   * BROKER_UNAVAILABLE code path (`resolvePositionEvidence`'s own `brokerPositions === null`
-   * branch below) a genuine Schwab outage already takes - not a new rule, and if anything more
-   * conservative than most real partial outages (quote/session are forced unavailable too, not
-   * just broker positions). Every Phase 1 contradiction protection (past-expiration, assigned-
-   * shares-no-call, opening-event/context-fingerprint mismatch) comes from resolveRelevantCampaignLegs'
-   * read of this app's own CampaignEvent ledger, never from live broker data - completely
-   * unaffected by this mode.
+   * Codex blocker repair (C, final) - `retainedEvidence`, when present, is used INSTEAD of
+   * fetching live broker/quote/session data (zero network/provider calls) for this one call. It
+   * is never a client-supplied flag - the ONLY source is `consumeFailedRefreshReceipt` (see
+   * failed-refresh-receipt.ts), a server-side, owner-scoped, one-shot, short-TTL lookup of exactly
+   * what a recently FAILED manual refresh attempt actually retrieved. Unlike the prior (rejected)
+   * design, this is never a blanket "everything unavailable" override - whichever pieces the
+   * failed attempt genuinely obtained (e.g. real broker positions, even if quote/session failed)
+   * are used AS-IS, so a real quantity-mismatch/coverage/assignment contradiction, or an
+   * already-ended expiration session, stays correctly detectable even though some OTHER piece of
+   * evidence happened to fail in that same attempt. Every Phase 1 contradiction protection
+   * (past-expiration, assigned-shares-no-call, opening-event/context-fingerprint mismatch) comes
+   * from resolveRelevantCampaignLegs' read of this app's own CampaignEvent ledger, never from live
+   * broker data - completely unaffected either way.
    */
-  options: { skipLiveEvidence?: boolean } = {},
+  options: { retainedEvidence?: RetainedPositionEvidence } = {},
 ): Promise<ResolvedPositionReview[]> {
   const { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls, openingEventIdByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
   if (relevant.length === 0) {
@@ -111,10 +112,10 @@ export async function resolvePositionReviewsForUser(
   let brokerPositions: (BrokerPosition & { accountLabel: string })[] | null;
   let quoteEvidenceByTicker: Map<string, QuoteReviewEvidence>;
   let sessionEvidenceAsRequested: EquityMarketSessionEvidence;
-  if (options.skipLiveEvidence) {
-    brokerPositions = null;
-    quoteEvidenceByTicker = new Map();
-    sessionEvidenceAsRequested = { status: "UNAVAILABLE", reason: "Live evidence skipped - resolving from durable historical data only." };
+  if (options.retainedEvidence) {
+    brokerPositions = options.retainedEvidence.brokerPositions;
+    quoteEvidenceByTicker = options.retainedEvidence.quoteEvidenceByTicker;
+    sessionEvidenceAsRequested = options.retainedEvidence.sessionEvidence;
   } else {
     [brokerPositions, quoteEvidenceByTicker, sessionEvidenceAsRequested] = await Promise.all([
       getSchwabOpenPositionsForUser(userId).catch(() => null),

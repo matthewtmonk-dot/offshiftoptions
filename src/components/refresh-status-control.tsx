@@ -1,20 +1,10 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import { refreshPositionEvidenceAction } from "@/app/(app)/actions";
 import { formatEtTime } from "@/lib/format";
-
-/**
- * Codex blocker repair (C) - the tab-scoped (never a cookie, which would leak to other tabs or an
- * unrelated prefetch hitting the same page within a TTL window) one-shot signal telling Dashboard/
- * Tracker's next server render "the live Schwab/market-data fetch just failed - skip it entirely
- * this once and resolve from durable historical data only" (see resolvePositionReviewsForUser's
- * own `skipLiveEvidence` option). Lives only in THIS navigation's URL, driven entirely by this
- * tab's own client JS - never a shared cookie jar.
- */
-const SKIP_LIVE_EVIDENCE_PARAM = "oso_skip_live";
 
 /**
  * Post-Phase-2 UX follow-up (correctness repair) - a last-resort, CLIENT-only fallback cooldown,
@@ -56,25 +46,22 @@ const FALLBACK_COOLDOWN_MS = 15_000;
  */
 export function RefreshStatusControl() {
   const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [availableAt, setAvailableAt] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
-
-  // Codex blocker repair (C) - strips the one-shot skip-live-evidence marker from the visible URL
-  // as soon as it's observed client-side (a plain history-API call, no network, no second
-  // navigation) - the server already consumed it for the render that just happened.
-  useEffect(() => {
-    if (searchParams.has(SKIP_LIVE_EVIDENCE_PARAM)) {
-      const remaining = new URLSearchParams(searchParams.toString());
-      remaining.delete(SKIP_LIVE_EVIDENCE_PARAM);
-      const query = remaining.toString();
-      window.history.replaceState(null, "", query ? `${pathname}?${query}` : pathname);
-    }
-  }, [pathname, searchParams]);
+  // Codex blocker repair (C, final) - Part 5: a click's own async result must never publish
+  // state once a NEWER click has started (e.g. the first click's own promise settles late, after
+  // the user already clicked again) - a ref, not state, so the check below always reads the
+  // LATEST value rather than one captured in a stale closure. This has no bearing on data
+  // correctness (the server-side generation fencing in failed-refresh-receipt.ts already
+  // independently guarantees a stale attempt can never corrupt a newer one's recorded state) - it
+  // only prevents this component's OWN displayed text/countdown from momentarily flashing a
+  // superseded click's outcome. Deliberately NOT tied to route/pathname at all - router.refresh()
+  // takes no URL argument, so there is no "stale pathname" to capture or navigate to in the first
+  // place (the historical bug this is fixing - see git history for the rejected URL-marker design).
+  const latestClickToken = useRef(0);
 
   // Ticks only while a cooldown is actually active, and stops itself once it reaches zero.
   useEffect(() => {
@@ -102,10 +89,16 @@ export function RefreshStatusControl() {
     if (disabled) {
       return;
     }
+    const myToken = ++latestClickToken.current;
     setErrorMessage(null);
     startTransition(async () => {
       try {
         const result = await refreshPositionEvidenceAction();
+        if (latestClickToken.current !== myToken) {
+          // A newer click has since started - this stale completion must never publish its own
+          // state over whatever the newer click already showed (or will show).
+          return;
+        }
         setAvailableAt(new Date(result.availableAgainAt).getTime());
 
         if (result.disposition === "COOLDOWN") {
@@ -121,23 +114,22 @@ export function RefreshStatusControl() {
         } else {
           setErrorMessage(refreshFailureMessage(result.reason));
         }
+        // Codex blocker repair (C, final) - a plain, unconditional router.refresh() is now SAFE
+        // on failure too, never just success: the failed attempt's own retained evidence was
+        // already recorded server-side (see workflows.ts's refreshPositionEvidenceForUserGuarded
+        // / failed-refresh-receipt.ts), keyed only by the authenticated owner - the very next
+        // render for that owner (wherever they are) consumes it directly, with zero further
+        // provider calls. No URL parameter, cookie, or other client-supplied signal is involved
+        // at all, so there is nothing here for a manually-edited URL to tamper with, and no
+        // "stale pathname" risk from a route change while this was in flight - router.refresh()
+        // always refreshes whatever page is CURRENTLY being viewed, never a captured one.
         if (result.shouldRefreshClient) {
-          if (result.ok) {
-            router.refresh();
-          } else {
-            // Codex blocker repair (C) - a genuine failure still deserves a chance to resolve a
-            // durable LAST_VALID fallback, but a plain router.refresh() here would re-run the
-            // page's own live evaluator against the cache this SAME failed attempt just cleared -
-            // a guaranteed second real provider call for one click. Instead, navigate with the
-            // tab-scoped skip-live-evidence marker so the next render resolves from durable
-            // historical data only (zero further provider calls) - see
-            // resolvePositionReviewsForUser's own `skipLiveEvidence` option.
-            const next = new URLSearchParams(searchParams.toString());
-            next.set(SKIP_LIVE_EVIDENCE_PARAM, "1");
-            router.replace(`${pathname}?${next.toString()}`, { scroll: false });
-          }
+          router.refresh();
         }
       } catch {
+        if (latestClickToken.current !== myToken) {
+          return;
+        }
         // The server action rejected outright (network failure, unexpected exception before it
         // could return its own authoritative cooldown) - never leave the button stuck disabled
         // forever showing "Refreshing…", and never claim a false success.

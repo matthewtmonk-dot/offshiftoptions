@@ -32,6 +32,28 @@ export async function getQuoteSnapshotsForUser(userId: string, tickers: string[]
 }
 
 /**
+ * Codex blocker repair (C, final) - derives the EXACT same `QuoteSnapshot` shape
+ * `getQuoteSnapshotsForUser` returns, but from already-retained quote-review evidence (see
+ * failed-refresh-receipt.ts) instead of a fresh provider call. Used ONLY right after a failed
+ * manual refresh, so Tracker's "Stock snapshot" info cell doesn't independently re-hit the
+ * market-data provider that same failed attempt's own cache-clear just emptied - the identical
+ * "no second provider call for one click" guarantee `resolvePositionReviewsForUser`'s own
+ * `retainedEvidence` option already provides for the colored review advisory. A ticker missing
+ * from the retained map (never requested, or genuinely unavailable) honestly maps to `null` -
+ * never a fabricated price, matching this function's own existing fallback convention.
+ */
+export function quoteSnapshotsFromRetainedEvidence(tickers: string[], quoteEvidenceByTicker: ReadonlyMap<string, QuoteReviewEvidence>): Map<string, QuoteSnapshot | null> {
+  const uniqueTickers = [...new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))];
+  return new Map(
+    uniqueTickers.map((ticker) => {
+      const evidence = quoteEvidenceByTicker.get(ticker);
+      const snapshot = evidence && evidence.status === "AVAILABLE" ? { price: evidence.price, asOf: evidence.tradeTime } : null;
+      return [ticker, snapshot] as const;
+    }),
+  );
+}
+
+/**
  * Batches live quote lookups for a set of tickers under one user's Schwab connection. Never
  * throws and never fabricates a price - a ticker with no connection, no token, or a failed
  * lookup maps to `null` so callers can render an honest "unavailable" state.

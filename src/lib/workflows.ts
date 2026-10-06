@@ -49,6 +49,7 @@ import { persistNormalizedBrokerRecordsForUser } from "./broker-import";
 import { getEquityMarketSessionEvidenceForUser, getQuoteReviewEvidenceForUser } from "./live-quotes";
 import { resolveRelevantCampaignLegs, tickersNeedingReviewQuotes, type PositionReviewCampaignInput } from "./position-review-scope";
 import { clearRefreshGuardsForTests, runGuarded, type RefreshDisposition } from "./refresh-guard";
+import { clearFailedRefreshReceiptsForTests, recordRefreshOutcome, type RetainedPositionEvidence } from "./failed-refresh-receipt";
 import { getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
 import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
@@ -66,6 +67,7 @@ import type {
   BrokerTransactionCategory,
   BrokerTransactionCategoryOutcome,
 } from "@/providers/broker-read/types";
+import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/providers/market-data/types";
 
 const NOTE_CATEGORIES = new Set<NoteCategory>(["PRO", "CON", "GENERAL"]);
 const RESEARCH_STATUSES = new Set<ResearchStatus>(["LIKE", "WATCH", "NEUTRAL", "AVOID", "NEVER_TRADE"]);
@@ -568,7 +570,19 @@ export async function getSchwabOpenPositionsForUser(userId: string, options: { b
 
 export type RefreshPositionEvidenceResult =
   | { ok: true; refreshedAt: string }
-  | { ok: false; reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED" | "MARKET_DATA_REFRESH_FAILED" | "TIMEOUT" };
+  | {
+      ok: false;
+      reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED" | "MARKET_DATA_REFRESH_FAILED" | "TIMEOUT";
+      /**
+       * Codex blocker repair (C, final) - whatever REAL evidence this specific failed attempt
+       * actually obtained before the overall call was judged a failure (e.g. broker positions
+       * succeeded but one ticker's quote did not) - `undefined` only when genuinely nothing was
+       * retrieved (NO_CONNECTION short-circuits before any fetch; a from-scratch TIMEOUT/thrown
+       * exception may also have nothing to report). Never a blanket "everything unavailable" -
+       * see failed-refresh-receipt.ts's own doc comment for why that would be unsafe.
+       */
+      retainedEvidence?: RetainedPositionEvidence;
+    };
 
 /** Post-Phase-2 UX follow-up correctness repair - the minimal campaign shape
  * resolveRelevantCampaignLegs/tickersNeedingReviewQuotes (position-review-scope.ts) need to
@@ -643,6 +657,17 @@ async function loadOpenAndAssignedCampaignsForUser(userId: string): Promise<Posi
  * caught by this function's own outer try/catch and resolves normally (never an unhandled
  * rejection) - by the time that happens the guard's own deadline has already fired, so this
  * resolution is discarded regardless of its shape (see refresh-guard.ts's `settled` flag).
+ *
+ * Codex blocker repair (C, final) - positions, quote evidence, and session evidence are now
+ * fetched INDEPENDENTLY of one another (never short-circuited the moment one piece fails), so
+ * that whichever pieces DID genuinely succeed are still available to retain on an overall
+ * failure. This is a deliberate change from the prior sequential design (which skipped quote/
+ * session entirely once positions failed) - it costs a few extra Schwab calls on an already-
+ * failing attempt, but not a NEW retry: still exactly one attempt per user click. See
+ * failed-refresh-receipt.ts for why maximizing what's genuinely retained (never a blanket
+ * "everything unavailable") matters: a real quantity mismatch, wrong contract, coverage
+ * contradiction, or already-ended expiration session must stay detectable even when some OTHER
+ * piece of evidence happened to fail in the same attempt.
  */
 export async function refreshPositionEvidenceForUser(userId: string, signal: AbortSignal): Promise<RefreshPositionEvidenceResult> {
   try {
@@ -655,46 +680,48 @@ export async function refreshPositionEvidenceForUser(userId: string, signal: Abo
     clearSchwabBrokerReadCacheForUser(userId);
     clearSchwabMarketDataCacheForUser(userId);
 
-    // Fix #2 - never bypassCache here: the cache was just cleared above, so this normal call
-    // already misses it and fetches fresh, while ALSO populating the same cache Dashboard/Tracker
-    // will read from moments later (see this function's own doc comment).
-    const positions = await getSchwabOpenPositionsForUser(userId, { signal });
-    signal.throwIfAborted();
-    if (positions === null) {
-      return { ok: false, reason: "BROKER_REFRESH_FAILED" };
-    }
-
     // Fix #1 - determine exactly which tickers Phase 2's own evaluator would need review evidence
-    // for, using the SAME shared scoping logic it uses (never re-derived), and require their quote
-    // + session evidence to genuinely succeed before ever reporting overall success.
+    // for, using the SAME shared scoping logic it uses (never re-derived), BEFORE fetching -
+    // campaigns/legs are pure DB/domain lookups, independent of whether the broker fetch below
+    // succeeds.
     const now = new Date();
     const campaigns = await loadOpenAndAssignedCampaignsForUser(userId);
     signal.throwIfAborted();
     const { relevant, legByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
     const tickers = tickersNeedingReviewQuotes(relevant, legByCampaignId);
 
-    if (tickers.length > 0) {
-      const [quoteEvidenceByTicker, sessionEvidence] = await Promise.all([
-        getQuoteReviewEvidenceForUser(userId, tickers, signal),
-        getEquityMarketSessionEvidenceForUser(userId, nyCalendarDateOf(now), signal),
-      ]);
-      signal.throwIfAborted();
+    // Fix #2 - never bypassCache here: the cache was just cleared above, so this normal call
+    // already misses it and fetches fresh, while ALSO populating the same cache Dashboard/Tracker
+    // will read from moments later (see this function's own doc comment).
+    const [positions, quoteEvidenceByTicker, sessionEvidence] = await Promise.all([
+      getSchwabOpenPositionsForUser(userId, { signal }),
+      tickers.length > 0 ? getQuoteReviewEvidenceForUser(userId, tickers, signal) : Promise.resolve(new Map<string, QuoteReviewEvidence>()),
+      tickers.length > 0
+        ? getEquityMarketSessionEvidenceForUser(userId, nyCalendarDateOf(now), signal)
+        : Promise.resolve<EquityMarketSessionEvidence>({ status: "UNAVAILABLE", reason: "No open option leg needs session evidence." }),
+    ]);
+    signal.throwIfAborted();
 
-      const quotesOk = tickers.every((ticker) => quoteEvidenceByTicker.get(ticker)?.status === "AVAILABLE");
-      const sessionOk = sessionEvidence.status === "AVAILABLE";
-      if (!quotesOk || !sessionOk) {
-        return { ok: false, reason: "MARKET_DATA_REFRESH_FAILED" };
-      }
+    const positionsOk = positions !== null;
+    const quotesOk = tickers.length === 0 || tickers.every((ticker) => quoteEvidenceByTicker.get(ticker)?.status === "AVAILABLE");
+    const sessionOk = tickers.length === 0 || sessionEvidence.status === "AVAILABLE";
+
+    if (positionsOk && quotesOk && sessionOk) {
+      return { ok: true, refreshedAt: new Date().toISOString() };
     }
 
-    signal.throwIfAborted();
-    return { ok: true, refreshedAt: new Date().toISOString() };
+    return {
+      ok: false,
+      reason: positionsOk ? "MARKET_DATA_REFRESH_FAILED" : "BROKER_REFRESH_FAILED",
+      retainedEvidence: { brokerPositions: positions, quoteEvidenceByTicker, sessionEvidence },
+    };
   } catch {
     // Defensive only - every call above already fails closed internally (getSchwabOpenPositionsForUser
     // never throws; getQuoteReviewEvidenceForUser/getEquityMarketSessionEvidenceForUser never throw).
     // An unexpected exception (e.g. a DB error resolving campaigns/accounts, or one of this
     // function's own explicit `signal.throwIfAborted()` calls) must still resolve to a typed
-    // failure, never an unhandled rejection reaching the server action/client.
+    // failure, never an unhandled rejection reaching the server action/client. Nothing is known to
+    // have genuinely succeeded here, so no retainedEvidence is reported.
     return { ok: false, reason: "BROKER_REFRESH_FAILED" };
   }
 }
@@ -720,19 +747,18 @@ export type GuardedRefreshPositionEvidenceResult = RefreshPositionEvidenceResult
   disposition: RefreshDisposition;
   /**
    * Post-Phase-2 UX follow-up (final correctness fixes) - an explicit, server-decided flag for
-   * "the client should navigate to pick up this attempt's outcome," so this decision is never
-   * independently re-derived in the component. True for any genuinely NEW attempt (EXECUTED or
-   * COALESCED) - never for a COOLDOWN result, which performed no new work and left whatever the
-   * page already shows unchanged.
+   * "the client should call router.refresh() to pick up this attempt's outcome," so this decision
+   * is never independently re-derived in the component. True for any genuinely NEW attempt
+   * (EXECUTED or COALESCED) - never for a COOLDOWN result, which performed no new work and left
+   * whatever the page already shows unchanged.
    *
    * Codex blocker repair (C) - this is now true on FAILURE too, not only `result.ok`. A failed
-   * attempt still deserves a chance to resolve a durable LAST_VALID fallback (see
-   * RefreshStatusControl's own doc comment for how it safely does this WITHOUT a second live
-   * provider call) - leaving the page frozen on failure was the exact bug reported. The client
-   * still reads `result.ok` itself to decide WHICH navigation to perform (a plain
-   * `router.refresh()` on success vs. a tab-scoped skip-live-evidence navigation on failure) -
-   * that part is client-side navigation mechanics, not a business decision, so it isn't
-   * duplicated into a second server-computed flag here.
+   * attempt still deserves a chance to resolve a durable LAST_VALID fallback. This is now SAFE to
+   * do with a plain, unconditional `router.refresh()` in every case (never a URL-parameterized
+   * navigation) - see failed-refresh-receipt.ts: the failed attempt's own retained evidence is
+   * recorded server-side, keyed only by the authenticated owner, and the next render for that
+   * owner (whichever page it happens to be) consumes it directly - no client-supplied flag of any
+   * kind is ever trusted to grant skip-live behavior.
    */
   shouldRefreshClient: boolean;
 };
@@ -760,11 +786,21 @@ export type GuardedRefreshPositionEvidenceResult = RefreshPositionEvidenceResult
  *    running operation is prevented from later corrupting a newer attempt's result.
  */
 export async function refreshPositionEvidenceForUserGuarded(userId: string): Promise<GuardedRefreshPositionEvidenceResult> {
-  const { result, availableAgainAt, disposition } = await runGuarded(`refresh-position-evidence:${userId}`, (signal) => refreshPositionEvidenceForUser(userId, signal), {
+  const { result, availableAgainAt, disposition, generation } = await runGuarded(`refresh-position-evidence:${userId}`, (signal) => refreshPositionEvidenceForUser(userId, signal), {
     cooldownMs: REFRESH_POSITION_EVIDENCE_COOLDOWN_MS,
     timeoutMs: REFRESH_POSITION_EVIDENCE_TIMEOUT_MS,
     onTimeout: (): RefreshPositionEvidenceResult => ({ ok: false, reason: "TIMEOUT" }),
   });
+
+  // Codex blocker repair (C, final) - COOLDOWN performed no new work at all (it just reused a
+  // prior attempt's own already-recorded outcome), so it has nothing new to record here. Every
+  // genuinely new attempt (EXECUTED or COALESCED) records its own outcome, keyed by this exact
+  // generation - a stale/superseded one is ignored by recordRefreshOutcome itself (see its own
+  // doc comment), never relied on here.
+  if (disposition !== "COOLDOWN") {
+    recordRefreshOutcome(userId, generation, result.ok ? { ok: true } : { ok: false, evidence: result.retainedEvidence ?? EMPTY_RETAINED_EVIDENCE });
+  }
+
   return {
     ...result,
     availableAgainAt: new Date(availableAgainAt).toISOString(),
@@ -773,8 +809,23 @@ export async function refreshPositionEvidenceForUserGuarded(userId: string): Pro
   };
 }
 
+/** Codex blocker repair (C, final) - the honest "nothing was retrieved at all" shape (NO_CONNECTION,
+ * a from-scratch TIMEOUT, or an unexpected thrown exception) - still worth recording as a receipt
+ * so the very next render doesn't immediately retry a doomed-to-fail provider call, but carries no
+ * fabricated evidence of any kind. */
+const EMPTY_RETAINED_EVIDENCE: RetainedPositionEvidence = {
+  brokerPositions: null,
+  quoteEvidenceByTicker: new Map(),
+  sessionEvidence: { status: "UNAVAILABLE", reason: "No evidence was retrieved before this refresh attempt failed." },
+};
+
 export function clearRefreshPositionEvidenceGuardsForTests() {
   clearRefreshGuardsForTests();
+  // Codex blocker repair (C, final) - the receipt store is a separate, independent module-level
+  // singleton (never reset by clearRefreshGuardsForTests alone) - clearing both together here
+  // keeps every existing test's isolation convention correct without needing to update every
+  // call site.
+  clearFailedRefreshReceiptsForTests();
 }
 
 export async function addAccountLedgerEntryForUser(

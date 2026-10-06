@@ -334,3 +334,60 @@ describe("resolvePositionAssessmentDisplaysForUser - owner isolation (Buddy/Both
     expect(saveAssessment).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Codex blocker repair (C, final) - resolvePositionAssessmentDisplaysForUser with options.retainedEvidence", () => {
+  function expectNoLiveProviderCalls() {
+    expect(getPositions).not.toHaveBeenCalled();
+    expect(getQuoteEvidence).not.toHaveBeenCalled();
+    expect(getSessionEvidence).not.toHaveBeenCalled();
+  }
+
+  // Part 7 tests B/C (real contradiction denial from retained broker/session evidence) are
+  // proven at the layer that actually DECIDES eligibility: position-review.test.ts (the real,
+  // unmocked evaluator correctly derives POSITION_NOT_ASSESSED / EXPIRATION_SESSION_ENDED from
+  // retained evidence) and positionReviewAssessment.test.ts (the real, unmocked
+  // evaluateHistoricalAssessmentEligibility/evaluateVerifiedCurrentAssessmentEligibility deny
+  // those exact reasons). This file mocks positionReviewAssessmentStore.ts's store functions
+  // entirely, so a test here asserting a specific allow/deny outcome would only be checking what
+  // the MOCK was told to return, never the real eligibility logic - proving nothing. What IS
+  // meaningfully testable at this plumbing layer is covered by tests E/F below: that
+  // `retainedEvidence` correctly reaches the CANNOT_ASSESS branch and composes whatever the store
+  // (real or mocked) actually decides, with zero live provider calls either way.
+
+  // Part 7 test E: a genuine transient outage (nothing retained) with NO established contradiction
+  // and a matching saved assessment may compose LAST_VALID.
+  it("test E - genuinely nothing retained (true outage), no contradiction, a matching saved assessment composes LAST_VALID", async () => {
+    const stored = storedFixture();
+    getLastValid.mockResolvedValue(stored);
+    const retainedEvidence = { brokerPositions: null, quoteEvidenceByTicker: new Map<string, QuoteReviewEvidence>(), sessionEvidence: { status: "UNAVAILABLE" as const, reason: "retained: genuine outage" } };
+
+    const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { retainedEvidence });
+
+    expectNoLiveProviderCalls();
+    expect(results[0]!.display).toEqual({ state: "LAST_VALID", currentUnavailable: expect.objectContaining({ action: "CANNOT_ASSESS" }), lastValid: stored });
+  });
+
+  // Part 7 test F: a genuine transient outage with NO stored record composes UNAVAILABLE.
+  it("test F - genuinely nothing retained (true outage), no stored record, composes UNAVAILABLE", async () => {
+    getLastValid.mockResolvedValue(null);
+    const retainedEvidence = { brokerPositions: null, quoteEvidenceByTicker: new Map<string, QuoteReviewEvidence>(), sessionEvidence: { status: "UNAVAILABLE" as const, reason: "retained: genuine outage" } };
+
+    const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { retainedEvidence });
+
+    expectNoLiveProviderCalls();
+    expect(results[0]!.display.state).toBe("UNAVAILABLE");
+  });
+
+  it("a Buddy-scoped campaign still never touches the store even when resolving from retained evidence", async () => {
+    const retainedEvidence = { brokerPositions: null, quoteEvidenceByTicker: new Map<string, QuoteReviewEvidence>(), sessionEvidence: { status: "UNAVAILABLE" as const, reason: "retained" } };
+    const ericsCampaign = putCampaign({ id: "campaign-eric", ownerId: "eric" });
+    const ericsAccount: PositionReviewAccountInput = { id: "account-1", userId: "eric", externalAccountId: "broker-a", source: "SCHWAB" };
+
+    const results = await resolvePositionAssessmentDisplaysForUser("matt", [ericsCampaign], [ericsAccount], 3, NOON, undefined, { retainedEvidence });
+
+    expectNoLiveProviderCalls();
+    expect(saveAssessment).not.toHaveBeenCalled();
+    expect(getLastValid).not.toHaveBeenCalled();
+    expect(results[0]!.display.state).toBe("UNAVAILABLE");
+  });
+});

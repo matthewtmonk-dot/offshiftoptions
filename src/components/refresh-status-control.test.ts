@@ -139,49 +139,77 @@ describe("Final correctness fixes - disposition-driven revalidation/refresh (nev
   });
 });
 
-describe("Codex blocker repair (C) - a failed refresh resolves a durable fallback without a second provider call", () => {
+describe("Codex blocker repair (C, final) - a failed refresh resolves a durable fallback, authenticated server-side, never a client-trusted flag", () => {
   it("workflows.ts now sets shouldRefreshClient for a genuine failure too, not only result.ok", () => {
     const workflows = source("../lib/workflows.ts");
     expect(workflows).toContain('shouldRefreshClient: disposition !== "COOLDOWN"');
     expect(workflows).not.toContain('shouldRefreshClient: result.ok && disposition !== "COOLDOWN"');
   });
 
-  it("RefreshStatusControl never calls a plain router.refresh() on a failure branch - it navigates with the tab-scoped skip-live-evidence marker instead", () => {
+  it("RefreshStatusControl calls the SAME plain, unconditional router.refresh() on both success and failure - no second navigation mechanism, no URL parameter of any kind", () => {
     const control = source("./refresh-status-control.tsx");
-    const refreshIndex = control.indexOf("router.refresh();");
-    const replaceIndex = control.indexOf("router.replace(");
-    expect(refreshIndex).toBeGreaterThan(-1);
-    expect(replaceIndex).toBeGreaterThan(-1);
-    // router.refresh() sits inside its own `if (result.ok)` branch, router.replace() inside the
-    // sibling `else` branch that follows it - never the same branch, never unconditional.
-    const betweenRefreshAndReplace = control.slice(refreshIndex, replaceIndex);
-    expect(betweenRefreshAndReplace).toContain("} else {");
-    expect(control).toContain("SKIP_LIVE_EVIDENCE_PARAM");
+    const code = control.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    // Exactly one router.refresh() CALL SITE (comments may still mention it in prose), reached by
+    // `if (result.shouldRefreshClient)` alone - never branching further on `result.ok` to decide
+    // HOW to refresh.
+    const matches = code.match(/router\.refresh\(\)/g) ?? [];
+    expect(matches.length).toBe(1);
+    expect(code).not.toContain("router.replace(");
+    expect(control).not.toContain("oso_skip_live");
+    expect(control).not.toContain("useSearchParams");
+    expect(control).not.toContain("usePathname");
+    expect(code).not.toMatch(/cookies\(\)\.set/);
   });
 
-  it("the skip-live-evidence marker is a tab-scoped URL param, never a cookie - this app never calls cookies().set() for it", () => {
+  it("a stale click's own late completion is guarded against via a ref, not state - so it can never publish a newer click's result", () => {
     const control = source("./refresh-status-control.tsx");
-    expect(control).not.toMatch(/cookies\(\)\.set/);
-    expect(control).toContain("useSearchParams");
-    expect(control).toContain("URLSearchParams");
+    expect(control).toContain("useRef");
+    expect(control).toContain("latestClickToken");
   });
 
-  it("the marker is scrubbed from the visible URL via a plain history API call, never a second router navigation", () => {
-    const control = source("./refresh-status-control.tsx");
-    expect(control).toContain("window.history.replaceState");
+  it("the skip-live-evidence decision lives entirely server-side (failed-refresh-receipt.ts), owner-scoped by the authenticated session alone - never a client-supplied token/flag", () => {
+    const receipt = source("../lib/failed-refresh-receipt.ts");
+    const code = receipt.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(receipt).toContain("export function consumeFailedRefreshReceipt");
+    expect(receipt).toContain("export function recordRefreshOutcome");
+    // Never a client-visible identifier/capability of any kind in the actual CODE (comments
+    // legitimately discuss, in prose, why this is deliberately not a token/cookie) - looked up
+    // by userId alone.
+    expect(code).not.toMatch(/token|cookie|searchParam/i);
   });
 
-  it("position-review.ts's skip-live-evidence option reuses the exact same BROKER_UNAVAILABLE code path a genuine outage already takes - no new eligibility rule", () => {
+  it("Dashboard and Tracker both consume the receipt server-side - no client flag/query param reaches either page", () => {
+    const dashboard = source("../app/(app)/dashboard/page.tsx");
+    const tracker = source("../app/(app)/positions/page.tsx");
+    expect(dashboard).toContain("consumeFailedRefreshReceipt");
+    expect(tracker).toContain("consumeFailedRefreshReceipt");
+    expect(dashboard).not.toContain("oso_skip_live");
+    expect(tracker).not.toContain("oso_skip_live");
+  });
+
+  it("Tracker's independent 'Stock snapshot' quote call also uses retained evidence when present - never an unguarded second provider call (Codex defect 2)", () => {
+    const tracker = source("../app/(app)/positions/page.tsx");
+    expect(tracker).toContain("quoteSnapshotsFromRetainedEvidence");
+  });
+
+  it("resolvePositionReviewsForUser's retained-evidence option reuses the exact same BROKER_UNAVAILABLE code path a genuine outage already takes - no new eligibility rule", () => {
     const positionReview = source("../lib/position-review.ts");
-    const optionIndex = positionReview.indexOf("skipLiveEvidence");
-    expect(optionIndex).toBeGreaterThan(-1);
-    expect(positionReview).toContain('brokerPositions = null;');
-    expect(positionReview).toContain('status: "UNAVAILABLE"');
+    expect(positionReview).toContain("retainedEvidence");
+    expect(positionReview).toContain("resolveRelevantCampaignLegs");
   });
 
   it("the orchestration layer's CURRENT read-back and true historical-fallback questions stay on two separate functions - never reunified by this fix", () => {
     const orchestration = source("../lib/positionAssessmentOrchestration.ts");
     expect(orchestration).toContain("getVerifiedPositionAssessmentForCurrentLeg");
     expect(orchestration).toContain("getLastValidPositionAssessment");
+  });
+
+  it("refresh-guard.ts exposes the generation number so a receipt store can enforce strict ordering, without weakening its own coalescing/cooldown/timeout contract", () => {
+    const guard = source("../lib/refresh-guard.ts");
+    expect(guard).toContain("generation: number");
+    // The existing contract (disposition, cooldown, timeout) is still fully intact.
+    expect(guard).toContain("RefreshDisposition");
+    expect(guard).toContain("cooldownMs");
+    expect(guard).toContain("timeoutMs");
   });
 });
