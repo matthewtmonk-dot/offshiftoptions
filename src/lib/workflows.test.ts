@@ -388,12 +388,10 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
     m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: async () => { throw new Error("Schwab unavailable"); } }));
-    m.campaignFindMany.mockResolvedValue([]);
 
     const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
-    expect(result.ok).toBe(false);
-    expect((result as { reason: string }).reason).toBe("BROKER_REFRESH_FAILED");
+    expect(result).toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
   });
 
   it("succeeds (no active positions needing review) and returns only a timestamp - never a campaign/position/transaction count of any kind", async () => {
@@ -482,8 +480,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
 
       const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
-      expect(result.ok).toBe(false);
-      expect((result as { reason: string }).reason).toBe("MARKET_DATA_REFRESH_FAILED");
+      expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
     });
 
     it("a session failure prevents a false success where session evidence is required", async () => {
@@ -496,8 +493,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
 
       const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
-      expect(result.ok).toBe(false);
-      expect((result as { reason: string }).reason).toBe("MARKET_DATA_REFRESH_FAILED");
+      expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
     });
   });
 
@@ -578,7 +574,6 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       const m = await mocks();
       m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
       m.getSchwabBrokerReadProviderForUser.mockRejectedValue(new Error("resolver exploded"));
-      m.campaignFindMany.mockResolvedValue([]);
 
       await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
@@ -587,11 +582,8 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       const m = await mocks();
       m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
       m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts: async () => { throw new Error("boom"); } }));
-      m.campaignFindMany.mockResolvedValue([]);
 
-      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
-      expect(result.ok).toBe(false);
-      expect((result as { reason: string }).reason).toBe("BROKER_REFRESH_FAILED");
+      await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
 
     it("a positions-fetch throw resolves to BROKER_REFRESH_FAILED", async () => {
@@ -600,11 +592,8 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       m.getSchwabBrokerReadProviderForUser.mockResolvedValue(
         fakeReadProvider({ getAccounts: async () => [{ id: "acct-1", label: "Individual", accountValue: 1, cash: 1, liquidationValue: 1 }], getPositions: async () => { throw new Error("boom"); } }),
       );
-      m.campaignFindMany.mockResolvedValue([]);
 
-      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
-      expect(result.ok).toBe(false);
-      expect((result as { reason: string }).reason).toBe("BROKER_REFRESH_FAILED");
+      await expect(refreshPositionEvidenceForUser("matt", new AbortController().signal)).resolves.toEqual({ ok: false, reason: "BROKER_REFRESH_FAILED" });
     });
 
     it("a quote-fetch throw resolves to a typed failure, never an unhandled rejection", async () => {
@@ -781,7 +770,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     expect(m.campaignFindMany).not.toHaveBeenCalled(); // zero quote/session-scoping work during cooldown
   });
 
-  it("the component's/action's error handling has something to hold onto: even a failed refresh returns a cooldown timestamp", async () => {
+  it("the component's/action's error handling has something to hold onto: even a failed refresh returns a cooldown timestamp and a false shouldRefreshClient", async () => {
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
 
@@ -789,67 +778,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
 
     expect(result.ok).toBe(false);
     expect(result.disposition).toBe("EXECUTED");
+    expect(result.shouldRefreshClient).toBe(false);
     expect(result.availableAgainAt).toEqual(expect.any(String));
-  });
-
-  // Codex blocker repair (C) - a genuinely failed (non-COOLDOWN) attempt must still set
-  // shouldRefreshClient, so the client gets a chance to resolve a durable LAST_VALID fallback
-  // (via the tab-scoped skip-live-evidence navigation - see RefreshStatusControl) instead of
-  // freezing on stale data. Only COOLDOWN (a reused, non-attempt result) stays false.
-  it("shouldRefreshClient is true for a genuine failure too (EXECUTED), so the client can still resolve a durable fallback", async () => {
-    const m = await mocks();
-    m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
-
-    const result = await refreshPositionEvidenceForUserGuarded("matt");
-
-    expect(result.ok).toBe(false);
-    expect(result.disposition).toBe("EXECUTED");
-    expect(result.shouldRefreshClient).toBe(true);
-  });
-
-  // Codex blocker repair (C, final) - the ticket's own mandatory proof, exercised end-to-end
-  // through the REAL receipt mechanism (never a hand-built option): one failed refresh click
-  // records a receipt via recordRefreshOutcome; consuming it and feeding the retained evidence
-  // into resolvePositionReviewsForUser must make exactly ONE real provider call TOTAL across
-  // both steps - never a second attempt for the same click.
-  it("one failed refresh records a receipt; consuming it and resolving from it makes exactly one provider call total", async () => {
-    const m = await mocks();
-    const getAccounts = vi.fn().mockRejectedValue(new Error("Schwab is down"));
-    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
-    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts }));
-    m.campaignFindMany.mockResolvedValue([]);
-
-    const refreshResult = await refreshPositionEvidenceForUserGuarded("matt");
-    expect(refreshResult.ok).toBe(false);
-    expect(getAccounts).toHaveBeenCalledTimes(1);
-
-    const { consumeFailedRefreshReceipt } = await import("./failed-refresh-receipt");
-    const retainedEvidence = consumeFailedRefreshReceipt("matt");
-    expect(retainedEvidence).not.toBeNull();
-
-    const { resolvePositionReviewsForUser } = await import("./position-review");
-    const campaign = {
-      id: "campaign-1",
-      ownerId: "matt",
-      accountId: "account-1",
-      ticker: "UPST",
-      status: "OPEN" as const,
-      events: [
-        { type: "SELL_PUT" as const, occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT" as const, contracts: 1, strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1 },
-      ],
-    };
-    const account = { id: "account-1", userId: "matt", externalAccountId: "broker-a", source: "SCHWAB" as const };
-
-    const results = await resolvePositionReviewsForUser("matt", [campaign] as never, [account], 3, new Date("2026-06-15T16:00:00.000Z"), undefined, { retainedEvidence: retainedEvidence! });
-
-    // Still exactly one provider call total - consuming the receipt made zero more.
-    expect(getAccounts).toHaveBeenCalledTimes(1);
-    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
-    expect(results[0]?.result.evidence.position).toBe("BROKER_UNAVAILABLE");
-  });
-
-  it("consumeFailedRefreshReceipt returns null when there was no prior failure, so a normal caller falls through to its own live fetch", async () => {
-    const { consumeFailedRefreshReceipt } = await import("./failed-refresh-receipt");
-    expect(consumeFailedRefreshReceipt("someone-who-never-clicked-refresh")).toBeNull();
   });
 });

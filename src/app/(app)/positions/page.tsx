@@ -58,8 +58,7 @@ import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { getTrackerPageData, normalizeTrackerScope, optionContractKey, type TrackerScope } from "@/lib/app-data";
 import { money, percent, shortCalendarDate, shortDate, toNumber } from "@/lib/format";
-import { getQuoteSnapshotsForUser, quoteSnapshotsFromRetainedEvidence, type QuoteSnapshot } from "@/lib/live-quotes";
-import { consumeFailedRefreshReceipt } from "@/lib/failed-refresh-receipt";
+import { getQuoteSnapshotsForUser, type QuoteSnapshot } from "@/lib/live-quotes";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { resolveInheritedVisibility } from "@/lib/privacy";
 import { getSchwabOpenPositionsForUser } from "@/lib/workflows";
@@ -173,14 +172,6 @@ export default async function PositionsPage({
   const view = parseViewMode(firstParam(query.view));
   const error = firstParam(query.error);
   const previewBatchId = firstParam(query.previewBatch);
-  // Codex blocker repair (C, final) - a server-validated, owner-scoped, one-shot lookup (never a
-  // client-supplied flag) of whatever a recently FAILED manual refresh attempt actually
-  // retrieved - see dashboard/page.tsx's own identical comment and failed-refresh-receipt.ts.
-  // Consumed exactly ONCE here (never re-read) and reused below for every provider-backed read
-  // this page would otherwise make independently (the open-position snapshot, the colored review
-  // advisory, and the "Stock snapshot" quote cell) so a failed refresh can never cause a second
-  // real provider call no matter how many separate call sites this page has.
-  const retainedEvidence = view === "open" ? consumeFailedRefreshReceipt(user.id) ?? undefined : undefined;
   const needsOpenBrokerData = view === "open";
   const needsAccountsImportData = view === "accounts";
   const [data, schwabPositions, brokerActivityAwaitingReview, importBatches, pendingImport, schwabConnection] = await Promise.all([
@@ -188,7 +179,7 @@ export default async function PositionsPage({
       includeLegacyTrades: needsOpenBrokerData,
       includeOptionMarks: view === "performance",
     }),
-    needsOpenBrokerData ? (retainedEvidence ? Promise.resolve(retainedEvidence.brokerPositions) : getSchwabOpenPositionsForUser(user.id)) : Promise.resolve(null),
+    needsOpenBrokerData ? getSchwabOpenPositionsForUser(user.id) : Promise.resolve(null),
     needsAccountsImportData ? getBrokerActivityAwaitingReviewForUser(user.id) : Promise.resolve([]),
     needsAccountsImportData ? getBrokerImportBatchesForUser(user.id) : Promise.resolve([]),
     needsAccountsImportData && previewBatchId ? getPendingBrokerImportBatchForUser(user.id, previewBatchId) : Promise.resolve(null),
@@ -256,11 +247,7 @@ export default async function PositionsPage({
     ];
     // Still the legacy, timestamp-optional snapshot - kept only for the "Stock snapshot" info
     // cell's own general/delayed price display, never for the colored review advisory below.
-    // Codex blocker repair (C, final) - derived from the SAME retained evidence when present,
-    // never an independent provider call that would bypass the failed attempt's own cache-clear.
-    quoteSnapshots = retainedEvidence
-      ? quoteSnapshotsFromRetainedEvidence(tickersNeedingQuotes, retainedEvidence.quoteEvidenceByTicker)
-      : await getQuoteSnapshotsForUser(user.id, tickersNeedingQuotes);
+    quoteSnapshots = await getQuoteSnapshotsForUser(user.id, tickersNeedingQuotes);
     for (const row of assignedRows) {
       const price = quoteSnapshots.get(row.campaign.ticker.toUpperCase())?.price ?? null;
       assignedSummaryByCampaignId.set(
@@ -286,7 +273,7 @@ export default async function PositionsPage({
     // Codex P1 (B8) - `snapshotCheckedAt` selects which NY date to request session evidence for;
     // the real evaluation instant is captured fresh AFTER resolvePositionAssessmentDisplaysForUser's
     // own retrieval completes, never reused from before this page even started fetching.
-    const resolvedDisplays = await resolvePositionAssessmentDisplaysForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt, () => new Date(), { retainedEvidence });
+    const resolvedDisplays = await resolvePositionAssessmentDisplaysForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt, () => new Date());
     for (const entry of resolvedDisplays) {
       positionAssessmentDisplayByCampaignId.set(entry.campaignId, entry.display);
     }

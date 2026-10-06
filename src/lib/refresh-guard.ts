@@ -53,15 +53,6 @@ export type GuardedOutcome<T> = {
   /** Epoch ms - when a NEW operation for this key may next actually run. */
   availableAgainAt: number;
   disposition: RefreshDisposition;
-  /**
-   * Codex blocker repair (C, final) - this key's own strictly-increasing per-attempt counter
-   * (never reused, never shared across keys/users). Lets a caller record an attempt's outcome
-   * against a receipt store (or similar) with correct ordering: a LATER-completing but
-   * actually-OLDER generation can be detected and ignored, so a stale/abandoned attempt's
-   * eventual resolution can never overwrite a newer attempt's already-recorded state. EXECUTED
-   * and every COALESCED joiner for the same attempt all observe the SAME generation number.
-   */
-  generation: number;
 };
 
 type TerminalOutcome<T> = { kind: "SUCCESS"; value: T } | { kind: "FAILURE"; error: unknown } | { kind: "TIMEOUT" };
@@ -118,14 +109,14 @@ export async function runGuarded<T>(key: string, operation: (signal: AbortSignal
     const { generation, terminalPromise } = state.activeGeneration;
     const outcome = await terminalPromise;
     finalizeGeneration(state, generation, outcome, cooldownMs, now);
-    return outcomeForCaller(outcome, state, "COALESCED", onTimeout, generation);
+    return outcomeForCaller(outcome, state, "COALESCED", onTimeout);
   }
 
   // COOLDOWN: a prior generation for this key completed (or was abandoned to timeout) recently -
   // never starts a new underlying operation, never aborts anything, never clears caches.
   if (now() < state.availableAt) {
     const result = state.hasResult ? (state.lastResult as T) : onTimeout();
-    return { result, availableAgainAt: state.availableAt, disposition: "COOLDOWN", generation: state.generationCounter };
+    return { result, availableAgainAt: state.availableAt, disposition: "COOLDOWN" };
   }
 
   // EXECUTED: genuinely start a new generation, with its own controller/deadline/terminal promise.
@@ -137,7 +128,7 @@ export async function runGuarded<T>(key: string, operation: (signal: AbortSignal
 
   const outcome = await terminalPromise;
   finalizeGeneration(state, generation, outcome, cooldownMs, now);
-  return outcomeForCaller(outcome, state, "EXECUTED", onTimeout, generation);
+  return outcomeForCaller(outcome, state, "EXECUTED", onTimeout);
 }
 
 /** Settles EXACTLY ONCE, to whichever of {operation settles, deadline fires} happens first - the
@@ -191,12 +182,12 @@ function finalizeGeneration<T>(state: KeyState<T>, generation: number, outcome: 
   // (a neutral, honest placeholder) rather than fabricating one.
 }
 
-function outcomeForCaller<T>(outcome: TerminalOutcome<T>, state: KeyState<T>, disposition: RefreshDisposition, onTimeout: () => T, generation: number): GuardedOutcome<T> {
+function outcomeForCaller<T>(outcome: TerminalOutcome<T>, state: KeyState<T>, disposition: RefreshDisposition, onTimeout: () => T): GuardedOutcome<T> {
   if (outcome.kind === "FAILURE") {
     throw outcome.error;
   }
   const result = outcome.kind === "SUCCESS" ? outcome.value : onTimeout();
-  return { result, availableAgainAt: state.availableAt, disposition, generation };
+  return { result, availableAgainAt: state.availableAt, disposition };
 }
 
 export function clearRefreshGuardsForTests() {

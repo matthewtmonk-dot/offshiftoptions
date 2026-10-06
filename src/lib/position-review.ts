@@ -1,7 +1,7 @@
 import "server-only";
 
 import { OPTION_MULTIPLIER } from "@/domain/finance/campaigns";
-import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/providers/market-data/types";
+import type { EquityMarketSessionEvidence } from "@/providers/market-data/types";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 import { formatOccSymbol, occContractKey, parseOccOptionSymbol } from "@/domain/finance/occOption";
 import {
@@ -30,7 +30,6 @@ import {
   type RelevantCampaignLegs,
 } from "./position-review-scope";
 import { getSchwabOpenPositionsForUser } from "./workflows";
-import type { RetainedPositionEvidence } from "./failed-refresh-receipt";
 
 /**
  * Dashboard V2 Phase 2 - the ONE place Dashboard and Tracker both call to get position-review
@@ -84,22 +83,6 @@ export async function resolvePositionReviewsForUser(
    * production caller that wants genuine post-retrieval timing passes `() => new Date()`.
    */
   clock: () => Date = () => now,
-  /**
-   * Codex blocker repair (C, final) - `retainedEvidence`, when present, is used INSTEAD of
-   * fetching live broker/quote/session data (zero network/provider calls) for this one call. It
-   * is never a client-supplied flag - the ONLY source is `consumeFailedRefreshReceipt` (see
-   * failed-refresh-receipt.ts), a server-side, owner-scoped, one-shot, short-TTL lookup of exactly
-   * what a recently FAILED manual refresh attempt actually retrieved. Unlike the prior (rejected)
-   * design, this is never a blanket "everything unavailable" override - whichever pieces the
-   * failed attempt genuinely obtained (e.g. real broker positions, even if quote/session failed)
-   * are used AS-IS, so a real quantity-mismatch/coverage/assignment contradiction, or an
-   * already-ended expiration session, stays correctly detectable even though some OTHER piece of
-   * evidence happened to fail in that same attempt. Every Phase 1 contradiction protection
-   * (past-expiration, assigned-shares-no-call, opening-event/context-fingerprint mismatch) comes
-   * from resolveRelevantCampaignLegs' read of this app's own CampaignEvent ledger, never from live
-   * broker data - completely unaffected either way.
-   */
-  options: { retainedEvidence?: RetainedPositionEvidence } = {},
 ): Promise<ResolvedPositionReview[]> {
   const { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls, openingEventIdByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
   if (relevant.length === 0) {
@@ -107,22 +90,13 @@ export async function resolvePositionReviewsForUser(
   }
 
   const tickersNeedingQuotes = tickersNeedingReviewQuotes(relevant, legByCampaignId);
-  const requestedNyDate = nyCalendarDateOf(now);
 
-  let brokerPositions: (BrokerPosition & { accountLabel: string })[] | null;
-  let quoteEvidenceByTicker: Map<string, QuoteReviewEvidence>;
-  let sessionEvidenceAsRequested: EquityMarketSessionEvidence;
-  if (options.retainedEvidence) {
-    brokerPositions = options.retainedEvidence.brokerPositions;
-    quoteEvidenceByTicker = options.retainedEvidence.quoteEvidenceByTicker;
-    sessionEvidenceAsRequested = options.retainedEvidence.sessionEvidence;
-  } else {
-    [brokerPositions, quoteEvidenceByTicker, sessionEvidenceAsRequested] = await Promise.all([
-      getSchwabOpenPositionsForUser(userId).catch(() => null),
-      getQuoteReviewEvidenceForUser(userId, tickersNeedingQuotes),
-      getEquityMarketSessionEvidenceForUser(userId, requestedNyDate),
-    ]);
-  }
+  const requestedNyDate = nyCalendarDateOf(now);
+  const [brokerPositions, quoteEvidenceByTicker, sessionEvidenceAsRequested] = await Promise.all([
+    getSchwabOpenPositionsForUser(userId).catch(() => null),
+    getQuoteReviewEvidenceForUser(userId, tickersNeedingQuotes),
+    getEquityMarketSessionEvidenceForUser(userId, requestedNyDate),
+  ]);
 
   // Codex P1 (B8) - the REAL evaluation instant, read only now that every async fetch above has
   // actually resolved - never the `now` captured before this function started retrieving

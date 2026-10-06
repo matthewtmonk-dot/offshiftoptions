@@ -19,7 +19,6 @@ import {
   type ResolvedPositionReview,
 } from "./position-review";
 import { getLastValidPositionAssessment, getVerifiedPositionAssessmentForCurrentLeg, savePositionReviewAssessmentIfEligible } from "./positionReviewAssessmentStore";
-import type { RetainedPositionEvidence } from "./failed-refresh-receipt";
 
 /**
  * LST "Last Valid Position Assessment" - Phase 2A shared server-side orchestration. The ONE place
@@ -220,11 +219,8 @@ export async function resolvePositionAssessmentDisplaysForUser(
   rollBufferPercent: number,
   now: Date = new Date(),
   clock: () => Date = () => now,
-  /** Codex blocker repair (C, final) - passed straight through to resolvePositionReviewsForUser;
-   * see its own doc comment. */
-  options: { retainedEvidence?: RetainedPositionEvidence } = {},
 ): Promise<ResolvedPositionAssessmentDisplay[]> {
-  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock, options);
+  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock);
   const campaignById = new Map(campaigns.map((campaign) => [campaign.id, campaign]));
   const accountById = new Map(accounts.map((account) => [account.id, account]));
 

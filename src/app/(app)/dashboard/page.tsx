@@ -9,7 +9,6 @@ import { money, shortCalendarDate } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { resolvePositionAssessmentDisplaysForUser } from "@/lib/positionAssessmentOrchestration";
-import { consumeFailedRefreshReceipt, type RetainedPositionEvidence } from "@/lib/failed-refresh-receipt";
 import { summarizeAccountReporting } from "@/domain/finance/reporting";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { summarizeCampaignExposure, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
@@ -46,11 +45,6 @@ type DashboardOpenCampaign = Awaited<ReturnType<typeof getDashboardData>>["openC
 export default async function DashboardPage() {
   const user = await requireCurrentUser();
   const asOf = new Date();
-  // Codex blocker repair (C, final) - a server-validated, owner-scoped, one-shot lookup (never a
-  // client-supplied flag of any kind) of whatever a recently FAILED manual refresh attempt
-  // actually retrieved. Non-null only in the rare window right after that attempt's own
-  // router.refresh() - otherwise this is a normal, free, no-op lookup every render.
-  const retainedEvidence = consumeFailedRefreshReceipt(user.id) ?? undefined;
   const data = await getDashboardData(user.id);
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
 
@@ -220,7 +214,6 @@ export default async function DashboardPage() {
                   rollBufferPercent={rollBufferPercent}
                   asOf={asOf}
                   limit={POSITIONS_TO_REVIEW_LIMIT}
-                  retainedEvidence={retainedEvidence}
                 />
               </Suspense>
             )}
@@ -396,7 +389,6 @@ async function PositionsToReviewWithStatus({
   rollBufferPercent,
   asOf,
   limit,
-  retainedEvidence,
 }: {
   userId: string;
   ownAccounts: DashboardAccount[];
@@ -405,13 +397,12 @@ async function PositionsToReviewWithStatus({
   rollBufferPercent: number;
   asOf: Date;
   limit: number;
-  retainedEvidence: RetainedPositionEvidence | undefined;
 }) {
   const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
   // Codex P1 (B8) - `asOf` selects which NY date to request session evidence for; the real
   // evaluation instant is captured fresh AFTER resolvePositionAssessmentDisplaysForUser's own
   // retrieval completes, never reused from before this page even started fetching.
-  const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date(), { retainedEvidence });
+  const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
   const displaysByCampaignId = new Map(resolved.map((entry) => [entry.campaignId, entry.display]));
   const sortedRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(rows, displaysByCampaignId));
   const visibleRows = sortedRows.slice(0, limit);

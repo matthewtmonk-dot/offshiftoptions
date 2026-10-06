@@ -51,17 +51,20 @@ export function RefreshStatusControl() {
   const [availableAt, setAvailableAt] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
-  // Codex blocker repair (C, final) - Part 5: a click's own async result must never publish
-  // state once a NEWER click has started (e.g. the first click's own promise settles late, after
-  // the user already clicked again) - a ref, not state, so the check below always reads the
-  // LATEST value rather than one captured in a stale closure. This has no bearing on data
-  // correctness (the server-side generation fencing in failed-refresh-receipt.ts already
-  // independently guarantees a stale attempt can never corrupt a newer one's recorded state) - it
-  // only prevents this component's OWN displayed text/countdown from momentarily flashing a
-  // superseded click's outcome. Deliberately NOT tied to route/pathname at all - router.refresh()
-  // takes no URL argument, so there is no "stale pathname" to capture or navigate to in the first
-  // place (the historical bug this is fixing - see git history for the rejected URL-marker design).
+  // V1 client safety - a click's own async result must never publish state once a NEWER click
+  // has started (e.g. the first click's own promise settles late, after the user already clicked
+  // again), and never after this component has unmounted. A ref, not state, so the check below
+  // always reads the LATEST value rather than one captured in a stale closure. This has no
+  // bearing on data correctness (the server's own per-user generation fencing in refresh-guard.ts
+  // already independently guarantees a stale attempt's result is never confused with a newer
+  // one's) - it only prevents this component's OWN displayed text/countdown from momentarily
+  // flashing a superseded click's outcome, or updating state after unmount.
   const latestClickToken = useRef(0);
+  useEffect(() => {
+    return () => {
+      latestClickToken.current = -1;
+    };
+  }, []);
 
   // Ticks only while a cooldown is actually active, and stops itself once it reaches zero.
   useEffect(() => {
@@ -95,8 +98,8 @@ export function RefreshStatusControl() {
       try {
         const result = await refreshPositionEvidenceAction();
         if (latestClickToken.current !== myToken) {
-          // A newer click has since started - this stale completion must never publish its own
-          // state over whatever the newer click already showed (or will show).
+          // A newer click has since started, or this component has unmounted - this stale
+          // completion must never publish its own state over whatever is current now.
           return;
         }
         setAvailableAt(new Date(result.availableAgainAt).getTime());
@@ -112,17 +115,14 @@ export function RefreshStatusControl() {
           setLastRefreshedAt(new Date(result.refreshedAt));
           setErrorMessage(null);
         } else {
+          // V1 scope decision - a failed attempt reports the failure and stops there: no
+          // automatic retry, no navigation, no attempt to resolve a historical fallback from
+          // this click. The currently displayed page/data is left exactly as it was. Opening
+          // Dashboard/Tracker fresh afterward already resolves LAST_VALID correctly server-side
+          // when a real eligible historical assessment exists (see positionAssessmentOrchestration.ts) -
+          // a failed manual refresh click just doesn't trigger that render by itself in V1.
           setErrorMessage(refreshFailureMessage(result.reason));
         }
-        // Codex blocker repair (C, final) - a plain, unconditional router.refresh() is now SAFE
-        // on failure too, never just success: the failed attempt's own retained evidence was
-        // already recorded server-side (see workflows.ts's refreshPositionEvidenceForUserGuarded
-        // / failed-refresh-receipt.ts), keyed only by the authenticated owner - the very next
-        // render for that owner (wherever they are) consumes it directly, with zero further
-        // provider calls. No URL parameter, cookie, or other client-supplied signal is involved
-        // at all, so there is nothing here for a manually-edited URL to tamper with, and no
-        // "stale pathname" risk from a route change while this was in flight - router.refresh()
-        // always refreshes whatever page is CURRENTLY being viewed, never a captured one.
         if (result.shouldRefreshClient) {
           router.refresh();
         }
