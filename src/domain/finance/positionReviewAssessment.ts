@@ -424,3 +424,15 @@ export function classifyLastValidTiming(evaluatedAt: Date, now: Date): LastValid
   }
   return evaluatedDay.getTime() === previousNyseMarketDay(today).getTime() ? "PREVIOUS_SESSION" : "OLDER";
 }
+
+/**
+ * Phase 2B - the one place that picks "the live evaluator result to read factual/priority fields
+ * from" regardless of which display state composePositionAssessmentDisplay produced.
+ * daysToExpiration/priority/explanation all live on a real PositionReviewResult in EVERY state -
+ * LAST_VALID/UNAVAILABLE's `currentUnavailable` is still a genuine live evaluation (action
+ * CANNOT_ASSESS), never a reconstruction - so callers that only need those factual fields (sorting,
+ * DTE display) never need to branch on `state` themselves.
+ */
+export function underlyingPositionReviewResult(display: PositionAssessmentDisplay): PositionReviewResult {
+  return display.state === "CURRENT" ? display.current : display.currentUnavailable;
+}

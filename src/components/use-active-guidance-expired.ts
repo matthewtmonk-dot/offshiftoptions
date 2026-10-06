@@ -11,8 +11,8 @@ import {
 } from "@/lib/server-time-calibration";
 
 /**
- * Dashboard V2 Phase 2 - Codex P1 (B3) / Codex P2 (A, rounds 1-4). Shared by LivePositionReviewBadge
- * and LivePositionReviewEvidenceLine so the dominant badge and the secondary evidence text always
+ * Dashboard V2 Phase 2 - Codex P1 (B3) / Codex P2 (A, rounds 1-4). Shared by LivePositionAssessmentBadge
+ * and LivePositionAssessmentEvidenceLine (Phase 2B rename) so the dominant badge and the secondary evidence text always
  * downgrade TOGETHER, from the exact same deadline, rather than drifting independently.
  *
  * `deadline` and `evaluatedAt` are both real, server-computed instants (see

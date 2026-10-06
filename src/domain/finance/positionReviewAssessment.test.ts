@@ -13,6 +13,7 @@ import {
   type PositionReviewAssessmentScope,
   type PositionReviewContextFingerprintInput,
   type StoredLastValidAssessment,
+  underlyingPositionReviewResult,
 } from "./positionReviewAssessment";
 
 const NY_DATE = "2026-06-15";
@@ -466,6 +467,24 @@ describe("composePositionAssessmentDisplay (Phase 2A)", () => {
     const current = evaluatePositionReview(baseInput({ leg: { kind: "NONE" } }));
     const display = composePositionAssessmentDisplay({ current, verifiedFallback: storedFixture() });
     expect(display.state).not.toBe("CURRENT");
+  });
+
+  it("underlyingPositionReviewResult returns `current` for a CURRENT display", () => {
+    const current = evaluatePositionReview(baseInput({ quote: quote(30) }));
+    const display = composePositionAssessmentDisplay({ current, verifiedFallback: null });
+    expect(underlyingPositionReviewResult(display)).toBe(current);
+  });
+
+  it("underlyingPositionReviewResult returns `currentUnavailable` for a LAST_VALID display", () => {
+    const current = evaluatePositionReview(baseInput({ leg: { kind: "NONE" } }));
+    const display = composePositionAssessmentDisplay({ current, verifiedFallback: storedFixture() });
+    expect(underlyingPositionReviewResult(display)).toBe(current);
+  });
+
+  it("underlyingPositionReviewResult returns `currentUnavailable` for an UNAVAILABLE display", () => {
+    const current = evaluatePositionReview(baseInput({ leg: { kind: "NONE" } }));
+    const display = composePositionAssessmentDisplay({ current, verifiedFallback: null });
+    expect(underlyingPositionReviewResult(display)).toBe(current);
   });
 });
 

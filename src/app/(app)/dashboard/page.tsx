@@ -2,12 +2,13 @@ import { Suspense } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
-import { LivePositionReviewBadge, LivePositionReviewEvidenceLine } from "@/components/live-position-review-badge";
+import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
+import { LastValidNotice } from "@/components/last-valid-notice";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { money, shortCalendarDate } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
-import { resolvePositionReviewsForUser } from "@/lib/position-review";
+import { resolvePositionAssessmentDisplaysForUser } from "@/lib/positionAssessmentOrchestration";
 import { summarizeAccountReporting } from "@/domain/finance/reporting";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { summarizeCampaignExposure, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
@@ -17,7 +18,7 @@ import { summarizeThisWeek, summarizeWinLoss } from "@/domain/finance/performanc
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import {
   accountValueCard,
-  attachPositionReviews,
+  attachPositionAssessmentDisplays,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
@@ -200,7 +201,7 @@ export default async function DashboardPage() {
               <Suspense
                 fallback={
                   <PositionsToReviewTable
-                    rows={allReviewRows.slice(0, POSITIONS_TO_REVIEW_LIMIT).map((row) => ({ ...row, review: null }))}
+                    rows={allReviewRows.slice(0, POSITIONS_TO_REVIEW_LIMIT).map((row) => ({ ...row, display: null }))}
                     loading
                   />
                 }
@@ -373,11 +374,12 @@ function CapitalLine({ label, value, detail, emphasize = false }: { label: strin
 }
 
 /**
- * Dashboard V2 Phase 2 - resolves the shared positionReview.ts evaluation for every relevant open
- * campaign (never just the truncated slice - see resolvePositionReviewsForUser's own contract),
- * attaches it to each factual row, sorts the FULL set by the ticket's deterministic priority order,
- * and only THEN truncates to `limit`. Tracker (positions/page.tsx) resolves the identical
- * evaluator for the same campaign, so the two pages can never disagree about a position's status.
+ * Phase 2B - resolves the shared CURRENT/LAST_VALID/UNAVAILABLE display for every relevant open
+ * campaign (never just the truncated slice - see resolvePositionAssessmentDisplaysForUser's own
+ * contract), attaches it to each factual row, sorts the FULL set by the ticket's deterministic
+ * priority order, and only THEN truncates to `limit`. Tracker (positions/page.tsx) resolves the
+ * identical orchestration for the same campaign, so the two pages can never disagree about a
+ * position's status.
  */
 async function PositionsToReviewWithStatus({
   userId,
@@ -398,17 +400,22 @@ async function PositionsToReviewWithStatus({
 }) {
   const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
   // Codex P1 (B8) - `asOf` selects which NY date to request session evidence for; the real
-  // evaluation instant is captured fresh AFTER resolvePositionReviewsForUser's own retrieval
-  // completes, never reused from before this page even started fetching.
-  const reviews = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
-  const reviewsByCampaignId = new Map(reviews.map((entry) => [entry.campaignId, entry.result]));
-  const sortedRows = sortPositionToReviewDisplayRows(attachPositionReviews(rows, reviewsByCampaignId));
+  // evaluation instant is captured fresh AFTER resolvePositionAssessmentDisplaysForUser's own
+  // retrieval completes, never reused from before this page even started fetching.
+  const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
+  const displaysByCampaignId = new Map(resolved.map((entry) => [entry.campaignId, entry.display]));
+  const sortedRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(rows, displaysByCampaignId));
   const visibleRows = sortedRows.slice(0, limit);
   const hiddenCount = sortedRows.length - visibleRows.length;
+  // A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never LAST_VALID) -
+  // see positionAssessmentOrchestration.ts's own owner-isolation check - so this notice only ever
+  // appears from the viewer's own historical data, never a buddy's.
+  const hasLastValid = visibleRows.some((row) => row.display?.state === "LAST_VALID");
 
   return (
     <div className="space-y-2">
-      <PositionsToReviewTable rows={visibleRows} />
+      {hasLastValid ? <LastValidNotice /> : null}
+      <PositionsToReviewTable rows={visibleRows} now={asOf} />
       {hiddenCount > 0 ? (
         <IntentPrefetchLink href="/positions" className="block text-center text-xs text-zinc-500 hover:text-sky-300">
           +{hiddenCount} more in Tracker
@@ -418,7 +425,7 @@ async function PositionsToReviewWithStatus({
   );
 }
 
-function PositionsToReviewTable({ rows, loading = false }: { rows: PositionToReviewDisplayRow[]; loading?: boolean }) {
+function PositionsToReviewTable({ rows, now = new Date(), loading = false }: { rows: PositionToReviewDisplayRow[]; now?: Date; loading?: boolean }) {
   return (
     <div className="space-y-1.5">
       {rows.map((row) => (
@@ -437,10 +444,10 @@ function PositionsToReviewTable({ rows, loading = false }: { rows: PositionToRev
               {row.stage}
               {row.quantity !== null ? ` · ${row.quantity} ${row.quantityUnit}` : ""}
             </div>
-            {row.review ? <LivePositionReviewEvidenceLine result={row.review} /> : null}
+            {row.display ? <LivePositionAssessmentEvidenceLine display={row.display} now={now} /> : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {row.review ? <LivePositionReviewBadge result={row.review} /> : <Badge tone="neutral">{loading ? "Checking..." : "Review needed"}</Badge>}
+            {row.display ? <LivePositionAssessmentBadge display={row.display} now={now} /> : <Badge tone="neutral">{loading ? "Checking..." : "Review needed"}</Badge>}
           </div>
         </div>
       ))}

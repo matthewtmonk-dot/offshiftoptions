@@ -3,7 +3,8 @@ import { friendlyReportingReason, type AccountReportingSummary } from "@/domain/
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignCurrentStage, type CampaignStatusInput } from "@/domain/finance/campaigns";
-import { comparePositionReviewPriority, type PositionReviewResult } from "@/domain/finance/positionReview";
+import { comparePositionReviewPriority } from "@/domain/finance/positionReview";
+import { underlyingPositionReviewResult, type PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import {
   accountValueDetail,
   accountValueUnavailableReason,
@@ -211,35 +212,39 @@ export function positionsToReviewRows(
 }
 
 /**
- * Dashboard V2 Phase 2 - merges each factual row with its shared positionReview.ts evaluation, by
- * campaign id. A row absent from `reviewsByCampaignId` (no leg the shared evaluator could resolve
- * at all, e.g. a "Review needed" legacy row) gets `review: null` - rendered distinctly, never
- * defaulted to a guessed status. Supersedes the old positionConfirmationStatus/ConfirmationBadge
- * pair entirely: PositionReviewResult.evidence.position already carries the same (and more
- * complete) confirmation states, and keeping both would risk the two disagreeing.
+ * Phase 2B - merges each factual row with its shared orchestration display (CURRENT/LAST_VALID/
+ * UNAVAILABLE), by campaign id. A row absent from `displaysByCampaignId` (no leg the shared
+ * evaluator could resolve at all, e.g. a "Review needed" legacy row) gets `display: null` -
+ * rendered distinctly, never defaulted to a guessed status. Supersedes the old
+ * positionConfirmationStatus/ConfirmationBadge pair entirely: the underlying live result's
+ * evidence.position already carries the same (and more complete) confirmation states, and keeping
+ * both would risk the two disagreeing.
  */
-export type PositionToReviewDisplayRow = PositionToReviewRow & { review: PositionReviewResult | null };
+export type PositionToReviewDisplayRow = PositionToReviewRow & { display: PositionAssessmentDisplay | null };
 
-export function attachPositionReviews(
+export function attachPositionAssessmentDisplays(
   rows: PositionToReviewRow[],
-  reviewsByCampaignId: ReadonlyMap<string, PositionReviewResult>,
+  displaysByCampaignId: ReadonlyMap<string, PositionAssessmentDisplay>,
 ): PositionToReviewDisplayRow[] {
-  return rows.map((row) => ({ ...row, review: reviewsByCampaignId.get(row.campaignId) ?? null }));
+  return rows.map((row) => ({ ...row, display: displaysByCampaignId.get(row.campaignId) ?? null }));
 }
 
 /**
  * The ticket's own deterministic priority ordering, applied to full display rows rather than bare
  * PositionReviewResults - callers MUST sort the complete owner-scoped set before truncating for
- * display (never sort an already-truncated slice). A row with no review (no leg the shared
+ * display (never sort an already-truncated slice). A row with no display (no leg the shared
  * evaluator could resolve) sorts after every row that does have one - there is nothing to
  * prioritize it against, so it is treated as the least actionable case rather than guessed into a
- * priority group.
+ * priority group. Sorts on the underlying live PositionReviewResult regardless of CURRENT/
+ * LAST_VALID/UNAVAILABLE state (underlyingPositionReviewResult) - this is a type-shape change
+ * only, not a new sort policy: a LAST_VALID/UNAVAILABLE row's `currentUnavailable` already carries
+ * the exact same priority/lifecycle fields a CANNOT_ASSESS row always had, pre-Phase-2B.
  */
-export function sortPositionToReviewDisplayRows<T extends { review: PositionReviewResult | null }>(rows: T[]): T[] {
+export function sortPositionToReviewDisplayRows<T extends { display: PositionAssessmentDisplay | null }>(rows: T[]): T[] {
   return [...rows].sort((a, b) => {
-    if (a.review && b.review) return comparePositionReviewPriority(a.review, b.review);
-    if (a.review && !b.review) return -1;
-    if (!a.review && b.review) return 1;
+    if (a.display && b.display) return comparePositionReviewPriority(underlyingPositionReviewResult(a.display), underlyingPositionReviewResult(b.display));
+    if (a.display && !b.display) return -1;
+    if (!a.display && b.display) return 1;
     return 0;
   });
 }

@@ -3,9 +3,10 @@ import type { AccountReportingSummary } from "@/domain/finance/reporting";
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
 import type { PositionReviewResult } from "@/domain/finance/positionReview";
+import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import {
   accountValueCard,
-  attachPositionReviews,
+  attachPositionAssessmentDisplays,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
@@ -421,7 +422,7 @@ describe("positionsToReviewRows", () => {
   });
 });
 
-describe("Dashboard V2 Phase 2 - attachPositionReviews / sortPositionToReviewDisplayRows", () => {
+describe("Phase 2B - attachPositionAssessmentDisplays / sortPositionToReviewDisplayRows", () => {
   function reviewFixture(overrides: Partial<PositionReviewResult> = {}): PositionReviewResult {
     return {
       action: "COMFORTABLE",
@@ -438,26 +439,30 @@ describe("Dashboard V2 Phase 2 - attachPositionReviews / sortPositionToReviewDis
     };
   }
 
+  function displayFixture(overrides: Partial<PositionReviewResult> = {}): PositionAssessmentDisplay {
+    return { state: "CURRENT", current: reviewFixture(overrides), lastValid: null };
+  }
+
   function row(campaignId: string) {
     return { campaignId, ownerId: "u1", accountId: "a1", ticker: "XYZ", status: "OPEN" as const, stage: "Cash-secured put" as const, legType: "PUT" as const, strike: 25, expiration: new Date("2026-10-02"), quantity: 1, quantityUnit: "contracts" as const };
   }
 
-  it("attaches a matching review by campaign id, and null when none exists", () => {
-    const reviews = new Map([["c1", reviewFixture()]]);
-    const [attached1, attached2] = attachPositionReviews([row("c1"), row("c2")], reviews);
-    expect(attached1.review).toEqual(reviewFixture());
-    expect(attached2.review).toBeNull();
+  it("attaches a matching display by campaign id, and null when none exists", () => {
+    const displays = new Map([["c1", displayFixture()]]);
+    const [attached1, attached2] = attachPositionAssessmentDisplays([row("c1"), row("c2")], displays);
+    expect(attached1.display).toEqual(displayFixture());
+    expect(attached2.display).toBeNull();
   });
 
   it("sorts by the shared evaluator's own priority order, never by input order", () => {
-    const reviewRoll = reviewFixture({ action: "REVIEW_ROLL", priority: { group: 4, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "AAA", accountId: "a1", campaignId: "c1" } });
-    const comfortable = reviewFixture({ priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "ZZZ", accountId: "a1", campaignId: "c2" } });
-    const attached = attachPositionReviews([row("c2"), row("c1")], new Map([["c1", reviewRoll], ["c2", comfortable]]));
+    const reviewRoll = displayFixture({ action: "REVIEW_ROLL", priority: { group: 4, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "AAA", accountId: "a1", campaignId: "c1" } });
+    const comfortable = displayFixture({ priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "ZZZ", accountId: "a1", campaignId: "c2" } });
+    const attached = attachPositionAssessmentDisplays([row("c2"), row("c1")], new Map([["c1", reviewRoll], ["c2", comfortable]]));
     expect(sortPositionToReviewDisplayRows(attached).map((r) => r.campaignId)).toEqual(["c1", "c2"]);
   });
 
-  it("sorts a row with no evaluable review after every row that has one, rather than guessing a priority", () => {
-    const attached = attachPositionReviews([row("c1"), row("c2")], new Map([["c1", reviewFixture()]]));
+  it("sorts a row with no evaluable display after every row that has one, rather than guessing a priority", () => {
+    const attached = attachPositionAssessmentDisplays([row("c1"), row("c2")], new Map([["c1", displayFixture()]]));
     expect(sortPositionToReviewDisplayRows(attached).map((r) => r.campaignId)).toEqual(["c1", "c2"]);
   });
 });

@@ -19,7 +19,8 @@ import {
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
-import { LivePositionReviewBadge, LivePositionReviewEvidenceLine } from "@/components/live-position-review-badge";
+import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
+import { LastValidNotice } from "@/components/last-valid-notice";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -31,11 +32,12 @@ import {
   summarizeCampaign,
   type CurrentOpenCall,
 } from "@/domain/finance/campaigns";
-import type { PositionReviewResult } from "@/domain/finance/positionReview";
+import { underlyingPositionReviewResult, type PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import { resolveCurrentCostToClose, type CurrentCostToCloseSource } from "@/domain/finance/currentPositionMark";
 import { distanceToStrikeDollars } from "@/domain/finance/calculations";
 import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
-import { resolvePositionReviewsForUser, type PositionReviewCampaignInput } from "@/lib/position-review";
+import type { PositionReviewCampaignInput } from "@/lib/position-review";
+import { resolvePositionAssessmentDisplaysForUser } from "@/lib/positionAssessmentOrchestration";
 import {
   summarizeCampaignProgress,
   summarizePerformanceMetrics,
@@ -226,12 +228,13 @@ export default async function PositionsPage({
   });
   const snapshotCheckedAt = new Date();
   let quoteSnapshots = new Map<string, QuoteSnapshot | null>();
-  // Dashboard V2 Phase 2 - the SAME shared position-review evaluator the Dashboard uses (see
-  // src/lib/position-review.ts), so Tracker and Dashboard can never disagree about a position's
-  // status. Supersedes the old per-page computeRollStatus/computeCoveredCallRollStatus pair
-  // entirely, including their own Friday/weekend escalation wording and expiration-guidance
-  // suppression logic - those are now the shared evaluator's own action/lifecycle contract.
-  const positionReviewByCampaignId = new Map<string, PositionReviewResult>();
+  // Phase 2B - the SAME shared CURRENT/LAST_VALID/UNAVAILABLE orchestration the Dashboard uses
+  // (see src/lib/positionAssessmentOrchestration.ts), so Tracker and Dashboard can never disagree
+  // about a position's status. Supersedes the old per-page computeRollStatus/
+  // computeCoveredCallRollStatus pair entirely, including their own Friday/weekend escalation
+  // wording and expiration-guidance suppression logic - those are now the shared orchestration's
+  // own action/lifecycle contract.
+  const positionAssessmentDisplayByCampaignId = new Map<string, PositionAssessmentDisplay>();
   // Recomputed only for ASSIGNED rows once a quote is available, so the Assigned Stock card can
   // show unrealized/total campaign P/L - summarizeCampaign never fabricates these without a real
   // current price (see PROJECT_HANDOFF.md), so an unavailable quote just leaves them UNKNOWN.
@@ -268,11 +271,11 @@ export default async function PositionsPage({
       source: account.source,
     }));
     // Codex P1 (B8) - `snapshotCheckedAt` selects which NY date to request session evidence for;
-    // the real evaluation instant is captured fresh AFTER resolvePositionReviewsForUser's own
-    // retrieval completes, never reused from before this page even started fetching.
-    const reviews = await resolvePositionReviewsForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt, () => new Date());
-    for (const entry of reviews) {
-      positionReviewByCampaignId.set(entry.campaignId, entry.result);
+    // the real evaluation instant is captured fresh AFTER resolvePositionAssessmentDisplaysForUser's
+    // own retrieval completes, never reused from before this page even started fetching.
+    const resolvedDisplays = await resolvePositionAssessmentDisplaysForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt, () => new Date());
+    for (const entry of resolvedDisplays) {
+      positionAssessmentDisplayByCampaignId.set(entry.campaignId, entry.display);
     }
   }
 
@@ -459,13 +462,18 @@ export default async function PositionsPage({
             </div>
           </div>
 
+          {/* A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never
+              LAST_VALID) - see positionAssessmentOrchestration.ts's own owner-isolation check - so
+              this notice only ever appears from the viewer's own historical data. */}
+          {openRows.some((row) => positionAssessmentDisplayByCampaignId.get(row.campaign.id)?.state === "LAST_VALID") ? <LastValidNotice /> : null}
+
           <div className="space-y-2.5">
             {openRows.map((row) => (
               <CampaignCard
                 key={row.campaign.id}
                 row={assignedSummaryByCampaignId.has(row.campaign.id) ? { ...row, summary: assignedSummaryByCampaignId.get(row.campaign.id)! } : row}
                 currentUserId={user.id}
-                review={positionReviewByCampaignId.get(row.campaign.id) ?? null}
+                display={positionAssessmentDisplayByCampaignId.get(row.campaign.id) ?? null}
                 openView
                 quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
                 asOf={snapshotCheckedAt}
@@ -700,18 +708,18 @@ function NewAccountPanel({
 function CampaignCard({
   row,
   currentUserId,
-  review = null,
+  display = null,
   openView = false,
   quoteSnapshot = null,
   asOf = new Date(),
 }: {
   row: { campaign: CampaignRow; summary: ReturnType<typeof summarizeCampaign>; feesFullyKnown?: boolean };
   currentUserId: string;
-  /** Dashboard V2 Phase 2 - the SAME shared positionReview.ts evaluation the Dashboard shows for
-   * this campaign (see src/lib/position-review.ts). Null only when Open view hasn't resolved it
-   * (a different view is showing this card) or the campaign has no leg the evaluator could
-   * resolve at all - never a guessed status. */
-  review?: PositionReviewResult | null;
+  /** Phase 2B - the SAME shared CURRENT/LAST_VALID/UNAVAILABLE display the Dashboard shows for
+   * this campaign (see src/lib/positionAssessmentOrchestration.ts). Null only when Open view
+   * hasn't resolved it (a different view is showing this card) or the campaign has no leg the
+   * evaluator could resolve at all - never a guessed status. */
+  display?: PositionAssessmentDisplay | null;
   openView?: boolean;
   quoteSnapshot?: QuoteSnapshot | null;
   asOf?: Date;
@@ -738,11 +746,15 @@ function CampaignCard({
   const latestAssignmentEvent = campaign.status === "ASSIGNED" ? latestAssignment(campaign.events) : null;
   const strikeVsBasis = openCall ? describeCallStrikeVsAdjustedBasis(openCall.strike, summary.adjustedBasis) : null;
   // A general, delayed/non-authoritative "roughly where is the stock" figure for the Stock
-  // Snapshot info cell only - never the colored review advisory (see `review` above), which uses
-  // its own approved, timestamp-verified evidence instead.
+  // Snapshot info cell only - never the colored assessment advisory (see `display` above), which
+  // uses its own approved, timestamp-verified evidence instead.
   const distanceDollars = quoteSnapshot && openPut ? distanceToStrikeDollars(quoteSnapshot.price, openPut.strike) : null;
   const distancePct = quoteSnapshot && openPut ? ((quoteSnapshot.price - openPut.strike) / openPut.strike) * 100 : null;
   const returnOnSecuredCapital = campaign.status === "CLOSED" ? progress.currentReturnPercent : null;
+  // The shared evaluator's own NY-calendar DTE, matching exactly what Dashboard shows for the same
+  // campaign, regardless of CURRENT/LAST_VALID/UNAVAILABLE state - daysToExpiration lives on the
+  // live evaluator result in every state (currentUnavailable is still a genuine live evaluation).
+  const dte = display ? underlyingPositionReviewResult(display).explanation.daysToExpiration : null;
 
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
@@ -767,14 +779,14 @@ function CampaignCard({
             <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[15px]" data-testid="active-put-contract">
               <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>
               <span className="text-zinc-300">{shortCalendarDate(openPut.expiration)}</span>
-              {/* Codex P2 - the shared review evaluator's own NY-calendar DTE, matching exactly
-                  what Dashboard shows for the same campaign. Never falls back to the legacy
-                  UTC-based calculations.daysToExpiration - that calculation uses different
-                  (UTC, not NY-calendar) semantics, so silently substituting it would show a DTE
-                  that could disagree with the review evaluator's own expiration-state logic
-                  right next to it. Shows "-" rather than an incompatible number when review
-                  evaluation didn't populate this leg. */}
-              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? "-"} DTE</span>
+              {/* Codex P2 - the shared evaluator's own NY-calendar DTE, matching exactly what
+                  Dashboard shows for the same campaign. Never falls back to the legacy UTC-based
+                  calculations.daysToExpiration - that calculation uses different (UTC, not
+                  NY-calendar) semantics, so silently substituting it would show a DTE that could
+                  disagree with the evaluator's own expiration-state logic right next to it.
+                  Shows "-" rather than an incompatible number when evaluation didn't populate
+                  this leg. */}
+              <span className="font-semibold text-zinc-100">{dte ?? "-"} DTE</span>
               <span className="text-[13px] text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
             </div>
           ) : null}
@@ -783,7 +795,7 @@ function CampaignCard({
               <span className="font-semibold text-amber-200">{campaign.ticker} {money(openCall.strike)} Call</span>
               <span className="text-zinc-300">{shortCalendarDate(openCall.expiration)}</span>
               {/* Codex P2 - same NY-calendar-only DTE as the put contract above, no legacy fallback. */}
-              <span className="font-semibold text-zinc-100">{review?.explanation.daysToExpiration ?? "-"} DTE</span>
+              <span className="font-semibold text-zinc-100">{dte ?? "-"} DTE</span>
               <span className="text-[13px] text-zinc-400">Short {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}</span>
               {openCallEventRow ? (
                 <span className="text-[13px] text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>
@@ -793,10 +805,10 @@ function CampaignCard({
           {/* The dominant assessment signal (Comfortable/Watch/Review roll/Review call/Cannot
               assess), on its own line with real breathing room - immediately recognizable before
               a reader even reaches the smaller provenance line below. */}
-          {openView && review ? (
+          {openView && display ? (
             <div className="mt-2">
-              <LivePositionReviewBadge result={review} />
-              <LivePositionReviewEvidenceLine result={review} />
+              <LivePositionAssessmentBadge display={display} now={asOf} />
+              <LivePositionAssessmentEvidenceLine display={display} now={asOf} />
             </div>
           ) : null}
           {/* Provenance/context - deliberately the smallest, most muted text in the card. */}

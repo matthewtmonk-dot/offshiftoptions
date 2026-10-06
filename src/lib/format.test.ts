@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatEtDateTime, shortCalendarDate } from "./format";
+import { formatEtCompactDateTime, formatEtDateTime, shortCalendarDate } from "./format";
 
 describe("shortCalendarDate", () => {
   it("preserves the stored calendar date for a UTC-midnight date-only value, regardless of the runtime's local timezone", () => {
@@ -50,5 +50,24 @@ describe("formatEtDateTime", () => {
   it("a UTC instant can cross into the previous ET calendar day - the date component converts too, never just the time", () => {
     // 2:15 AM UTC on 2026-09-30 is 10:15 PM ET on 2026-09-29 (EDT, UTC-4).
     expect(formatEtDateTime("2026-09-30T02:15:00.000Z")).toBe("Sep 29, 2026, 10:15 PM ET");
+  });
+});
+
+describe("formatEtCompactDateTime", () => {
+  it("omits the year when the value and reference instant fall in the same NY-calendar year", () => {
+    // 2026-10-05T19:57:00.000Z is 3:57 PM ET (EDT, UTC-4) on 2026-10-05 - matches the ticket's own
+    // "Oct 5, 3:57 PM ET" copy example exactly.
+    expect(formatEtCompactDateTime("2026-10-05T19:57:00.000Z", new Date("2026-10-05T20:00:00.000Z"))).toBe("Oct 5, 3:57 PM ET");
+  });
+
+  it("includes the year when the value and reference instant fall in different NY-calendar years", () => {
+    expect(formatEtCompactDateTime("2025-12-31T20:00:00.000Z", new Date("2026-01-02T16:00:00.000Z"))).toBe("Dec 31, 2025, 3:00 PM ET");
+  });
+
+  it("compares NY-calendar years, not raw UTC years - a late-December EST instant stays in the prior year even though its UTC timestamp already reads January", () => {
+    // 2027-01-01T04:30:00.000Z is 11:30 PM ET on 2026-12-31 (EST, UTC-5) - both inputs' raw UTC
+    // year is 2027, so a naive getUTCFullYear() comparison would wrongly call this "same year"
+    // and omit it; the correct NY-calendar read puts the value in 2026 and the reference in 2027.
+    expect(formatEtCompactDateTime("2027-01-01T04:30:00.000Z", new Date("2027-01-01T06:00:00.000Z"))).toBe("Dec 31, 2026, 11:30 PM ET");
   });
 });

@@ -121,3 +121,29 @@ export function formatEtDateTime(value: Date | string) {
 export function upperTicker(value: FormDataEntryValue | null) {
   return normalizeTicker(value);
 }
+
+const NY_YEAR_FORMAT = new Intl.DateTimeFormat("en-US", { year: "numeric", timeZone: "America/New_York" });
+
+/**
+ * Phase 2B (Last Valid Position Assessment) - a compact America/New_York month/day/time stamp for
+ * a historical instant shown alongside a `referenceInstant` (e.g. "now"), omitting the year unless
+ * the two instants fall in different NY-calendar years. Matches this file's own `formatEtTime`/
+ * `formatEtDateTime` convention (always America/New_York, plain "ET" suffix, never EST/EDT), and
+ * `shortCalendarDate`'s existing warning about why a calendar-year comparison must go through an
+ * explicit timezone-aware read rather than `Date.prototype.getFullYear()`/`getUTCFullYear()` - a
+ * late-ET-day instant can already be a different UTC day/year, and a raw local getter in a
+ * browser running outside America/New_York would read a third, equally wrong answer.
+ */
+export function formatEtCompactDateTime(value: Date | string, referenceInstant: Date): string {
+  const date = new Date(value);
+  const sameYear = NY_YEAR_FORMAT.format(date) === NY_YEAR_FORMAT.format(referenceInstant);
+  const formatted = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" as const }),
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  }).format(date);
+  return `${formatted} ET`;
+}
