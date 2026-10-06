@@ -138,3 +138,50 @@ describe("Final correctness fixes - disposition-driven revalidation/refresh (nev
     expect(guard).toMatch(/NOT a durable or\s*\n?\s*\*?\s*distributed rate limiter/i);
   });
 });
+
+describe("Codex blocker repair (C) - a failed refresh resolves a durable fallback without a second provider call", () => {
+  it("workflows.ts now sets shouldRefreshClient for a genuine failure too, not only result.ok", () => {
+    const workflows = source("../lib/workflows.ts");
+    expect(workflows).toContain('shouldRefreshClient: disposition !== "COOLDOWN"');
+    expect(workflows).not.toContain('shouldRefreshClient: result.ok && disposition !== "COOLDOWN"');
+  });
+
+  it("RefreshStatusControl never calls a plain router.refresh() on a failure branch - it navigates with the tab-scoped skip-live-evidence marker instead", () => {
+    const control = source("./refresh-status-control.tsx");
+    const refreshIndex = control.indexOf("router.refresh();");
+    const replaceIndex = control.indexOf("router.replace(");
+    expect(refreshIndex).toBeGreaterThan(-1);
+    expect(replaceIndex).toBeGreaterThan(-1);
+    // router.refresh() sits inside its own `if (result.ok)` branch, router.replace() inside the
+    // sibling `else` branch that follows it - never the same branch, never unconditional.
+    const betweenRefreshAndReplace = control.slice(refreshIndex, replaceIndex);
+    expect(betweenRefreshAndReplace).toContain("} else {");
+    expect(control).toContain("SKIP_LIVE_EVIDENCE_PARAM");
+  });
+
+  it("the skip-live-evidence marker is a tab-scoped URL param, never a cookie - this app never calls cookies().set() for it", () => {
+    const control = source("./refresh-status-control.tsx");
+    expect(control).not.toMatch(/cookies\(\)\.set/);
+    expect(control).toContain("useSearchParams");
+    expect(control).toContain("URLSearchParams");
+  });
+
+  it("the marker is scrubbed from the visible URL via a plain history API call, never a second router navigation", () => {
+    const control = source("./refresh-status-control.tsx");
+    expect(control).toContain("window.history.replaceState");
+  });
+
+  it("position-review.ts's skip-live-evidence option reuses the exact same BROKER_UNAVAILABLE code path a genuine outage already takes - no new eligibility rule", () => {
+    const positionReview = source("../lib/position-review.ts");
+    const optionIndex = positionReview.indexOf("skipLiveEvidence");
+    expect(optionIndex).toBeGreaterThan(-1);
+    expect(positionReview).toContain('brokerPositions = null;');
+    expect(positionReview).toContain('status: "UNAVAILABLE"');
+  });
+
+  it("the orchestration layer's CURRENT read-back and true historical-fallback questions stay on two separate functions - never reunified by this fix", () => {
+    const orchestration = source("../lib/positionAssessmentOrchestration.ts");
+    expect(orchestration).toContain("getVerifiedPositionAssessmentForCurrentLeg");
+    expect(orchestration).toContain("getLastValidPositionAssessment");
+  });
+});

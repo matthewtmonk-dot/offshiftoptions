@@ -1,7 +1,7 @@
 import "server-only";
 
 import { OPTION_MULTIPLIER } from "@/domain/finance/campaigns";
-import type { EquityMarketSessionEvidence } from "@/providers/market-data/types";
+import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/providers/market-data/types";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 import { formatOccSymbol, occContractKey, parseOccOptionSymbol } from "@/domain/finance/occOption";
 import {
@@ -83,6 +83,22 @@ export async function resolvePositionReviewsForUser(
    * production caller that wants genuine post-retrieval timing passes `() => new Date()`.
    */
   clock: () => Date = () => now,
+  /**
+   * Codex blocker repair (C) - `skipLiveEvidence: true` skips the three live Schwab/market-data
+   * calls below entirely (zero network/provider calls) and treats evidence as uniformly
+   * unavailable instead. Used ONLY right after a manual refresh attempt genuinely failed (see
+   * workflows.ts's refreshPositionEvidenceForUserGuarded/RefreshStatusControl) - that attempt
+   * already cleared the relevant caches, so a normal re-render would otherwise MISS cache and
+   * make a second real provider call for the same click. This reuses the EXACT existing
+   * BROKER_UNAVAILABLE code path (`resolvePositionEvidence`'s own `brokerPositions === null`
+   * branch below) a genuine Schwab outage already takes - not a new rule, and if anything more
+   * conservative than most real partial outages (quote/session are forced unavailable too, not
+   * just broker positions). Every Phase 1 contradiction protection (past-expiration, assigned-
+   * shares-no-call, opening-event/context-fingerprint mismatch) comes from resolveRelevantCampaignLegs'
+   * read of this app's own CampaignEvent ledger, never from live broker data - completely
+   * unaffected by this mode.
+   */
+  options: { skipLiveEvidence?: boolean } = {},
 ): Promise<ResolvedPositionReview[]> {
   const { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls, openingEventIdByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
   if (relevant.length === 0) {
@@ -90,13 +106,22 @@ export async function resolvePositionReviewsForUser(
   }
 
   const tickersNeedingQuotes = tickersNeedingReviewQuotes(relevant, legByCampaignId);
-
   const requestedNyDate = nyCalendarDateOf(now);
-  const [brokerPositions, quoteEvidenceByTicker, sessionEvidenceAsRequested] = await Promise.all([
-    getSchwabOpenPositionsForUser(userId).catch(() => null),
-    getQuoteReviewEvidenceForUser(userId, tickersNeedingQuotes),
-    getEquityMarketSessionEvidenceForUser(userId, requestedNyDate),
-  ]);
+
+  let brokerPositions: (BrokerPosition & { accountLabel: string })[] | null;
+  let quoteEvidenceByTicker: Map<string, QuoteReviewEvidence>;
+  let sessionEvidenceAsRequested: EquityMarketSessionEvidence;
+  if (options.skipLiveEvidence) {
+    brokerPositions = null;
+    quoteEvidenceByTicker = new Map();
+    sessionEvidenceAsRequested = { status: "UNAVAILABLE", reason: "Live evidence skipped - resolving from durable historical data only." };
+  } else {
+    [brokerPositions, quoteEvidenceByTicker, sessionEvidenceAsRequested] = await Promise.all([
+      getSchwabOpenPositionsForUser(userId).catch(() => null),
+      getQuoteReviewEvidenceForUser(userId, tickersNeedingQuotes),
+      getEquityMarketSessionEvidenceForUser(userId, requestedNyDate),
+    ]);
+  }
 
   // Codex P1 (B8) - the REAL evaluation instant, read only now that every async fetch above has
   // actually resolved - never the `now` captured before this function started retrieving

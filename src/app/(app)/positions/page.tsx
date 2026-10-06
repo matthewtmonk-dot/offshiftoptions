@@ -172,6 +172,10 @@ export default async function PositionsPage({
   const view = parseViewMode(firstParam(query.view));
   const error = firstParam(query.error);
   const previewBatchId = firstParam(query.previewBatch);
+  // Codex blocker repair (C) - set by the global header's own refresh control via a tab-scoped
+  // navigation right after a genuinely failed manual refresh (see dashboard/page.tsx's own
+  // identical comment).
+  const skipLiveEvidence = firstParam(query.oso_skip_live) === "1";
   const needsOpenBrokerData = view === "open";
   const needsAccountsImportData = view === "accounts";
   const [data, schwabPositions, brokerActivityAwaitingReview, importBatches, pendingImport, schwabConnection] = await Promise.all([
@@ -273,7 +277,7 @@ export default async function PositionsPage({
     // Codex P1 (B8) - `snapshotCheckedAt` selects which NY date to request session evidence for;
     // the real evaluation instant is captured fresh AFTER resolvePositionAssessmentDisplaysForUser's
     // own retrieval completes, never reused from before this page even started fetching.
-    const resolvedDisplays = await resolvePositionAssessmentDisplaysForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt, () => new Date());
+    const resolvedDisplays = await resolvePositionAssessmentDisplaysForUser(user.id, reviewCampaignInputs, reviewAccounts, rollBufferPercent, snapshotCheckedAt, () => new Date(), { skipLiveEvidence });
     for (const entry of resolvedDisplays) {
       positionAssessmentDisplayByCampaignId.set(entry.campaignId, entry.display);
     }

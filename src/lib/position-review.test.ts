@@ -863,3 +863,49 @@ describe("Codex P1 - rolled-position orchestration (realistic history, not a pre
     expect(results).toHaveLength(0); // CLOSED campaigns are never part of the review set at all
   });
 });
+
+describe("Codex blocker repair (C) - resolvePositionReviewsForUser options.skipLiveEvidence", () => {
+  it("never calls the live Schwab/market-data functions at all", async () => {
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+
+    expect(getPositions).not.toHaveBeenCalled();
+    expect(getQuoteEvidence).not.toHaveBeenCalled();
+    expect(getSessionEvidence).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+  });
+
+  it("produces CANNOT_ASSESS / BROKER_UNAVAILABLE for every relevant campaign - the exact same path a genuine Schwab outage already takes", async () => {
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.evidence.position).toBe("BROKER_UNAVAILABLE");
+    expect(results[0]?.result.explanation.reasonCodes).toEqual(["POSITION_BROKER_UNAVAILABLE"]);
+  });
+
+  it("still never fabricates CURRENT for a manual account - skip-live is uniformly conservative", async () => {
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign({ accountId: "account-2" })], [manualAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+  });
+
+  it("Phase 1 lifecycle contradiction protections (past-expiration) still apply, derived purely from the campaign's own event ledger, never live evidence", async () => {
+    const expired = putCampaign({
+      events: [{ type: "SELL_PUT", occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT", contracts: 1, strike: 25, expiration: new Date("2026-01-01T00:00:00.000Z"), premium: 1 }],
+    });
+    const results = await resolvePositionReviewsForUser("matt", [expired], [schwabAccount], 3, NOON, undefined, { skipLiveEvidence: true });
+
+    expect(results[0]?.result.lifecycle).toBe("EXPIRATION_PENDING");
+    expect(results[0]?.result.explanation.reasonCodes).toEqual(["PAST_EXPIRATION_UNRESOLVED"]);
+  });
+
+  it("defaults to the normal live-evidence path when the option is omitted", async () => {
+    getPositions.mockResolvedValue([{ accountId: "broker-a", symbol: "UPST  261002P00025000", quantity: -1, marketValue: -100, accountLabel: "Test", positionReadReceivedAt: NOON }]);
+    getQuoteEvidence.mockResolvedValue(new Map([["UPST", quoteEvidence(30)]]));
+    getSessionEvidence.mockResolvedValue(SESSION);
+
+    const results = await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
+
+    expect(getPositions).toHaveBeenCalledTimes(1);
+    expect(results[0]?.result.action).toBe("COMFORTABLE");
+  });
+});

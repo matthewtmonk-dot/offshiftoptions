@@ -14,6 +14,7 @@ import {
   type PositionReviewContextFingerprintInput,
   type StoredLastValidAssessment,
   underlyingPositionReviewResult,
+  evaluateVerifiedCurrentAssessmentEligibility,
 } from "./positionReviewAssessment";
 
 const NY_DATE = "2026-06-15";
@@ -400,6 +401,65 @@ describe("repair: explicit historical fallback allowlist", () => {
     expect(evaluatePositionReviewWriteEligibility(candidate, NOON)).toEqual({ eligible: false, reasonCode: "RESULT_CONTEXT_MISMATCH" });
   });
 
+});
+
+describe("Codex blocker repair (A) - evaluateVerifiedCurrentAssessmentEligibility", () => {
+  const stored = { scope: SCOPE, contextFingerprint: computePositionReviewContextFingerprint(contextInput()) };
+  const current: CurrentLegMatchContext = { ...stored, positionEvidenceState: "SCHWAB_CONFIRMED", lifecycle: "CURRENT_PUT", reasonCodes: [] };
+
+  // The exact shipped bug: a live COMFORTABLE/WATCH/REVIEW_ROLL/REVIEW_CALL result's own
+  // reasonCodes (ordinary action reasons, never outage reasons) must never deny the CURRENT
+  // read-back the way they would (correctly) deny a true historical fallback.
+  it.each(["WITHIN_ROLL_BUFFER", "EXPIRES_TODAY", "PUT_AT_OR_ITM", "CALL_AT_OR_ITM"])(
+    "allows a persistable CURRENT action's own reason code %s - never an outage reason",
+    (reason) => {
+      expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, reasonCodes: [reason] } }).eligible).toBe(true);
+    },
+  );
+  it("allows an empty reasonCodes array (a plain COMFORTABLE)", () => {
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current }).eligible).toBe(true);
+  });
+
+  it("still denies every identity mismatch evaluateHistoricalAssessmentEligibility denies", () => {
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: null }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, scope: { ...current.scope, ownerId: "someone-else" } } }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, scope: { ...current.scope, accountId: "other-account" } } }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, scope: { ...current.scope, campaignId: "other-campaign" } } }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, scope: { ...current.scope, openingEventId: "rolled-away-leg" } } }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, contextFingerprint: "different-fingerprint" } }).eligible).toBe(false);
+  });
+
+  it("still denies expiration-primacy lifecycle (assignment/expiration must stay primary)", () => {
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, lifecycle: "EXPIRATION_PENDING" } }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, lifecycle: "EXPIRATION_SESSION_ENDED" } }).eligible).toBe(false);
+  });
+
+  it("still denies ambiguous/unsupported coverage position evidence", () => {
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, positionEvidenceState: "POSITION_MISMATCH_AMBIGUOUS" } }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, positionEvidenceState: "INSUFFICIENT_SHARE_COVERAGE" } }).eligible).toBe(false);
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, positionEvidenceState: "UNSUPPORTED_CONTRACT_DELIVERABLE" } }).eligible).toBe(false);
+  });
+
+  it("still denies a lifecycle outside CURRENT_PUT/ROLLED_PUT/COVERED_CALL (e.g. assigned shares with no call)", () => {
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, lifecycle: "ASSIGNED_SHARES" } }).eligible).toBe(false);
+  });
+
+  it("still denies the overloaded NOT_ASSESSED position state", () => {
+    expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, positionEvidenceState: "NOT_ASSESSED" } }).eligible).toBe(false);
+  });
+
+  it("allows CURRENT_PUT/ROLLED_PUT/COVERED_CALL with SCHWAB_CONFIRMED or MANUAL_POSITION", () => {
+    for (const lifecycle of ["CURRENT_PUT", "ROLLED_PUT", "COVERED_CALL"] as const) {
+      for (const positionEvidenceState of ["SCHWAB_CONFIRMED", "MANUAL_POSITION"] as const) {
+        expect(evaluateVerifiedCurrentAssessmentEligibility({ stored, current: { ...current, lifecycle, positionEvidenceState } }).eligible).toBe(true);
+      }
+    }
+  });
+
+  it("evaluateHistoricalAssessmentEligibility still denies a persistable action's own reason codes (that question is unchanged)", () => {
+    expect(evaluateHistoricalAssessmentEligibility({ stored, current: { ...current, reasonCodes: ["WITHIN_ROLL_BUFFER"] } }).eligible).toBe(false);
+    expect(evaluateHistoricalAssessmentEligibility({ stored, current: { ...current, reasonCodes: ["PUT_AT_OR_ITM"] } }).eligible).toBe(false);
+  });
 });
 
 describe("composePositionAssessmentDisplay (Phase 2A)", () => {

@@ -1,10 +1,20 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import { refreshPositionEvidenceAction } from "@/app/(app)/actions";
 import { formatEtTime } from "@/lib/format";
+
+/**
+ * Codex blocker repair (C) - the tab-scoped (never a cookie, which would leak to other tabs or an
+ * unrelated prefetch hitting the same page within a TTL window) one-shot signal telling Dashboard/
+ * Tracker's next server render "the live Schwab/market-data fetch just failed - skip it entirely
+ * this once and resolve from durable historical data only" (see resolvePositionReviewsForUser's
+ * own `skipLiveEvidence` option). Lives only in THIS navigation's URL, driven entirely by this
+ * tab's own client JS - never a shared cookie jar.
+ */
+const SKIP_LIVE_EVIDENCE_PARAM = "oso_skip_live";
 
 /**
  * Post-Phase-2 UX follow-up (correctness repair) - a last-resort, CLIENT-only fallback cooldown,
@@ -46,11 +56,25 @@ const FALLBACK_COOLDOWN_MS = 15_000;
  */
 export function RefreshStatusControl() {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [availableAt, setAvailableAt] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
+
+  // Codex blocker repair (C) - strips the one-shot skip-live-evidence marker from the visible URL
+  // as soon as it's observed client-side (a plain history-API call, no network, no second
+  // navigation) - the server already consumed it for the render that just happened.
+  useEffect(() => {
+    if (searchParams.has(SKIP_LIVE_EVIDENCE_PARAM)) {
+      const remaining = new URLSearchParams(searchParams.toString());
+      remaining.delete(SKIP_LIVE_EVIDENCE_PARAM);
+      const query = remaining.toString();
+      window.history.replaceState(null, "", query ? `${pathname}?${query}` : pathname);
+    }
+  }, [pathname, searchParams]);
 
   // Ticks only while a cooldown is actually active, and stops itself once it reaches zero.
   useEffect(() => {
@@ -98,7 +122,20 @@ export function RefreshStatusControl() {
           setErrorMessage(refreshFailureMessage(result.reason));
         }
         if (result.shouldRefreshClient) {
-          router.refresh();
+          if (result.ok) {
+            router.refresh();
+          } else {
+            // Codex blocker repair (C) - a genuine failure still deserves a chance to resolve a
+            // durable LAST_VALID fallback, but a plain router.refresh() here would re-run the
+            // page's own live evaluator against the cache this SAME failed attempt just cleared -
+            // a guaranteed second real provider call for one click. Instead, navigate with the
+            // tab-scoped skip-live-evidence marker so the next render resolves from durable
+            // historical data only (zero further provider calls) - see
+            // resolvePositionReviewsForUser's own `skipLiveEvidence` option.
+            const next = new URLSearchParams(searchParams.toString());
+            next.set(SKIP_LIVE_EVIDENCE_PARAM, "1");
+            router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+          }
         }
       } catch {
         // The server action rejected outright (network failure, unexpected exception before it

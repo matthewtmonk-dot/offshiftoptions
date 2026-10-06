@@ -770,7 +770,7 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
     expect(m.campaignFindMany).not.toHaveBeenCalled(); // zero quote/session-scoping work during cooldown
   });
 
-  it("the component's/action's error handling has something to hold onto: even a failed refresh returns a cooldown timestamp and a false shouldRefreshClient", async () => {
+  it("the component's/action's error handling has something to hold onto: even a failed refresh returns a cooldown timestamp", async () => {
     const m = await mocks();
     m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
 
@@ -778,7 +778,81 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
 
     expect(result.ok).toBe(false);
     expect(result.disposition).toBe("EXECUTED");
-    expect(result.shouldRefreshClient).toBe(false);
     expect(result.availableAgainAt).toEqual(expect.any(String));
+  });
+
+  // Codex blocker repair (C) - a genuinely failed (non-COOLDOWN) attempt must still set
+  // shouldRefreshClient, so the client gets a chance to resolve a durable LAST_VALID fallback
+  // (via the tab-scoped skip-live-evidence navigation - see RefreshStatusControl) instead of
+  // freezing on stale data. Only COOLDOWN (a reused, non-attempt result) stays false.
+  it("shouldRefreshClient is true for a genuine failure too (EXECUTED), so the client can still resolve a durable fallback", async () => {
+    const m = await mocks();
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(null);
+
+    const result = await refreshPositionEvidenceForUserGuarded("matt");
+
+    expect(result.ok).toBe(false);
+    expect(result.disposition).toBe("EXECUTED");
+    expect(result.shouldRefreshClient).toBe(true);
+  });
+
+  // Codex blocker repair (C) - the ticket's own mandatory proof: one failed refresh click,
+  // followed by the skip-live-evidence resolution it now safely triggers, must make exactly ONE
+  // real provider call TOTAL - never a second attempt for the same click (the retry-storm risk
+  // naively flipping shouldRefreshClient would otherwise create).
+  it("one failed refresh followed by a skip-live-evidence resolution makes exactly one provider call total", async () => {
+    const m = await mocks();
+    const getAccounts = vi.fn().mockRejectedValue(new Error("Schwab is down"));
+    m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+    m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider({ getAccounts }));
+
+    const refreshResult = await refreshPositionEvidenceForUserGuarded("matt");
+    expect(refreshResult.ok).toBe(false);
+    expect(getAccounts).toHaveBeenCalledTimes(1);
+
+    const { resolvePositionReviewsForUser } = await import("./position-review");
+    const campaign = {
+      id: "campaign-1",
+      ownerId: "matt",
+      accountId: "account-1",
+      ticker: "UPST",
+      status: "OPEN" as const,
+      events: [
+        { type: "SELL_PUT" as const, occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT" as const, contracts: 1, strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1 },
+      ],
+    };
+    const account = { id: "account-1", userId: "matt", externalAccountId: "broker-a", source: "SCHWAB" as const };
+
+    const results = await resolvePositionReviewsForUser("matt", [campaign] as never, [account], 3, new Date("2026-06-15T16:00:00.000Z"), undefined, { skipLiveEvidence: true });
+
+    // Still exactly one provider call total - the skip-live resolution made zero more.
+    expect(getAccounts).toHaveBeenCalledTimes(1);
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.evidence.position).toBe("BROKER_UNAVAILABLE");
+  });
+
+  it("skipLiveEvidence never calls the provider at all when there was no prior refresh attempt either", async () => {
+    const { resolvePositionReviewsForUser } = await import("./position-review");
+    const liveQuotes = await import("./live-quotes");
+    const getQuoteSpy = vi.mocked(liveQuotes.getQuoteReviewEvidenceForUser);
+    const getSessionSpy = vi.mocked(liveQuotes.getEquityMarketSessionEvidenceForUser);
+    const campaign = {
+      id: "campaign-1",
+      ownerId: "matt",
+      accountId: "account-1",
+      ticker: "UPST",
+      status: "OPEN" as const,
+      events: [
+        { type: "SELL_PUT" as const, occurredAt: new Date("2026-05-01T00:00:00.000Z"), optionType: "PUT" as const, contracts: 1, strike: 25, expiration: new Date("2026-10-02T00:00:00.000Z"), premium: 1 },
+      ],
+    };
+    const account = { id: "account-1", userId: "matt", externalAccountId: "broker-a", source: "SCHWAB" as const };
+
+    const results = await resolvePositionReviewsForUser("matt", [campaign] as never, [account], 3, new Date("2026-06-15T16:00:00.000Z"), undefined, { skipLiveEvidence: true });
+
+    expect(getQuoteSpy).not.toHaveBeenCalled();
+    expect(getSessionSpy).not.toHaveBeenCalled();
+    expect(results[0]?.result.action).toBe("CANNOT_ASSESS");
+    expect(results[0]?.result.evidence.position).toBe("BROKER_UNAVAILABLE");
   });
 });

@@ -18,7 +18,7 @@ import {
   type PositionReviewCampaignInput,
   type ResolvedPositionReview,
 } from "./position-review";
-import { getLastValidPositionAssessment, savePositionReviewAssessmentIfEligible } from "./positionReviewAssessmentStore";
+import { getLastValidPositionAssessment, getVerifiedPositionAssessmentForCurrentLeg, savePositionReviewAssessmentIfEligible } from "./positionReviewAssessmentStore";
 
 /**
  * LST "Last Valid Position Assessment" - Phase 2A shared server-side orchestration. The ONE place
@@ -168,8 +168,12 @@ async function resolveSingleDisplay(args: {
       logPersistenceDiagnostic("save:threw", { userId, campaignId: campaign.id }, error);
     }
 
+    // Codex blocker repair (A) - this is the CURRENT read-back question ("does a durable row
+    // exist for this exact leg"), never the true historical-fallback question - a persistable
+    // CURRENT action's own reasonCodes (WITHIN_ROLL_BUFFER/PUT_AT_OR_ITM/etc.) must never be
+    // checked against the transient-outage allowlist getLastValidPositionAssessment applies.
     const verifiedFallback = verifiedDurable
-      ? await getLastValidPositionAssessment({ ownerId: userId, scope, current: matchContext }).catch((error) => {
+      ? await getVerifiedPositionAssessmentForCurrentLeg({ ownerId: userId, scope, current: matchContext }).catch((error) => {
           logPersistenceDiagnostic("read-after-save:threw", { userId, campaignId: campaign.id }, error);
           return null;
         })
@@ -215,8 +219,11 @@ export async function resolvePositionAssessmentDisplaysForUser(
   rollBufferPercent: number,
   now: Date = new Date(),
   clock: () => Date = () => now,
+  /** Codex blocker repair (C) - passed straight through to resolvePositionReviewsForUser; see its
+   * own doc comment. */
+  options: { skipLiveEvidence?: boolean } = {},
 ): Promise<ResolvedPositionAssessmentDisplay[]> {
-  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock);
+  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock, options);
   const campaignById = new Map(campaigns.map((campaign) => [campaign.id, campaign]));
   const accountById = new Map(accounts.map((account) => [account.id, account]));
 

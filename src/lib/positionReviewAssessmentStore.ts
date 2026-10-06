@@ -5,6 +5,7 @@ import {
   POSITION_REVIEW_POLICY_VERSION,
   evaluateHistoricalAssessmentEligibility,
   evaluatePositionReviewWriteEligibility,
+  evaluateVerifiedCurrentAssessmentEligibility,
   type CurrentLegMatchContext,
   type CurrentPositionAssessmentCandidate,
   type PositionReviewAssessmentScope,
@@ -216,40 +217,83 @@ function rowToStoredLastValidAssessment(row: PositionReviewAssessmentRow): Store
 }
 
 /**
+ * Shared owner-scoped fetch: retrieves the raw stored row for an exact scoped leg (or null), never
+ * applying any eligibility predicate itself - both `getLastValidPositionAssessment` and
+ * `getVerifiedPositionAssessmentForCurrentLeg` below fetch through this one path and apply their
+ * own, DIFFERENT eligibility question to the same row, rather than duplicating the Prisma fetch/
+ * row-mapping. `ownerId` must come from the caller's own authenticated session; it is asserted
+ * against `scope.ownerId` so a mismatched scope (e.g. built from the wrong owner's campaign) fails
+ * loudly rather than silently querying someone else's data. Owner isolation is enforced at the
+ * QUERY level (ownerId is part of the compound primary key itself, not an application-side
+ * post-filter) - never by component visibility, shared/Buddy-view access, ticker, or campaign alone.
+ */
+async function fetchStoredAssessmentRow(ownerId: string, scope: PositionReviewAssessmentScope) {
+  if (ownerId !== scope.ownerId) {
+    throw new Error("fetchStoredAssessmentRow: ownerId does not match scope.ownerId - refusing a cross-owner read.");
+  }
+
+  return prisma.positionReviewAssessment.findUnique({
+    where: {
+      ownerId_accountId_campaignId_openingEventId: {
+        ownerId: scope.ownerId,
+        accountId: scope.accountId,
+        campaignId: scope.campaignId,
+        openingEventId: scope.openingEventId,
+      },
+    },
+  });
+}
+
+/**
  * Owner-scoped read: retrieves the candidate last-valid assessment for an exact scoped leg,
- * verifies it against the CURRENT resolved leg's own identity/context/lifecycle (via
- * evaluateHistoricalAssessmentEligibility), and returns typed historical data or null - never a
- * presentation string. `ownerId` must come from the caller's own authenticated session; it is
- * asserted against `scope.ownerId` so a mismatched scope (e.g. built from the wrong owner's
- * campaign) fails loudly rather than silently querying someone else's data. Owner isolation is
- * enforced at the QUERY level (ownerId is part of the compound primary key itself, not an
- * application-side post-filter) - never by component visibility, shared/Buddy-view access, ticker,
- * or campaign alone.
+ * verifies it against the CURRENT resolved leg's own identity/context/lifecycle AND the
+ * reasonCodes-vs-allowed-transient-outage allowlist (via evaluateHistoricalAssessmentEligibility),
+ * and returns typed historical data or null - never a presentation string. This is the TRUE
+ * historical-fallback question: only reached when CURRENT is CANNOT_ASSESS. See
+ * getVerifiedPositionAssessmentForCurrentLeg below for the separate CURRENT-read-back question,
+ * which must never reuse this function's reasonCodes allowlist (Codex blocker repair A).
  */
 export async function getLastValidPositionAssessment(args: {
   ownerId: string;
   scope: PositionReviewAssessmentScope;
   current: CurrentLegMatchContext | null;
 }): Promise<StoredLastValidAssessment | null> {
-  if (args.ownerId !== args.scope.ownerId) {
-    throw new Error("getLastValidPositionAssessment: ownerId does not match scope.ownerId - refusing a cross-owner read.");
-  }
-
-  const row = await prisma.positionReviewAssessment.findUnique({
-    where: {
-      ownerId_accountId_campaignId_openingEventId: {
-        ownerId: args.scope.ownerId,
-        accountId: args.scope.accountId,
-        campaignId: args.scope.campaignId,
-        openingEventId: args.scope.openingEventId,
-      },
-    },
-  });
+  const row = await fetchStoredAssessmentRow(args.ownerId, args.scope);
   if (!row) {
     return null;
   }
 
   const eligibility = evaluateHistoricalAssessmentEligibility({
+    stored: { scope: args.scope, contextFingerprint: row.contextFingerprint },
+    current: args.current,
+  });
+  if (!eligibility.eligible) {
+    return null;
+  }
+
+  return rowToStoredLastValidAssessment(row as unknown as PositionReviewAssessmentRow);
+}
+
+/**
+ * Codex blocker repair (A) - owner-scoped read for the CURRENT read-back question only: "does a
+ * durable row still exist for the exact leg I just persisted (or that a newer write now occupies),
+ * safe to attach as CURRENT.lastValid?" Gates on evaluateVerifiedCurrentAssessmentEligibility
+ * (identity/lifecycle/coverage safety only) - deliberately never the reasonCodes-vs-allowed-
+ * transient-outage allowlist `getLastValidPositionAssessment` applies, since a persistable CURRENT
+ * action's own reasonCodes (WITHIN_ROLL_BUFFER/PUT_AT_OR_ITM/etc.) are ordinary action reasons,
+ * never outage reasons, and must never be checked against that allowlist.
+ */
+export async function getVerifiedPositionAssessmentForCurrentLeg(args: {
+  ownerId: string;
+  scope: PositionReviewAssessmentScope;
+  current: CurrentLegMatchContext | null;
+}): Promise<StoredLastValidAssessment | null> {
+  const row = await fetchStoredAssessmentRow(args.ownerId, args.scope);
+  if (!row) {
+    return null;
+  }
+
+  const eligibility = evaluateVerifiedCurrentAssessmentEligibility({
     stored: { scope: args.scope, contextFingerprint: row.contextFingerprint },
     current: args.current,
   });

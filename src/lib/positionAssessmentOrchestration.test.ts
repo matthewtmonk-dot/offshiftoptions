@@ -3,19 +3,24 @@ import type { EquityMarketSessionEvidence, QuoteReviewEvidence } from "@/provide
 import type { StoredLastValidAssessment } from "@/domain/finance/positionReviewAssessment";
 import { getEquityMarketSessionEvidenceForUser, getQuoteReviewEvidenceForUser } from "./live-quotes";
 import { getSchwabOpenPositionsForUser } from "./workflows";
-import { getLastValidPositionAssessment, savePositionReviewAssessmentIfEligible } from "./positionReviewAssessmentStore";
+import { getLastValidPositionAssessment, getVerifiedPositionAssessmentForCurrentLeg, savePositionReviewAssessmentIfEligible } from "./positionReviewAssessmentStore";
 import { resolvePositionAssessmentDisplaysForUser } from "./positionAssessmentOrchestration";
 import type { PositionReviewAccountInput, PositionReviewCampaignInput } from "./position-review-scope";
 
 vi.mock("./workflows", () => ({ getSchwabOpenPositionsForUser: vi.fn() }));
 vi.mock("./live-quotes", () => ({ getQuoteReviewEvidenceForUser: vi.fn(), getEquityMarketSessionEvidenceForUser: vi.fn() }));
-vi.mock("./positionReviewAssessmentStore", () => ({ savePositionReviewAssessmentIfEligible: vi.fn(), getLastValidPositionAssessment: vi.fn() }));
+vi.mock("./positionReviewAssessmentStore", () => ({
+  savePositionReviewAssessmentIfEligible: vi.fn(),
+  getLastValidPositionAssessment: vi.fn(),
+  getVerifiedPositionAssessmentForCurrentLeg: vi.fn(),
+}));
 
 const getPositions = vi.mocked(getSchwabOpenPositionsForUser);
 const getQuoteEvidence = vi.mocked(getQuoteReviewEvidenceForUser);
 const getSessionEvidence = vi.mocked(getEquityMarketSessionEvidenceForUser);
 const saveAssessment = vi.mocked(savePositionReviewAssessmentIfEligible);
 const getLastValid = vi.mocked(getLastValidPositionAssessment);
+const getVerifiedCurrentLeg = vi.mocked(getVerifiedPositionAssessmentForCurrentLeg);
 
 const NY_DATE = "2026-06-15";
 const NOON = new Date(`${NY_DATE}T16:00:00Z`);
@@ -107,13 +112,14 @@ function setUp(options: { quote?: number; equity?: boolean } = {}) {
   getQuoteEvidence.mockResolvedValue(new Map([["UPST", quoteEvidence(options.quote ?? 30)]]));
   getSessionEvidence.mockResolvedValue(SESSION);
   getLastValid.mockResolvedValue(null);
+  getVerifiedCurrentLeg.mockResolvedValue(null);
 }
 
 describe("resolvePositionAssessmentDisplaysForUser - CURRENT", () => {
   it("a valid COMFORTABLE evaluation composes CURRENT and attempts persistence", async () => {
     setUp({ quote: 30 });
     saveAssessment.mockResolvedValue({ status: "SAVED" });
-    getLastValid.mockResolvedValue(storedFixture());
+    getVerifiedCurrentLeg.mockResolvedValue(storedFixture());
 
     const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
 
@@ -127,10 +133,38 @@ describe("resolvePositionAssessmentDisplaysForUser - CURRENT", () => {
     }
   });
 
+  // Codex blocker repair (A) regression - the exact shipped bug: WATCH/REVIEW_ROLL's own
+  // reasonCodes (WITHIN_ROLL_BUFFER/PUT_AT_OR_ITM) previously made the OLD shared read-back
+  // (evaluateHistoricalAssessmentEligibility's transient-outage allowlist) deny the read, leaving
+  // `lastValid` wrongly null even after a successful save. Mocking
+  // getVerifiedPositionAssessmentForCurrentLeg here proves the orchestration now calls the NEW,
+  // narrower function for this path - calling the OLD getLastValidPositionAssessment would leave
+  // this test's own `getLastValid` mock (which stays null via setUp) wrongly consulted instead.
+  // (REVIEW_CALL requires an ASSIGNED campaign with an open call leg, which this PUT-campaign
+  // fixture can't produce through the full resolveRelevantCampaignLegs pipeline - its own
+  // reasonCode CALL_AT_OR_ITM is covered directly at the domain level, above.)
+  it.each(["WATCH", "REVIEW_ROLL"] as const)("a valid %s evaluation reads back its own just-saved fallback (Codex blocker A)", async (action) => {
+    const quoteFor = { WATCH: 25.3, REVIEW_ROLL: 20 }[action];
+    setUp({ quote: quoteFor });
+    saveAssessment.mockResolvedValue({ status: "SAVED" });
+    const stored = storedFixture({ action });
+    getVerifiedCurrentLeg.mockResolvedValue(stored);
+
+    const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
+
+    expect(results[0]!.display.state).toBe("CURRENT");
+    if (results[0]!.display.state === "CURRENT") {
+      expect(results[0]!.display.current.action).toBe(action);
+      expect(results[0]!.display.lastValid).toEqual(stored);
+    }
+    expect(getVerifiedCurrentLeg).toHaveBeenCalledTimes(1);
+    expect(getLastValid).not.toHaveBeenCalled();
+  });
+
   it("CURRENT wins even when a historical row exists - current never gets masked by stale fallback data", async () => {
     setUp({ quote: 30 });
     saveAssessment.mockResolvedValue({ status: "SAVED" });
-    getLastValid.mockResolvedValue(storedFixture({ action: "WATCH" }));
+    getVerifiedCurrentLeg.mockResolvedValue(storedFixture({ action: "WATCH" }));
 
     const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
     expect(results[0]!.display.state).toBe("CURRENT");
@@ -140,10 +174,10 @@ describe("resolvePositionAssessmentDisplaysForUser - CURRENT", () => {
     setUp({ quote: 30 });
     saveAssessment.mockResolvedValue({ status: "SAVED" });
     const stored = storedFixture();
-    getLastValid.mockResolvedValue(stored);
+    getVerifiedCurrentLeg.mockResolvedValue(stored);
 
     const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
-    expect(getLastValid).toHaveBeenCalledTimes(1);
+    expect(getVerifiedCurrentLeg).toHaveBeenCalledTimes(1);
     if (results[0]!.display.state === "CURRENT") {
       expect(results[0]!.display.lastValid).toEqual(stored);
     }
@@ -153,7 +187,7 @@ describe("resolvePositionAssessmentDisplaysForUser - CURRENT", () => {
     setUp({ quote: 30 });
     saveAssessment.mockResolvedValue({ status: "SUPERSEDED_BY_NEWER" });
     const stored = storedFixture({ underlyingPrice: 31 });
-    getLastValid.mockResolvedValue(stored);
+    getVerifiedCurrentLeg.mockResolvedValue(stored);
 
     const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
     expect(results[0]!.display.state).toBe("CURRENT");
@@ -171,7 +205,7 @@ describe("resolvePositionAssessmentDisplaysForUser - CURRENT", () => {
     if (results[0]!.display.state === "CURRENT") {
       expect(results[0]!.display.lastValid).toBeNull();
     }
-    expect(getLastValid).not.toHaveBeenCalled();
+    expect(getVerifiedCurrentLeg).not.toHaveBeenCalled();
   });
 
   it("persistence CONTEXT_CHANGED does not invalidate CURRENT and never fabricates a fallback", async () => {
@@ -191,14 +225,14 @@ describe("resolvePositionAssessmentDisplaysForUser - CURRENT", () => {
     const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
     expect(results[0]!.display.state).toBe("CURRENT");
     if (results[0]!.display.state === "CURRENT") expect(results[0]!.display.lastValid).toBeNull();
-    expect(getLastValid).not.toHaveBeenCalled();
+    expect(getVerifiedCurrentLeg).not.toHaveBeenCalled();
     errorSpy.mockRestore();
   });
 
   it("a read-after-save throw still preserves CURRENT, with no fabricated fallback", async () => {
     setUp({ quote: 30 });
     saveAssessment.mockResolvedValue({ status: "SAVED" });
-    getLastValid.mockRejectedValue(new Error("read exploded"));
+    getVerifiedCurrentLeg.mockRejectedValue(new Error("read exploded"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const results = await resolvePositionAssessmentDisplaysForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);

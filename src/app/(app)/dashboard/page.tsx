@@ -42,9 +42,19 @@ const TRACKER_PERFORMANCE_HREF = "/positions?scope=mine&view=performance";
 type DashboardAccount = Awaited<ReturnType<typeof getDashboardData>>["ownAccounts"][number];
 type DashboardOpenCampaign = Awaited<ReturnType<typeof getDashboardData>>["openCampaigns"][number];
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const user = await requireCurrentUser();
   const asOf = new Date();
+  // Codex blocker repair (C) - set by RefreshStatusControl's own tab-scoped navigation right
+  // after a genuinely failed manual refresh, so THIS render alone resolves from durable
+  // historical data only (zero further Schwab/market-data provider calls) rather than missing
+  // the cache that same failed attempt just cleared. Never a cookie - see its own doc comment.
+  const query = await searchParams;
+  const skipLiveEvidence = query.oso_skip_live === "1";
   const data = await getDashboardData(user.id);
   const scannerIsLiveSchwab = data.latestScanRun?.source === "LIVE:SCHWAB";
 
@@ -214,6 +224,7 @@ export default async function DashboardPage() {
                   rollBufferPercent={rollBufferPercent}
                   asOf={asOf}
                   limit={POSITIONS_TO_REVIEW_LIMIT}
+                  skipLiveEvidence={skipLiveEvidence}
                 />
               </Suspense>
             )}
@@ -389,6 +400,7 @@ async function PositionsToReviewWithStatus({
   rollBufferPercent,
   asOf,
   limit,
+  skipLiveEvidence,
 }: {
   userId: string;
   ownAccounts: DashboardAccount[];
@@ -397,12 +409,13 @@ async function PositionsToReviewWithStatus({
   rollBufferPercent: number;
   asOf: Date;
   limit: number;
+  skipLiveEvidence: boolean;
 }) {
   const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
   // Codex P1 (B8) - `asOf` selects which NY date to request session evidence for; the real
   // evaluation instant is captured fresh AFTER resolvePositionAssessmentDisplaysForUser's own
   // retrieval completes, never reused from before this page even started fetching.
-  const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
+  const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date(), { skipLiveEvidence });
   const displaysByCampaignId = new Map(resolved.map((entry) => [entry.campaignId, entry.display]));
   const sortedRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(rows, displaysByCampaignId));
   const visibleRows = sortedRows.slice(0, limit);

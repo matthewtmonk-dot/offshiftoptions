@@ -720,10 +720,19 @@ export type GuardedRefreshPositionEvidenceResult = RefreshPositionEvidenceResult
   disposition: RefreshDisposition;
   /**
    * Post-Phase-2 UX follow-up (final correctness fixes) - an explicit, server-decided flag for
-   * "the client should call router.refresh() to pick up newly-fresh evidence," so this decision is
-   * never independently re-derived in the component. True only when this call's own evidence is
-   * actually fresh (a genuine success from EXECUTED or COALESCED) - never for a COOLDOWN result,
-   * regardless of whether the reused result itself was `ok: true`.
+   * "the client should navigate to pick up this attempt's outcome," so this decision is never
+   * independently re-derived in the component. True for any genuinely NEW attempt (EXECUTED or
+   * COALESCED) - never for a COOLDOWN result, which performed no new work and left whatever the
+   * page already shows unchanged.
+   *
+   * Codex blocker repair (C) - this is now true on FAILURE too, not only `result.ok`. A failed
+   * attempt still deserves a chance to resolve a durable LAST_VALID fallback (see
+   * RefreshStatusControl's own doc comment for how it safely does this WITHOUT a second live
+   * provider call) - leaving the page frozen on failure was the exact bug reported. The client
+   * still reads `result.ok` itself to decide WHICH navigation to perform (a plain
+   * `router.refresh()` on success vs. a tab-scoped skip-live-evidence navigation on failure) -
+   * that part is client-side navigation mechanics, not a business decision, so it isn't
+   * duplicated into a second server-computed flag here.
    */
   shouldRefreshClient: boolean;
 };
@@ -760,7 +769,7 @@ export async function refreshPositionEvidenceForUserGuarded(userId: string): Pro
     ...result,
     availableAgainAt: new Date(availableAgainAt).toISOString(),
     disposition,
-    shouldRefreshClient: result.ok && disposition !== "COOLDOWN",
+    shouldRefreshClient: disposition !== "COOLDOWN",
   };
 }
 

@@ -283,7 +283,9 @@ export type HistoricalAssessmentIneligibleReason =
   | "OPENING_EVENT_CHANGED"
   | "CONTEXT_FINGERPRINT_CHANGED"
   | "EXPIRATION_LIFECYCLE_PRIMARY"
-  | "COVERAGE_AMBIGUOUS_OR_UNSUPPORTED";
+  | "COVERAGE_AMBIGUOUS_OR_UNSUPPORTED"
+  | "UNSUPPORTED_LIFECYCLE"
+  | "POSITION_EVIDENCE_NOT_ALLOWED";
 
 export type HistoricalAssessmentEligibility = { eligible: true } | { eligible: false; reasonCode: HistoricalAssessmentIneligibleReason };
 
@@ -303,15 +305,34 @@ const ALLOWED_FALLBACK_REASONS = new Set([
   "MARKET_CLOSED", "QUOTE_EVIDENCE_UNAVAILABLE", "QUOTE_STALE_TIMESTAMP", "QUOTE_SESSION_EVIDENCE_UNAVAILABLE",
 ]);
 
+export type VerifiedCurrentAssessmentIneligibleReason =
+  | "NO_CURRENT_LEG"
+  | "OWNER_MISMATCH"
+  | "ACCOUNT_MISMATCH"
+  | "CAMPAIGN_MISMATCH"
+  | "OPENING_EVENT_CHANGED"
+  | "CONTEXT_FINGERPRINT_CHANGED"
+  | "EXPIRATION_LIFECYCLE_PRIMARY"
+  | "COVERAGE_AMBIGUOUS_OR_UNSUPPORTED"
+  | "UNSUPPORTED_LIFECYCLE"
+  | "POSITION_EVIDENCE_NOT_ALLOWED";
+
+export type VerifiedCurrentAssessmentEligibility = { eligible: true } | { eligible: false; reasonCode: VerifiedCurrentAssessmentIneligibleReason };
+
 /**
- * Pure predicate: is a stored assessment still eligible to be shown as a LAST_VALID fallback for
- * the CURRENT resolved leg? Owner/account/campaign/openingEventId/context fingerprint must all
- * match exactly, the current leg must still exist, its lifecycle must not have reached
- * expiration-primacy, and its position evidence must not indicate a structural identity/coverage
- * problem. Old DB rows are never deleted merely because a roll/close occurred - they simply become
- * ineligible here and the persistence/read service returns null for them.
+ * Codex blocker repair (A) - "is this durable row still describing the SAME safe, current,
+ * matching leg" (identity + lifecycle/coverage safety), deliberately WITHOUT the separate "is the
+ * live failure reason an allowed transient outage" question evaluateHistoricalAssessmentEligibility
+ * below also asks. The two questions only coincide when CURRENT is CANNOT_ASSESS - they must NOT
+ * be conflated when CURRENT is a persistable action (COMFORTABLE/WATCH/REVIEW_ROLL/REVIEW_CALL)
+ * and the orchestration layer is merely confirming a just-persisted (or newer) row exists for this
+ * exact leg, since a persistable action's own reasonCodes (WITHIN_ROLL_BUFFER/PUT_AT_OR_ITM/etc.)
+ * are ordinary action reasons, never outage reasons, and were never meant to be checked against
+ * ALLOWED_FALLBACK_REASONS at all. The row's own CONTENT was already validated once, at write time,
+ * by evaluatePositionReviewWriteEligibility - this predicate only reconfirms identity/lifecycle
+ * safety at read time, never re-validates the write itself.
  */
-export function evaluateHistoricalAssessmentEligibility(input: StoredAssessmentMatchInput): HistoricalAssessmentEligibility {
+export function evaluateVerifiedCurrentAssessmentEligibility(input: StoredAssessmentMatchInput): VerifiedCurrentAssessmentEligibility {
   const { stored, current } = input;
 
   if (!current) {
@@ -338,11 +359,33 @@ export function evaluateHistoricalAssessmentEligibility(input: StoredAssessmentM
   if (["POSITION_MISMATCH_AMBIGUOUS", "INSUFFICIENT_SHARE_COVERAGE", "UNSUPPORTED_CONTRACT_DELIVERABLE"].includes(current.positionEvidenceState)) {
     return { eligible: false, reasonCode: "COVERAGE_AMBIGUOUS_OR_UNSUPPORTED" };
   }
+  if (!["CURRENT_PUT", "ROLLED_PUT", "COVERED_CALL"].includes(current.lifecycle)) {
+    return { eligible: false, reasonCode: "UNSUPPORTED_LIFECYCLE" };
+  }
+  if (!ALLOWED_POSITION_STATES.includes(current.positionEvidenceState)) {
+    return { eligible: false, reasonCode: "POSITION_EVIDENCE_NOT_ALLOWED" };
+  }
+  return { eligible: true };
+}
 
-  if (!["CURRENT_PUT", "ROLLED_PUT", "COVERED_CALL"].includes(current.lifecycle) ||
-      !ALLOWED_POSITION_STATES.includes(current.positionEvidenceState) ||
-      current.reasonCodes.some((reason) => !ALLOWED_FALLBACK_REASONS.has(reason))) {
-    return { eligible: false, reasonCode: "FALLBACK_REASON_NOT_ALLOWED" };
+/**
+ * Pure predicate: is a stored assessment still eligible to be shown as a LAST_VALID fallback for
+ * the CURRENT resolved leg? Owner/account/campaign/openingEventId/context fingerprint must all
+ * match exactly, the current leg must still exist, its lifecycle must not have reached
+ * expiration-primacy, and its position evidence must not indicate a structural identity/coverage
+ * problem. Old DB rows are never deleted merely because a roll/close occurred - they simply become
+ * ineligible here and the persistence/read service returns null for them. Delegates the identity/
+ * lifecycle/coverage safety checks to evaluateVerifiedCurrentAssessmentEligibility above, then
+ * additionally requires every reasonCode to be a known, allowed TRANSIENT-outage reason - this
+ * extra check is this function's own, never shared with the verified-current-leg read.
+ */
+export function evaluateHistoricalAssessmentEligibility(input: StoredAssessmentMatchInput): HistoricalAssessmentEligibility {
+  const safety = evaluateVerifiedCurrentAssessmentEligibility(input);
+  if (!safety.eligible) {
+    return safety;
+  }
+  if (!input.current || input.current.reasonCodes.some((reason) => !ALLOWED_FALLBACK_REASONS.has(reason))) {
+    return { eligible: false, reasonCode: input.current ? "FALLBACK_REASON_NOT_ALLOWED" : "NO_CURRENT_LEG" };
   }
   return { eligible: true };
 }

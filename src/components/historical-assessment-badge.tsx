@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui";
 import { classifyLastValidTiming, type StoredLastValidAssessment } from "@/domain/finance/positionReviewAssessment";
 import { formatEtCompactDateTime, formatEtTime, money } from "@/lib/format";
 import { actionLabelFor, ICON_BY_ACTION, moneynessDistanceLabel, TONE_BY_ACTION } from "@/components/position-review-badge";
+import { useLiveReferenceTime } from "@/components/use-live-reference-time";
 
 /**
  * Phase 2B (Last Valid Position Assessment) - the one place that renders a `StoredLastValidAssessment`
@@ -57,15 +58,22 @@ export function HistoricalAssessmentBadge({ lastValid }: { lastValid: StoredLast
  * "at last valid check", never "closing price"), its moneyness distance, and the timing-tier copy
  * on its own sub-line - matches the ticket's explicit "underlying price used, moneyness, dollar/
  * percentage distance, evaluated timestamp" list.
+ *
+ * Codex blocker repair (B) - `now` is only the SEED for useLiveReferenceTime, not the value
+ * actually used to classify the timing tier: a page left open across a session boundary with no
+ * new server render must not freeze on "Last valid today" forever. See
+ * use-live-reference-time.ts's own doc comment for why the ordinary client clock is an acceptable
+ * source here (cosmetic tier selection only, never a trust-sensitive decision).
  */
 export function HistoricalAssessmentEvidenceLine({ lastValid, now }: { lastValid: StoredLastValidAssessment; now: Date }) {
+  const liveNow = useLiveReferenceTime(now);
   const distanceLabel = moneynessDistanceLabel(lastValid);
   const priceLabel = `${money(lastValid.underlyingPrice)} at last valid check`;
 
   return (
     <p className="mt-1 text-[13px] text-zinc-400">
       {distanceLabel ? `${priceLabel} · ${distanceLabel}` : priceLabel}
-      <span className="block text-xs text-zinc-500">{lastValidTimingCopy(lastValid.evaluatedAt, now)}</span>
+      <span className="block text-xs text-zinc-500">{lastValidTimingCopy(lastValid.evaluatedAt, liveNow)}</span>
     </p>
   );
 }
