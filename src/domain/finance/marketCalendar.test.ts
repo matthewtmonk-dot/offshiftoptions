@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyMarkFreshness, isNyseMarketDay, isRecentRetrieval, nextNyseMarketDay, previousNyseMarketDay } from "./marketCalendar";
+import { classifyMarkFreshness, isLikelyWithinRegularSession, isNyseMarketDay, isRecentRetrieval, nextNyseMarketDay, previousNyseMarketDay } from "./marketCalendar";
 
 function utc(year: number, month: number, day: number) {
   return new Date(Date.UTC(year, month - 1, day));
@@ -8,6 +8,44 @@ function utc(year: number, month: number, day: number) {
 function key(date: Date) {
   return date.toISOString().slice(0, 10);
 }
+
+describe("isLikelyWithinRegularSession - Attention-First Freshness Phase 1 - pure, zero-network estimate", () => {
+  it("true at 10:00 AM ET on an ordinary Monday trading day", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-15T14:00:00.000Z"))).toBe(true); // 10:00 AM ET
+  });
+
+  it("true right at the 9:30 AM ET open", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-15T13:30:00.000Z"))).toBe(true);
+  });
+
+  it("false one minute before the 9:30 AM ET open", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-15T13:29:00.000Z"))).toBe(false);
+  });
+
+  it("false exactly at the 4:00 PM ET close (interval is [open, close))", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-15T20:00:00.000Z"))).toBe(false);
+  });
+
+  it("false one minute before the 4:00 PM ET close is still true (inside the session)", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-15T19:59:00.000Z"))).toBe(true);
+  });
+
+  it("false on a weekend even at a normal mid-day hour", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-13T15:00:00.000Z"))).toBe(false); // Saturday
+  });
+
+  it("false on an NYSE holiday (Labor Day, Sep 7 2026) even during normal trading hours", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-09-07T15:00:00.000Z"))).toBe(false);
+  });
+
+  it("false well before the open on an ordinary trading day", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-15T10:00:00.000Z"))).toBe(false); // 6:00 AM ET
+  });
+
+  it("false well after the close on an ordinary trading day", () => {
+    expect(isLikelyWithinRegularSession(new Date("2026-06-16T02:00:00.000Z"))).toBe(false); // 10:00 PM ET
+  });
+});
 
 describe("nextNyseMarketDay", () => {
   it("Sep 4 2026 (Friday) expiration -> next market day is Tue Sep 8 2026, skipping the Labor Day weekend", () => {

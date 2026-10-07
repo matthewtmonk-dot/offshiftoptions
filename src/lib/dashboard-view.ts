@@ -4,7 +4,7 @@ import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignCurrentStage, type CampaignStatusInput } from "@/domain/finance/campaigns";
 import { comparePositionReviewPriority } from "@/domain/finance/positionReview";
-import { underlyingPositionReviewResult, type PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
+import { isKnownTransientFallbackReason, underlyingPositionReviewResult, type PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import {
   accountValueDetail,
   accountValueUnavailableReason,
@@ -246,6 +246,38 @@ export function sortPositionToReviewDisplayRows<T extends { display: PositionAss
     if (a.display && !b.display) return -1;
     if (!a.display && b.display) return 1;
     return 0;
+  });
+}
+
+/**
+ * LST "Attention-First Freshness" Phase 1 - "Attention Now" section: only rows genuinely needing
+ * review/action RIGHT NOW, never a historical (LAST_VALID) Watch/Review carried over from a stale
+ * evaluation - a LAST_VALID row's own action is useful CONTEXT elsewhere on the page, but this app
+ * can no longer confirm it still applies, so it must never be promoted into an attention-demanding
+ * list. Two cases qualify:
+ *   1. A live CURRENT result whose action is WATCH/REVIEW_ROLL/REVIEW_CALL (COMFORTABLE and
+ *      CANNOT_ASSESS are excluded - "current, no action needed" and "nothing to report" are not
+ *      attention items).
+ *   2. A live UNAVAILABLE result carrying a genuine CONTRADICTION reason - any reasonCode outside
+ *      isKnownTransientFallbackReason's existing allowlist (reused verbatim from the approved
+ *      historical-fallback eligibility rule, never a new/independent interpretation of "transient
+ *      vs. contradictory"). An ordinary transient gap (market closed, quote momentarily
+ *      unavailable) never appears here even when no historical fallback exists for it.
+ * Input rows are assumed already sorted (sortPositionToReviewDisplayRows) - this only filters,
+ * never reorders.
+ */
+export function attentionNowRows<T extends { display: PositionAssessmentDisplay | null }>(rows: T[]): T[] {
+  return rows.filter((row) => {
+    const display = row.display;
+    if (!display) return false;
+    if (display.state === "CURRENT") {
+      return display.current.action === "WATCH" || display.current.action === "REVIEW_ROLL" || display.current.action === "REVIEW_CALL";
+    }
+    if (display.state === "UNAVAILABLE") {
+      return display.currentUnavailable.explanation.reasonCodes.some((code) => !isKnownTransientFallbackReason(code));
+    }
+    // LAST_VALID - a historical action is context, never an attention-demanding item.
+    return false;
   });
 }
 

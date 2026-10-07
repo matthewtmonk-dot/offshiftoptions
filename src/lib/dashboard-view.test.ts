@@ -7,6 +7,7 @@ import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewA
 import {
   accountValueCard,
   attachPositionAssessmentDisplays,
+  attentionNowRows,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
@@ -464,6 +465,70 @@ describe("Phase 2B - attachPositionAssessmentDisplays / sortPositionToReviewDisp
   it("sorts a row with no evaluable display after every row that has one, rather than guessing a priority", () => {
     const attached = attachPositionAssessmentDisplays([row("c1"), row("c2")], new Map([["c1", displayFixture()]]));
     expect(sortPositionToReviewDisplayRows(attached).map((r) => r.campaignId)).toEqual(["c1", "c2"]);
+  });
+
+  // Attention-First Freshness Phase 1 - "Attention Now" never promotes a row that doesn't
+  // genuinely need review right now: COMFORTABLE (current, no action) and historical (LAST_VALID)
+  // actions are both excluded, even though a LAST_VALID row can carry a WATCH/REVIEW_ROLL action
+  // of its own - that action is only confirmed-stale context, never a live attention item.
+  describe("attentionNowRows", () => {
+    function unavailableDisplay(reasonCodes: string[]): PositionAssessmentDisplay {
+      return { state: "UNAVAILABLE", currentUnavailable: reviewFixture({ action: "CANNOT_ASSESS", explanation: { ...reviewFixture().explanation, reasonCodes } }) };
+    }
+    function lastValidDisplay(action: PositionReviewResult["action"]): PositionAssessmentDisplay {
+      return {
+        state: "LAST_VALID",
+        currentUnavailable: reviewFixture({ action: "CANNOT_ASSESS", explanation: { ...reviewFixture().explanation, reasonCodes: ["MARKET_CLOSED"] } }),
+        lastValid: {
+          scope: { ownerId: "u1", accountId: "a1", campaignId: "c1", openingEventId: "e1" }, contextFingerprint: "fp",
+          action: action === "CANNOT_ASSESS" ? "COMFORTABLE" : action, reasonCodes: [], evaluatedAt: new Date("2026-06-15T16:00:00Z"),
+          nySessionDate: "2026-06-15", regularSessionStart: new Date("2026-06-15T13:30:00Z"), regularSessionEnd: new Date("2026-06-15T20:00:00Z"),
+          underlyingPrice: 30, underlyingTradeTime: new Date("2026-06-15T16:00:00Z"), ticker: "XYZ", optionType: "PUT", strike: 25,
+          expiration: new Date("2026-10-02"), contracts: 1, moneyness: "OTM", dollarDistance: 5, percentageDistance: 20,
+          appliedRollBufferPercent: 3, positionEvidenceSource: "MANUAL_POSITION", brokerReceiptAt: null, evaluationPolicyVersion: 1,
+        },
+      };
+    }
+
+    it("excludes a CURRENT Comfortable row - current, no action needed is not an attention item", () => {
+      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "COMFORTABLE" })]]));
+      expect(attentionNowRows(attached)).toHaveLength(0);
+    });
+
+    it("includes a CURRENT Watch/Review roll/Review call row", () => {
+      for (const action of ["WATCH", "REVIEW_ROLL", "REVIEW_CALL"] as const) {
+        const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action })]]));
+        expect(attentionNowRows(attached).map((r) => r.campaignId)).toEqual(["c1"]);
+      }
+    });
+
+    it("excludes a row with no display at all", () => {
+      const attached = attachPositionAssessmentDisplays([row("c1")], new Map());
+      expect(attentionNowRows(attached)).toHaveLength(0);
+    });
+
+    it("excludes a LAST_VALID row even when its own stored action is Watch/Review - historical action is context, never a live attention item", () => {
+      const attached = [{ ...row("c1"), display: lastValidDisplay("WATCH") }];
+      expect(attentionNowRows(attached)).toHaveLength(0);
+    });
+
+    it("excludes an UNAVAILABLE row carrying only a known transient/benign reason (market closed, quote momentarily unavailable)", () => {
+      const attached = [{ ...row("c1"), display: unavailableDisplay(["MARKET_CLOSED"]) }];
+      expect(attentionNowRows(attached)).toHaveLength(0);
+    });
+
+    it("includes an UNAVAILABLE row carrying a genuine contradiction reason (e.g. past-expiration unresolved)", () => {
+      const attached = [{ ...row("c1"), display: unavailableDisplay(["PAST_EXPIRATION_UNRESOLVED"]) }];
+      expect(attentionNowRows(attached).map((r) => r.campaignId)).toEqual(["c1"]);
+    });
+
+    it("returns an empty list (never a guessed/placeholder item) when nothing needs attention - supports the Dashboard's own 'No new attention items' empty state", () => {
+      const attached = attachPositionAssessmentDisplays([row("c1"), row("c2")], new Map([
+        ["c1", displayFixture({ action: "COMFORTABLE" })],
+        ["c2", lastValidDisplay("REVIEW_ROLL")],
+      ]));
+      expect(attentionNowRows(attached)).toEqual([]);
+    });
   });
 });
 

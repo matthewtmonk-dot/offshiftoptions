@@ -4,6 +4,7 @@ import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
+import { FreshnessStrip } from "@/components/freshness-strip";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { money, shortCalendarDate } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
@@ -19,6 +20,7 @@ import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import {
   accountValueCard,
   attachPositionAssessmentDisplays,
+  attentionNowRows,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
@@ -181,9 +183,9 @@ export default async function DashboardPage() {
 
       {/* 3 & 4. Main row: Positions to Review (dominant) + Capital & Cash */}
       <div className="grid gap-3 xl:grid-cols-3">
-        <div className="xl:col-span-2">
+        <div className="xl:col-span-2 space-y-3">
           <Panel
-            title="Positions to Review"
+            title="Positions"
             action={
               <IntentPrefetchLink className="text-sm font-medium text-sky-300 hover:text-sky-200" href="/positions">
                 Open in Tracker
@@ -198,14 +200,7 @@ export default async function DashboardPage() {
                 </IntentPrefetchLink>
               </EmptyState>
             ) : (
-              <Suspense
-                fallback={
-                  <PositionsToReviewTable
-                    rows={allReviewRows.slice(0, POSITIONS_TO_REVIEW_LIMIT).map((row) => ({ ...row, display: null }))}
-                    loading
-                  />
-                }
-              >
+              <Suspense fallback={<p className="text-xs text-zinc-500">Checking current status…</p>}>
                 <PositionsToReviewWithStatus
                   userId={user.id}
                   ownAccounts={data.ownAccounts}
@@ -411,16 +406,32 @@ async function PositionsToReviewWithStatus({
   // see positionAssessmentOrchestration.ts's own owner-isolation check - so this notice only ever
   // appears from the viewer's own historical data, never a buddy's.
   const hasLastValid = visibleRows.some((row) => row.display?.state === "LAST_VALID");
+  const attentionRows = attentionNowRows(sortedRows);
+  const allDisplays = sortedRows.flatMap((row) => (row.display ? [row.display] : []));
 
   return (
-    <div className="space-y-2">
-      {hasLastValid ? <LastValidNotice /> : null}
-      <PositionsToReviewTable rows={visibleRows} now={asOf} />
-      {hiddenCount > 0 ? (
-        <IntentPrefetchLink href="/positions" className="block text-center text-xs text-zinc-500 hover:text-sky-300">
-          +{hiddenCount} more in Tracker
-        </IntentPrefetchLink>
-      ) : null}
+    <div className="space-y-3">
+      <FreshnessStrip displays={allDisplays} now={asOf} />
+
+      <div>
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Attention Now</h3>
+        {attentionRows.length === 0 ? (
+          <p className="text-xs text-zinc-500">No new attention items.</p>
+        ) : (
+          <PositionsToReviewTable rows={attentionRows} now={asOf} />
+        )}
+      </div>
+
+      <div>
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
+        {hasLastValid ? <div className="mb-2"><LastValidNotice /></div> : null}
+        <PositionsToReviewTable rows={visibleRows} now={asOf} />
+        {hiddenCount > 0 ? (
+          <IntentPrefetchLink href="/positions" className="mt-1.5 block text-center text-xs text-zinc-500 hover:text-sky-300">
+            +{hiddenCount} more in Tracker
+          </IntentPrefetchLink>
+        ) : null}
+      </div>
     </div>
   );
 }

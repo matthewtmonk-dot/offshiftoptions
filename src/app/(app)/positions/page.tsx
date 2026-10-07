@@ -21,6 +21,8 @@ import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
+import { FreshnessStrip } from "@/components/freshness-strip";
+import { currentActivityLabel, historicalOriginLabel } from "@/domain/finance/positionActivity";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -462,6 +464,8 @@ export default async function PositionsPage({
             </div>
           </div>
 
+          <FreshnessStrip displays={Array.from(positionAssessmentDisplayByCampaignId.values())} now={snapshotCheckedAt} />
+
           {/* A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never
               LAST_VALID) - see positionAssessmentOrchestration.ts's own owner-isolation check - so
               this notice only ever appears from the viewer's own historical data. */}
@@ -755,6 +759,13 @@ function CampaignCard({
   // campaign, regardless of CURRENT/LAST_VALID/UNAVAILABLE state - daysToExpiration lives on the
   // live evaluator result in every state (currentUnavailable is still a genuine live evaluation).
   const dte = display ? underlyingPositionReviewResult(display).explanation.daysToExpiration : null;
+  // Attention-First Freshness Phase 1 - a presentation-only relabel of the campaign's own
+  // already-authoritative currentStage (see positionActivity.ts): an ASSIGNED campaign with an
+  // open covered call shows "COVERED CALL OPEN" rather than leaving "ASSIGNED" as the primary
+  // ongoing activity (the ticket's own PATH complaint). OPEN/CLOSED keep their literal status text
+  // - neither has the same "origin, not activity" problem ASSIGNED alone does.
+  const activityLabel = campaign.status === "ASSIGNED" ? currentActivityLabel(summary.currentStage) : campaign.status;
+  const originLabel = historicalOriginLabel({ status: campaign.status, events: campaign.events });
 
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
@@ -766,13 +777,18 @@ function CampaignCard({
               recognizable" goal). */}
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-2xl font-bold tracking-tight text-zinc-50">{campaign.ticker}</span>
-            <Badge tone={statusTone(campaign.status, plValue)}>{campaign.status}</Badge>
+            <Badge tone={statusTone(campaign.status, plValue)}>{activityLabel}</Badge>
             {campaign.status === "CLOSED" ? (
               <Badge tone={plValue === null ? "neutral" : plValue < 0 ? "bad" : "good"}>
                 {expiredWorthless ? "EXPIRED OTM · " : ""}
                 {outcomeLabel(summary.finalResult)}
               </Badge>
             ) : null}
+            {/* Attention-First Freshness Phase 1 - "Called away"/"Assigned from put" secondary
+                ORIGIN context (history view), distinct from the financial WIN/LOSS badge above -
+                this app has no separate "call exercised" event, so a closed campaign that assigned
+                shares and later sold them is, by definition, how a covered call resolves ITM. */}
+            {campaign.status === "CLOSED" && originLabel ? <span className="text-xs text-zinc-500">{originLabel}</span> : null}
             {!openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
           </div>
           {openView && openPut ? (
@@ -800,6 +816,16 @@ function CampaignCard({
               {openCallEventRow ? (
                 <span className="text-[13px] text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>
               ) : null}
+            </div>
+          ) : null}
+          {/* Attention-First Freshness Phase 1 - the PATH-style "shares assigned at $X" origin
+              context, shown for every ASSIGNED campaign (with or without an open call) right in
+              the compact summary - not only inside the expanded Assigned Stock detail below - so
+              "COVERED CALL OPEN"/"SHARES HELD" above never reads as unexplained. */}
+          {openView && campaign.status === "ASSIGNED" ? (
+            <div className="mt-1 text-[13px] text-zinc-400">
+              {summary.sharesHeld} shares{latestAssignmentEvent ? ` assigned at ${money(latestAssignmentEvent.strike)}` : ""}
+              {originLabel ? <span className="ml-1.5 text-zinc-500">· {originLabel}</span> : null}
             </div>
           ) : null}
           {/* The dominant assessment signal (Comfortable/Watch/Review roll/Review call/Cannot

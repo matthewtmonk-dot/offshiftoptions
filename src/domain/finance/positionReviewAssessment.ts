@@ -391,6 +391,18 @@ export function evaluateHistoricalAssessmentEligibility(input: StoredAssessmentM
 }
 
 /**
+ * Phase 1 (attention-first freshness) - exposes the same transient/benign-reason allowlist
+ * evaluateHistoricalAssessmentEligibility already gates on, so a presentation layer (e.g.
+ * Dashboard's "Attention Now" filter) can tell an ordinary transient evidence gap (market closed,
+ * quote momentarily unavailable) apart from a genuine contradiction worth surfacing for review
+ * (past-expiration unresolved, assigned-shares-no-call, coverage ambiguity, incomplete terms) -
+ * without re-deriving or duplicating this allowlist a second time.
+ */
+export function isKnownTransientFallbackReason(code: string): boolean {
+  return ALLOWED_FALLBACK_REASONS.has(code);
+}
+
+/**
  * LST "Last Valid Position Assessment" - Phase 2A display composition. A current valid assessment
  * always wins; historical data is DISPLAY FALLBACK ONLY and is composed here from an ALREADY
  * fetched/verified `StoredLastValidAssessment` - this function never queries anything itself and

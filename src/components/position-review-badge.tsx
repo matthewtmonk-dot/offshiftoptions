@@ -139,10 +139,21 @@ export function PositionReviewEvidenceLine({ result }: { result: PositionReviewR
 
   parts.push(POSITION_EVIDENCE_LABELS[evidence.position]);
 
+  // Attention-First Freshness Phase 1 - a persistable (live) action gets the same "<tier> ·
+  // <time>" sub-line shape the historical presentation uses (see lastValidTimingCopy), so the
+  // freshness label is always visible in the same place regardless of CURRENT/SNAPSHOT/
+  // LAST_SESSION/HISTORICAL state. A CANNOT_ASSESS row keeps the plain "Price as of" phrasing -
+  // it never claims "Current" guidance exists.
+  const freshnessLine = explanation.quoteTradeTime
+    ? result.action === "CANNOT_ASSESS"
+      ? `Price as of ${formatEtTime(explanation.quoteTradeTime)}`
+      : `Current · ${formatEtTime(explanation.quoteTradeTime)}`
+    : null;
+
   return (
     <p className="mt-1 text-[13px] text-zinc-400">
       {parts.join(" · ")}
-      {explanation.quoteTradeTime ? <span className="block text-xs text-zinc-500">Price as of {formatEtTime(explanation.quoteTradeTime)}</span> : null}
+      {freshnessLine ? <span className="block text-xs text-zinc-500">{freshnessLine}</span> : null}
     </p>
   );
 }
