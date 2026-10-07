@@ -31,13 +31,24 @@ export function currentActivityLabel(stage: CampaignCurrentStage): CurrentActivi
 
 /**
  * Secondary, muted ORIGIN context - "how did we get here," never the primary activity signal above.
- * Reads only the campaign's own append-only event history (never inferred from moneyness/price) -
- * "Assigned from put" once any ASSIGNMENT event exists, upgraded to "Called away" once the campaign
- * has also CLOSED with a STOCK_SALE in its history (the wheel's own vocabulary for shares leaving
- * while a covered call was active - this app has no separate "call exercised" event type; a closed
- * campaign that assigned shares and later sold them is, by definition, how a covered call resolves
- * when it finishes in-the-money). Returns null when there is no assignment history to describe -
- * an ordinary still-open short put has no "origin" worth a secondary label.
+ * Reads only the campaign's own append-only event history (never inferred from moneyness/price,
+ * expiration, or a strike/price relationship).
+ *
+ * Codex blocker repair (B3) - this used to upgrade to "Called away" once a CLOSED campaign also had
+ * a STOCK_SALE event, but that is NOT proof a covered call was actually exercised: `STOCK_SALE` is
+ * the SAME event type `sellStockAction` (workflows.ts) creates for a plain, deliberate manual sale
+ * of assigned shares - there is no separate "call exercised/assigned" event anywhere in this app's
+ * schema, and the ticket's own instruction is explicit: do not invent one, and do not infer call
+ * assignment from a stock sale alone. A user who manually sold assigned shares (for any reason,
+ * including simply changing their mind, well before any call's expiration) would otherwise be told
+ * their shares were "Called away," which this app cannot actually prove. The honest, fully-provable
+ * wording is used instead: "Assigned from put" (proven by a real ASSIGNMENT event) for a campaign
+ * that still holds the shares or is only now resolving, and "Shares sold" (proven by a real,
+ * already-recorded STOCK_SALE event) once the campaign has also CLOSED - a factual statement of
+ * what happened, with no claim about WHY. If this app ever gains a real, authoritative signal that
+ * actually proves call assignment (not invented here), "Called away" can be reintroduced as a
+ * THIRD, separately-gated branch above "Shares sold" - never by weakening this function's current
+ * proof requirement.
  */
 export function historicalOriginLabel(args: { status: CampaignStatusInput; events: readonly Pick<CampaignEventInput, "type">[] }): string | null {
   const hasAssignment = args.events.some((event) => event.type === "ASSIGNMENT");
@@ -46,7 +57,7 @@ export function historicalOriginLabel(args: { status: CampaignStatusInput; event
   }
   const hasStockSale = args.events.some((event) => event.type === "STOCK_SALE");
   if (args.status === "CLOSED" && hasStockSale) {
-    return "Called away";
+    return "Shares sold";
   }
   return "Assigned from put";
 }

@@ -2,11 +2,12 @@ import { Suspense } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
-import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
-import { FreshnessStrip } from "@/components/freshness-strip";
+import { ClientPresentationProvider, FreshnessStrip, AttentionNowList, type DisplayEntry } from "@/components/client-freshness";
+import { PositionToReviewRowView } from "@/components/position-to-review-row";
+import { deriveMarketSessionClaim } from "@/domain/finance/presentationFreshness";
+import { underlyingPositionReviewResult } from "@/domain/finance/positionReviewAssessment";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
-import { money, shortCalendarDate } from "@/lib/format";
 import { requireCurrentUser } from "@/lib/auth";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { resolvePositionAssessmentDisplaysForUser } from "@/lib/positionAssessmentOrchestration";
@@ -30,7 +31,6 @@ import {
   scannerInsightViewModel,
   sortPositionToReviewDisplayRows,
   wholeAccountGainCard,
-  type PositionToReviewDisplayRow,
   type PositionToReviewRow,
 } from "@/lib/dashboard-view";
 
@@ -407,61 +407,37 @@ async function PositionsToReviewWithStatus({
   // appears from the viewer's own historical data, never a buddy's.
   const hasLastValid = visibleRows.some((row) => row.display?.state === "LAST_VALID");
   const attentionRows = attentionNowRows(sortedRows);
-  const allDisplays = sortedRows.flatMap((row) => (row.display ? [row.display] : []));
+  const entries: DisplayEntry[] = sortedRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
+  // Codex blocker repair (B2) - derived from the page's own already-fetched session evidence
+  // (never a pure calendar guess, zero new provider calls); "UNKNOWN" whenever that evidence
+  // disagrees or is unavailable, so the strip never asserts an unproven market-open/closed claim.
+  const marketClaim = deriveMarketSessionClaim(sortedRows.flatMap((row) => (row.display ? [underlyingPositionReviewResult(row.display)] : [])));
 
   return (
-    <div className="space-y-3">
-      <FreshnessStrip displays={allDisplays} now={asOf} />
+    <ClientPresentationProvider entries={entries} now={asOf}>
+      <div className="space-y-3">
+        <FreshnessStrip entries={entries} now={asOf} marketClaim={marketClaim} />
 
-      <div>
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Attention Now</h3>
-        {attentionRows.length === 0 ? (
-          <p className="text-xs text-zinc-500">No new attention items.</p>
-        ) : (
-          <PositionsToReviewTable rows={attentionRows} now={asOf} />
-        )}
-      </div>
-
-      <div>
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
-        {hasLastValid ? <div className="mb-2"><LastValidNotice /></div> : null}
-        <PositionsToReviewTable rows={visibleRows} now={asOf} />
-        {hiddenCount > 0 ? (
-          <IntentPrefetchLink href="/positions" className="mt-1.5 block text-center text-xs text-zinc-500 hover:text-sky-300">
-            +{hiddenCount} more in Tracker
-          </IntentPrefetchLink>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function PositionsToReviewTable({ rows, now = new Date(), loading = false }: { rows: PositionToReviewDisplayRow[]; now?: Date; loading?: boolean }) {
-  return (
-    <div className="space-y-1.5">
-      {rows.map((row) => (
-        <div key={row.campaignId} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3.5 py-2.5">
-          <div className="min-w-0">
-            <div className="flex items-baseline gap-2">
-              <span className="text-lg font-bold text-zinc-100">{row.ticker}</span>
-              {row.legType ? (
-                <span className="text-[15px] text-zinc-300 tabular-nums">
-                  {money(row.strike)} {row.legType === "PUT" ? "Put" : "Call"}
-                  {row.expiration ? ` · ${shortCalendarDate(row.expiration)}` : ""}
-                </span>
-              ) : null}
-            </div>
-            <div className="mt-0.5 text-xs text-zinc-500">
-              {row.stage}
-              {row.quantity !== null ? ` · ${row.quantity} ${row.quantityUnit}` : ""}
-            </div>
-            {row.display ? <LivePositionAssessmentEvidenceLine display={row.display} now={now} /> : null}
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {row.display ? <LivePositionAssessmentBadge display={row.display} now={now} /> : <Badge tone="neutral">{loading ? "Checking..." : "Review needed"}</Badge>}
-          </div>
+        <div>
+          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Attention Now</h3>
+          <AttentionNowList rows={attentionRows} now={asOf} />
         </div>
-      ))}
-    </div>
+
+        <div>
+          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
+          {hasLastValid ? <div className="mb-2"><LastValidNotice /></div> : null}
+          <div className="space-y-1.5">
+            {visibleRows.map((row) => (
+              <PositionToReviewRowView key={row.campaignId} row={row} now={asOf} />
+            ))}
+          </div>
+          {hiddenCount > 0 ? (
+            <IntentPrefetchLink href="/positions" className="mt-1.5 block text-center text-xs text-zinc-500 hover:text-sky-300">
+              +{hiddenCount} more in Tracker
+            </IntentPrefetchLink>
+          ) : null}
+        </div>
+      </div>
+    </ClientPresentationProvider>
   );
 }

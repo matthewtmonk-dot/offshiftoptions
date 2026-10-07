@@ -97,35 +97,6 @@ const marketDateFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
 });
 
-const nyWallClockFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-});
-
-/**
- * Attention-First Freshness Phase 1 - a PURE, zero-network estimate of "is NYSE regular trading
- * hours (9:30 AM-4:00 PM ET) likely in progress right now," for presentation-only use (e.g. the
- * Dashboard/Tracker freshness strip's "Market open"/"Market closed" headline). Deliberately NEVER
- * fetched from a live session-evidence provider call - this exists specifically so the freshness
- * strip can show a reasonable headline with ZERO additional Schwab/market-data requests.
- *
- * Known, documented limitation (acceptable for this presentational use): NYSE early-close days
- * (e.g. the day after Thanksgiving, Christmas Eve when a trading day) are NOT modeled - this
- * checks the ordinary 9:30-4:00 window on any NYSE market day, regardless of an early close. This
- * never gates any trust-sensitive decision (quote eligibility, guidance deadlines, persistence
- * eligibility all continue to use the real, provider-verified EquityMarketSessionEvidence
- * elsewhere) - it only picks a headline's wording.
- */
-export function isLikelyWithinRegularSession(now: Date): boolean {
-  if (!isNyseMarketDay(marketDate(now))) {
-    return false;
-  }
-  const parts = nyWallClockFormatter.formatToParts(now);
-  const hour = Number(parts.find((part) => part.type === "hour")!.value);
-  const minute = Number(parts.find((part) => part.type === "minute")!.value);
-  const minutesSinceMidnight = hour * 60 + minute;
-  return minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight < 16 * 60;
-}
-
 /** The America/New_York calendar date of `instant`, as a UTC-midnight Date - exported for any
  * caller (e.g. the Scanner domain's own honest-retrieval-timing disclosure) that needs the same
  * NY-calendar-day conversion `isNyseMarketDay` expects, without duplicating this Intl lookup. */

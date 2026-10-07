@@ -21,8 +21,9 @@ import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
-import { FreshnessStrip } from "@/components/freshness-strip";
+import { ClientPresentationProvider, FreshnessStrip, type DisplayEntry } from "@/components/client-freshness";
 import { currentActivityLabel, historicalOriginLabel } from "@/domain/finance/positionActivity";
+import { deriveMarketSessionClaim } from "@/domain/finance/presentationFreshness";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -280,6 +281,11 @@ export default async function PositionsPage({
       positionAssessmentDisplayByCampaignId.set(entry.campaignId, entry.display);
     }
   }
+  const trackerFreshnessEntries: DisplayEntry[] = Array.from(positionAssessmentDisplayByCampaignId.entries()).map(([key, display]) => ({ key, display }));
+  // Codex blocker repair (B2) - derived from the page's own already-fetched session evidence
+  // (never a pure calendar guess, zero new provider calls); "UNKNOWN" whenever that evidence
+  // disagrees or is unavailable, so the strip never asserts an unproven market-open/closed claim.
+  const trackerMarketClaim = deriveMarketSessionClaim(Array.from(positionAssessmentDisplayByCampaignId.values()).map((display) => underlyingPositionReviewResult(display)));
 
   // Performance is always computed from the current user's own completed campaigns and own
   // accounts, never from the scope-filtered `campaigns`/`visibleAccounts` lists above - so
@@ -464,7 +470,9 @@ export default async function PositionsPage({
             </div>
           </div>
 
-          <FreshnessStrip displays={Array.from(positionAssessmentDisplayByCampaignId.values())} now={snapshotCheckedAt} />
+          <ClientPresentationProvider entries={trackerFreshnessEntries} now={snapshotCheckedAt}>
+            <FreshnessStrip entries={trackerFreshnessEntries} now={snapshotCheckedAt} marketClaim={trackerMarketClaim} />
+          </ClientPresentationProvider>
 
           {/* A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never
               LAST_VALID) - see positionAssessmentOrchestration.ts's own owner-isolation check - so
@@ -764,7 +772,12 @@ function CampaignCard({
   // open covered call shows "COVERED CALL OPEN" rather than leaving "ASSIGNED" as the primary
   // ongoing activity (the ticket's own PATH complaint). OPEN/CLOSED keep their literal status text
   // - neither has the same "origin, not activity" problem ASSIGNED alone does.
-  const activityLabel = campaign.status === "ASSIGNED" ? currentActivityLabel(summary.currentStage) : campaign.status;
+  // Non-blocking cleanup (Codex review) - apply the activity vocabulary consistently for OPEN too
+  // (SHORT PUT OPEN / SETTLEMENT PENDING / REVIEW NEEDED), not only ASSIGNED - an ordinary open
+  // put used to show the bare literal "OPEN" while an assigned-with-call campaign already got the
+  // richer label. CLOSED keeps its own literal text (already matches currentActivityLabel's own
+  // "CLOSED" output exactly, so this is a no-op for that case either way).
+  const activityLabel = campaign.status === "CLOSED" ? campaign.status : currentActivityLabel(summary.currentStage);
   const originLabel = historicalOriginLabel({ status: campaign.status, events: campaign.events });
 
   return (
@@ -784,10 +797,11 @@ function CampaignCard({
                 {outcomeLabel(summary.finalResult)}
               </Badge>
             ) : null}
-            {/* Attention-First Freshness Phase 1 - "Called away"/"Assigned from put" secondary
+            {/* Attention-First Freshness Phase 1 - "Shares sold"/"Assigned from put" secondary
                 ORIGIN context (history view), distinct from the financial WIN/LOSS badge above -
-                this app has no separate "call exercised" event, so a closed campaign that assigned
-                shares and later sold them is, by definition, how a covered call resolves ITM. */}
+                see historicalOriginLabel's own doc comment (positionActivity.ts, Codex blocker
+                repair B3): this app has no event proving a call was actually exercised, so it
+                never claims "Called away" - only the fully-provable fact that shares were sold. */}
             {campaign.status === "CLOSED" && originLabel ? <span className="text-xs text-zinc-500">{originLabel}</span> : null}
             {!openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
           </div>

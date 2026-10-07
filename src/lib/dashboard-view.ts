@@ -265,6 +265,14 @@ export function sortPositionToReviewDisplayRows<T extends { display: PositionAss
  *      unavailable) never appears here even when no historical fallback exists for it.
  * Input rows are assumed already sorted (sortPositionToReviewDisplayRows) - this only filters,
  * never reorders.
+ *
+ * Codex blocker repair (B1) - this is the SERVER-SIDE candidate list only, computed once at page
+ * render against `now`. A case-1 (CURRENT Watch/Review) row can still expire client-side at its
+ * own trusted guidance deadline before the next server render - `AttentionNowList`
+ * (client-freshness.tsx) wraps this list and additionally removes a CURRENT-sourced row the
+ * instant useActiveGuidanceExpired reports it expired, so the rendered list never disagrees with
+ * what that row's own visible badge is showing. A case-2 (UNAVAILABLE contradiction) row has no
+ * guidance deadline at all and passes through the client layer unchanged.
  */
 export function attentionNowRows<T extends { display: PositionAssessmentDisplay | null }>(rows: T[]): T[] {
   return rows.filter((row) => {

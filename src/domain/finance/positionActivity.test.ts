@@ -43,20 +43,42 @@ describe("historicalOriginLabel - append-only event-history origin context only,
     ).toBe("Assigned from put");
   });
 
-  it("shares called away: CLOSED campaign with both an assignment and a later stock sale reads 'Called away'", () => {
-    expect(
-      historicalOriginLabel({
-        status: "CLOSED",
-        events: [{ type: "SELL_PUT" }, { type: "ASSIGNMENT" }, { type: "SELL_COVERED_CALL" }, { type: "STOCK_SALE" }],
-      }),
-    ).toBe("Called away");
+  // Codex blocker repair (B3) - "Called away" claimed call-assignment causation this app cannot
+  // actually prove (STOCK_SALE is the same event a plain manual sale creates). It is never shown
+  // any more - a closed, assigned-then-sold campaign now reads the honest, fully-provable "Shares
+  // sold" instead, with no claim about WHY the shares left.
+  it("a CLOSED campaign with both an assignment and a later stock sale reads the factual 'Shares sold' - never the unprovable 'Called away'", () => {
+    const result = historicalOriginLabel({
+      status: "CLOSED",
+      events: [{ type: "SELL_PUT" }, { type: "ASSIGNMENT" }, { type: "SELL_COVERED_CALL" }, { type: "STOCK_SALE" }],
+    });
+    expect(result).toBe("Shares sold");
+    expect(result).not.toBe("Called away");
+  });
+
+  it("manual-sale scenario: assigned shares later sold manually (no covered call ever involved) still reads 'Shares sold', never 'Called away' - proves the label makes no claim about cause", () => {
+    const result = historicalOriginLabel({ status: "CLOSED", events: [{ type: "SELL_PUT" }, { type: "ASSIGNMENT" }, { type: "STOCK_SALE" }] });
+    expect(result).toBe("Shares sold");
+    expect(result).not.toBe("Called away");
   });
 
   it("a CLOSED campaign that never assigned shares at all (plain expired/closed put) returns null - never a fabricated origin", () => {
     expect(historicalOriginLabel({ status: "CLOSED", events: [{ type: "SELL_PUT" }, { type: "PUT_EXPIRED" }] })).toBeNull();
   });
 
-  it("a CLOSED campaign with an assignment but no stock sale (e.g. still mid-history in a test fixture) stays 'Assigned from put', never guesses 'Called away' without real sale evidence", () => {
+  it("a CLOSED campaign with an assignment but no stock sale (e.g. still mid-history in a test fixture) stays 'Assigned from put' - the only fact actually proven", () => {
     expect(historicalOriginLabel({ status: "CLOSED", events: [{ type: "SELL_PUT" }, { type: "ASSIGNMENT" }] })).toBe("Assigned from put");
+  });
+
+  it("'Called away' is never returned for ANY input this app can construct today - no event type exists anywhere in this schema that proves call assignment", () => {
+    const allPossibleEventTypes: { type: string }[] = [
+      { type: "SELL_PUT" }, { type: "CLOSE_PUT" }, { type: "ROLL_PUT_CLOSE" }, { type: "ROLL_PUT_OPEN" }, { type: "ASSIGNMENT" },
+      { type: "SELL_COVERED_CALL" }, { type: "CLOSE_COVERED_CALL" }, { type: "COVERED_CALL_EXPIRED" }, { type: "PUT_EXPIRED" },
+      { type: "STOCK_SALE" }, { type: "NOTE" },
+    ];
+    for (const status of ["OPEN", "ASSIGNED", "CLOSED"] as const) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(historicalOriginLabel({ status, events: allPossibleEventTypes as any })).not.toBe("Called away");
+    }
   });
 });
