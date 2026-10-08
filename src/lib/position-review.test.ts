@@ -205,7 +205,7 @@ describe("resolvePositionReviewsForUser", () => {
   it("only requests quote evidence for tickers that actually have a leg to review", async () => {
     getPositions.mockResolvedValue([]);
     await resolvePositionReviewsForUser("matt", [putCampaign()], [schwabAccount], 3, NOON);
-    expect(getQuoteEvidence).toHaveBeenCalledWith("matt", ["UPST"]);
+    expect(getQuoteEvidence).toHaveBeenCalledWith("matt", ["UPST"], undefined);
   });
 });
 

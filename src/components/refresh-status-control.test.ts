@@ -179,7 +179,7 @@ describe("V1 scope decision - failed-refresh special recovery intentionally defe
 
   it("Dashboard and Tracker both resolve LAST_VALID directly on a normal page load/render - no special post-refresh-failure path required", () => {
     const orchestration = source("../lib/positionAssessmentOrchestration.ts");
-    expect(orchestration).toContain("resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock)");
+    expect(orchestration).toContain("resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock, signal)");
   });
 
   it("Tracker's own live position-review calls and stock-snapshot quote calls are unconditional again - no retained-evidence bypass of any kind", () => {

@@ -12,19 +12,28 @@ function requestWithHeaders(headers: Record<string, string>): Request {
 }
 
 describe("POST /api/internal/scheduled-capture", () => {
-  const ORIGINAL_SECRET = process.env.OSO_CRON_SECRET;
+  const ORIGINAL_SECRET = process.env.OSO_SCHEDULED_CAPTURE_SECRET;
+  const ORIGINAL_CRON_SECRET = process.env.OSO_CRON_SECRET;
 
   beforeEach(() => {
     runHeartbeatMock.mockReset();
-    runHeartbeatMock.mockResolvedValue({ status: "ok", due: 0, processed: 0, skipped: 0, failed: 0 });
-    process.env.OSO_CRON_SECRET = "sentinel-scheduled-capture-secret";
+    runHeartbeatMock.mockResolvedValue({ status: "ok", due: 0, processed: 0, deferred: 0, skipped: 0, failed: 0 });
+    process.env.OSO_SCHEDULED_CAPTURE_SECRET = "sentinel-scheduled-capture-secret";
+    // Codex blocker repair (B6) - the OLD shared secret is deliberately left configured too, so
+    // the "no fallback" tests below prove it is REJECTED by this endpoint, not merely untested.
+    process.env.OSO_CRON_SECRET = "sentinel-shared-cron-secret";
   });
 
   afterEach(() => {
     if (ORIGINAL_SECRET === undefined) {
+      delete process.env.OSO_SCHEDULED_CAPTURE_SECRET;
+    } else {
+      process.env.OSO_SCHEDULED_CAPTURE_SECRET = ORIGINAL_SECRET;
+    }
+    if (ORIGINAL_CRON_SECRET === undefined) {
       delete process.env.OSO_CRON_SECRET;
     } else {
-      process.env.OSO_CRON_SECRET = ORIGINAL_SECRET;
+      process.env.OSO_CRON_SECRET = ORIGINAL_CRON_SECRET;
     }
   });
 
@@ -40,17 +49,29 @@ describe("POST /api/internal/scheduled-capture", () => {
     expect(runHeartbeatMock).not.toHaveBeenCalled();
   });
 
-  it("returns 401 when OSO_CRON_SECRET is not configured on the server at all", async () => {
-    delete process.env.OSO_CRON_SECRET;
+  it("returns 401 when OSO_SCHEDULED_CAPTURE_SECRET is not configured on the server at all", async () => {
+    delete process.env.OSO_SCHEDULED_CAPTURE_SECRET;
     const response = await POST(requestWithHeaders({ authorization: "Bearer anything" }));
     expect(response.status).toBe(401);
     expect(runHeartbeatMock).not.toHaveBeenCalled();
   });
 
-  it("also accepts the secret via the X-OSO-Cron-Secret header", async () => {
-    const response = await POST(requestWithHeaders({ "x-oso-cron-secret": "sentinel-scheduled-capture-secret" }));
+  it("Codex blocker repair (B6) - rejects the OLD shared OSO_CRON_SECRET - there is no fallback", async () => {
+    const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-shared-cron-secret" }));
+    expect(response.status).toBe(401);
+    expect(runHeartbeatMock).not.toHaveBeenCalled();
+  });
+
+  it("also accepts the secret via the X-OSO-Scheduled-Capture-Secret header", async () => {
+    const response = await POST(requestWithHeaders({ "x-oso-scheduled-capture-secret": "sentinel-scheduled-capture-secret" }));
     expect(response.status).toBe(200);
     expect(runHeartbeatMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects the correct secret sent via the OLD X-OSO-Cron-Secret header name", async () => {
+    const response = await POST(requestWithHeaders({ "x-oso-cron-secret": "sentinel-scheduled-capture-secret" }));
+    expect(response.status).toBe(401);
+    expect(runHeartbeatMock).not.toHaveBeenCalled();
   });
 
   it("calls the heartbeat with no arguments - it can never be told which user/account to target", async () => {
@@ -63,15 +84,15 @@ describe("POST /api/internal/scheduled-capture", () => {
     const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scheduled-capture-secret" }));
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body).toEqual({ status: "ok", due: 0, processed: 0, skipped: 0, failed: 0 });
+    expect(body).toEqual({ status: "ok", due: 0, processed: 0, deferred: 0, skipped: 0, failed: 0 });
   });
 
   it("passes through a real processed result's aggregate counts - never brokerage/account/symbol data", async () => {
-    runHeartbeatMock.mockResolvedValue({ status: "ok", due: 2, processed: 1, skipped: 1, failed: 0 });
+    runHeartbeatMock.mockResolvedValue({ status: "ok", due: 2, processed: 1, deferred: 1, skipped: 0, failed: 0 });
     const response = await POST(requestWithHeaders({ authorization: "Bearer sentinel-scheduled-capture-secret" }));
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body).toEqual({ status: "ok", due: 2, processed: 1, skipped: 1, failed: 0 });
+    expect(body).toEqual({ status: "ok", due: 2, processed: 1, deferred: 1, skipped: 0, failed: 0 });
   });
 
   it("never exposes the configured secret anywhere in the response", async () => {

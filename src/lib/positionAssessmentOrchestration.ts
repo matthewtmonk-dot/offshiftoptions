@@ -219,8 +219,12 @@ export async function resolvePositionAssessmentDisplaysForUser(
   rollBufferPercent: number,
   now: Date = new Date(),
   clock: () => Date = () => now,
+  /** Codex blocker repair (B3, scheduled-capture) - optional, additive passthrough; see
+   * resolvePositionReviewsForUser's own doc comment (position-review.ts). Every existing caller
+   * (Dashboard/Tracker) omits this and is completely unaffected. */
+  signal?: AbortSignal,
 ): Promise<ResolvedPositionAssessmentDisplay[]> {
-  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock);
+  const resolved = await resolvePositionReviewsForUser(userId, campaigns, accounts, rollBufferPercent, now, clock, signal);
   const campaignById = new Map(campaigns.map((campaign) => [campaign.id, campaign]));
   const accountById = new Map(accounts.map((account) => [account.id, account]));
 

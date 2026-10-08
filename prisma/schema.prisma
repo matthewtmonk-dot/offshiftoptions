@@ -1597,8 +1597,18 @@ enum ScheduledCaptureSlot {
 enum ScheduledCaptureStatus {
   RUNNING
   SUCCEEDED
+  /// Codex blocker repair (B4) - the per-minute provider-request budget had no room for this
+  /// owner's capture THIS heartbeat. Never a failure: the slot's original `dueAt` identity is
+  /// preserved, and a later heartbeat is expected to pick it up - see the fairness ordering in
+  /// scheduled-capture.ts's own doc comment.
+  DEFERRED
+  /// Codex blocker repair (B3) - a RUNNING row aged past the point this app can still trust it was
+  /// genuinely abandoned (not merely slow). Marked here for OPERATIONAL VISIBILITY only - this
+  /// EXACT (owner, dueAt) slot is never re-executed (the earlier attempt may still be in flight;
+  /// re-running it could duplicate real provider work), but it no longer holds the owner-level
+  /// active-run guard open, so a LATER, DIFFERENT slot for the same owner can proceed.
+  ABANDONED
   FAILED
-  SKIPPED
 }
 
 /// LST "Bounded Scheduled Position Capture" Phase 2A - durable state for the internal
@@ -1625,15 +1635,22 @@ model ScheduledCaptureRun {
   dueAt    DateTime
 
   status        ScheduledCaptureStatus @default(RUNNING)
-  /// Incremented each time this exact slot is re-claimed after a FAILED or stale-RUNNING attempt -
-  /// never incremented for a slot that already SUCCEEDED (a completed slot is never reprocessed).
+  /// Incremented each time this exact slot is re-claimed after a FAILED-and-retry-eligible attempt
+  /// - never incremented for a slot that already SUCCEEDED, and never for a stale RUNNING row
+  /// (Codex blocker repair B3 - those are marked ABANDONED, never automatically re-claimed/re-run).
   attemptCount  Int                    @default(1)
   startedAt     DateTime
   completedAt   DateTime?
 
-  /// A short, stable category ("PROVIDER_UNAVAILABLE" / "AUTH_UNAVAILABLE" / "UNKNOWN" / etc.) -
-  /// never a raw error message, stack trace, or provider response body.
-  errorCategory String?
+  /// Codex blocker repair (B5) - the FINE-GRAINED operational outcome, populated for every
+  /// COMPLETED (non-RUNNING) status, not only FAILED - e.g. "CURRENT_CAPTURED" / "NO_CURRENT_LEGITIMATE"
+  /// / "SESSION_CLOSED" / "CONTRADICTION_DETECTED" / "PROVIDER_UNAVAILABLE" / "AUTH_UNAVAILABLE" /
+  /// "UNKNOWN_ERROR" / "BUDGET_DEFERRED" / "ABANDONED_STALE" - see scheduled-capture.ts's own
+  /// classification function. This is what lets the Account-page indicator distinguish "ran fine,
+  /// genuinely nothing to capture" from "ran but the provider/connection is unhealthy" - both of
+  /// which the existing fail-closed evaluator equally reports as a safe UNAVAILABLE display.
+  /// Never a raw error message, stack trace, or provider response body.
+  resultCategory String?
 
   /// Bounded operational counts only (see scheduled-capture.ts) - never a symbol list, never
   /// per-position detail, never brokerage account identifiers.
@@ -1641,16 +1658,20 @@ model ScheduledCaptureRun {
   currentAssessmentsPersisted  Int?
   unavailableCount             Int?
   contradictionCount           Int?
-  /// An ESTIMATE (accountCount + distinctTickerCount + 1), not a live-instrumented count - see
-  /// scheduled-capture.ts's own doc comment for why a real per-request counter was not added to
-  /// the existing, trust-sensitive provider call chain for this ticket.
+  /// A conservative ESTIMATE derived from LOCAL DATABASE STATE (Schwab account count + distinct
+  /// tracked ticker count, the real measured cost formula - see scheduled-capture-budget.ts), not
+  /// a live-instrumented per-request count - see that file's own doc comment for why a real
+  /// per-request counter was not added to the shared, trust-sensitive provider call chain for this
+  /// ticket. Explicitly labeled an estimate everywhere it is surfaced.
   providerRequestCountEstimate Int?
   durationMs                   Int?
 
-  /// Set only on a FAILED transient-category result - null means "not eligible for a scheduler-
-  /// driven retry" (a permanent/unknown failure still gets picked up again like any other
-  /// not-yet-SUCCEEDED slot once a later heartbeat re-evaluates, but this field specifically backs
-  /// off a known-transient failure rather than hammering it on the very next heartbeat).
+  /// Codex blocker repair (B5, null-retry fix) - the ONLY way this row becomes automatically
+  /// re-claimable after a FAILED result: a NON-NULL instant that has passed. NULL explicitly means
+  /// "do not auto-retry" (a permanent/exhausted-retries condition, e.g. auth needing reconnection,
+  /// or an unknown error past its bounded retry count) - the claim query's WHERE clause requires
+  /// `nextEligibleRetryAt IS NOT NULL AND nextEligibleRetryAt <= now`, never treating NULL as
+  /// "eligible now" (the exact defect Codex found in the original implementation).
   nextEligibleRetryAt DateTime?
 
   createdAt DateTime @default(now())
@@ -1662,9 +1683,9 @@ model ScheduledCaptureRun {
   /// invocations, or a process restart) targeting the exact same owner + exact same due instant
   /// can never both perform real capture work - the second claim attempt's INSERT ... ON CONFLICT
   /// simply finds this row already present and (depending on its status) either does nothing or
-  /// atomically re-claims it under the exact rules above - see claimScheduledCaptureSlot in
-  /// scheduled-capture.ts.
+  /// atomically re-claims it under the exact rules above - see claimSlot in scheduled-capture.ts.
   @@unique([ownerId, dueAt])
   @@index([ownerId, sessionDate])
   @@index([status])
+  @@index([ownerId, status])
 }

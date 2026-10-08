@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { extractProvidedCronSecret, getCronConfigStatus, isValidCronSecret } from "./cron-auth";
+import {
+  extractProvidedCronSecret,
+  extractProvidedScheduledCaptureSecret,
+  getCronConfigStatus,
+  isValidCronSecret,
+  isValidScheduledCaptureSecret,
+} from "./cron-auth";
 
 describe("cron-auth", () => {
   const ORIGINAL_SECRET = process.env.OSO_CRON_SECRET;
@@ -63,5 +69,71 @@ describe("cron-auth", () => {
 
   it("returns null when no relevant header is present at all", () => {
     expect(extractProvidedCronSecret(new Headers())).toBeNull();
+  });
+});
+
+describe("cron-auth - dedicated scheduled-capture secret (Codex blocker repair B6)", () => {
+  const ORIGINAL_SCHEDULED_SECRET = process.env.OSO_SCHEDULED_CAPTURE_SECRET;
+  const ORIGINAL_CRON_SECRET = process.env.OSO_CRON_SECRET;
+
+  beforeEach(() => {
+    process.env.OSO_SCHEDULED_CAPTURE_SECRET = "sentinel-scheduled-capture-secret-value";
+    process.env.OSO_CRON_SECRET = "sentinel-cron-secret-value";
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_SCHEDULED_SECRET === undefined) {
+      delete process.env.OSO_SCHEDULED_CAPTURE_SECRET;
+    } else {
+      process.env.OSO_SCHEDULED_CAPTURE_SECRET = ORIGINAL_SCHEDULED_SECRET;
+    }
+    if (ORIGINAL_CRON_SECRET === undefined) {
+      delete process.env.OSO_CRON_SECRET;
+    } else {
+      process.env.OSO_CRON_SECRET = ORIGINAL_CRON_SECRET;
+    }
+  });
+
+  it("accepts the exact configured dedicated secret", () => {
+    expect(isValidScheduledCaptureSecret("sentinel-scheduled-capture-secret-value")).toBe(true);
+  });
+
+  it("rejects the broad OSO_CRON_SECRET even though it is configured and valid for other endpoints", () => {
+    expect(isValidScheduledCaptureSecret("sentinel-cron-secret-value")).toBe(false);
+  });
+
+  it("rejects a wrong secret without throwing, regardless of length", () => {
+    expect(isValidScheduledCaptureSecret("wrong")).toBe(false);
+    expect(isValidScheduledCaptureSecret("way-way-way-longer-than-the-real-secret")).toBe(false);
+  });
+
+  it("rejects null/empty provided values", () => {
+    expect(isValidScheduledCaptureSecret(null)).toBe(false);
+    expect(isValidScheduledCaptureSecret("")).toBe(false);
+  });
+
+  it("fails closed when OSO_SCHEDULED_CAPTURE_SECRET itself is not configured, even if OSO_CRON_SECRET is", () => {
+    delete process.env.OSO_SCHEDULED_CAPTURE_SECRET;
+    expect(isValidScheduledCaptureSecret("sentinel-scheduled-capture-secret-value")).toBe(false);
+    expect(isValidScheduledCaptureSecret("sentinel-cron-secret-value")).toBe(false);
+  });
+
+  it("extracts the secret from a Bearer Authorization header", () => {
+    const headers = new Headers({ authorization: "Bearer my-secret-value" });
+    expect(extractProvidedScheduledCaptureSecret(headers)).toBe("my-secret-value");
+  });
+
+  it("extracts the secret from the X-OSO-Scheduled-Capture-Secret header when no Authorization header is present", () => {
+    const headers = new Headers({ "x-oso-scheduled-capture-secret": "my-secret-value" });
+    expect(extractProvidedScheduledCaptureSecret(headers)).toBe("my-secret-value");
+  });
+
+  it("ignores the OLD X-OSO-Cron-Secret header name entirely", () => {
+    const headers = new Headers({ "x-oso-cron-secret": "my-secret-value" });
+    expect(extractProvidedScheduledCaptureSecret(headers)).toBeNull();
+  });
+
+  it("returns null when no relevant header is present at all", () => {
+    expect(extractProvidedScheduledCaptureSecret(new Headers())).toBeNull();
   });
 });

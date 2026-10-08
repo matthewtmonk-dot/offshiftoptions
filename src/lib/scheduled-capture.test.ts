@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { categorizeError, isTransientErrorCategory, tallyPositionAssessmentDisplays } from "./scheduled-capture";
+import { classifyCaptureOutcome, tallyPositionAssessmentDisplays } from "./scheduled-capture";
 import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import type { PositionReviewResult } from "@/domain/finance/positionReview";
+import type { StoredLastValidAssessment } from "@/domain/finance/positionReviewAssessment";
 
 function currentResult(overrides: Partial<PositionReviewResult> = {}): PositionReviewResult {
   return {
@@ -24,6 +25,10 @@ function currentDisplay(action: PositionReviewResult["action"] = "COMFORTABLE"):
 }
 function unavailableDisplay(reasonCodes: string[]): PositionAssessmentDisplay {
   return { state: "UNAVAILABLE", currentUnavailable: currentResult({ action: "CANNOT_ASSESS", explanation: { ...currentResult().explanation, reasonCodes } }) };
+}
+function lastValidDisplay(reasonCodes: string[]): PositionAssessmentDisplay {
+  const fallback = {} as StoredLastValidAssessment;
+  return { state: "LAST_VALID", currentUnavailable: currentResult({ action: "CANNOT_ASSESS", explanation: { ...currentResult().explanation, reasonCodes } }), lastValid: fallback };
 }
 
 describe("tallyPositionAssessmentDisplays", () => {
@@ -57,33 +62,49 @@ describe("tallyPositionAssessmentDisplays", () => {
   });
 });
 
-describe("categorizeError / isTransientErrorCategory", () => {
-  it("categorizes an AbortError as PROVIDER_UNAVAILABLE (transient)", () => {
-    const error = new Error("aborted");
-    error.name = "AbortError";
-    expect(categorizeError(error)).toBe("PROVIDER_UNAVAILABLE");
-    expect(isTransientErrorCategory(categorizeError(error))).toBe(true);
+describe("classifyCaptureOutcome (Codex blocker repair B5)", () => {
+  it("classifies zero relevant campaigns as legitimately nothing to capture, never an error", () => {
+    expect(classifyCaptureOutcome([], false)).toBe("NO_CURRENT_LEGITIMATE");
   });
 
-  it("categorizes a network/fetch/429 message as PROVIDER_UNAVAILABLE (transient)", () => {
-    expect(categorizeError(new Error("fetch failed: ECONNRESET"))).toBe("PROVIDER_UNAVAILABLE");
-    expect(categorizeError(new Error("received 429 Too Many Requests"))).toBe("PROVIDER_UNAVAILABLE");
-    expect(isTransientErrorCategory("PROVIDER_UNAVAILABLE")).toBe(true);
+  it("classifies at least one CURRENT display as CURRENT_CAPTURED", () => {
+    expect(classifyCaptureOutcome([{ display: currentDisplay() }], false)).toBe("CURRENT_CAPTURED");
   });
 
-  it("categorizes an auth/token message as AUTH_UNAVAILABLE (never retried automatically)", () => {
-    expect(categorizeError(new Error("token refresh failed: unauthorized"))).toBe("AUTH_UNAVAILABLE");
-    expect(isTransientErrorCategory("AUTH_UNAVAILABLE")).toBe(false);
+  it("classifies a verified LAST_VALID display as CURRENT_CAPTURED - a historical fallback is a real success", () => {
+    expect(classifyCaptureOutcome([{ display: lastValidDisplay(["POSITION_BROKER_UNAVAILABLE"]) }], false)).toBe("CURRENT_CAPTURED");
   });
 
-  it("categorizes an unrecognized error as UNKNOWN (never retried automatically)", () => {
-    expect(categorizeError(new Error("something genuinely unexpected"))).toBe("UNKNOWN");
-    expect(isTransientErrorCategory("UNKNOWN")).toBe(false);
+  it("classifies only benign/awaiting-confirmation reasons as NO_CURRENT_LEGITIMATE, not an error", () => {
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["POSITION_AWAITING_CONFIRMATION"]) }], false)).toBe("NO_CURRENT_LEGITIMATE");
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["QUOTE_STALE_TIMESTAMP"]) }], false)).toBe("NO_CURRENT_LEGITIMATE");
   });
 
-  it("categorizes a non-Error thrown value as UNKNOWN, never throws itself", () => {
-    expect(categorizeError("a plain string")).toBe("UNKNOWN");
-    expect(categorizeError(null)).toBe("UNKNOWN");
-    expect(categorizeError(undefined)).toBe("UNKNOWN");
+  it("classifies a broker/quote/session provider reason as PROVIDER_UNAVAILABLE when auth is NOT expired", () => {
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["POSITION_BROKER_UNAVAILABLE"]) }], false)).toBe("PROVIDER_UNAVAILABLE");
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["QUOTE_EVIDENCE_UNAVAILABLE"]) }], false)).toBe("PROVIDER_UNAVAILABLE");
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["QUOTE_SESSION_EVIDENCE_UNAVAILABLE"]) }], false)).toBe("PROVIDER_UNAVAILABLE");
+  });
+
+  it("classifies the SAME broker/quote/session provider reason as AUTH_UNAVAILABLE when this owner's token refresh already failed", () => {
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["POSITION_BROKER_UNAVAILABLE"]) }], true)).toBe("AUTH_UNAVAILABLE");
+  });
+
+  it("classifies a MARKET_CLOSED-only reason as SESSION_CLOSED (defensive - B1's own gate should normally intercept this earlier)", () => {
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["MARKET_CLOSED"]) }], false)).toBe("SESSION_CLOSED");
+  });
+
+  it("classifies any genuinely unrecognized reason as CONTRADICTION_DETECTED - never silently downgraded", () => {
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["PAST_EXPIRATION_UNRESOLVED"]) }], false)).toBe("CONTRADICTION_DETECTED");
+  });
+
+  it("a contradiction wins even alongside an otherwise-successful CURRENT display in the same run", () => {
+    const resolved = [{ display: currentDisplay() }, { display: unavailableDisplay(["PAST_EXPIRATION_UNRESOLVED"]) }];
+    expect(classifyCaptureOutcome(resolved, false)).toBe("CONTRADICTION_DETECTED");
+  });
+
+  it("a CURRENT display wins over a merely benign/provider-unavailable sibling in the same run", () => {
+    const resolved = [{ display: currentDisplay() }, { display: unavailableDisplay(["POSITION_BROKER_UNAVAILABLE"]) }];
+    expect(classifyCaptureOutcome(resolved, false)).toBe("CURRENT_CAPTURED");
   });
 });

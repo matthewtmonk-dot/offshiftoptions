@@ -83,6 +83,17 @@ export async function resolvePositionReviewsForUser(
    * production caller that wants genuine post-retrieval timing passes `() => new Date()`.
    */
   clock: () => Date = () => now,
+  /**
+   * Codex blocker repair (B3, scheduled-capture) - OPTIONAL, additive, defaults to undefined so
+   * every EXISTING caller (Dashboard/Tracker via positionAssessmentOrchestration.ts) is completely
+   * unaffected. The three provider-touching functions below already accept (and respect) an
+   * AbortSignal - the SAME mechanism refreshPositionEvidenceForUser (workflows.ts) already uses
+   * for manual Refresh's own bounded timeout - this just threads that EXISTING capability through
+   * to this read/evaluate path too, so the scheduled-capture worker can enforce a real, honored
+   * deadline instead of merely racing a Promise.race that never actually cancels the underlying
+   * fetch. Never a broad provider-client rewrite - purely an optional parameter passthrough.
+   */
+  signal?: AbortSignal,
 ): Promise<ResolvedPositionReview[]> {
   const { relevant, legByCampaignId, lifecycleByCampaignId, trackedPuts, trackedCalls, openingEventIdByCampaignId } = resolveRelevantCampaignLegs(campaigns, now);
   if (relevant.length === 0) {
@@ -93,9 +104,9 @@ export async function resolvePositionReviewsForUser(
 
   const requestedNyDate = nyCalendarDateOf(now);
   const [brokerPositions, quoteEvidenceByTicker, sessionEvidenceAsRequested] = await Promise.all([
-    getSchwabOpenPositionsForUser(userId).catch(() => null),
-    getQuoteReviewEvidenceForUser(userId, tickersNeedingQuotes),
-    getEquityMarketSessionEvidenceForUser(userId, requestedNyDate),
+    getSchwabOpenPositionsForUser(userId, { signal }).catch(() => null),
+    getQuoteReviewEvidenceForUser(userId, tickersNeedingQuotes, signal),
+    getEquityMarketSessionEvidenceForUser(userId, requestedNyDate, signal),
   ]);
 
   // Codex P1 (B8) - the REAL evaluation instant, read only now that every async fetch above has

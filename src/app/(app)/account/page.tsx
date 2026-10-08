@@ -31,7 +31,7 @@ import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/provide
 import { getAlphaVantageConfigStatus } from "@/providers/alpha-vantage/config";
 import { getAlphaVantageUsageToday, ALPHA_VANTAGE_AUTO_DAILY_LIMIT, ALPHA_VANTAGE_TOTAL_DAILY_LIMIT, ALPHA_VANTAGE_MANUAL_RESERVE } from "@/lib/alpha-vantage-budget";
 import { getAlphaVantageCacheSummary } from "@/lib/alpha-vantage-fundamentals";
-import { getLatestScheduledCaptureStatusForUser } from "@/lib/scheduled-capture";
+import { describeScheduledCaptureStatus, getLatestScheduledCaptureStatusForUser } from "@/lib/scheduled-capture";
 import { InfoTip } from "@/components/info-tip";
 import { AlphaVantageQueueButton } from "./alpha-vantage-queue-button";
 import {
@@ -508,20 +508,26 @@ export default async function AccountPage({
 
               {/* Phase 2A (Bounded Scheduled Position Capture) - minimal operational indicator
                   only, never a market/financial claim. Deliberately OUTSIDE the connected-only
-                  branch above: a past capture success/failure remains meaningful even if the
-                  connection has since changed state. Shows nothing at all until this owner has at
-                  least one concluded scheduled-capture attempt - never a fabricated "never run"
-                  status. */}
-              {scheduledCaptureStatus.known ? (
-                <p className="text-xs text-zinc-500">
-                  Automatic capture:{" "}
-                  {scheduledCaptureStatus.status === "SUCCEEDED" ? (
-                    <span className="text-zinc-400">Healthy · last success {shortDateTime(scheduledCaptureStatus.at)}</span>
-                  ) : (
-                    <span className="text-amber-300">Attention needed · last attempt failed {shortDateTime(scheduledCaptureStatus.at)}</span>
-                  )}
-                </p>
-              ) : null}
+                  branch above: a past capture attempt remains meaningful even if the connection
+                  has since changed state. Shows nothing at all until this owner has at least one
+                  concluded scheduled-capture attempt - never a fabricated "never run" status.
+                  Codex blocker repair (B5) - "Healthy" is shown ONLY for a genuine CURRENT_CAPTURED
+                  result (describeScheduledCaptureStatus, scheduled-capture.ts); a safe, fail-closed
+                  non-throwing run is never conflated with "healthy." This also makes no claim that
+                  Hermes is actually calling this endpoint on a schedule - code/schema existing is
+                  not evidence of that; this only reports what, if anything, has actually run. */}
+              {(() => {
+                const { label, tone } = describeScheduledCaptureStatus(scheduledCaptureStatus);
+                if (!scheduledCaptureStatus.known) {
+                  return null;
+                }
+                const toneClass = tone === "healthy" ? "text-zinc-400" : tone === "attention" ? "text-amber-300" : "text-zinc-500";
+                return (
+                  <p className="text-xs text-zinc-500">
+                    Automatic capture: <span className={toneClass}>{label} · {shortDateTime(scheduledCaptureStatus.at)}</span>
+                  </p>
+                );
+              })()}
 
               {!schwabOauthReady ? (
                 <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">

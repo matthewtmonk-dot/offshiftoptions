@@ -1,7 +1,7 @@
 import "server-only";
 
 import { NextResponse } from "next/server";
-import { extractProvidedCronSecret, isValidCronSecret } from "@/lib/cron-auth";
+import { extractProvidedScheduledCaptureSecret, isValidScheduledCaptureSecret } from "@/lib/cron-auth";
 import { runScheduledCaptureHeartbeat } from "@/lib/scheduled-capture";
 
 export const dynamic = "force-dynamic";
@@ -16,11 +16,14 @@ export const runtime = "nodejs";
  * determines which owners are due and processes each with its own owner-scoped Schwab connection,
  * identical precedent to /api/internal/scanner-technical/process.
  *
- * Auth: identical pattern to /api/internal/alpha-vantage/process, /api/internal/scanner-reference/refresh,
- * and /api/internal/scanner-technical/process - a shared secret (OSO_CRON_SECRET) via
- * `Authorization: Bearer <secret>` or `X-OSO-Cron-Secret`, compared in constant time. A missing/
- * wrong secret returns 401 and runs NOTHING - the auth check happens before any database or
- * provider work, before even computing which slot (if any) is due.
+ * Auth: Codex blocker repair (B6) - a DEDICATED secret, `OSO_SCHEDULED_CAPTURE_SECRET`, separate
+ * from the broader `OSO_CRON_SECRET` the other /api/internal/* endpoints share (Alpha Vantage
+ * queue work, scanner reference-data refresh, scanner technical preparation) - Hermes holds only
+ * the smallest credential that does its one job. Via `Authorization: Bearer <secret>` or
+ * `X-OSO-Scheduled-Capture-Secret`, compared in constant time. There is NO fallback to
+ * `OSO_CRON_SECRET` - presenting that old shared secret here is rejected exactly like any other
+ * wrong guess. A missing/wrong secret returns 401 and runs NOTHING - the auth check happens before
+ * any database or provider work, before even computing which slot (if any) is due.
  *
  * Hermes may call this endpoint on a short, simple heartbeat (e.g. every 5 minutes) - that does
  * NOT mean Schwab is called every 5 minutes. The worker decides server-side whether a capture slot
@@ -31,8 +34,8 @@ export const runtime = "nodejs";
  * symbol, never a token, never a raw provider response.
  */
 export async function POST(request: Request) {
-  const provided = extractProvidedCronSecret(request.headers);
-  if (!isValidCronSecret(provided)) {
+  const provided = extractProvidedScheduledCaptureSecret(request.headers);
+  if (!isValidScheduledCaptureSecret(provided)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
