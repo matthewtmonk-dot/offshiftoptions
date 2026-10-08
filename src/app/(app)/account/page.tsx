@@ -31,6 +31,7 @@ import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/provide
 import { getAlphaVantageConfigStatus } from "@/providers/alpha-vantage/config";
 import { getAlphaVantageUsageToday, ALPHA_VANTAGE_AUTO_DAILY_LIMIT, ALPHA_VANTAGE_TOTAL_DAILY_LIMIT, ALPHA_VANTAGE_MANUAL_RESERVE } from "@/lib/alpha-vantage-budget";
 import { getAlphaVantageCacheSummary } from "@/lib/alpha-vantage-fundamentals";
+import { getLatestScheduledCaptureStatusForUser } from "@/lib/scheduled-capture";
 import { InfoTip } from "@/components/info-tip";
 import { AlphaVantageQueueButton } from "./alpha-vantage-queue-button";
 import {
@@ -52,7 +53,7 @@ export default async function AccountPage({
 }) {
   const user = await requireCurrentUser();
   const params = await searchParams;
-  const [schwabConnection, schwabHealth, schwabDeveloperCredential, schwabConfig, accountData, alphaVantageUsage, alphaVantageCache] =
+  const [schwabConnection, schwabHealth, schwabDeveloperCredential, schwabConfig, accountData, alphaVantageUsage, alphaVantageCache, scheduledCaptureStatus] =
     await Promise.all([
       getSchwabConnectionSummaryForUser(user.id),
       getSchwabConnectionHealthForUser(user.id),
@@ -61,6 +62,7 @@ export default async function AccountPage({
       getAccountPageData(user.id),
       getAlphaVantageUsageToday(),
       getAlphaVantageCacheSummary(),
+      getLatestScheduledCaptureStatusForUser(user.id),
     ]);
   const schwabOauthReady = Boolean(schwabDeveloperCredential?.configured) || schwabConfig.configured;
   // Single source of truth for which primary Schwab action to show - derived from the same
@@ -503,6 +505,23 @@ export default async function AccountPage({
                   manual tracking keeps working without a brokerage connection.
                 </p>
               )}
+
+              {/* Phase 2A (Bounded Scheduled Position Capture) - minimal operational indicator
+                  only, never a market/financial claim. Deliberately OUTSIDE the connected-only
+                  branch above: a past capture success/failure remains meaningful even if the
+                  connection has since changed state. Shows nothing at all until this owner has at
+                  least one concluded scheduled-capture attempt - never a fabricated "never run"
+                  status. */}
+              {scheduledCaptureStatus.known ? (
+                <p className="text-xs text-zinc-500">
+                  Automatic capture:{" "}
+                  {scheduledCaptureStatus.status === "SUCCEEDED" ? (
+                    <span className="text-zinc-400">Healthy · last success {shortDateTime(scheduledCaptureStatus.at)}</span>
+                  ) : (
+                    <span className="text-amber-300">Attention needed · last attempt failed {shortDateTime(scheduledCaptureStatus.at)}</span>
+                  )}
+                </p>
+              ) : null}
 
               {!schwabOauthReady ? (
                 <div className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">

@@ -575,7 +575,7 @@ export type RefreshPositionEvidenceResult =
  * determine which tickers currently require review evidence, queried directly rather than reusing
  * app-data.ts's much larger getDashboardData (which also loads watchlist/recommendations/chat/
  * trades - unrelated to a position-review evidence refresh). */
-async function loadOpenAndAssignedCampaignsForUser(userId: string): Promise<PositionReviewCampaignInput[]> {
+export async function loadOpenAndAssignedCampaignsForUser(userId: string): Promise<PositionReviewCampaignInput[]> {
   return prisma.campaign.findMany({
     where: { ownerId: userId, status: { in: ["OPEN", "ASSIGNED"] } },
     include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },

@@ -19,6 +19,20 @@ export function nyCalendarDateOf(instant: Date): CalendarDateString {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(instant);
 }
 
+const nyWallClockFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+/** The America/New_York wall-clock minute-of-day (0-1439) for a given instant - DST-safe (via
+ * Intl, never a fixed UTC-offset assumption, matching this file's own nyCalendarDateOf and
+ * technical-preparation-orchestrator.ts's identical nyDateTimeParts convention). Purely a wall-
+ * clock reading - never itself a claim about whether the market is open (that requires real,
+ * provider-verified EquityMarketSessionEvidence, which this function does not fetch or consult). */
+export function nyMinuteOfDay(instant: Date): number {
+  const parts = nyWallClockFormatter.formatToParts(instant);
+  const hour = Number(parts.find((part) => part.type === "hour")!.value) % 24;
+  const minute = Number(parts.find((part) => part.type === "minute")!.value);
+  return hour * 60 + minute;
+}
+
 /**
  * A stored expiration/occurredAt Date's own calendar-date LABEL, read via UTC components - never
  * converted through any timezone. Matches this project's own established convention (see
@@ -31,7 +45,7 @@ export function expirationCalendarDate(expiration: Date): CalendarDateString {
   return expiration.toISOString().slice(0, 10);
 }
 
-function parseCalendarDateString(value: CalendarDateString): { y: number; m: number; d: number } {
+export function parseCalendarDateString(value: CalendarDateString): { y: number; m: number; d: number } {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
   if (!match) throw new RangeError(`Expected a YYYY-MM-DD calendar date, got "${value}".`);
   return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };

@@ -318,6 +318,7 @@ model User {
   technicalIndicatorSnapshots TechnicalIndicatorSnapshot[]
   technicalPreparationRuns    TechnicalPreparationRun[]
   positionReviewAssessments   PositionReviewAssessment[]
+  scheduledCaptureRuns        ScheduledCaptureRun[]
 }
 
 model Session {
@@ -1585,4 +1586,85 @@ model PositionReviewAssessment {
   @@id([ownerId, accountId, campaignId, openingEventId])
   @@index([ownerId])
   @@index([campaignId])
+}
+
+enum ScheduledCaptureSlot {
+  OPENING
+  BASELINE
+  FINAL
+}
+
+enum ScheduledCaptureStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+/// LST "Bounded Scheduled Position Capture" Phase 2A - durable state for the internal
+/// `/api/internal/scheduled-capture` worker (scheduled-capture.ts). One row per (owner, exact
+/// targeted instant) - `dueAt` is the real America/New_York instant a capture slot targeted,
+/// computed once by the scheduler and never recomputed/backdated after the fact, so a slot missed
+/// because the server/Hermes was down is never silently fabricated with a fake observation time
+/// later. This table exists ONLY to make the capture worker idempotent/restart-safe and to record
+/// bounded operational counts - it never stores a provider payload, a quote, a position, or any
+/// financial figure; the actual captured evidence is persisted exactly as today, through the
+/// unmodified, already-approved `PositionReviewAssessment` write path (positionReviewAssessmentStore.ts).
+model ScheduledCaptureRun {
+  id       String               @id @default(cuid())
+  ownerId  String
+  /// America/New_York calendar date ("YYYY-MM-DD") this run targets - denormalized alongside
+  /// `dueAt` purely for cheap per-day querying/reporting, never re-derived with a different
+  /// timezone rule than the scheduler itself used.
+  sessionDate String
+  slot     ScheduledCaptureSlot
+  /// The exact NY instant this slot targeted, stored as its real UTC instant - the sole
+  /// uniqueness key alongside `ownerId` (see @@unique below). Never backdated: a slot claimed
+  /// late (a missed heartbeat window) keeps its ORIGINAL target instant here, while `startedAt`/
+  /// `completedAt` always reflect when work genuinely happened.
+  dueAt    DateTime
+
+  status        ScheduledCaptureStatus @default(RUNNING)
+  /// Incremented each time this exact slot is re-claimed after a FAILED or stale-RUNNING attempt -
+  /// never incremented for a slot that already SUCCEEDED (a completed slot is never reprocessed).
+  attemptCount  Int                    @default(1)
+  startedAt     DateTime
+  completedAt   DateTime?
+
+  /// A short, stable category ("PROVIDER_UNAVAILABLE" / "AUTH_UNAVAILABLE" / "UNKNOWN" / etc.) -
+  /// never a raw error message, stack trace, or provider response body.
+  errorCategory String?
+
+  /// Bounded operational counts only (see scheduled-capture.ts) - never a symbol list, never
+  /// per-position detail, never brokerage account identifiers.
+  positionsExamined            Int?
+  currentAssessmentsPersisted  Int?
+  unavailableCount             Int?
+  contradictionCount           Int?
+  /// An ESTIMATE (accountCount + distinctTickerCount + 1), not a live-instrumented count - see
+  /// scheduled-capture.ts's own doc comment for why a real per-request counter was not added to
+  /// the existing, trust-sensitive provider call chain for this ticket.
+  providerRequestCountEstimate Int?
+  durationMs                   Int?
+
+  /// Set only on a FAILED transient-category result - null means "not eligible for a scheduler-
+  /// driven retry" (a permanent/unknown failure still gets picked up again like any other
+  /// not-yet-SUCCEEDED slot once a later heartbeat re-evaluates, but this field specifically backs
+  /// off a known-transient failure rather than hammering it on the very next heartbeat).
+  nextEligibleRetryAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  /// The ONE idempotency guarantee this whole feature rests on: two heartbeats (or two concurrent
+  /// invocations, or a process restart) targeting the exact same owner + exact same due instant
+  /// can never both perform real capture work - the second claim attempt's INSERT ... ON CONFLICT
+  /// simply finds this row already present and (depending on its status) either does nothing or
+  /// atomically re-claims it under the exact rules above - see claimScheduledCaptureSlot in
+  /// scheduled-capture.ts.
+  @@unique([ownerId, dueAt])
+  @@index([ownerId, sessionDate])
+  @@index([status])
 }
