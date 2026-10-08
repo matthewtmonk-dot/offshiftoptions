@@ -387,8 +387,8 @@ vi.mock("./live-quotes", () => ({
     });
   });
 
-  describe("Codex 'final five' round 2 - B2: a single owner's own cost exceeding the ceiling is BUDGET_BLOCKED, not an endless DEFERRED loop", () => {
-    it("estimate > ceiling -> BUDGET_BLOCKED, no provider calls, nextEligibleRetryAt null, never reclaimed by a later heartbeat", async () => {
+  describe("Codex 'final five' round 2/3 - B2: a single owner's own cost exceeding the ceiling is BUDGET_BLOCKED, not an endless DEFERRED loop", () => {
+    it("Codex blocker repair (B1, round 3) - estimate > ceiling -> BUDGET_BLOCKED BEFORE the preflight session call even runs - ZERO provider calls of any kind, nextEligibleRetryAt null, never reclaimed by a later heartbeat", async () => {
       const costSpy = vi.spyOn(budget, "estimateProviderCost").mockImplementation(async (ownerId: string) => (ownerId === ownerA.id ? 25 : 0));
 
       await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
@@ -397,6 +397,10 @@ vi.mock("./live-quotes", () => ({
       expect(rowA.status).toBe("FAILED");
       expect(rowA.resultCategory).toBe("BUDGET_BLOCKED");
       expect(rowA.nextEligibleRetryAt).toBeNull();
+      // This assertion was specifically missing before round 3 - BUDGET_BLOCKED must mean ZERO
+      // provider calls of ANY kind, not merely "the heavy resolver was skipped." The preflight
+      // session function itself must never be invoked for a permanently over-budget owner.
+      expect(sessionEvidenceMock).not.toHaveBeenCalledWith(ownerA.id, expect.anything(), expect.anything());
       expect(resolveMock).not.toHaveBeenCalledWith(ownerA.id, expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything());
 
       // A later heartbeat (even far in the future) never reclaims a BUDGET_BLOCKED row - it is
@@ -407,6 +411,7 @@ vi.mock("./live-quotes", () => ({
       expect(rowAAfter.status).toBe("FAILED");
       expect(rowAAfter.resultCategory).toBe("BUDGET_BLOCKED");
       expect(rowAAfter.attemptCount).toBe(1); // never re-claimed
+      expect(sessionEvidenceMock).not.toHaveBeenCalledWith(ownerA.id, expect.anything(), expect.anything());
 
       costSpy.mockRestore();
     });
@@ -425,8 +430,60 @@ vi.mock("./live-quotes", () => ({
       const statuses = [rowA[0]?.status, rowB[0]?.status];
       expect(statuses).toContain("DEFERRED");
       expect(statuses).not.toContain("BUDGET_BLOCKED");
+      // The DEFERRED owner's heavy resolver is never entered - only the cheap preflight (which
+      // DOES run per the required flow: absolute-budget check -> preflight -> capacity check)
+      // happens before the temporary-capacity denial.
+      const deferredOwnerId = rowA[0]?.status === "DEFERRED" ? ownerA.id : ownerB.id;
+      expect(resolveMock).not.toHaveBeenCalledWith(deferredOwnerId, expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything());
 
       reserveSpy.mockRestore();
+    });
+
+    it("Codex blocker repair (B2, round 3) - an aborted preflight that resolves to UNAVAILABLE (exactly as the real provider wrapper does after catching its own AbortError) is classified TIMEOUT, never SESSION_UNAVAILABLE, never CURRENT_CAPTURED", async () => {
+      const reserveSpy = vi.spyOn(budget, "tryReserveProviderRequestBudget").mockReturnValue(true);
+      // Simulates the REAL wrapper's own fail-closed behavior: it catches the AbortError from the
+      // signal firing and safely returns UNAVAILABLE - the scheduler boundary itself must still
+      // recognize the deadline fired and classify this as TIMEOUT, not trust the wrapper's result.
+      const RealAbortController = globalThis.AbortController;
+      class AlreadyAbortedController extends RealAbortController {
+        constructor() {
+          super();
+          this.abort();
+        }
+      }
+      vi.stubGlobal("AbortController", AlreadyAbortedController);
+      sessionEvidenceMock.mockResolvedValue(UNAVAILABLE_SESSION);
+      // If the heavy resolver were ever (incorrectly) entered, it would return a LAST_VALID
+      // fallback - proving that even a tempting historical fallback cannot turn this into anything
+      // but TIMEOUT, because the heavy resolver must never be reached at all.
+      resolveMock.mockResolvedValue([lastValidDisplayEntry(["POSITION_BROKER_UNAVAILABLE"], DUE_NOW)]);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      vi.unstubAllGlobals();
+      reserveSpy.mockRestore();
+
+      const rows = await prisma.scheduledCaptureRun.findMany({ where: { ownerId: { in: [ownerA.id, ownerB.id] } } });
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(row.status).toBe("FAILED");
+        expect(row.resultCategory).toBe("TIMEOUT");
+        expect(row.resultCategory).not.toBe("SESSION_UNAVAILABLE");
+        expect(row.resultCategory).not.toBe("CURRENT_CAPTURED");
+        expect(row.nextEligibleRetryAt).not.toBeNull();
+      }
+      expect(resolveMock).not.toHaveBeenCalled();
+    });
+
+    it("a genuine (non-abort) SESSION_UNAVAILABLE still classifies correctly - the TIMEOUT priority check only fires when the deadline actually aborted", async () => {
+      sessionEvidenceMock.mockResolvedValue(UNAVAILABLE_SESSION);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("FAILED");
+      expect(rowA.resultCategory).toBe("SESSION_UNAVAILABLE");
+      expect(resolveMock).not.toHaveBeenCalled();
     });
   });
 

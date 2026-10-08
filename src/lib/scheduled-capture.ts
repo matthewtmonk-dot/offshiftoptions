@@ -465,19 +465,50 @@ async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: Capt
     return "SKIPPED"; // already SUCCEEDED/ABANDONED, still genuinely RUNNING, or FAILED/DEFERRED not yet retry-eligible
   }
   const { id: runId, attemptCount } = claim;
-
-  // Codex blocker repair (B3, round 2) - the ONE end-to-end deadline for this entire attempt,
-  // created BEFORE the first provider call of any kind (the B1 preflight included) - see
-  // CAPTURE_TIMEOUT_MS's own doc comment for why this moved earlier than the first Codex round.
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CAPTURE_TIMEOUT_MS);
   const startedAt = Date.now();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    // Codex blocker repair (B1, round 2) - the preflight session gate now FAILS CLOSED on every
+    // Codex blocker repair (B1, round 3) - the ABSOLUTE per-owner budget check runs BEFORE any
+    // provider call of any kind, including the cheap B1 preflight session request. Derived
+    // entirely from LOCAL DATABASE STATE (`estimateProviderCost` - account/ticker counts only,
+    // zero Schwab/account/position/quote/session/token calls, verified by inspection and by the
+    // dedicated regression test asserting every provider-function call count is zero for this
+    // branch). An owner whose OWN estimated cost exceeds the ENTIRE per-minute ceiling can never
+    // fit no matter when it runs - that is BUDGET_BLOCKED, a terminal, non-retryable state, and it
+    // must cost ZERO Schwab requests, not merely avoid the heavy resolver. The previous round
+    // computed this AFTER the preflight call had already run, which let a permanently-over-budget
+    // owner generate real provider traffic before being blocked - fixed here by moving this check
+    // first and only creating the end-to-end deadline/controller once it passes.
+    const estimatedCost = await estimateProviderCost(ownerId, now);
+    if (estimatedCost > MAX_PROVIDER_REQUESTS_PER_MINUTE) {
+      await completeFailed(runId, now, "BUDGET_BLOCKED", Date.now() - startedAt, null);
+      return "FAILED";
+    }
+
+    // Codex blocker repair (B3, round 2) - the ONE end-to-end deadline for this entire attempt,
+    // created BEFORE the first provider call of any kind (the B1 preflight included) - see
+    // CAPTURE_TIMEOUT_MS's own doc comment. Created only now, AFTER the absolute-budget check
+    // passes - there is no reason to arm a deadline for work that will never execute.
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), CAPTURE_TIMEOUT_MS);
+
+    // Codex blocker repair (B1, round 2) - the preflight session gate FAILS CLOSED on every
     // non-open outcome, including UNAVAILABLE (see this module's header doc comment for the exact
     // AVAILABLE+OPEN / AVAILABLE+CLOSED / UNAVAILABLE three-way contract).
     const nyDate = nyCalendarDateOf(now);
     const sessionEvidence = await getEquityMarketSessionEvidenceForUser(ownerId, nyDate, controller.signal);
+
+    // Codex blocker repair (B2, round 3) - the deadline is checked FIRST, before trusting
+    // whatever the preflight wrapper returned. The real wrapper safely converts its own
+    // AbortError into `{status:"UNAVAILABLE"}` (correct, fail-closed behavior for that module) -
+    // but that must never let a genuine scheduled TIMEOUT be misclassified as SESSION_UNAVAILABLE
+    // just because the wrapper's own catch got there first. A timeout always wins, regardless of
+    // what the preflight call itself returned.
+    if (controller.signal.aborted) {
+      await completeFailed(runId, now, "TIMEOUT", Date.now() - startedAt, new Date(now.getTime() + TIMEOUT_RETRY_BACKOFF_MS));
+      return "FAILED";
+    }
+
     if (sessionEvidence.status === "UNAVAILABLE") {
       await completeFailed(runId, now, "SESSION_UNAVAILABLE", Date.now() - startedAt, new Date(now.getTime() + PROVIDER_RETRY_BACKOFF_MS));
       return "FAILED";
@@ -487,16 +518,10 @@ async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: Capt
       return "SUCCEEDED";
     }
 
-    // Codex blocker repair (B2, round 2) - a dynamic, DB-derived cost estimate. An owner whose OWN
-    // estimated cost exceeds the ENTIRE per-minute ceiling by itself can never fit no matter when
-    // it runs - that is BUDGET_BLOCKED, a terminal, non-retryable state (see CaptureResultCategory's
-    // own doc comment), never an endless DEFERRED loop. A capture that fits individually but has
-    // no capacity THIS MINUTE because another owner already consumed it remains ordinary DEFERRED.
-    const estimatedCost = await estimateProviderCost(ownerId, now);
-    if (estimatedCost > MAX_PROVIDER_REQUESTS_PER_MINUTE) {
-      await completeFailed(runId, now, "BUDGET_BLOCKED", Date.now() - startedAt, null);
-      return "FAILED";
-    }
+    // Normal per-minute SHARED-capacity reservation (unchanged position/logic from round 2) - an
+    // owner who individually fits the absolute ceiling but has no capacity THIS MINUTE because
+    // another owner already consumed it remains ordinary, retryable DEFERRED - never conflated
+    // with the permanent BUDGET_BLOCKED case above.
     if (!tryReserveProviderRequestBudget(estimatedCost, now)) {
       await completeDeferred(runId, now, Date.now() - startedAt);
       return "DEFERRED";
@@ -545,7 +570,9 @@ async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: Capt
     await completeFailed(runId, now, "UNKNOWN_ERROR", durationMs, retryEligible ? new Date(now.getTime() + UNKNOWN_ERROR_RETRY_BACKOFF_MS) : null);
     return "FAILED";
   } finally {
-    clearTimeout(timeout);
+    // `timeout` is never set when the absolute-budget check above returns BEFORE the controller
+    // is even created - `clearTimeout(undefined)` is a documented no-op, never a throw.
+    if (timeout) clearTimeout(timeout);
   }
 }
 
