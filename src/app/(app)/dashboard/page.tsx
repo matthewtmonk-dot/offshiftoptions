@@ -5,8 +5,6 @@ import { EventTime } from "@/components/event-time";
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { ClientPresentationProvider, FreshnessStrip, AttentionNowList, type DisplayEntry } from "@/components/client-freshness";
 import { PositionToReviewRowView } from "@/components/position-to-review-row";
-import { deriveMarketSessionClaim } from "@/domain/finance/presentationFreshness";
-import { underlyingPositionReviewResult } from "@/domain/finance/positionReviewAssessment";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { requireCurrentUser } from "@/lib/auth";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
@@ -408,15 +406,11 @@ async function PositionsToReviewWithStatus({
   const hasLastValid = visibleRows.some((row) => row.display?.state === "LAST_VALID");
   const attentionRows = attentionNowRows(sortedRows);
   const entries: DisplayEntry[] = sortedRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
-  // Codex blocker repair (B2) - derived from the page's own already-fetched session evidence
-  // (never a pure calendar guess, zero new provider calls); "UNKNOWN" whenever that evidence
-  // disagrees or is unavailable, so the strip never asserts an unproven market-open/closed claim.
-  const marketClaim = deriveMarketSessionClaim(sortedRows.flatMap((row) => (row.display ? [underlyingPositionReviewResult(row.display)] : [])));
 
   return (
     <ClientPresentationProvider entries={entries} now={asOf}>
       <div className="space-y-3">
-        <FreshnessStrip entries={entries} now={asOf} marketClaim={marketClaim} />
+        <FreshnessStrip entries={entries} now={asOf} />
 
         <div>
           <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Attention Now</h3>

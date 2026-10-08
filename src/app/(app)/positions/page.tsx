@@ -23,7 +23,6 @@ import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from 
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { ClientPresentationProvider, FreshnessStrip, type DisplayEntry } from "@/components/client-freshness";
 import { currentActivityLabel, historicalOriginLabel } from "@/domain/finance/positionActivity";
-import { deriveMarketSessionClaim } from "@/domain/finance/presentationFreshness";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -282,10 +281,6 @@ export default async function PositionsPage({
     }
   }
   const trackerFreshnessEntries: DisplayEntry[] = Array.from(positionAssessmentDisplayByCampaignId.entries()).map(([key, display]) => ({ key, display }));
-  // Codex blocker repair (B2) - derived from the page's own already-fetched session evidence
-  // (never a pure calendar guess, zero new provider calls); "UNKNOWN" whenever that evidence
-  // disagrees or is unavailable, so the strip never asserts an unproven market-open/closed claim.
-  const trackerMarketClaim = deriveMarketSessionClaim(Array.from(positionAssessmentDisplayByCampaignId.values()).map((display) => underlyingPositionReviewResult(display)));
 
   // Performance is always computed from the current user's own completed campaigns and own
   // accounts, never from the scope-filtered `campaigns`/`visibleAccounts` lists above - so
@@ -471,7 +466,7 @@ export default async function PositionsPage({
           </div>
 
           <ClientPresentationProvider entries={trackerFreshnessEntries} now={snapshotCheckedAt}>
-            <FreshnessStrip entries={trackerFreshnessEntries} now={snapshotCheckedAt} marketClaim={trackerMarketClaim} />
+            <FreshnessStrip entries={trackerFreshnessEntries} now={snapshotCheckedAt} />
           </ClientPresentationProvider>
 
           {/* A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never

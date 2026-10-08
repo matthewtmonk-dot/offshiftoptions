@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyFreshnessStripState, classifyPresentationFreshness, deriveMarketSessionClaim, effectivePresentation } from "./presentationFreshness";
+import { classifyFreshnessStripState, classifyPresentationFreshness, currentRevisionKey, effectivePresentation, resolveEffectivePresentation } from "./presentationFreshness";
 import type { PositionAssessmentDisplay, StoredLastValidAssessment } from "./positionReviewAssessment";
 import type { PositionReviewResult } from "./positionReview";
 
@@ -207,36 +207,6 @@ describe("classifyFreshnessStripState", () => {
   });
 });
 
-describe("deriveMarketSessionClaim - Codex blocker repair (B2): never claim Market open without authoritative, already-fetched evidence", () => {
-  function resultWithSession(session: "OPEN" | "CLOSED" | "UNAVAILABLE") {
-    return { evidence: { position: "SCHWAB_CONFIRMED" as const, quote: "ELIGIBLE" as const, quoteIneligibleReason: null, session } };
-  }
-
-  it("UNKNOWN when there are no results at all", () => {
-    expect(deriveMarketSessionClaim([])).toBe("UNKNOWN");
-  });
-
-  it("OPEN when every result's own provider-verified session evidence says OPEN (an ordinary full trading day)", () => {
-    expect(deriveMarketSessionClaim([resultWithSession("OPEN"), resultWithSession("OPEN")])).toBe("OPEN");
-  });
-
-  it("CLOSED when every result's session evidence says CLOSED - this is how a real NYSE early close (e.g. Nov 27 2026, 2:30 PM ET, the day after Thanksgiving) is correctly reflected: the PROVIDER's own real market-hours evidence already marks the session closed for the remainder of that day, never a hardcoded date list on this app's side", () => {
-    expect(deriveMarketSessionClaim([resultWithSession("CLOSED"), resultWithSession("CLOSED")])).toBe("CLOSED");
-  });
-
-  it("UNKNOWN (never a guessed OPEN or CLOSED) when session evidence is UNAVAILABLE", () => {
-    expect(deriveMarketSessionClaim([resultWithSession("UNAVAILABLE")])).toBe("UNKNOWN");
-  });
-
-  it("UNKNOWN when results disagree - defensive, even though one page render always shares one session-evidence fetch in practice", () => {
-    expect(deriveMarketSessionClaim([resultWithSession("OPEN"), resultWithSession("CLOSED")])).toBe("UNKNOWN");
-  });
-
-  it("normal full trading day: a single OPEN result claims OPEN", () => {
-    expect(deriveMarketSessionClaim([resultWithSession("OPEN")])).toBe("OPEN");
-  });
-});
-
 describe("effectivePresentation - Codex blocker repair (B1): the pure function the client hook calls, fully testable without a component-render harness", () => {
   it("CURRENT Watch before expiry (currentExpired=false): stillLiveCurrent=true, tier=CURRENT", () => {
     const display = currentDisplay({ action: "WATCH" });
@@ -296,5 +266,137 @@ describe("effectivePresentation - Codex blocker repair (B1): the pure function t
     // entirely OUTSIDE this function, in the thin "use client" hook that computes `currentExpired`
     // before calling this function - see client-freshness.tsx's own doc comment.
     expect(effectivePresentation.constructor.name).not.toBe("AsyncFunction");
+  });
+});
+
+describe("currentRevisionKey", () => {
+  it("is null for a non-CURRENT display - LAST_VALID/UNAVAILABLE never have a client-tracked revision", () => {
+    expect(currentRevisionKey("c1", lastValidDisplay(MONDAY_359PM))).toBeNull();
+    expect(currentRevisionKey("c1", unavailableDisplay())).toBeNull();
+  });
+
+  it("includes the entryKey, so two different campaigns with identical evaluatedAt/deadline never collide", () => {
+    const keyA = currentRevisionKey("campaign-A", currentDisplay());
+    const keyB = currentRevisionKey("campaign-B", currentDisplay());
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it("changes when evaluatedAt changes (a fresh evaluation / roll), even for the same campaign", () => {
+    const first = currentDisplay({ explanation: { ...currentResult().explanation, evaluatedAt: MONDAY_NOON } });
+    const second = currentDisplay({ explanation: { ...currentResult().explanation, evaluatedAt: TUESDAY_NOON } });
+    expect(currentRevisionKey("c1", first)).not.toBe(currentRevisionKey("c1", second));
+  });
+
+  it("is stable (identical) for the exact same evaluatedAt/deadline pair on the same campaign", () => {
+    const a = currentDisplay();
+    const b = currentDisplay();
+    expect(currentRevisionKey("c1", a)).toBe(currentRevisionKey("c1", b));
+  });
+});
+
+// Codex blocker repair, round 2 (B1) - the full regression matrix the ticket itself specified
+// (scenarios A-G), proving a cached client report keyed by the OLD revision can never be reused
+// for a different revision, a server replacement with LAST_VALID/UNAVAILABLE, or a different
+// campaign - without needing a component-render harness (this repo has none; see this file's own
+// client-freshness.tsx doc comment for why the component-level fallback path was used instead).
+describe("resolveEffectivePresentation - revision-safe client cache lookup", () => {
+  function reportFor(entryKey: string, display: PositionAssessmentDisplay, overrides: Partial<ReturnType<typeof effectivePresentation>> = {}) {
+    const key = currentRevisionKey(entryKey, display);
+    if (!key) throw new Error("test setup error: display must be CURRENT to have a revision key");
+    return { key, state: { ...effectivePresentation(display, false, MONDAY_NOON), ...overrides } };
+  }
+
+  // A. CURRENT Watch revision A -> client report says still CURRENT.
+  it("A: a matching live report for the CURRENT display's own revision is used as-is", () => {
+    const display = currentDisplay({ action: "WATCH" });
+    const { key, state } = reportFor("c1", display);
+    const liveByRevision = new Map([[key, state]]);
+    const result = resolveEffectivePresentation(liveByRevision, "c1", display, MONDAY_NOON);
+    expect(result.stillLiveCurrent).toBe(true);
+    expect(result.tier).toBe("CURRENT");
+  });
+
+  // B. Props replace same campaign with LAST_VALID revision B -> result is LAST_VALID
+  // immediately, old CURRENT report ignored.
+  it("B: a stale CURRENT report left in the map is never consulted once the server replaces the display with LAST_VALID", () => {
+    const oldCurrent = currentDisplay({ action: "WATCH" }, null);
+    const { key, state } = reportFor("c1", oldCurrent, { stillLiveCurrent: true, tier: "CURRENT" });
+    const liveByRevision = new Map([[key, state]]); // stale report still physically present
+    const newLastValid = lastValidDisplay(MONDAY_359PM);
+    const result = resolveEffectivePresentation(liveByRevision, "c1", newLastValid, TUESDAY_NOON);
+    expect(result.stillLiveCurrent).toBe(false);
+    expect(result.tier).toBe("LAST_SESSION"); // the NEW display's own tier, not the stale "CURRENT"
+  });
+
+  // C. Props replace same campaign with UNAVAILABLE -> result is UNAVAILABLE immediately, old
+  // CURRENT report ignored.
+  it("C: a stale CURRENT report is never consulted once the server replaces the display with UNAVAILABLE", () => {
+    const oldCurrent = currentDisplay({ action: "WATCH" }, null);
+    const { key, state } = reportFor("c1", oldCurrent, { stillLiveCurrent: true, tier: "CURRENT" });
+    const liveByRevision = new Map([[key, state]]);
+    const newUnavailable = unavailableDisplay();
+    const result = resolveEffectivePresentation(liveByRevision, "c1", newUnavailable, MONDAY_NOON);
+    expect(result.stillLiveCurrent).toBe(false);
+    expect(result.tier).toBe("UNAVAILABLE");
+  });
+
+  // D. CURRENT revision A -> CURRENT revision B with newer evaluatedAt/deadline -> revision A
+  // report cannot override revision B.
+  it("D: a report for an OLDER CURRENT revision cannot override a NEWER CURRENT revision of the same campaign", () => {
+    const revisionA = currentDisplay({ explanation: { ...currentResult().explanation, evaluatedAt: MONDAY_NOON, activeGuidanceDeadline: new Date(MONDAY_NOON.getTime() + 120_000) } });
+    const { key: keyA, state: stateA } = reportFor("c1", revisionA, { stillLiveCurrent: true, tier: "CURRENT" });
+    const liveByRevision = new Map([[keyA, stateA]]);
+
+    const laterEvaluatedAt = new Date(MONDAY_NOON.getTime() + 300_000);
+    const revisionB = currentDisplay({ explanation: { ...currentResult().explanation, evaluatedAt: laterEvaluatedAt, activeGuidanceDeadline: new Date(laterEvaluatedAt.getTime() + 120_000) } });
+    const result = resolveEffectivePresentation(liveByRevision, "c1", revisionB, laterEvaluatedAt);
+    // revision A's report is NOT reused for revision B - falls to the pending default instead,
+    // never silently inheriting revision A's stillLiveCurrent=true.
+    expect(result).toEqual(effectivePresentation(revisionB, true, laterEvaluatedAt));
+  });
+
+  // E. roll/current-leg replacement -> old revision cannot bleed into new leg. A roll always
+  // produces a fresh live evaluation (a new evaluatedAt/deadline) for the same campaign id -
+  // mechanically identical proof to D, confirmed explicitly under the roll scenario's own name.
+  it("E: a roll producing a new current leg (new evaluatedAt/deadline, same campaign id) is never presented using the pre-roll leg's own stale report", () => {
+    const preRoll = currentDisplay({ action: "REVIEW_ROLL", explanation: { ...currentResult().explanation, evaluatedAt: MONDAY_NOON, activeGuidanceDeadline: new Date(MONDAY_NOON.getTime() + 120_000) } });
+    const { key, state } = reportFor("c1", preRoll, { stillLiveCurrent: true, tier: "CURRENT" });
+    const liveByRevision = new Map([[key, state]]);
+
+    const postRollEvaluatedAt = new Date(MONDAY_NOON.getTime() + 60_000);
+    const postRoll = currentDisplay({ action: "COMFORTABLE", explanation: { ...currentResult().explanation, evaluatedAt: postRollEvaluatedAt, activeGuidanceDeadline: new Date(postRollEvaluatedAt.getTime() + 120_000) } });
+    const result = resolveEffectivePresentation(liveByRevision, "c1", postRoll, postRollEvaluatedAt);
+    expect(result).toEqual(effectivePresentation(postRoll, true, postRollEvaluatedAt));
+  });
+
+  // F. removed campaign -> stale report cannot affect another entry.
+  it("F: a stale report under one campaign's key can never be looked up for a different campaign", () => {
+    const removedCampaignDisplay = currentDisplay({ action: "WATCH" });
+    const { key, state } = reportFor("removed-campaign", removedCampaignDisplay, { stillLiveCurrent: true, tier: "CURRENT" });
+    const liveByRevision = new Map([[key, state]]);
+
+    const otherCampaignDisplay = currentDisplay({ action: "COMFORTABLE" });
+    const result = resolveEffectivePresentation(liveByRevision, "other-campaign", otherCampaignDisplay, MONDAY_NOON);
+    expect(result).toEqual(effectivePresentation(otherCampaignDisplay, true, MONDAY_NOON));
+    expect(result.stillLiveCurrent).toBe(false); // never inherited the removed campaign's true value
+  });
+
+  // G. unchanged CURRENT revision -> existing expiry behavior still works.
+  it("G: an unchanged CURRENT revision's live-reported expiry (both not-yet-expired and expired) still flows through correctly", () => {
+    const display = currentDisplay({ action: "WATCH" });
+    const { key } = reportFor("c1", display);
+
+    const stillLive = new Map([[key, effectivePresentation(display, false, MONDAY_NOON)]]);
+    expect(resolveEffectivePresentation(stillLive, "c1", display, MONDAY_NOON).stillLiveCurrent).toBe(true);
+
+    const expired = new Map([[key, effectivePresentation(display, true, MONDAY_NOON)]]);
+    expect(resolveEffectivePresentation(expired, "c1", display, MONDAY_NOON).stillLiveCurrent).toBe(false);
+  });
+
+  it("no matching report at all for a CURRENT display falls to the pending default, never throws and never fabricates a live status", () => {
+    const display = currentDisplay({ action: "WATCH" });
+    const result = resolveEffectivePresentation(new Map(), "c1", display, MONDAY_NOON);
+    expect(result).toEqual(effectivePresentation(display, true, MONDAY_NOON));
+    expect(result.stillLiveCurrent).toBe(false);
   });
 });

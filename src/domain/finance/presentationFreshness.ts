@@ -1,5 +1,4 @@
 import { classifyLastValidTiming, type PositionAssessmentDisplay } from "./positionReviewAssessment";
-import type { PositionReviewResult } from "./positionReview";
 
 /**
  * LST "Attention-First Freshness" Phase 1 - a PRESENTATION-ONLY freshness taxonomy, derived
@@ -34,37 +33,6 @@ export function classifyPresentationFreshness(display: PositionAssessmentDisplay
   if (tier === "TODAY") return "SNAPSHOT";
   if (tier === "PREVIOUS_SESSION") return "LAST_SESSION";
   return "HISTORICAL";
-}
-
-/**
- * Codex blocker repair (B2) - "is the exchange's regular session actually open right now," derived
- * ONLY from already-fetched, provider-verified `PositionReviewResult.evidence.session` values
- * (never a pure calendar/clock guess - the prior `isLikelyWithinRegularSession` approach this
- * replaced could not know about an NYSE early close, e.g. 1:00 PM ET on the day after
- * Thanksgiving, and would have kept claiming "Market open" until 4:00 PM regardless). Every row on
- * one page render shares the SAME session-evidence fetch (resolvePositionReviewsForUser calls
- * getEquityMarketSessionEvidenceForUser exactly once per call, not per campaign - see
- * position-review.ts), so results normally agree; this still defends against disagreement rather
- * than assuming it. Returns "UNKNOWN" (never a guessed OPEN/CLOSED) whenever session evidence
- * wasn't available at all, or disagrees - the freshness strip then shows neutral, non-committal
- * wording instead of a definitive market-state claim it can't actually back up. Zero new provider
- * calls - this reads evidence the page's own existing resolution already fetched for other
- * purposes.
- */
-export type MarketSessionClaim = "OPEN" | "CLOSED" | "UNKNOWN";
-
-export function deriveMarketSessionClaim(results: readonly Pick<PositionReviewResult, "evidence">[]): MarketSessionClaim {
-  if (results.length === 0) {
-    return "UNKNOWN";
-  }
-  const states = new Set(results.map((result) => result.evidence.session));
-  if (states.size !== 1) {
-    return "UNKNOWN";
-  }
-  const only = [...states][0];
-  if (only === "OPEN") return "OPEN";
-  if (only === "CLOSED") return "CLOSED";
-  return "UNKNOWN";
 }
 
 /**
@@ -201,4 +169,58 @@ export function effectivePresentation(display: PositionAssessmentDisplay, curren
     return { tier: tierForLastValid(display.lastValid.evaluatedAt, now), evaluatedAt: display.lastValid.evaluatedAt, stillLiveCurrent: false };
   }
   return { tier: "UNAVAILABLE", evaluatedAt: null, stillLiveCurrent: false };
+}
+
+/**
+ * Codex blocker repair, round 2 (B1) - a stable identity for ONE specific CURRENT evaluation
+ * ("revision"), not merely for the campaign it belongs to. A campaign can legitimately move
+ * through several distinct CURRENT evaluations (a fresh quote, a roll producing a new current
+ * leg), then to LAST_VALID, then back to a brand-new CURRENT evaluation later - all while its
+ * `entryKey` (campaignId) never changes. Built entirely from fields the live evaluator already
+ * exposes (`explanation.evaluatedAt`/`activeGuidanceDeadline`, both real server-computed instants
+ * that change on every fresh evaluation) - no new financial identity invented. `null` for a
+ * non-CURRENT display: LAST_VALID/UNAVAILABLE never have (or need) a client-tracked revision at
+ * all - see resolveEffectivePresentation's own lookup rule below, which never consults a cached
+ * report for them regardless.
+ */
+export function currentRevisionKey(entryKey: string, display: PositionAssessmentDisplay): string | null {
+  if (display.state !== "CURRENT") {
+    return null;
+  }
+  const { evaluatedAt, activeGuidanceDeadline } = display.current.explanation;
+  return `${entryKey}::${evaluatedAt.getTime()}::${activeGuidanceDeadline ? activeGuidanceDeadline.getTime() : "none"}`;
+}
+
+/**
+ * Codex blocker repair, round 2 (B1) - the ONE pure, revision-safe lookup rule, extracted so it is
+ * exhaustively unit-testable without a component-render harness (this repo has none). A cached
+ * client report can NEVER be used unless the NEW server display is itself CURRENT and its own
+ * `currentRevisionKey` exactly matches the report's key - this is what makes a stale report
+ * structurally impossible to apply to a different revision, a rolled leg, or a server replacement
+ * with LAST_VALID/UNAVAILABLE:
+ *
+ * 1. NEW display LAST_VALID -> use it directly, never consult `liveByRevision` at all.
+ * 2. NEW display UNAVAILABLE -> use it directly, never consult `liveByRevision` at all.
+ * 3. NEW display CURRENT -> consult `liveByRevision` ONLY via an exact revisionKey match.
+ * 4. No matching report for this exact revision -> the same pending-default
+ *    `effectivePresentation(display, true, now)` a brand-new row computes before its own first
+ *    report arrives (matches useActiveGuidanceExpired's own "always starts neutral" precedent -
+ *    never a flash of an unconfirmed "live" status, never a reused report from a different
+ *    revision).
+ */
+export function resolveEffectivePresentation(
+  liveByRevision: ReadonlyMap<string, EffectivePresentation>,
+  entryKey: string,
+  display: PositionAssessmentDisplay,
+  now: Date,
+): EffectivePresentation {
+  if (display.state !== "CURRENT") {
+    return effectivePresentation(display, true, now);
+  }
+  const revisionKey = currentRevisionKey(entryKey, display);
+  const live = revisionKey ? liveByRevision.get(revisionKey) : undefined;
+  if (live) {
+    return live;
+  }
+  return effectivePresentation(display, true, now);
 }
