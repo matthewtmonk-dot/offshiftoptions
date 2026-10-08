@@ -56,7 +56,7 @@ describe("Dashboard V2 Phase 2 - getQuoteReviewEvidenceForUser", () => {
 
     const result = await getQuoteReviewEvidenceForUser("matt", ["spy"]);
 
-    expect(resolveProvider).toHaveBeenCalledWith("matt");
+    expect(resolveProvider).toHaveBeenCalledWith("matt", undefined);
     expect(result.get("SPY")).toEqual(evidence);
   });
 
@@ -100,7 +100,7 @@ describe("Dashboard V2 Phase 2 - getEquityMarketSessionEvidenceForUser", () => {
 
     const result = await getEquityMarketSessionEvidenceForUser("matt", "2026-06-15");
 
-    expect(resolveProvider).toHaveBeenCalledWith("matt");
+    expect(resolveProvider).toHaveBeenCalledWith("matt", undefined);
     expect(getEquityMarketSessionEvidence).toHaveBeenCalledWith("2026-06-15", undefined);
     expect(result).toEqual(evidence);
   });

@@ -287,7 +287,12 @@ export async function disconnectSchwabForUser(userId: string) {
   });
 }
 
-export async function resolveMarketDataProviderForUser(userId: string): Promise<ResolvedMarketDataProvider> {
+/**
+ * Codex blocker repair (B3B, scheduled-capture Phase 2A) - `signal` is OPTIONAL and purely
+ * additive, threaded through to the token-resolution step only (`getValidSchwabAccessTokenForConnection`)
+ * - every existing caller that omits it keeps its exact prior behavior.
+ */
+export async function resolveMarketDataProviderForUser(userId: string, signal?: AbortSignal): Promise<ResolvedMarketDataProvider> {
   const connection = await findSchwabMarketDataConnectionForUser(userId);
   if (!connection) {
     return {
@@ -299,7 +304,7 @@ export async function resolveMarketDataProviderForUser(userId: string): Promise<
     };
   }
 
-  const accessToken = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: userId });
+  const accessToken = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: userId, signal });
   if (!accessToken) {
     return {
       provider: null,
@@ -322,8 +327,8 @@ export async function resolveMarketDataProviderForUser(userId: string): Promise<
   };
 }
 
-export async function getSchwabMarketDataProviderForUser(userId: string) {
-  return (await resolveMarketDataProviderForUser(userId)).provider;
+export async function getSchwabMarketDataProviderForUser(userId: string, signal?: AbortSignal) {
+  return (await resolveMarketDataProviderForUser(userId, signal)).provider;
 }
 
 export async function getSchwabMarketDataProvider(userId: string) {
@@ -332,6 +337,9 @@ export async function getSchwabMarketDataProvider(userId: string) {
 
 type ResolvePersonalBrokerProviderOptions = {
   bypassCache?: boolean;
+  /** Codex blocker repair (B3B, scheduled-capture Phase 2A) - OPTIONAL, additive; threaded through
+   * to the token-resolution step only. Every existing caller that omits it is unaffected. */
+  signal?: AbortSignal;
 };
 
 export async function resolvePersonalBrokerProviderForUser(
@@ -351,7 +359,7 @@ export async function resolvePersonalBrokerProviderForUser(
     };
   }
 
-  const accessToken = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: userId });
+  const accessToken = await getValidSchwabAccessTokenForConnection(connection.id, { expectedUserId: userId, signal: options.signal });
   if (!accessToken) {
     return {
       provider: null,

@@ -7,7 +7,7 @@ import { SCHWAB_TOKEN_URL, getSchwabOAuthConfig } from "./config";
 import { decryptToken, encryptToken } from "./crypto";
 import { normalizeSchwabAccountNumbers, type SchwabAccountNumber } from "./broker-read";
 import { SCHWAB_TRADER_BASE_URL } from "./config";
-import { schwabGetJson, SchwabApiError, type SchwabFetch } from "./client";
+import { isAbortError, schwabGetJson, SchwabApiError, type SchwabFetch } from "./client";
 import { resolveSchwabOAuthConfigForConnection, type ResolvedSchwabOAuthConfig } from "./developer-credentials";
 
 type StoredConnection = {
@@ -37,7 +37,18 @@ export async function exchangeSchwabAuthorizationCode(
   return requestSchwabToken({ grant_type: "authorization_code", code }, fetchFn, oauthConfig);
 }
 
-export async function refreshSchwabConnectionAccessToken(connectionId: string, fetchFn: SchwabFetch = fetch) {
+/**
+ * Codex blocker repair (B3B, scheduled-capture Phase 2A) - `signal` is OPTIONAL and purely
+ * additive: every existing caller (manual refresh paths, diagnostics) omits it and keeps its
+ * exact prior behavior (an `undefined` signal is a no-op for `fetch`). Only a bounded caller that
+ * wants its OWN token-refresh attempt cancellable (scheduled capture's own 45s deadline) supplies
+ * one. Safe to thread per-caller: there is no shared/deduplicated in-flight refresh promise
+ * anywhere in this module (confirmed by inspection - every call independently re-checks
+ * `needsRefresh` and, if true, makes its OWN POST to Schwab's token endpoint) - so aborting ONE
+ * caller's own fetch can never cancel a DIFFERENT, concurrent caller's independent refresh
+ * attempt (e.g. a simultaneous manual page load for the same connection).
+ */
+export async function refreshSchwabConnectionAccessToken(connectionId: string, fetchFn: SchwabFetch = fetch, signal?: AbortSignal) {
   const connection = await prisma.brokerConnection.findFirst({
     where: { id: connectionId, provider: "SCHWAB" },
   });
@@ -49,7 +60,7 @@ export async function refreshSchwabConnectionAccessToken(connectionId: string, f
   const refreshToken = decryptToken(connection.refreshTokenCiphertext);
   try {
     const oauthConfig = await resolveSchwabOAuthConfigForConnection(connection);
-    const tokenResponse = await requestSchwabToken({ grant_type: "refresh_token", refresh_token: refreshToken }, fetchFn, oauthConfig);
+    const tokenResponse = await requestSchwabToken({ grant_type: "refresh_token", refresh_token: refreshToken }, fetchFn, oauthConfig, signal);
     const refreshTokenCiphertext = tokenResponse.refresh_token
       ? encryptToken(tokenResponse.refresh_token)
       : connection.refreshTokenCiphertext;
@@ -73,6 +84,15 @@ export async function refreshSchwabConnectionAccessToken(connectionId: string, f
 
     return decryptToken(updated.accessTokenCiphertext!);
   } catch (error) {
+    // Codex blocker repair (B3B) - a caller-initiated abort (the scheduled-capture deadline, not
+    // Schwab itself, giving up) must NEVER be read as "the refresh was rejected" - that would
+    // incorrectly flip a perfectly healthy connection to EXPIRED just because one bounded caller's
+    // own timeout fired. Rethrow so the caller's own abort handling (already fail-closed - see
+    // live-quotes.ts/scheduled-capture.ts) decides what this means, without corrupting shared
+    // connection state that other callers (manual refresh, page renders) also depend on.
+    if (isAbortError(error)) {
+      throw error;
+    }
     await markConnectionExpired(
       connection.id,
       error instanceof SchwabApiError && error.status === 401 ? "refresh_rejected" : "refresh_failed",
@@ -83,7 +103,7 @@ export async function refreshSchwabConnectionAccessToken(connectionId: string, f
 
 export async function getValidSchwabAccessTokenForConnection(
   connectionId: string,
-  options: { expectedUserId?: string; fetchFn?: SchwabFetch } = {},
+  options: { expectedUserId?: string; fetchFn?: SchwabFetch; signal?: AbortSignal } = {},
 ) {
   const connection = await prisma.brokerConnection.findFirst({
     where: { id: connectionId, provider: "SCHWAB" },
@@ -99,7 +119,7 @@ export async function getValidSchwabAccessTokenForConnection(
     return decryptToken(connection.accessTokenCiphertext);
   }
 
-  return refreshSchwabConnectionAccessToken(connection.id, options.fetchFn);
+  return refreshSchwabConnectionAccessToken(connection.id, options.fetchFn, options.signal);
 }
 
 export async function findSchwabMarketDataConnectionForUser(userId: string) {
@@ -190,6 +210,7 @@ async function requestSchwabToken(
   params: Record<string, string>,
   fetchFn: SchwabFetch,
   oauthConfig?: ResolvedSchwabOAuthConfig,
+  signal?: AbortSignal,
 ): Promise<SchwabTokenResponse> {
   const config = oauthConfig?.config ?? getSchwabOAuthConfig();
   const body = new URLSearchParams(params);
@@ -204,6 +225,7 @@ async function requestSchwabToken(
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body,
+    signal,
   });
 
   if (!response.ok) {

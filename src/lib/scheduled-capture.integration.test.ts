@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
+import type { PositionAssessmentDisplay, StoredLastValidAssessment } from "@/domain/finance/positionReviewAssessment";
 import type { PositionReviewResult } from "@/domain/finance/positionReview";
+import type { EquityMarketSessionEvidence } from "@/providers/market-data/types";
 
 const dbTests = process.env.RUN_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
 
@@ -19,9 +20,46 @@ function cannotAssessResult(reasonCodes: string[], evaluatedAt: Date): PositionR
   };
 }
 
+function currentResult(evaluatedAt: Date): PositionReviewResult {
+  return {
+    action: "COMFORTABLE",
+    lifecycle: "CURRENT_PUT",
+    evidence: { position: "SCHWAB_CONFIRMED", quote: "ELIGIBLE", quoteIneligibleReason: null, session: "OPEN" },
+    explanation: {
+      reasonCodes: [], optionType: "PUT", strike: 25, stockPrice: 30, dollarDistance: 5, percentageDistance: 20,
+      moneyness: "OTM", bufferPercent: 3, expiration: new Date("2026-12-18T00:00:00Z"), daysToExpiration: 10,
+      quoteTradeTime: evaluatedAt, quoteAgeMs: 0, positionEvidenceAsOf: evaluatedAt, activeGuidanceDeadline: evaluatedAt, evaluatedAt,
+    },
+    priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-12-18", ticker: "ZVER", accountId: "a", campaignId: "c1" },
+  };
+}
+
 function unavailableDisplayEntry(evaluatedAt: Date): { campaignId: string; display: PositionAssessmentDisplay } {
   return { campaignId: "c1", display: { state: "UNAVAILABLE", currentUnavailable: cannotAssessResult(["MARKET_CLOSED"], evaluatedAt) } };
 }
+
+function lastValidDisplayEntry(reasonCodes: string[], evaluatedAt: Date): { campaignId: string; display: PositionAssessmentDisplay } {
+  return {
+    campaignId: "c1",
+    display: { state: "LAST_VALID", currentUnavailable: cannotAssessResult(reasonCodes, evaluatedAt), lastValid: {} as StoredLastValidAssessment },
+  };
+}
+
+function currentDisplayEntry(evaluatedAt: Date): { campaignId: string; display: PositionAssessmentDisplay } {
+  return { campaignId: "c1", display: { state: "CURRENT", current: currentResult(evaluatedAt), lastValid: null } };
+}
+
+const AVAILABLE_OPEN: EquityMarketSessionEvidence = {
+  status: "AVAILABLE",
+  requestedDate: "2026-10-08",
+  returnedDate: "2026-10-08",
+  marketType: "EQUITY",
+  product: "EQUITY",
+  isOpen: true,
+  regularMarketIntervals: [{ start: new Date("2026-10-08T13:30:00.000Z"), end: new Date("2026-10-08T20:00:00.000Z") }],
+};
+const AVAILABLE_CLOSED: EquityMarketSessionEvidence = { ...AVAILABLE_OPEN, isOpen: false, regularMarketIntervals: [] };
+const UNAVAILABLE_SESSION: EquityMarketSessionEvidence = { status: "UNAVAILABLE", reason: "test fixture" };
 
 const resolveMock = vi.fn();
 vi.mock("./positionAssessmentOrchestration", () => ({
@@ -31,20 +69,28 @@ vi.mock("./workflows", () => ({
   loadOpenAndAssignedCampaignsForUser: async () => [],
 }));
 
+const sessionEvidenceMock = vi.fn();
+vi.mock("./live-quotes", () => ({
+  getEquityMarketSessionEvidenceForUser: (...args: unknown[]) => sessionEvidenceMock(...args),
+}));
+
 /**
  * DB-integration coverage for the ONE idempotency guarantee this feature rests on
  * (claimSlot's atomic INSERT ... ON CONFLICT ... DO UPDATE ... WHERE, see scheduled-capture.ts),
  * plus owner isolation, the B3 stale-RUNNING/active-run-guard safety rules, the B4 budget-deferred
- * fairness rules, and the B5 null-retry semantics fix - against a real local Postgres. The
- * orchestration call itself is mocked (per the ticket's own explicit allowance: "Where live
- * provider evidence cannot be reproduced, use controlled fixtures/mocks around the orchestration
- * boundary") - persistence CORRECTNESS of a real CURRENT/LAST_VALID assessment is already fully
- * proven by positionReviewAssessmentStore.integration.test.ts (38/38); this suite proves the
- * SCHEDULING/CLAIMING layer around it, which that suite does not touch at all. The B1 session-
- * evidence gate and B2 cost estimate run against the REAL (unmocked) `getEquityMarketSessionEvidenceForUser`/
- * `estimateProviderCost` - with no real Schwab connection behind the dummy ciphertext test
- * fixtures, session evidence always resolves UNAVAILABLE (never throws, never fabricates
- * "closed"), so every test below exercises the heavy path exactly as it did before B1 existed.
+ * fairness rules, the B5 null-retry semantics fix, and the Codex "final five" round-2 repairs
+ * (B1 fail-closed preflight, B2 BUDGET_BLOCKED, B3 end-to-end timeout, B4 LAST_VALID-never-counts,
+ * B5 every-heartbeat retry) - against a real local Postgres. The orchestration call AND the
+ * preflight session-evidence call are both mocked (per the ticket's own explicit allowance:
+ * "Where live provider evidence cannot be reproduced, use controlled fixtures/mocks around the
+ * orchestration boundary") - persistence CORRECTNESS of a real CURRENT/LAST_VALID assessment is
+ * already fully proven by positionReviewAssessmentStore.integration.test.ts (38/38); this suite
+ * proves the SCHEDULING/CLAIMING/CLASSIFICATION layer around it, which that suite does not touch
+ * at all. `sessionEvidenceMock` defaults to AVAILABLE+OPEN in `beforeEach` so every test EXCEPT
+ * the dedicated B1 tests below exercises the heavy path exactly as it did before B1's fail-closed
+ * fix - the fixture connections' dummy ciphertext tokens would otherwise make REAL session
+ * evidence resolve UNAVAILABLE for every single test, which is no longer survivable now that B1
+ * fails closed on that outcome.
  */
 (dbTests ? describe : describe.skip)("scheduled-capture (DB)", () => {
   let prisma: typeof import("./prisma").prisma;
@@ -65,9 +111,8 @@ vi.mock("./workflows", () => ({
 
     // A CONNECTED Schwab broker connection is required for eligibleOwnerIdsInFairOrder() to select
     // a owner at all - the actual tokens are never used for real traffic (resolvePositionAssessmentDisplaysForUser
-    // is mocked above; the B1 session-evidence gate and B2 cost estimate tolerate a connection that
-    // can't actually decrypt/call Schwab, resolving to UNAVAILABLE/zero rather than throwing), so
-    // dummy ciphertext values are safe and make no real request.
+    // and getEquityMarketSessionEvidenceForUser are both mocked above), so dummy ciphertext values
+    // are safe and make no real request.
     for (const ownerId of [ownerA.id, ownerB.id]) {
       await prisma.brokerConnection.create({
         data: { userId: ownerId, provider: "SCHWAB", status: "CONNECTED", label: "Test connection", accessTokenCiphertext: "dummy", refreshTokenCiphertext: "dummy" },
@@ -85,12 +130,15 @@ vi.mock("./workflows", () => ({
   beforeEach(() => {
     resolveMock.mockReset();
     resolveMock.mockResolvedValue([]); // "no campaigns" by default - empty tally, zero contradictions
+    sessionEvidenceMock.mockReset();
+    sessionEvidenceMock.mockResolvedValue(AVAILABLE_OPEN);
     budget.resetScheduledCaptureBudgetForTests();
   });
 
   afterEach(async () => {
     await prisma.scheduledCaptureRun.deleteMany({ where: { ownerId: { in: [ownerA.id, ownerB.id] } } });
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   const DUE_NOW = new Date("2026-10-08T13:35:00.000Z"); // 9:35 AM ET on a Thursday (NYSE trading day) - the OPENING slot
@@ -298,5 +346,215 @@ vi.mock("./workflows", () => ({
     const result = await scheduledCapture.runScheduledCaptureHeartbeat(saturday935am);
     expect(result).toEqual({ status: "ok", due: 0, processed: 0, deferred: 0, skipped: 0, failed: 0 });
     expect(resolveMock).not.toHaveBeenCalled();
+  });
+
+  describe("Codex 'final five' round 2 - B1: session UNAVAILABLE must fail closed", () => {
+    it("session AVAILABLE + OPEN proceeds to the heavy resolver exactly as before", async () => {
+      sessionEvidenceMock.mockResolvedValue(AVAILABLE_OPEN);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      expect(resolveMock).toHaveBeenCalled();
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("SUCCEEDED");
+    });
+
+    it("session AVAILABLE + CLOSED skips the heavy resolver entirely - SUCCEEDED/SESSION_CLOSED", async () => {
+      sessionEvidenceMock.mockResolvedValue(AVAILABLE_CLOSED);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      expect(resolveMock).not.toHaveBeenCalled();
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("SUCCEEDED");
+      expect(rowA.resultCategory).toBe("SESSION_CLOSED");
+    });
+
+    it("session UNAVAILABLE now FAILS CLOSED - heavy resolver never entered, FAILED/SESSION_UNAVAILABLE with a bounded retry", async () => {
+      sessionEvidenceMock.mockResolvedValue(UNAVAILABLE_SESSION);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      expect(resolveMock).not.toHaveBeenCalled();
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("FAILED");
+      expect(rowA.resultCategory).toBe("SESSION_UNAVAILABLE");
+      expect(rowA.nextEligibleRetryAt).not.toBeNull();
+      // The early-close-unavailable scenario costs only the single preflight attempt - no
+      // account/position/quote calls at all (the mocked orchestration call, which is what WOULD
+      // make those real calls, was never invoked).
+      expect(rowA.positionsExamined).toBeNull();
+    });
+  });
+
+  describe("Codex 'final five' round 2 - B2: a single owner's own cost exceeding the ceiling is BUDGET_BLOCKED, not an endless DEFERRED loop", () => {
+    it("estimate > ceiling -> BUDGET_BLOCKED, no provider calls, nextEligibleRetryAt null, never reclaimed by a later heartbeat", async () => {
+      const costSpy = vi.spyOn(budget, "estimateProviderCost").mockImplementation(async (ownerId: string) => (ownerId === ownerA.id ? 25 : 0));
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("FAILED");
+      expect(rowA.resultCategory).toBe("BUDGET_BLOCKED");
+      expect(rowA.nextEligibleRetryAt).toBeNull();
+      expect(resolveMock).not.toHaveBeenCalledWith(ownerA.id, expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything());
+
+      // A later heartbeat (even far in the future) never reclaims a BUDGET_BLOCKED row - it is
+      // excluded by the SAME null-retry rule that protects every other terminal state.
+      const muchLater = new Date(DUE_NOW.getTime() + 5 * 60_000);
+      await scheduledCapture.runScheduledCaptureHeartbeat(muchLater);
+      const rowAAfter = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowAAfter.status).toBe("FAILED");
+      expect(rowAAfter.resultCategory).toBe("BUDGET_BLOCKED");
+      expect(rowAAfter.attemptCount).toBe(1); // never re-claimed
+
+      costSpy.mockRestore();
+    });
+
+    it("a capture that fits individually but has no capacity THIS MINUTE remains ordinary DEFERRED, not BUDGET_BLOCKED", async () => {
+      let callCount = 0;
+      const reserveSpy = vi.spyOn(budget, "tryReserveProviderRequestBudget").mockImplementation(() => {
+        callCount += 1;
+        return callCount === 1;
+      });
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      const rowA = await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } });
+      const rowB = await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerB.id } });
+      const statuses = [rowA[0]?.status, rowB[0]?.status];
+      expect(statuses).toContain("DEFERRED");
+      expect(statuses).not.toContain("BUDGET_BLOCKED");
+
+      reserveSpy.mockRestore();
+    });
+  });
+
+  describe("Codex 'final five' round 2 - B4: LAST_VALID must never count as CURRENT_CAPTURED for the scheduled operational result", () => {
+    it("CURRENT attempt provider failure + LAST_VALID fallback -> PROVIDER_UNAVAILABLE, never CURRENT_CAPTURED", async () => {
+      const reserveSpy = vi.spyOn(budget, "tryReserveProviderRequestBudget").mockReturnValue(true);
+      resolveMock.mockResolvedValue([lastValidDisplayEntry(["POSITION_BROKER_UNAVAILABLE"], DUE_NOW)]);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("FAILED");
+      expect(rowA.resultCategory).toBe("PROVIDER_UNAVAILABLE");
+
+      reserveSpy.mockRestore();
+    });
+
+    it("one actual CURRENT display alongside other LAST_VALID siblings still allows CURRENT_CAPTURED", async () => {
+      const reserveSpy = vi.spyOn(budget, "tryReserveProviderRequestBudget").mockReturnValue(true);
+      resolveMock.mockResolvedValue([currentDisplayEntry(DUE_NOW), lastValidDisplayEntry(["POSITION_BROKER_UNAVAILABLE"], DUE_NOW)]);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("SUCCEEDED");
+      expect(rowA.resultCategory).toBe("CURRENT_CAPTURED");
+
+      reserveSpy.mockRestore();
+    });
+
+    it("all legitimate no-current (zero relevant campaigns) classifies as NO_CURRENT_LEGITIMATE", async () => {
+      resolveMock.mockResolvedValue([]);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      const rowA = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerA.id } }))[0]!;
+      expect(rowA.status).toBe("SUCCEEDED");
+      expect(rowA.resultCategory).toBe("NO_CURRENT_LEGITIMATE");
+    });
+  });
+
+  describe("Codex 'final five' round 2 - B3/B4: end-to-end timeout takes priority over whatever the resolver eventually returns", () => {
+    it("a timeout persists as TIMEOUT/FAILED even when the resolver resolves with a beautiful CURRENT display", async () => {
+      // Deterministic, fast proof of captureOwnerSlot's own `controller.signal.aborted` priority
+      // check - deliberately NOT a real-45-second-elapsed test (fake timers interleaved with real
+      // DB I/O proved unreliable here; the actual end-to-end "signal reaches real fetch" proof
+      // already lives in client.test.ts/tokens.test.ts). Every AbortController this heartbeat
+      // creates is forced to report `aborted: true` immediately - simulating the 45s deadline
+      // having already fired by the time the (mocked) resolver call resolves - while every other
+      // mocked dependency (session evidence, the resolver itself) still reports ordinary success.
+      const RealAbortController = globalThis.AbortController;
+      class AlreadyAbortedController extends RealAbortController {
+        constructor() {
+          super();
+          this.abort();
+        }
+      }
+      vi.stubGlobal("AbortController", AlreadyAbortedController);
+
+      const reserveSpy = vi.spyOn(budget, "tryReserveProviderRequestBudget").mockReturnValue(true);
+      resolveMock.mockResolvedValue([currentDisplayEntry(DUE_NOW)]);
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW);
+
+      vi.unstubAllGlobals();
+      reserveSpy.mockRestore();
+
+      const rows = await prisma.scheduledCaptureRun.findMany({ where: { ownerId: { in: [ownerA.id, ownerB.id] } } });
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(row.status).toBe("FAILED");
+        expect(row.resultCategory).toBe("TIMEOUT");
+        expect(row.nextEligibleRetryAt).not.toBeNull();
+      }
+    });
+  });
+
+  describe("Codex 'final five' round 2 - B5: deferred/retryable work is serviced on EVERY heartbeat, not only when a new slot is due", () => {
+    // 9:50 AM ET BASELINE slot - its own 10-minute due-window closes at exactly 10:00 AM ET, and
+    // the NEXT baseline target (10:05 AM) isn't due until 10:05 - so a heartbeat at exactly 10:00
+    // AM ET has dueCaptureSlots() return [] (genuinely NO new slot), the precise gap this repair
+    // must still service DEFERRED/retryable work through.
+    const BASELINE_DUE = new Date("2026-10-08T13:50:00.000Z"); // 9:50 AM ET
+    const NO_NEW_SLOT_HEARTBEAT = new Date("2026-10-08T14:00:00.000Z"); // 10:00 AM ET - confirmed gap
+
+    it("9:50 both due, one deferred -> 10:00 heartbeat has NO new slot but still services the deferred owner (regardless of which owner it is)", async () => {
+      let callCount = 0;
+      const reserveSpy = vi.spyOn(budget, "tryReserveProviderRequestBudget").mockImplementation(() => {
+        callCount += 1;
+        return callCount === 1;
+      });
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(BASELINE_DUE);
+      const afterFirst = await prisma.scheduledCaptureRun.findMany({ where: { ownerId: { in: [ownerA.id, ownerB.id] } } });
+      expect(afterFirst.filter((r) => r.status === "SUCCEEDED")).toHaveLength(1);
+      const deferredRow = afterFirst.find((r) => r.status === "DEFERRED");
+      expect(deferredRow).toBeTruthy();
+      reserveSpy.mockRestore();
+
+      // Confirm the gap really is a gap - no new slot at 10:00.
+      const secondResult = await scheduledCapture.runScheduledCaptureHeartbeat(NO_NEW_SLOT_HEARTBEAT);
+
+      const afterSecond = await prisma.scheduledCaptureRun.findMany({ where: { ownerId: deferredRow!.ownerId } });
+      expect(afterSecond[0]!.status).toBe("SUCCEEDED");
+      expect(afterSecond[0]!.dueAt).toEqual(BASELINE_DUE); // original slot identity preserved
+      expect(secondResult.processed).toBe(1);
+    });
+
+    it("B5 bounding: a DEFERRED row from a PRIOR session date is abandoned, never executed the next day", async () => {
+      await prisma.scheduledCaptureRun.create({
+        data: {
+          ownerId: ownerB.id, sessionDate: "2026-10-07", slot: "OPENING", dueAt: new Date("2026-10-07T13:35:00.000Z"),
+          status: "DEFERRED", attemptCount: 1, startedAt: new Date("2026-10-07T13:35:00.000Z"), completedAt: new Date("2026-10-07T13:35:00.000Z"),
+          resultCategory: "BUDGET_DEFERRED", nextEligibleRetryAt: new Date("2026-10-07T13:36:00.000Z"),
+        },
+      });
+
+      await scheduledCapture.runScheduledCaptureHeartbeat(DUE_NOW); // "today" - a new slot IS due, so the maintenance sweep runs
+
+      // The OLD, prior-session row itself is abandoned - never reclaimed/re-executed under its own
+      // (now stale) dueAt. ownerB legitimately ALSO gets a brand-new, completely independent
+      // capture for TODAY's own due slot in the SAME heartbeat - that is correct, expected
+      // behavior (an unrelated stale row must never suppress an owner's normal future captures).
+      const rowB = (await prisma.scheduledCaptureRun.findMany({ where: { ownerId: ownerB.id, sessionDate: "2026-10-07" } }))[0]!;
+      expect(rowB.status).toBe("ABANDONED");
+      expect(rowB.resultCategory).toBe("ABANDONED_STALE");
+      expect(rowB.attemptCount).toBe(1); // never reclaimed under its own stale dueAt
+      expect(rowB.dueAt).toEqual(new Date("2026-10-07T13:35:00.000Z")); // never backdated to today
+    });
   });
 });

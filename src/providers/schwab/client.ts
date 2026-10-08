@@ -71,3 +71,17 @@ export async function schwabGetJson<T>(options: SchwabRequestOptions): Promise<T
   const response = await schwabFetchResponse(options);
   return (await response.json()) as T;
 }
+
+/**
+ * Codex blocker repair (B3B/B3C, scheduled-capture Phase 2A) - true for the native abort rejection
+ * a `fetch` call throws when ITS OWN caller-supplied `AbortSignal` fires (`DOMException`/`Error`
+ * with `name === "AbortError"`), as opposed to a genuine Schwab-side rejection (`SchwabApiError`,
+ * a network failure, a malformed response, etc). Exists so a caller that deliberately cancels its
+ * OWN bounded request (e.g. scheduled capture's own deadline) can tell "I gave up waiting" apart
+ * from "Schwab actually rejected this" - the two must never be handled identically, since only the
+ * latter is real evidence about the connection/credential itself (see tokens.ts's own use of this
+ * to avoid marking a healthy connection EXPIRED just because one caller's own timeout fired).
+ */
+export function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}

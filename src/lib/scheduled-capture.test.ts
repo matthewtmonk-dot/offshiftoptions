@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyCaptureOutcome, tallyPositionAssessmentDisplays } from "./scheduled-capture";
+import { classifyCaptureOutcome, describeScheduledCaptureStatus, tallyPositionAssessmentDisplays, type LatestScheduledCaptureStatus } from "./scheduled-capture";
 import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import type { PositionReviewResult } from "@/domain/finance/positionReview";
 import type { StoredLastValidAssessment } from "@/domain/finance/positionReviewAssessment";
@@ -71,8 +71,17 @@ describe("classifyCaptureOutcome (Codex blocker repair B5)", () => {
     expect(classifyCaptureOutcome([{ display: currentDisplay() }], false)).toBe("CURRENT_CAPTURED");
   });
 
-  it("classifies a verified LAST_VALID display as CURRENT_CAPTURED - a historical fallback is a real success", () => {
-    expect(classifyCaptureOutcome([{ display: lastValidDisplay(["POSITION_BROKER_UNAVAILABLE"]) }], false)).toBe("CURRENT_CAPTURED");
+  it("Codex blocker repair (B4, round 2): a LAST_VALID display NEVER counts as CURRENT_CAPTURED - a historical fallback is valuable for financial presentation but is not an operationally successful scheduled capture", () => {
+    expect(classifyCaptureOutcome([{ display: lastValidDisplay(["POSITION_BROKER_UNAVAILABLE"]) }], false)).toBe("PROVIDER_UNAVAILABLE");
+  });
+
+  it("Codex blocker repair (B4, round 2): LAST_VALID + auth-expired classifies as AUTH_UNAVAILABLE, not CURRENT_CAPTURED", () => {
+    expect(classifyCaptureOutcome([{ display: lastValidDisplay(["POSITION_BROKER_UNAVAILABLE"]) }], true)).toBe("AUTH_UNAVAILABLE");
+  });
+
+  it("Codex blocker repair (B4, round 2): a real CURRENT display alongside ONLY LAST_VALID siblings still allows CURRENT_CAPTURED", () => {
+    const resolved = [{ display: currentDisplay() }, { display: lastValidDisplay(["POSITION_BROKER_UNAVAILABLE"]) }];
+    expect(classifyCaptureOutcome(resolved, false)).toBe("CURRENT_CAPTURED");
   });
 
   it("classifies only benign/awaiting-confirmation reasons as NO_CURRENT_LEGITIMATE, not an error", () => {
@@ -106,5 +115,80 @@ describe("classifyCaptureOutcome (Codex blocker repair B5)", () => {
   it("a CURRENT display wins over a merely benign/provider-unavailable sibling in the same run", () => {
     const resolved = [{ display: currentDisplay() }, { display: unavailableDisplay(["POSITION_BROKER_UNAVAILABLE"]) }];
     expect(classifyCaptureOutcome(resolved, false)).toBe("CURRENT_CAPTURED");
+  });
+});
+
+describe("describeScheduledCaptureStatus (Codex blocker repair B2/B4/B5 UI wording)", () => {
+  const AT = new Date("2026-10-08T14:00:00Z");
+
+  function known(status: "SUCCEEDED" | "FAILED" | "DEFERRED" | "ABANDONED", resultCategory: string | null): LatestScheduledCaptureStatus {
+    return { known: true, status, resultCategory, at: AT, slot: "OPENING" };
+  }
+
+  it("never known -> neutral 'no runs yet'", () => {
+    expect(describeScheduledCaptureStatus({ known: false })).toEqual({ label: "No runs yet.", tone: "neutral" });
+  });
+
+  it("CURRENT_CAPTURED -> the ONLY healthy tone", () => {
+    expect(describeScheduledCaptureStatus(known("SUCCEEDED", "CURRENT_CAPTURED")).tone).toBe("healthy");
+  });
+
+  it("every other SUCCEEDED resultCategory is neutral, never healthy", () => {
+    expect(describeScheduledCaptureStatus(known("SUCCEEDED", "NO_CURRENT_LEGITIMATE")).tone).toBe("neutral");
+    expect(describeScheduledCaptureStatus(known("SUCCEEDED", "SESSION_CLOSED")).tone).toBe("neutral");
+  });
+
+  it("CONTRADICTION_DETECTED is attention, never healthy", () => {
+    expect(describeScheduledCaptureStatus(known("SUCCEEDED", "CONTRADICTION_DETECTED")).tone).toBe("attention");
+  });
+
+  it("Codex blocker repair (B1, round 2) - SESSION_UNAVAILABLE is attention, distinct wording from PROVIDER_UNAVAILABLE", () => {
+    const sessionUnavailable = describeScheduledCaptureStatus(known("FAILED", "SESSION_UNAVAILABLE"));
+    const providerUnavailable = describeScheduledCaptureStatus(known("FAILED", "PROVIDER_UNAVAILABLE"));
+    expect(sessionUnavailable.tone).toBe("attention");
+    expect(providerUnavailable.tone).toBe("attention");
+    expect(sessionUnavailable.label).not.toBe(providerUnavailable.label);
+  });
+
+  it("AUTH_UNAVAILABLE is attention and mentions reconnecting", () => {
+    const result = describeScheduledCaptureStatus(known("FAILED", "AUTH_UNAVAILABLE"));
+    expect(result.tone).toBe("attention");
+    expect(result.label.toLowerCase()).toContain("reconnect");
+  });
+
+  it("Codex blocker repair (B3/B4, round 2) - TIMEOUT is attention and never claims Healthy, even though a historical fallback may exist", () => {
+    const result = describeScheduledCaptureStatus(known("FAILED", "TIMEOUT"));
+    expect(result.tone).toBe("attention");
+    expect(result.label.toLowerCase()).toContain("timeout");
+    expect(result.label).not.toContain("Healthy");
+  });
+
+  it("Codex blocker repair (B2, round 2) - BUDGET_BLOCKED is attention and textually distinct from ordinary DEFERRED", () => {
+    const blocked = describeScheduledCaptureStatus(known("FAILED", "BUDGET_BLOCKED"));
+    const deferred = describeScheduledCaptureStatus(known("DEFERRED", "BUDGET_DEFERRED"));
+    expect(blocked.tone).toBe("attention");
+    expect(deferred.tone).toBe("neutral");
+    expect(blocked.label).not.toBe(deferred.label);
+    expect(blocked.label.toLowerCase()).toContain("budget");
+    expect(deferred.label.toLowerCase()).toContain("deferred");
+  });
+
+  it("UNKNOWN_ERROR is attention", () => {
+    expect(describeScheduledCaptureStatus(known("FAILED", "UNKNOWN_ERROR")).tone).toBe("attention");
+  });
+
+  it("ABANDONED is attention regardless of resultCategory", () => {
+    expect(describeScheduledCaptureStatus(known("ABANDONED", "ABANDONED_STALE")).tone).toBe("attention");
+  });
+
+  it("no status/category combination ever produces the literal word 'Healthy' except CURRENT_CAPTURED", () => {
+    const categories = [
+      "NO_CURRENT_LEGITIMATE", "SESSION_CLOSED", "CONTRADICTION_DETECTED", "PROVIDER_UNAVAILABLE",
+      "SESSION_UNAVAILABLE", "AUTH_UNAVAILABLE", "TIMEOUT", "UNKNOWN_ERROR", "BUDGET_BLOCKED",
+    ];
+    for (const category of categories) {
+      expect(describeScheduledCaptureStatus(known("FAILED", category)).label).not.toContain("Healthy");
+      expect(describeScheduledCaptureStatus(known("SUCCEEDED", category)).label).not.toContain("Healthy");
+    }
   });
 });

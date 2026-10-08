@@ -6,9 +6,10 @@ import { isKnownTransientFallbackReason, type PositionAssessmentDisplay } from "
 import { resolvePositionAssessmentDisplaysForUser, type ResolvedPositionAssessmentDisplay } from "./positionAssessmentOrchestration";
 import { loadOpenAndAssignedCampaignsForUser } from "./workflows";
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
-import { estimateProviderCost, tryReserveProviderRequestBudget } from "./scheduled-capture-budget";
+import { estimateProviderCost, MAX_PROVIDER_REQUESTS_PER_MINUTE, tryReserveProviderRequestBudget } from "./scheduled-capture-budget";
 import { getEquityMarketSessionEvidenceForUser } from "./live-quotes";
 import { isWithinRegularSession, nyCalendarDateOf } from "@/domain/finance/marketSession";
+import { isAbortError } from "@/providers/schwab/client";
 
 /**
  * LST "Bounded Scheduled Position Capture" Phase 2A - the bounded worker behind
@@ -21,26 +22,32 @@ import { isWithinRegularSession, nyCalendarDateOf } from "@/domain/finance/marke
  * SCHEDULING/TRIGGERING concern layered on top of code that was already correct and already
  * approved.
  *
- * Codex blocker repair (B1, early close) - before any heavy per-owner work, this module asks this
- * owner's OWN real Schwab session evidence (`getEquityMarketSessionEvidenceForUser`, the exact
- * same evidence the live evaluator itself trusts) whether `now` actually falls inside the regular
- * session. Schwab's own evidence already correctly encodes early closes (e.g. the day after
- * Thanksgiving) - no hardcoded/guessed holiday calendar is added here. When that evidence is
- * AVAILABLE and says the session is closed, this slot completes immediately as SUCCEEDED/
- * SESSION_CLOSED for roughly one request's cost, never entering the heavy resolver - this is what
- * stops an early-close afternoon from repeating a full A+M+2 capture every 15 minutes until FINAL.
- * When the evidence itself is UNAVAILABLE, this gate NEVER guesses "closed" from a failure - it
- * falls through to the heavy path exactly as before, so a session-evidence outage can only ever
- * cost MORE work (safe), never incorrectly suppress a real capture.
+ * Codex blocker repair (B1, early close - round 2) - before any heavy per-owner work, this module
+ * asks this owner's OWN real Schwab session evidence (`getEquityMarketSessionEvidenceForUser`, the
+ * exact same evidence the live evaluator itself trusts) whether `now` actually falls inside the
+ * regular session. Schwab's own evidence already correctly encodes early closes (e.g. the day
+ * after Thanksgiving) - no hardcoded/guessed holiday calendar is added here. Scheduled capture
+ * FAILS CLOSED on every non-open outcome:
+ *   AVAILABLE + OPEN      -> proceed to the heavy resolver
+ *   AVAILABLE + CLOSED    -> SUCCEEDED / SESSION_CLOSED, heavy resolver never entered
+ *   UNAVAILABLE           -> FAILED / SESSION_UNAVAILABLE, heavy resolver never entered either
+ * The first Codex round left the UNAVAILABLE case falling through to the heavy resolver "just in
+ * case," which defeated the whole gate on exactly the connectivity-degraded days it exists for.
+ * Manual Refresh is a SEPARATE, unaffected code path (`refreshPositionEvidenceForUser`,
+ * workflows.ts) that may still try harder because a human explicitly asked for it right now - this
+ * module's own principle is the opposite: a missing scheduled snapshot is preferable to
+ * uncontrolled/duplicate provider traffic, so an inconclusive preflight is never a license to
+ * proceed anyway.
  *
  * Measured provider-request cost (see PROJECT_HANDOFF.md for the full measurement): one cold-cache
  * `resolvePositionReviewsForUser` cycle for a user with A Schwab accounts and M distinct tickers
  * needing review costs (1 + A) broker-read calls + M quote calls (one per symbol, NOT batched -
  * this is EXISTING, trust-sensitive provider behavior, deliberately NOT rewritten by this ticket)
  * + 1 session call = A + M + 2 real Schwab requests on the heavy path, PLUS the one cheap B1 gate
- * call above (A + M + 3 total when the session turns out to be open) - see scheduled-capture-
- * budget.ts's own doc comment for the full budget-reservation formula (which adds further
- * headroom on top of this real-cost number).
+ * call above (A + M + 3 total when the session turns out to be open). A SESSION_CLOSED or
+ * SESSION_UNAVAILABLE outcome costs only that single preflight request - never A+M+3 - see
+ * scheduled-capture-budget.ts's own doc comment for the full budget-reservation formula (which
+ * adds further headroom on top of this real-cost number).
  */
 
 /** Codex blocker repair (B3) - a RUNNING row older than this is no longer trusted to still be a
@@ -54,27 +61,40 @@ import { isWithinRegularSession, nyCalendarDateOf } from "@/domain/finance/marke
 const ABANDON_STALE_RUNNING_THRESHOLD_MS = 10 * 60_000;
 
 /**
- * Codex blocker repair (B3) - the real, HONORED cancellation deadline for one owner's heavy
- * capture work, enforced via a genuine `AbortController` threaded all the way through
- * `resolvePositionAssessmentDisplaysForUser` -> `resolvePositionReviewsForUser` -> the three
- * provider-touching functions (which already honor an `AbortSignal` for the existing manual-
- * refresh path - this ticket only threads that SAME existing capability into the scheduled read/
- * evaluate path too). This is NOT a `Promise.race` that leaves the underlying fetch running
- * unobserved - the signal is the one actually passed to `fetch`, so an aborted request is actually
- * cancelled network-side. 45s is chosen to comfortably exceed this app's own measured typical
- * capture latency (a handful of sequential/concurrent Schwab requests) while still being short
- * enough that a genuinely hung request does not occupy an owner's "active run" slot for long.
+ * Codex blocker repair (B3, round 2) - the real, HONORED, END-TO-END cancellation deadline for one
+ * owner's ENTIRE scheduled attempt - created BEFORE the first provider call of any kind (the B1
+ * session preflight included, not just the heavy resolver) and threaded as the SAME `AbortSignal`
+ * through every subsequent provider-touching step: the preflight session call, token acquisition/
+ * refresh (`providers/schwab/tokens.ts`), accounts, positions, quotes, and the heavy resolver's
+ * own session-evidence fetch. The first Codex round created this controller only around the heavy
+ * resolver call, AFTER the preflight had already run un-cancellable and with token refresh never
+ * wired to any signal at all - so the "45-second deadline" was never actually a complete-provider-
+ * work deadline. This is NOT a `Promise.race` that leaves the underlying fetch running unobserved -
+ * the signal is the one actually passed to every real `fetch` in the chain, so an aborted request
+ * is actually cancelled network-side (verified by dedicated fetch-level tests - see
+ * scheduled-capture.test.ts and tokens.test.ts). 45s is chosen to comfortably exceed this app's own
+ * measured typical capture latency (a handful of sequential/concurrent Schwab requests) while
+ * still being short enough that a genuinely hung request does not occupy an owner's "active run"
+ * slot for long.
  *
  * Hermes recommendation: the documented `curl --max-time` MUST exceed this server-side deadline
- * plus write/network overhead - recommend `--max-time 60` (45s deadline + 15s margin), replacing
- * the previous, unsafe `--max-time 25` (which could not possibly cover a real capture attempt and
- * would abandon the HTTP request from Hermes's side while the server kept working regardless).
+ * plus write/network overhead - recommend `--max-time 60` (45s deadline + 15s margin). This is
+ * now genuinely justified: the 45s deadline is end-to-end across every scheduled provider call,
+ * not merely the heavy resolver, so 60s is a real, complete upper bound on server-side work.
  */
 const CAPTURE_TIMEOUT_MS = 45_000;
 
-/** A PROVIDER_UNAVAILABLE slot is not retried sooner than this - gives a transient provider hiccup
- * real recovery time rather than being hammered on the very next 5-minute heartbeat. */
+/** A PROVIDER_UNAVAILABLE or SESSION_UNAVAILABLE slot is not retried sooner than this - gives a
+ * transient provider hiccup real recovery time rather than being hammered on the very next
+ * 5-minute heartbeat. */
 const PROVIDER_RETRY_BACKOFF_MS = 5 * 60_000;
+/** Codex blocker repair (B4) - a TIMEOUT (the 45s end-to-end deadline fired) backs off on the SAME
+ * schedule as a plain provider hiccup: a timeout is itself evidence of a slow/unresponsive
+ * provider, not a distinct failure mode needing its own longer cooldown, and 5 minutes already
+ * gives real recovery time before the next heartbeat retries. Documented explicitly per the
+ * ticket's own "choose and document" instruction (the alternative considered was 15 minutes,
+ * rejected as needlessly conservative for what is often transient network/provider slowness). */
+const TIMEOUT_RETRY_BACKOFF_MS = PROVIDER_RETRY_BACKOFF_MS;
 /** Codex blocker repair (B5) - an AUTH_UNAVAILABLE slot backs off far longer than a plain provider
  * hiccup: a broken/expired Schwab connection needs the owner to actually reconnect (Account page),
  * which will not happen in the next 5 minutes - hammering it every heartbeat wastes a request and
@@ -118,8 +138,23 @@ export type CaptureResultCategory =
   | "CONTRADICTION_DETECTED"
   | "PROVIDER_UNAVAILABLE"
   | "AUTH_UNAVAILABLE"
+  /** Codex blocker repair (B1, round 2) - the preflight session-evidence gate itself returned
+   * UNAVAILABLE (never "closed," never "open" - genuinely unknown). Scheduled capture now fails
+   * closed on this outcome instead of falling through to the heavy resolver "just in case." */
+  | "SESSION_UNAVAILABLE"
+  /** Codex blocker repair (B3/B4, round 2) - this attempt's own 45s end-to-end deadline fired.
+   * Takes priority over whatever the resolver's own fail-closed catches turned the resulting
+   * abort into (ordinary-looking UNAVAILABLE/LAST_VALID evidence) - see captureOwnerSlot's
+   * explicit `controller.signal.aborted` check before classification. */
+  | "TIMEOUT"
   | "UNKNOWN_ERROR"
   | "BUDGET_DEFERRED"
+  /** Codex blocker repair (B2, round 2) - this owner's OWN estimated cost exceeds the ENTIRE
+   * per-minute ceiling by itself, not merely "no capacity this minute." Terminal: never executed,
+   * never auto-retried (nextEligibleRetryAt is always null) - distinct from BUDGET_DEFERRED, which
+   * remains retryable once capacity frees up. Requires operator attention (reduce this owner's
+   * tracked campaigns/tickers, or revisit the ceiling) rather than an indefinite retry loop. */
+  | "BUDGET_BLOCKED"
   | "ABANDONED_STALE";
 
 /**
@@ -210,13 +245,19 @@ async function ownerHasActiveRun(ownerId: string): Promise<boolean> {
 }
 
 /**
- * Codex blocker repair (B4) - this session date's DEFERRED rows whose own backoff has passed,
- * oldest `dueAt` first (the exact "oldest deferred owner first" fairness rule the ticket
- * requires) - never relying on unspecified database row order.
+ * Codex blocker repair (B5, round 2) - this session date's DEFERRED **and** FAILED-but-retry-
+ * eligible rows, oldest `dueAt` first (the exact "oldest deferred/retryable owner first" fairness
+ * rule the ticket requires) - never relying on unspecified database row order. Broadened from
+ * DEFERRED-only in the first Codex round: a FAILED row whose own backoff has passed (e.g.
+ * PROVIDER_UNAVAILABLE 5 minutes later) is now ALSO retried through this SAME queue, every
+ * heartbeat, rather than only incidentally when a brand-new schedule slot happens to target the
+ * exact same `dueAt` again. `nextEligibleRetryAt IS NOT NULL AND <= now` already excludes every
+ * terminal row (BUDGET_BLOCKED/ABANDONED_STALE/exhausted UNKNOWN_ERROR all store `null`) - a
+ * terminal row can never sit at the head of this queue forever, by construction.
  */
-async function eligibleDeferredRuns(now: Date, sessionDate: string) {
+async function eligibleRetryableRuns(now: Date, sessionDate: string) {
   return prisma.scheduledCaptureRun.findMany({
-    where: { status: "DEFERRED", sessionDate, nextEligibleRetryAt: { not: null, lte: now } },
+    where: { status: { in: ["DEFERRED", "FAILED"] }, sessionDate, nextEligibleRetryAt: { not: null, lte: now } },
     orderBy: { dueAt: "asc" },
     select: { ownerId: true, sessionDate: true, slot: true, dueAt: true },
     take: MAX_OWNERS_PER_INVOCATION,
@@ -298,42 +339,58 @@ export function tallyPositionAssessmentDisplays(resolved: readonly { display: Po
 const PROVIDER_ISSUE_REASONS = new Set(["POSITION_BROKER_UNAVAILABLE", "QUOTE_EVIDENCE_UNAVAILABLE", "QUOTE_SESSION_EVIDENCE_UNAVAILABLE"]);
 
 /**
- * Codex blocker repair (B5) - classifies an ALREADY-resolved, already-fail-closed display set into
- * one of the operational outcome categories, WITHOUT changing or reinterpreting the resolver's own
- * CURRENT/LAST_VALID/UNAVAILABLE trust decision for any individual campaign. The resolver
- * intentionally converts provider/auth failures into safe UNAVAILABLE displays (correct for
- * trading guidance) - this function exists precisely because "the resolver didn't throw" is NOT
- * the same question as "did this capture run actually accomplish anything," which is what the
- * Account-page health indicator needs to answer honestly.
+ * Codex blocker repair (B5, B4 round 2) - classifies an ALREADY-resolved, already-fail-closed
+ * display set into one of the operational outcome categories, WITHOUT changing or reinterpreting
+ * the resolver's own CURRENT/LAST_VALID/UNAVAILABLE trust decision for any individual campaign.
+ * The resolver intentionally converts provider/auth failures into safe UNAVAILABLE displays
+ * (correct for trading guidance) - this function exists precisely because "the resolver didn't
+ * throw" is NOT the same question as "did this capture run actually accomplish anything," which
+ * is what the Account-page health indicator needs to answer honestly.
+ *
+ * Codex blocker repair (B4, round 2) - CURRENT_CAPTURED now requires at least one display.state
+ * === "CURRENT" produced by THIS invocation. A verified LAST_VALID historical fallback is real and
+ * valuable for the FINANCIAL PRESENTATION (Dashboard/Tracker correctly show it to the user - that
+ * is unchanged and correct) but it must NEVER count as an operationally successful SCHEDULED
+ * capture: if the live attempt failed, the automatic background job did not succeed, regardless of
+ * what historical data happens to still be on display elsewhere. A LAST_VALID display's own
+ * `currentUnavailable.explanation.reasonCodes` is inspected exactly like an UNAVAILABLE display's -
+ * both share the same shape, and LAST_VALID's own eligibility gate already guarantees those
+ * reasonCodes are never a genuine contradiction, so a LAST_VALID entry correctly flows into
+ * PROVIDER_UNAVAILABLE/AUTH_UNAVAILABLE/SESSION_CLOSED/NO_CURRENT_LEGITIMATE based on the REAL
+ * reason the live attempt did not produce CURRENT - never silently treated as a success.
  *
  * Priority order (highest first): a genuine CONTRADICTION always wins (never hidden behind a
- * partially-successful run); then any meaningful display (CURRENT or LAST_VALID - a verified
- * historical fallback is a real operational success, not a failure, and LAST_VALID's own
- * eligibility check already guarantees its reasonCodes are never a contradiction, so it is never
- * re-checked here); then a genuine broker/quote/session PROVIDER problem (split into
- * AUTH_UNAVAILABLE vs PROVIDER_UNAVAILABLE using this owner's OWN `BrokerConnection.status`,
- * re-read AFTER the attempt - `EXPIRED` means the token refresh itself failed, a stronger signal
- * than "merely" a transient provider hiccup); then a resolver-detected closed session (defensive -
- * B1's own gate above should already intercept this before heavy work even starts, but this stays
- * correct if session evidence changes between the gate check and the heavy resolver's own fetch);
- * finally, everything else (only benign reasons, or zero relevant campaigns at all) is legitimately
- * nothing-to-capture, never an error.
+ * partially-successful run); then at least one genuine live CURRENT display; then a genuine
+ * broker/quote/session PROVIDER problem (split into AUTH_UNAVAILABLE vs PROVIDER_UNAVAILABLE
+ * using this owner's OWN `BrokerConnection.status`, re-read AFTER the attempt - `EXPIRED` means
+ * the token refresh itself failed, a stronger signal than "merely" a transient provider hiccup);
+ * then a resolver-detected closed session (defensive - B1's own gate above should already
+ * intercept this before heavy work even starts, but this stays correct if session evidence
+ * changes between the gate check and the heavy resolver's own fetch); finally, everything else
+ * (only benign reasons, or zero relevant campaigns at all) is legitimately nothing-to-capture,
+ * never an error. NOTE: an aborted/timed-out attempt is classified as TIMEOUT by captureOwnerSlot
+ * BEFORE this function is even called (see its own `controller.signal.aborted` check) - timeout
+ * always takes priority over whatever this function would otherwise conclude from the resulting
+ * (possibly abort-truncated) display set.
  */
 export function classifyCaptureOutcome(resolved: readonly { display: PositionAssessmentDisplay }[], authExpired: boolean): CaptureResultCategory {
   if (resolved.length === 0) {
     return "NO_CURRENT_LEGITIMATE";
   }
 
-  let hasMeaningfulDisplay = false;
+  let hasCurrent = false;
   let hasContradiction = false;
   let hasProviderIssue = false;
   let hasSessionClosed = false;
 
   for (const { display } of resolved) {
-    if (display.state === "CURRENT" || display.state === "LAST_VALID") {
-      hasMeaningfulDisplay = true;
+    if (display.state === "CURRENT") {
+      hasCurrent = true;
       continue;
     }
+    // LAST_VALID and UNAVAILABLE both carry `currentUnavailable` describing WHY the live attempt
+    // itself did not produce CURRENT - a historical fallback existing (LAST_VALID) never changes
+    // that underlying reason's own classification.
     for (const code of display.currentUnavailable.explanation.reasonCodes) {
       if (!isKnownTransientFallbackReason(code)) {
         hasContradiction = true;
@@ -346,7 +403,7 @@ export function classifyCaptureOutcome(resolved: readonly { display: PositionAss
   }
 
   if (hasContradiction) return "CONTRADICTION_DETECTED";
-  if (hasMeaningfulDisplay) return "CURRENT_CAPTURED";
+  if (hasCurrent) return "CURRENT_CAPTURED";
   if (hasProviderIssue) return authExpired ? "AUTH_UNAVAILABLE" : "PROVIDER_UNAVAILABLE";
   if (hasSessionClosed) return "SESSION_CLOSED";
   return "NO_CURRENT_LEGITIMATE";
@@ -400,6 +457,8 @@ async function completeFailed(runId: string, now: Date, resultCategory: CaptureR
   });
 }
 
+const ZERO_TALLY: CaptureTally = { positionsExamined: 0, currentAssessmentsPersisted: 0, unavailableCount: 0, contradictionCount: 0 };
+
 async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: CaptureSlotKind, dueAt: Date, now: Date): Promise<OwnerCaptureOutcome> {
   const claim = await claimSlot(ownerId, sessionDate, slot, dueAt, now);
   if (!claim) {
@@ -407,32 +466,54 @@ async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: Capt
   }
   const { id: runId, attemptCount } = claim;
 
-  // Codex blocker repair (B1) - cheap authoritative session gate BEFORE any heavy work. See this
-  // module's header doc comment: proceeds to heavy work whenever evidence is UNAVAILABLE, never
-  // guesses "closed" from a failed lookup.
-  const nyDate = nyCalendarDateOf(now);
-  const sessionEvidence = await getEquityMarketSessionEvidenceForUser(ownerId, nyDate);
-  if (sessionEvidence.status === "AVAILABLE" && !isWithinRegularSession(sessionEvidence, now)) {
-    await completeSucceeded(runId, now, "SESSION_CLOSED", { positionsExamined: 0, currentAssessmentsPersisted: 0, unavailableCount: 0, contradictionCount: 0 }, 1, 0);
-    return "SUCCEEDED";
-  }
-
-  // Codex blocker repair (B2) - a dynamic, DB-derived cost estimate, reserved against the shared
-  // per-minute budget BEFORE any heavy provider work. A denial is BUDGET_DEFERRED, never FAILED -
-  // see scheduled-capture-budget.ts's own doc comment for the formula/reasoning.
-  const estimatedCost = await estimateProviderCost(ownerId, now);
-  if (!tryReserveProviderRequestBudget(estimatedCost, now)) {
-    await completeDeferred(runId, now, 0);
-    return "DEFERRED";
-  }
-
-  // Codex blocker repair (B3) - a real, HONORED AbortController deadline (see CAPTURE_TIMEOUT_MS's
-  // own doc comment), never a Promise.race that leaves the underlying fetch running unobserved.
+  // Codex blocker repair (B3, round 2) - the ONE end-to-end deadline for this entire attempt,
+  // created BEFORE the first provider call of any kind (the B1 preflight included) - see
+  // CAPTURE_TIMEOUT_MS's own doc comment for why this moved earlier than the first Codex round.
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CAPTURE_TIMEOUT_MS);
   const startedAt = Date.now();
   try {
+    // Codex blocker repair (B1, round 2) - the preflight session gate now FAILS CLOSED on every
+    // non-open outcome, including UNAVAILABLE (see this module's header doc comment for the exact
+    // AVAILABLE+OPEN / AVAILABLE+CLOSED / UNAVAILABLE three-way contract).
+    const nyDate = nyCalendarDateOf(now);
+    const sessionEvidence = await getEquityMarketSessionEvidenceForUser(ownerId, nyDate, controller.signal);
+    if (sessionEvidence.status === "UNAVAILABLE") {
+      await completeFailed(runId, now, "SESSION_UNAVAILABLE", Date.now() - startedAt, new Date(now.getTime() + PROVIDER_RETRY_BACKOFF_MS));
+      return "FAILED";
+    }
+    if (!isWithinRegularSession(sessionEvidence, now)) {
+      await completeSucceeded(runId, now, "SESSION_CLOSED", ZERO_TALLY, 1, Date.now() - startedAt);
+      return "SUCCEEDED";
+    }
+
+    // Codex blocker repair (B2, round 2) - a dynamic, DB-derived cost estimate. An owner whose OWN
+    // estimated cost exceeds the ENTIRE per-minute ceiling by itself can never fit no matter when
+    // it runs - that is BUDGET_BLOCKED, a terminal, non-retryable state (see CaptureResultCategory's
+    // own doc comment), never an endless DEFERRED loop. A capture that fits individually but has
+    // no capacity THIS MINUTE because another owner already consumed it remains ordinary DEFERRED.
+    const estimatedCost = await estimateProviderCost(ownerId, now);
+    if (estimatedCost > MAX_PROVIDER_REQUESTS_PER_MINUTE) {
+      await completeFailed(runId, now, "BUDGET_BLOCKED", Date.now() - startedAt, null);
+      return "FAILED";
+    }
+    if (!tryReserveProviderRequestBudget(estimatedCost, now)) {
+      await completeDeferred(runId, now, Date.now() - startedAt);
+      return "DEFERRED";
+    }
+
     const resolved = await captureOneOwner(ownerId, now, controller.signal);
+
+    // Codex blocker repair (B4, round 2) - an abort that fired DURING this capture takes priority
+    // over whatever the resolver's own fail-closed catches turned it into (ordinary-looking
+    // UNAVAILABLE/LAST_VALID evidence for whichever branches hadn't resolved yet) - a timeout must
+    // never be reported as a successful or merely-benign capture just because some other branch
+    // happened to finish first, or a historical fallback happened to already be on file.
+    if (controller.signal.aborted) {
+      await completeFailed(runId, now, "TIMEOUT", Date.now() - startedAt, new Date(now.getTime() + TIMEOUT_RETRY_BACKOFF_MS));
+      return "FAILED";
+    }
+
     const tally = tallyPositionAssessmentDisplays(resolved);
     const authExpired = await ownerAuthExpired(ownerId);
     const category = classifyCaptureOutcome(resolved, authExpired);
@@ -446,12 +527,20 @@ async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: Capt
 
     await completeSucceeded(runId, now, category, tally, estimatedCost, durationMs);
     return "SUCCEEDED";
-  } catch {
-    // Codex blocker repair (B5) - anything that reaches here is genuinely unexpected: the resolver
-    // itself already converts every known provider/auth/session failure into safe UNAVAILABLE
-    // evidence rather than throwing (see this module's header doc comment). Bounded retry, never
-    // an immediate infinite retry.
+  } catch (error) {
     const durationMs = Date.now() - startedAt;
+    // Codex blocker repair (B3, round 2) - with the deadline now created before every provider
+    // call, an abort can also surface as a THROWN AbortError rather than a safely-caught
+    // UNAVAILABLE evidence object (e.g. if it fires between two steps neither of which has its own
+    // catch) - classify it as TIMEOUT, not UNKNOWN_ERROR, and apply TIMEOUT's own retry policy.
+    if (isAbortError(error)) {
+      await completeFailed(runId, now, "TIMEOUT", durationMs, new Date(now.getTime() + TIMEOUT_RETRY_BACKOFF_MS));
+      return "FAILED";
+    }
+    // Codex blocker repair (B5) - anything else that reaches here is genuinely unexpected: the
+    // resolver itself already converts every known provider/auth/session failure into safe
+    // UNAVAILABLE evidence rather than throwing (see this module's header doc comment). Bounded
+    // retry, never an immediate infinite retry.
     const retryEligible = attemptCount < UNKNOWN_ERROR_MAX_ATTEMPTS;
     await completeFailed(runId, now, "UNKNOWN_ERROR", durationMs, retryEligible ? new Date(now.getTime() + UNKNOWN_ERROR_RETRY_BACKOFF_MS) : null);
     return "FAILED";
@@ -462,17 +551,27 @@ async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: Capt
 
 /**
  * One bounded heartbeat invocation - called by the protected internal endpoint, never by a page
- * render. "Nothing due" (outside every slot's window, or a non-market day) costs ZERO database
- * writes and ZERO provider calls - the slot-due check runs first, entirely in memory.
+ * render.
  *
- * Codex blocker repair (B4) - fairness/ordering guarantee: this heartbeat FIRST retries this
- * session date's own DEFERRED rows (oldest `dueAt` first - "oldest deferred owner first"), THEN
- * considers any remaining CONNECTED owner not already handled this heartbeat, in least-recently-
- * serviced order (never unspecified DB row order). A newer due slot never supersedes an older
- * deferred one: the deferred queue is always processed before new claims, so a legitimately
- * deferred owner is never starved by a later slot appearing first - exactly the ticket's own
- * 9:35-Matt/9:40-Eric scenario (Eric's DEFERRED row keeps its ORIGINAL 9:35 `dueAt` and is reclaimed
- * at the next heartbeat regardless of whether the 9:35 slot's own due-window has since closed).
+ * Codex blocker repair (B5, round 2) - the NOTHING-DUE contract is revised: a NEW schedule slot
+ * being due is no longer the only reason this heartbeat does any work. EVERY heartbeat now ALSO
+ * checks for this session date's own retryable/deferred work (`eligibleRetryableRuns`), regardless
+ * of whether a brand-new slot is currently due - this is what lets an intermediate, no-new-slot
+ * heartbeat (e.g. 9:40 or 9:45, when the 15-minute baseline cadence has nothing new to offer) still
+ * service a 9:35 DEFERRED or FAILED-retry-eligible row. The ORIGINAL contract still holds exactly
+ * when there is truly nothing to do: no new slot AND no retryable/deferred row means ZERO provider
+ * calls and ZERO writes (the maintenance sweeps below are skipped too) - only the one minimal,
+ * already-narrowly-scoped retry-queue SELECT runs, never a broad owner-discovery query.
+ *
+ * Fairness/ordering guarantee (unchanged from the first Codex round, now exercised every
+ * heartbeat rather than only when a new slot happens to coincide): retryable/deferred work is
+ * ALWAYS processed before any new claim (oldest `dueAt` first - "oldest deferred/retryable owner
+ * first"), then any remaining CONNECTED owner not already handled this heartbeat is considered in
+ * least-recently-serviced order (never unspecified DB row order). A newer due slot never
+ * supersedes an older deferred/retryable one - exactly the ticket's own 9:35-Matt/9:40-Eric
+ * scenario (Eric's DEFERRED row keeps its ORIGINAL 9:35 `dueAt` and is reclaimed at the next
+ * heartbeat regardless of whether the 9:35 slot's own due-window has since closed, and regardless
+ * of whether a NEW slot is also due that same heartbeat).
  *
  * Owners are processed strictly SEQUENTIALLY (never Promise.all across owners) - this app has
  * exactly two users, so this trivially keeps cross-owner concurrency at 1, well under the ticket's
@@ -484,13 +583,15 @@ async function captureOwnerSlot(ownerId: string, sessionDate: string, slot: Capt
  */
 export async function runScheduledCaptureHeartbeat(now: Date = new Date()): Promise<ScheduledCaptureHeartbeatResult> {
   const due = dueCaptureSlots(now);
-  if (due.length === 0) {
+  const sessionDate = nyCalendarDateOf(now);
+
+  const retryQueue = await eligibleRetryableRuns(now, sessionDate);
+  if (due.length === 0 && retryQueue.length === 0) {
     return { status: "ok", due: 0, processed: 0, deferred: 0, skipped: 0, failed: 0 };
   }
-  const dueSlot = due[0]!;
 
   await abandonStaleRunningRows(now);
-  await abandonStaleDeferredRows(now, dueSlot.sessionDate);
+  await abandonStaleDeferredRows(now, sessionDate);
 
   let processed = 0;
   let deferredCount = 0;
@@ -505,8 +606,7 @@ export async function runScheduledCaptureHeartbeat(now: Date = new Date()): Prom
     else skipped += 1;
   };
 
-  const deferredQueue = await eligibleDeferredRuns(now, dueSlot.sessionDate);
-  for (const item of deferredQueue) {
+  for (const item of retryQueue) {
     handledOwnerIds.add(item.ownerId);
     if (await ownerHasActiveRun(item.ownerId)) {
       skipped += 1;
@@ -515,16 +615,21 @@ export async function runScheduledCaptureHeartbeat(now: Date = new Date()): Prom
     tally(await captureOwnerSlot(item.ownerId, item.sessionDate, item.slot, item.dueAt, now));
   }
 
-  const newOwnerIds = await eligibleOwnerIdsInFairOrder(handledOwnerIds);
-  for (const ownerId of newOwnerIds) {
-    if (await ownerHasActiveRun(ownerId)) {
-      skipped += 1;
-      continue;
+  let newOwnerCount = 0;
+  if (due.length > 0) {
+    const dueSlot = due[0]!;
+    const newOwnerIds = await eligibleOwnerIdsInFairOrder(handledOwnerIds);
+    newOwnerCount = newOwnerIds.length;
+    for (const ownerId of newOwnerIds) {
+      if (await ownerHasActiveRun(ownerId)) {
+        skipped += 1;
+        continue;
+      }
+      tally(await captureOwnerSlot(ownerId, dueSlot.sessionDate, dueSlot.slot, dueSlot.dueAt, now));
     }
-    tally(await captureOwnerSlot(ownerId, dueSlot.sessionDate, dueSlot.slot, dueSlot.dueAt, now));
   }
 
-  return { status: "ok", due: deferredQueue.length + newOwnerIds.length, processed, deferred: deferredCount, skipped, failed };
+  return { status: "ok", due: retryQueue.length + newOwnerCount, processed, deferred: deferredCount, skipped, failed };
 }
 
 /**
@@ -543,7 +648,7 @@ export function describeScheduledCaptureStatus(status: LatestScheduledCaptureSta
   }
   const { status: runStatus, resultCategory } = status;
   if (runStatus === "DEFERRED") {
-    return { label: "Catching up - a prior capture was deferred for budget and will run on the next heartbeat.", tone: "neutral" };
+    return { label: "Deferred - waiting for scheduler capacity, will run on the next heartbeat", tone: "neutral" };
   }
   if (runStatus === "ABANDONED") {
     return { label: "Previous attempt did not finish in time - next scheduled slot will try again.", tone: "attention" };
@@ -559,10 +664,16 @@ export function describeScheduledCaptureStatus(status: LatestScheduledCaptureSta
       return { label: "Connection attention needed - evidence contradiction found", tone: "attention" };
     case "PROVIDER_UNAVAILABLE":
       return { label: "No current assessment captured - provider unavailable", tone: "attention" };
+    case "SESSION_UNAVAILABLE":
+      return { label: "No current assessment captured - session status unavailable", tone: "attention" };
     case "AUTH_UNAVAILABLE":
       return { label: "Connection attention needed - reconnect Schwab", tone: "attention" };
+    case "TIMEOUT":
+      return { label: "Provider timeout - automatic capture did not complete; last known position data remains available on Dashboard/Tracker", tone: "attention" };
     case "UNKNOWN_ERROR":
       return { label: "Connection attention needed - unexpected error on last attempt", tone: "attention" };
+    case "BUDGET_BLOCKED":
+      return { label: "Budget blocked - automatic capture needs attention", tone: "attention" };
     default:
       return runStatus === "SUCCEEDED"
         ? { label: "No current assessment captured", tone: "neutral" }

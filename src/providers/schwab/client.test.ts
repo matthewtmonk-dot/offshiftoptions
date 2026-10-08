@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { schwabGetJson, SchwabApiError } from "./client";
+import { isAbortError, schwabGetJson, SchwabApiError } from "./client";
 
 describe("Schwab API client", () => {
   it("surfaces rate limits without leaking tokens", async () => {
@@ -72,6 +72,23 @@ describe("Schwab API client", () => {
           signal: controller.signal,
         }),
       ).rejects.toThrow("Aborted");
+    });
+  });
+
+  describe("isAbortError (Codex blocker repair B3B/B3C)", () => {
+    it("recognizes a real AbortError/DOMException", () => {
+      expect(isAbortError(new DOMException("Aborted", "AbortError"))).toBe(true);
+    });
+
+    it("rejects a SchwabApiError - a genuine provider rejection is never mistaken for a caller-initiated abort", () => {
+      expect(isAbortError(new SchwabApiError("Schwab request failed.", 500))).toBe(false);
+    });
+
+    it("rejects a plain Error, a non-Error thrown value, and never throws itself", () => {
+      expect(isAbortError(new Error("something else"))).toBe(false);
+      expect(isAbortError("a plain string")).toBe(false);
+      expect(isAbortError(null)).toBe(false);
+      expect(isAbortError(undefined)).toBe(false);
     });
   });
 });

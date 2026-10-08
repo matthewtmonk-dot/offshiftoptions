@@ -75,7 +75,7 @@ export async function getQuoteReviewEvidenceForUser(userId: string, tickers: str
   if (!uniqueTickers.length) return evidence;
 
   try {
-    const provider = await getSchwabMarketDataProviderForUser(userId);
+    const provider = await getSchwabMarketDataProviderForUser(userId, signal);
     if (!provider) {
       uniqueTickers.forEach((ticker) => evidence.set(ticker, unavailable("No Schwab market-data connection available.")));
       return evidence;
@@ -106,7 +106,7 @@ export async function getQuoteReviewEvidenceForUser(userId: string, tickers: str
  */
 export async function getEquityMarketSessionEvidenceForUser(userId: string, nyDate: string, signal?: AbortSignal): Promise<EquityMarketSessionEvidence> {
   try {
-    const provider = await getSchwabMarketDataProviderForUser(userId);
+    const provider = await getSchwabMarketDataProviderForUser(userId, signal);
     if (!provider) {
       return { status: "UNAVAILABLE", reason: "No Schwab market-data connection available." };
     }
