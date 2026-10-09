@@ -26,7 +26,7 @@ import {
   wholeAccountGainStatusBadge,
 } from "@/lib/account-evidence-display";
 import { getSanitizedBrokerRecordClassificationForUser } from "@/lib/broker-record-classification-diagnostic";
-import { money, shortDate, shortDateTime } from "@/lib/format";
+import { formatEtDateTime, money, shortDate, shortDateTime } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
 import { getAlphaVantageConfigStatus } from "@/providers/alpha-vantage/config";
 import { getAlphaVantageUsageToday, ALPHA_VANTAGE_AUTO_DAILY_LIMIT, ALPHA_VANTAGE_TOTAL_DAILY_LIMIT, ALPHA_VANTAGE_MANUAL_RESERVE } from "@/lib/alpha-vantage-budget";
@@ -515,7 +515,13 @@ export default async function AccountPage({
                   result (describeScheduledCaptureStatus, scheduled-capture.ts); a safe, fail-closed
                   non-throwing run is never conflated with "healthy." This also makes no claim that
                   Hermes is actually calling this endpoint on a schedule - code/schema existing is
-                  not evidence of that; this only reports what, if anything, has actually run. */}
+                  not evidence of that; this only reports what, if anything, has actually run.
+                  Production follow-up fix - `scheduledCaptureStatus.at` is a genuine time-of-day
+                  instant rendered in a SERVER component; `shortDateTime` has no explicit `timeZone`
+                  and silently defaults to the runtime process's own timezone (confirmed live: a
+                  3:35 PM ET capture rendered as "7:35 PM," exactly the UTC/EDT gap) - `formatEtDateTime`
+                  pins to America/New_York regardless of the runtime, matching the convention every
+                  other genuine time-of-day instant on this page already uses. */}
               {(() => {
                 const { label, tone } = describeScheduledCaptureStatus(scheduledCaptureStatus);
                 if (!scheduledCaptureStatus.known) {
@@ -524,7 +530,7 @@ export default async function AccountPage({
                 const toneClass = tone === "healthy" ? "text-zinc-400" : tone === "attention" ? "text-amber-300" : "text-zinc-500";
                 return (
                   <p className="text-xs text-zinc-500">
-                    Automatic capture: <span className={toneClass}>{label} · {shortDateTime(scheduledCaptureStatus.at)}</span>
+                    Automatic capture: <span className={toneClass}>{label} · {formatEtDateTime(scheduledCaptureStatus.at)}</span>
                   </p>
                 );
               })()}

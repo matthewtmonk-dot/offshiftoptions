@@ -51,6 +51,11 @@ describe("formatEtDateTime", () => {
     // 2:15 AM UTC on 2026-09-30 is 10:15 PM ET on 2026-09-29 (EDT, UTC-4).
     expect(formatEtDateTime("2026-09-30T02:15:00.000Z")).toBe("Sep 29, 2026, 10:15 PM ET");
   });
+
+  it("Account-page Automatic capture fix - a scheduled capture's dueAt (19:35 UTC) displays as the real 3:35 PM ET it is, never the raw 7:35 PM UTC-as-if-local the page previously showed", () => {
+    expect(formatEtDateTime("2026-10-09T19:35:00.000Z")).toBe("Oct 9, 2026, 3:35 PM ET");
+    expect(formatEtDateTime("2026-10-09T19:35:00.000Z")).not.toContain("7:35 PM");
+  });
 });
 
 describe("formatEtCompactDateTime", () => {
