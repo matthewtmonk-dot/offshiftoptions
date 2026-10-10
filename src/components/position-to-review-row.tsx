@@ -20,7 +20,9 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
   // Settlement Clarity - now also expiration-aware (row.expiration is the currently open leg's own
   // expiration, put or call - see positionsToReviewRows), so an expired-unresolved covered call
   // reads SETTLEMENT PENDING here exactly like an expired put, never left looking still-active.
-  const activityLabel = currentActivityLabel(row.stage, row.expiration, now);
+  // `row.display` lets this recognize a SAME-DAY, session-ended expiration too (blocker repair B1)
+  // - never waiting for the calendar date to roll over.
+  const activityLabel = currentActivityLabel(row.stage, row.expiration, now, row.display);
   const awaitingSettlement = activityLabel === "SETTLEMENT PENDING";
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">

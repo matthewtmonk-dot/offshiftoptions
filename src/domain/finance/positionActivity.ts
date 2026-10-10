@@ -1,4 +1,5 @@
 import { isPastExpiration, type CampaignCurrentStage, type CampaignEventInput, type CampaignStatusInput } from "./campaigns";
+import type { PositionAssessmentDisplay } from "./positionReviewAssessment";
 
 /**
  * LST "Attention-First Freshness" Phase 1 - current-activity presentation labels. Deliberately a
@@ -12,31 +13,66 @@ import { isPastExpiration, type CampaignCurrentStage, type CampaignEventInput, t
 export type CurrentActivityLabel = "SHORT PUT OPEN" | "SHARES HELD" | "COVERED CALL OPEN" | "SETTLEMENT PENDING" | "CLOSED" | "REVIEW NEEDED";
 
 /**
- * Weekend / Settlement Clarity - `legExpiration`/`asOf` let this ALSO recognize an expired-but-
- * unresolved COVERED CALL as SETTLEMENT PENDING, which `currentStage` alone cannot: `currentStage`
- * already does this for a put (its own "Expiration processing" stage, via the same isPastExpiration
- * helper), but an ASSIGNED campaign with an open call always reports "Covered call" regardless of
- * whether that call's own expiration has passed - the exact same reason rollStatus.ts's
+ * Weekend / Settlement Clarity, blocker repair (B1) - a pure calendar check (`isPastExpiration`)
+ * only flips the DAY AFTER expiration; it cannot know whether TODAY's own expiration session has
+ * already ended, since that requires real session evidence (regular-session close instant), not
+ * just a calendar date. `positionReview.ts`'s live evaluator already has that evidence and already
+ * flags a same-day, session-ended leg as `lifecycle: "EXPIRATION_SESSION_ENDED"` the INSTANT the
+ * session closes (see its own `sessionEndedToday` check) - `EXPIRATION_PENDING` similarly covers
+ * the day-after case the calendar check also catches. This reuses that ALREADY-COMPUTED,
+ * authoritative evidence (never a new hard-coded clock test, never a second session-close
+ * computation) whenever a live `display` is available for the row; `display.state` can only be
+ * "UNAVAILABLE" with one of these two lifecycles when the leg has genuinely reached expiration
+ * primacy - a "CURRENT" display's action is always one of the persistable
+ * COMFORTABLE/WATCH/REVIEW_ROLL/REVIEW_CALL actions, which the evaluator can only reach when NEITHER
+ * condition is true, and a "LAST_VALID" display can never represent this leg either (historical
+ * fallback is itself blocked once lifecycle reaches EXPIRATION_PENDING/EXPIRATION_SESSION_ENDED -
+ * see `LIFECYCLE_STAGES_BLOCKING_FALLBACK`, positionReviewAssessment.ts) - so this check never needs
+ * to consult CURRENT/LAST_VALID.
+ */
+function isAwaitingBrokerSettlement(stage: CampaignCurrentStage, legExpiration: Date | null, asOf: Date, display: PositionAssessmentDisplay | null): boolean {
+  if (display && display.state === "UNAVAILABLE") {
+    const lifecycle = display.currentUnavailable.lifecycle;
+    if (lifecycle === "EXPIRATION_PENDING" || lifecycle === "EXPIRATION_SESSION_ENDED") return true;
+  }
+  // Calendar-only fallback for a caller with no live evaluation available at all (e.g. the
+  // Dashboard's own top-of-page exposure summary, which never resolves a PositionAssessmentDisplay
+  // per campaign - see activeSettlementBreakdown, dashboard-view.ts). Correct for the day-after
+  // case; without session evidence it cannot detect "still today, but the session already ended" on
+  // its own - that narrower gap is an accepted limitation only where `display` genuinely isn't
+  // available, never where it is.
+  if (stage === "Expiration processing") return true;
+  return legExpiration !== null && isPastExpiration(legExpiration, asOf);
+}
+
+/**
+ * Weekend / Settlement Clarity - `legExpiration`/`asOf`/`display` let this recognize an expired-but-
+ * unresolved leg (put OR covered call) as SETTLEMENT PENDING, including the SAME calendar day its
+ * expiration session ends (see isAwaitingBrokerSettlement above) - `currentStage` alone only ever
+ * flags a put the day AFTER expiration (its own "Expiration processing" stage), and never a covered
+ * call at all: an ASSIGNED campaign with an open call always reports "Covered call" regardless of
+ * that call's own expiration - the exact same reason rollStatus.ts's
  * `isCoveredCallRollGuidanceApplicable` exists as a SEPARATE function rather than a `currentStage`
  * branch ("A covered call has no dedicated CampaignCurrentStage of its own once a campaign is
  * ASSIGNED," see that function's own doc comment). This mirrors that established pattern instead of
- * adding a covered-call branch to `currentStage()` itself - `positionReview.ts`'s live evaluator
- * already independently detects a past-expiration leg (put OR call) via its own `dte < 0` check
+ * adding branches to `currentStage()` itself - `positionReview.ts`'s live evaluator already
+ * independently detects a past-expiration-or-session-ended leg (put OR call) via its own checks
  * before `currentStage` is ever consulted for lifecycle purposes, so `currentStage` staying
- * "Covered call" has never affected ACTION/LIFECYCLE evaluation - only this presentation label was
- * stale. `legExpiration` is the CURRENTLY open leg's own expiration (the put's while a put is open,
- * the call's once assigned+covered) - pass `null` when there is no open leg to check (e.g. assigned
- * shares with no call), which this function simply ignores for every stage except "Covered call".
+ * "Cash-secured put"/"Rolled put"/"Covered call" through session-end has never affected
+ * ACTION/LIFECYCLE evaluation - only this presentation label was stale. `legExpiration` is the
+ * CURRENTLY open leg's own expiration - pass `null` when there is no open leg to check (e.g.
+ * assigned shares with no call). `display` is the SAME live PositionAssessmentDisplay the row
+ * itself already resolved - pass `null` only when none is available at all.
  */
-export function currentActivityLabel(stage: CampaignCurrentStage, legExpiration: Date | null, asOf: Date): CurrentActivityLabel {
+export function currentActivityLabel(stage: CampaignCurrentStage, legExpiration: Date | null, asOf: Date, display: PositionAssessmentDisplay | null): CurrentActivityLabel {
   switch (stage) {
     case "Cash-secured put":
     case "Rolled put":
-      return "SHORT PUT OPEN";
+      return isAwaitingBrokerSettlement(stage, legExpiration, asOf, display) ? "SETTLEMENT PENDING" : "SHORT PUT OPEN";
     case "Assigned shares":
       return "SHARES HELD";
     case "Covered call":
-      return legExpiration && isPastExpiration(legExpiration, asOf) ? "SETTLEMENT PENDING" : "COVERED CALL OPEN";
+      return isAwaitingBrokerSettlement(stage, legExpiration, asOf, display) ? "SETTLEMENT PENDING" : "COVERED CALL OPEN";
     case "Expiration processing":
       return "SETTLEMENT PENDING";
     case "Closed":
@@ -55,8 +91,8 @@ export function currentActivityLabel(stage: CampaignCurrentStage, legExpiration:
  * negation - never a third, overlapping category), mirroring the same mutual-exclusivity guarantee
  * partitionPositionReviewRows gives Attention Now/Open Positions.
  */
-export function isAwaitingSettlement(stage: CampaignCurrentStage, legExpiration: Date | null, asOf: Date): boolean {
-  return currentActivityLabel(stage, legExpiration, asOf) === "SETTLEMENT PENDING";
+export function isAwaitingSettlement(stage: CampaignCurrentStage, legExpiration: Date | null, asOf: Date, display: PositionAssessmentDisplay | null): boolean {
+  return currentActivityLabel(stage, legExpiration, asOf, display) === "SETTLEMENT PENDING";
 }
 
 /**

@@ -38,6 +38,33 @@ describe("cannotAssessPresentationTier (compact position UX) - deliberately sepa
     expect(cannotAssessPresentationTier(["POSITION_INSUFFICIENT_SHARE_COVERAGE"])).toBe("attention");
   });
 
+  /**
+   * Weekend / Settlement Clarity, blocker repair (B2) - Codex found that the routine-reason check
+   * used to treat EVERY `QUOTE_`-prefixed code as calm via a broad `startsWith("QUOTE_")` rule, but
+   * the quote evaluator (quoteEvidence.ts) can also emit `QUOTE_SYMBOL_MISMATCH` - a genuine quote-
+   * identity contradiction (the quote itself may be for the wrong instrument), never routine
+   * unavailability. The allowlist is now explicit, reusing only the three QUOTE_ reasons already
+   * vetted as genuinely transient by the historical-fallback allowlist (ALLOWED_FALLBACK_REASONS).
+   */
+  it("B2: QUOTE_SYMBOL_MISMATCH is a genuine quote-identity contradiction - ATTENTION, never silently calmed by a broad QUOTE_ prefix rule", () => {
+    expect(cannotAssessPresentationTier(["QUOTE_SYMBOL_MISMATCH"])).toBe("attention");
+  });
+
+  it("B2: other non-transient quote failures (wrong asset type, stale provider feed, malformed data) stay ATTENTION too - only genuine temporary/stale/unavailable evidence is routine", () => {
+    expect(cannotAssessPresentationTier(["QUOTE_UNSUPPORTED_ASSET_TYPE"])).toBe("attention");
+    expect(cannotAssessPresentationTier(["QUOTE_NOT_REALTIME"])).toBe("attention");
+    expect(cannotAssessPresentationTier(["QUOTE_INVALID_PRICE"])).toBe("attention");
+    expect(cannotAssessPresentationTier(["QUOTE_INVALID_TIMESTAMP"])).toBe("attention");
+    expect(cannotAssessPresentationTier(["QUOTE_FUTURE_TIMESTAMP"])).toBe("attention");
+  });
+
+  it("B2: the genuinely transient/stale/unavailable quote reasons remain CALM, unaffected by narrowing the prefix rule", () => {
+    expect(cannotAssessPresentationTier(["QUOTE_EVIDENCE_UNAVAILABLE"])).toBe("calm");
+    expect(cannotAssessPresentationTier(["QUOTE_STALE_TIMESTAMP"])).toBe("calm");
+    expect(cannotAssessPresentationTier(["QUOTE_SESSION_EVIDENCE_UNAVAILABLE"])).toBe("calm");
+    expect(cannotAssessPresentationTier(["QUOTE_UNAVAILABLE"])).toBe("calm");
+  });
+
   it("incomplete/missing terms are ATTENTION - a real data problem, not routine waiting", () => {
     expect(cannotAssessPresentationTier(["INCOMPLETE_TERMS"])).toBe("attention");
     expect(cannotAssessPresentationTier(["MISSING_CONTRACTS"])).toBe("attention");
@@ -130,12 +157,15 @@ describe("cannotAssessPresentationTier and isAttentionRow never disagree (the ac
     ["routine: past-expiration unresolved alone", ["PAST_EXPIRATION_UNRESOLVED"]],
     ["routine: expiration session ended alone", ["EXPIRATION_SESSION_ENDED"]],
     ["routine: market closed alone", ["MARKET_CLOSED"]],
-    ["routine: a QUOTE_-prefixed code alone", ["QUOTE_EVIDENCE_UNAVAILABLE"]],
+    ["routine: a genuinely transient QUOTE_ code alone", ["QUOTE_EVIDENCE_UNAVAILABLE"]],
     ["non-routine: assigned shares, no call", ["ASSIGNED_SHARES_NO_CALL"]],
     ["non-routine: a broker-evidenced position mismatch", ["POSITION_MISMATCH_AMBIGUOUS"]],
     ["non-routine: incomplete terms", ["INCOMPLETE_TERMS"]],
     ["non-routine: mixed routine + non-routine", ["MARKET_CLOSED", "ASSIGNED_SHARES_NO_CALL"]],
     ["non-routine: an unrecognized code", ["SOME_FUTURE_REASON_THIS_TEST_DOES_NOT_KNOW_ABOUT"]],
+    // B2 - a QUOTE_-prefixed code is NOT automatically routine: a genuine quote-identity
+    // contradiction must stay in Attention Now exactly like any other non-routine reason.
+    ["non-routine (B2): QUOTE_SYMBOL_MISMATCH, a genuine quote-identity contradiction", ["QUOTE_SYMBOL_MISMATCH"]],
   ];
 
   it.each(reasonCodeScenarios)("%s", (_label, reasonCodes) => {

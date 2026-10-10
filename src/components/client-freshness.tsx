@@ -225,8 +225,8 @@ export function DashboardPositionSections({ rows, now, limit }: { rows: readonly
   const { attention, open } = partitionPositionReviewRows(rows, liveByRevision, now);
   const visibleOpen = open.slice(0, limit);
   const hiddenCount = open.length - visibleOpen.length;
-  const activeNow = visibleOpen.filter((row) => !isAwaitingSettlement(row.stage, row.expiration, now));
-  const awaitingSettlement = visibleOpen.filter((row) => isAwaitingSettlement(row.stage, row.expiration, now));
+  const activeNow = visibleOpen.filter((row) => !isAwaitingSettlement(row.stage, row.expiration, now, row.display));
+  const awaitingSettlement = visibleOpen.filter((row) => isAwaitingSettlement(row.stage, row.expiration, now, row.display));
   // A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never LAST_VALID) -
   // see positionAssessmentOrchestration.ts's own owner-isolation check - so this notice only ever
   // reflects the viewer's own historical data, never a buddy's.

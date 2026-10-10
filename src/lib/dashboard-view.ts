@@ -188,7 +188,11 @@ export function activeSettlementBreakdown(
     const openPut = campaign.status === "OPEN" ? getCurrentOpenPut(campaign.events) : null;
     const openCall = campaign.status === "ASSIGNED" ? getCurrentOpenCall(campaign.events) : null;
     const legExpiration = openCall?.expiration ?? openPut?.expiration ?? null;
-    if (isAwaitingSettlement(summary.currentStage, legExpiration, asOf)) {
+    // No live PositionAssessmentDisplay is resolved here (this summary only reads raw campaign/
+    // event data, never a per-campaign live evaluation) - calendar-only fallback, an accepted
+    // limitation for the SAME-DAY, after-session-close edge case (see isAwaitingSettlement's own
+    // doc comment); correct for every other case, including the day-after one.
+    if (isAwaitingSettlement(summary.currentStage, legExpiration, asOf, null)) {
       awaitingSettlementCount += 1;
     } else {
       activeCount += 1;

@@ -418,11 +418,31 @@ export function isKnownTransientFallbackReason(code: string): boolean {
  * while still occupying an Attention Now slot (the exact bug this ticket fixes). Everything else -
  * a genuine broker-evidenced mismatch, incomplete/missing terms, assigned shares with no call sold,
  * an unrecognized reason - is NOT routine and keeps drawing attention, never silently calmed.
+ *
+ * Weekend / Settlement Clarity, blocker repair (B2) - the QUOTE_ members here are an explicit
+ * allowlist, deliberately NOT `code.startsWith("QUOTE_")`: the quote evaluator (quoteEvidence.ts)
+ * can also emit `QUOTE_SYMBOL_MISMATCH` (the quote itself may be for the wrong instrument - a
+ * genuine identity contradiction) and several other non-timing failures
+ * (QUOTE_UNSUPPORTED_ASSET_TYPE, QUOTE_NOT_REALTIME, QUOTE_INVALID_PRICE/TIMESTAMP,
+ * QUOTE_FUTURE_TIMESTAMP, QUOTE_TRADE_TIME_*) that a broad prefix match would have silently calmed
+ * despite being real data-quality problems, never routine unavailability. Only the three QUOTE_
+ * reasons already vetted as genuinely transient/temporary by the historical-fallback allowlist
+ * above (ALLOWED_FALLBACK_REASONS) - "we don't have fresh-enough evidence right now" - are routine
+ * here too; `QUOTE_UNAVAILABLE` is the separate, defensive "no quote at all" fallback code
+ * (positionReview.ts) and is equally routine. Every other QUOTE_ reason keeps drawing attention.
  */
-const ROUTINE_CANNOT_ASSESS_REASONS = new Set(["MARKET_CLOSED", "QUOTE_UNAVAILABLE", "EXPIRATION_SESSION_ENDED", "PAST_EXPIRATION_UNRESOLVED"]);
+const ROUTINE_CANNOT_ASSESS_REASONS = new Set([
+  "MARKET_CLOSED",
+  "EXPIRATION_SESSION_ENDED",
+  "PAST_EXPIRATION_UNRESOLVED",
+  "QUOTE_UNAVAILABLE",
+  "QUOTE_EVIDENCE_UNAVAILABLE",
+  "QUOTE_STALE_TIMESTAMP",
+  "QUOTE_SESSION_EVIDENCE_UNAVAILABLE",
+]);
 
 export function isRoutineCannotAssessReason(code: string): boolean {
-  return ROUTINE_CANNOT_ASSESS_REASONS.has(code) || code.startsWith("QUOTE_");
+  return ROUTINE_CANNOT_ASSESS_REASONS.has(code);
 }
 
 /**

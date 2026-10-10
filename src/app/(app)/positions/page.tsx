@@ -393,7 +393,11 @@ export default async function PositionsPage({
   const effectiveOpenRows = openRows.map((row) => (assignedSummaryByCampaignId.has(row.campaign.id) ? { ...row, summary: assignedSummaryByCampaignId.get(row.campaign.id)! } : row));
   const rowAwaitingSettlement = (row: (typeof effectiveOpenRows)[number]) => {
     const legExpiration = row.campaign.status === "ASSIGNED" ? getCurrentOpenCall(row.campaign.events)?.expiration ?? null : getCurrentOpenPut(row.campaign.events)?.expiration ?? null;
-    return isAwaitingSettlement(row.summary.currentStage, legExpiration, snapshotCheckedAt);
+    // The SAME live display each row's own CampaignCard receives - lets this recognize a SAME-DAY,
+    // session-ended expiration too (blocker repair B1), never waiting for the calendar date to
+    // roll over.
+    const display = positionAssessmentDisplayByCampaignId.get(row.campaign.id) ?? null;
+    return isAwaitingSettlement(row.summary.currentStage, legExpiration, snapshotCheckedAt, display);
   };
   const activeOpenRows = effectiveOpenRows.filter((row) => !rowAwaitingSettlement(row));
   const awaitingSettlementOpenRows = effectiveOpenRows.filter((row) => rowAwaitingSettlement(row));
@@ -826,7 +830,9 @@ function CampaignCard({
   // once assigned+covered, the put's otherwise), so an expired-unresolved covered call reads
   // SETTLEMENT PENDING exactly like an expired put - see currentActivityLabel's own doc comment.
   const openLegExpiration = openCall?.expiration ?? openPut?.expiration ?? null;
-  const activityLabel = campaign.status === "CLOSED" ? campaign.status : currentActivityLabel(summary.currentStage, openLegExpiration, asOf);
+  // `display` lets this recognize a SAME-DAY, session-ended expiration too (blocker repair B1) -
+  // never waiting for the calendar date to roll over.
+  const activityLabel = campaign.status === "CLOSED" ? campaign.status : currentActivityLabel(summary.currentStage, openLegExpiration, asOf, display);
   const awaitingSettlement = activityLabel === "SETTLEMENT PENDING";
   const originLabel = historicalOriginLabel({ status: campaign.status, events: campaign.events });
 
