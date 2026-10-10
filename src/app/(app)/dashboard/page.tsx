@@ -24,6 +24,7 @@ import {
   chatPreviewViewModel,
   closedThisWeekViewModel,
   confirmedTradingPLCard,
+  excludeAttentionRows,
   openCampaignsCard,
   positionsToReviewRows,
   scannerInsightViewModel,
@@ -398,13 +399,18 @@ async function PositionsToReviewWithStatus({
   const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
   const displaysByCampaignId = new Map(resolved.map((entry) => [entry.campaignId, entry.display]));
   const sortedRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(rows, displaysByCampaignId));
-  const visibleRows = sortedRows.slice(0, limit);
-  const hiddenCount = sortedRows.length - visibleRows.length;
+  const attentionRows = attentionNowRows(sortedRows);
+  // Compact position UX - a position already surfaced in Attention Now must never repeat under
+  // Open Positions (same campaign shown twice just because it is both open and attention-worthy
+  // wastes the attention-first section's own point) - see excludeAttentionRows's own doc comment.
+  // Display filtering only: attentionRows itself is computed above, unchanged.
+  const openOnlyRows = excludeAttentionRows(sortedRows, attentionRows);
+  const visibleRows = openOnlyRows.slice(0, limit);
+  const hiddenCount = openOnlyRows.length - visibleRows.length;
   // A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never LAST_VALID) -
   // see positionAssessmentOrchestration.ts's own owner-isolation check - so this notice only ever
   // appears from the viewer's own historical data, never a buddy's.
   const hasLastValid = visibleRows.some((row) => row.display?.state === "LAST_VALID");
-  const attentionRows = attentionNowRows(sortedRows);
   const entries: DisplayEntry[] = sortedRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
 
   return (
@@ -420,11 +426,15 @@ async function PositionsToReviewWithStatus({
         <div>
           <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
           {hasLastValid ? <div className="mb-2"><LastValidNotice /></div> : null}
-          <div className="space-y-1.5">
-            {visibleRows.map((row) => (
-              <PositionToReviewRowView key={row.campaignId} row={row} now={asOf} />
-            ))}
-          </div>
+          {openOnlyRows.length === 0 ? (
+            <EmptyState>Every open position is already listed above in Attention Now.</EmptyState>
+          ) : (
+            <div className="space-y-1.5">
+              {visibleRows.map((row) => (
+                <PositionToReviewRowView key={row.campaignId} row={row} now={asOf} />
+              ))}
+            </div>
+          )}
           {hiddenCount > 0 ? (
             <IntentPrefetchLink href="/positions" className="mt-1.5 block text-center text-xs text-zinc-500 hover:text-sky-300">
               +{hiddenCount} more in Tracker

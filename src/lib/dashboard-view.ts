@@ -289,6 +289,18 @@ export function attentionNowRows<T extends { display: PositionAssessmentDisplay 
   });
 }
 
+/**
+ * Compact position UX - "Open Positions" must never repeat a row Attention Now already surfaced
+ * (same campaign shown twice just because it is both open and attention-worthy wastes the
+ * attention-first section's own point). Pure display-filtering/deduplication only - never changes
+ * which rows qualify as attention (attentionNowRows itself is untouched); callers compute
+ * attentionNowRows(rows) first and pass that same list in here to get the remainder.
+ */
+export function excludeAttentionRows<T extends { campaignId: string }>(rows: readonly T[], attentionRows: readonly { campaignId: string }[]): T[] {
+  const attentionIds = new Set(attentionRows.map((row) => row.campaignId));
+  return rows.filter((row) => !attentionIds.has(row.campaignId));
+}
+
 // ---------------------------------------------------------------------------
 // Capital & Cash panel
 // ---------------------------------------------------------------------------

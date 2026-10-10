@@ -484,6 +484,7 @@ export default async function PositionsPage({
                 openView
                 quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
                 asOf={snapshotCheckedAt}
+                scope={scope}
               />
             ))}
             {openRows.length === 0 ? (
@@ -526,7 +527,7 @@ export default async function PositionsPage({
             </div>
           </div>
           {historyRows.map((row) => (
-            <CampaignCard key={row.campaign.id} row={row} currentUserId={user.id} />
+            <CampaignCard key={row.campaign.id} row={row} currentUserId={user.id} scope={scope} />
           ))}
           {historyRows.length === 0 ? <EmptyState>No campaigns yet for this view.</EmptyState> : null}
         </section>
@@ -719,6 +720,7 @@ function CampaignCard({
   openView = false,
   quoteSnapshot = null,
   asOf = new Date(),
+  scope = "both",
 }: {
   row: { campaign: CampaignRow; summary: ReturnType<typeof summarizeCampaign>; feesFullyKnown?: boolean };
   currentUserId: string;
@@ -730,6 +732,12 @@ function CampaignCard({
   openView?: boolean;
   quoteSnapshot?: QuoteSnapshot | null;
   asOf?: Date;
+  /** Compact position UX - the page's own scope filter (?scope=). In "mine"/"buddy" every visible
+   * card trivially belongs to the same person, so the provenance line's owner name ("You"/buddy
+   * name) is redundant on every row and is omitted - only "both" (where rows from different
+   * owners are interleaved) actually needs it to disambiguate. Defaults to "both" (show it) so a
+   * caller that omits this prop never silently loses ownership context. */
+  scope?: TrackerScope;
 }) {
   const { campaign, summary } = row;
   const isOwner = campaign.ownerId === currentUserId;
@@ -810,7 +818,7 @@ function CampaignCard({
               </span>
             ) : null}
             {openView && openCall ? (
-              <span className="text-[13px] text-amber-200" data-testid="active-call-contract">
+              <span className="text-[13px] text-zinc-300" data-testid="active-call-contract">
                 {money(openCall.strike)} Call · {shortCalendarDate(openCall.expiration)} · {dte ?? "-"} DTE · {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}
               </span>
             ) : null}
@@ -841,7 +849,11 @@ function CampaignCard({
               visibility affordance (compact position UX) now lives ONLY here, next to the account
               identifier it describes - never as a loud badge in the primary row above. */}
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-zinc-500">
-            <span>{isOwner ? "You" : campaign.owner.name}</span>
+            {/* Compact position UX - in "both" scope, rows from different owners are interleaved,
+                so the owner name still earns its place; in "mine"/"buddy" every card on the page
+                is trivially the same person's, and repeating that on every row is the exact
+                wasted-row-on-metadata the ticket calls out. */}
+            {scope === "both" ? <span>{isOwner ? "You" : campaign.owner.name}</span> : null}
             <span>
               {accountVisibleToViewer ? campaign.account.name : "Private account"}
               {" · "}

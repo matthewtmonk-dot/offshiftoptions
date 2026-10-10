@@ -12,6 +12,7 @@ import {
   chatPreviewViewModel,
   closedThisWeekViewModel,
   confirmedTradingPLCard,
+  excludeAttentionRows,
   openCampaignsCard,
   positionsToReviewRows,
   scannerInsightViewModel,
@@ -528,6 +529,44 @@ describe("Phase 2B - attachPositionAssessmentDisplays / sortPositionToReviewDisp
         ["c2", lastValidDisplay("REVIEW_ROLL")],
       ]));
       expect(attentionNowRows(attached)).toEqual([]);
+    });
+  });
+
+  // Compact position UX - Dashboard's "Open Positions" must never repeat a row Attention Now
+  // already surfaced (the AAP/F/IONQ/WBD duplicate-rows bug the ticket calls out). Display
+  // filtering/dedup only - never changes which rows attentionNowRows itself selects.
+  describe("excludeAttentionRows (Compact position UX)", () => {
+    it("A: an attention-qualifying row (e.g. WATCH) is excluded from the remainder, so it is never shown twice", () => {
+      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "WATCH" })]]));
+      const attention = attentionNowRows(attached);
+      expect(attention.map((r) => r.campaignId)).toEqual(["c1"]);
+      expect(excludeAttentionRows(attached, attention)).toEqual([]);
+    });
+
+    it("B: an open row that does NOT qualify for attention (e.g. COMFORTABLE) still appears in the remainder", () => {
+      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "COMFORTABLE" })]]));
+      const attention = attentionNowRows(attached);
+      expect(attention).toEqual([]);
+      expect(excludeAttentionRows(attached, attention).map((r) => r.campaignId)).toEqual(["c1"]);
+    });
+
+    it("mixed set: only the non-attention row remains, in its original relative order", () => {
+      const attached = attachPositionAssessmentDisplays(
+        [row("c1"), row("c2")],
+        new Map([
+          ["c1", displayFixture({ action: "REVIEW_ROLL" })],
+          ["c2", displayFixture({ action: "COMFORTABLE" })],
+        ]),
+      );
+      const attention = attentionNowRows(attached);
+      expect(attention.map((r) => r.campaignId)).toEqual(["c1"]);
+      expect(excludeAttentionRows(attached, attention).map((r) => r.campaignId)).toEqual(["c2"]);
+    });
+
+    it("when every row qualifies for attention, the remainder is empty - supports Dashboard's own Open Positions empty state", () => {
+      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "WATCH" })]]));
+      const attention = attentionNowRows(attached);
+      expect(excludeAttentionRows(attached, attention)).toEqual([]);
     });
   });
 });
