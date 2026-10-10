@@ -2,8 +2,9 @@ import "server-only";
 import { friendlyReportingReason, type AccountReportingSummary } from "@/domain/finance/reporting";
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
-import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignStatusInput } from "@/domain/finance/campaigns";
+import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignCurrentStage, type CampaignStatusInput } from "@/domain/finance/campaigns";
 import { isAwaitingSettlement } from "@/domain/finance/positionActivity";
+import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import type { PositionToReviewRow } from "@/domain/finance/positionReviewRows";
 import {
   accountValueDetail,
@@ -170,29 +171,28 @@ export type ActiveSettlementBreakdown = {
  * "5 active market positions" even when most of those campaigns are simply awaiting ordinary
  * post-expiration settlement, not genuinely exposed right now. This answers the honest, higher-
  * level question instead: how many of these open campaigns are genuinely active versus just
- * waiting on Schwab's own settlement confirmation - reusing the SAME currentActivityLabel each
- * individual row's own badge already shows (never a third, independently-invented classification).
- * `openCampaigns.count`/`openCampaignsCard` itself is NEVER altered by this - the underlying open-
- * campaign total and its accounting-facing breakdown stay exactly as they were; this is additive,
- * presentation-only.
+ * waiting on Schwab's own settlement confirmation.
+ *
+ * Summary-consistency blocker repair - takes the SAME already-sorted, already-display-attached
+ * rows DashboardPositionSections/Tracker's grouping render from (each row's own `stage`/
+ * `expiration`/`display`, exactly as isAwaitingSettlement already consumes them elsewhere) -
+ * never raw campaign/event data re-walked with a null display. Previously this recomputed
+ * `currentStage`/the open leg's expiration itself from `openCampaigns` and always passed
+ * `display: null` into `isAwaitingSettlement`, since no live evaluation was available at that
+ * call site - a calendar-only, strictly WEAKER classification than the one each row's own badge
+ * and group actually use. On a same-day expiration, after its session had already ended, a row
+ * could correctly show SETTLEMENT PENDING / group under Awaiting Settlement while this summary
+ * still silently counted it as active - the exact inconsistency this fix removes by construction:
+ * there is now only ONE classification, computed once per row, and this summary and every row/
+ * group all read it from the identical source. `openCampaigns.count`/`openCampaignsCard` itself is
+ * NEVER altered by this - the underlying open-campaign total and its accounting-facing breakdown
+ * stay exactly as they were; this remains additive, presentation-only.
  */
-export function activeSettlementBreakdown(
-  openCampaigns: { status: CampaignStatusInput; events: Parameters<typeof summarizeCampaign>[0]["events"] }[],
-  asOf: Date,
-): ActiveSettlementBreakdown {
+export function activeSettlementBreakdown(rows: readonly { stage: CampaignCurrentStage; expiration: Date | null; display: PositionAssessmentDisplay | null }[], asOf: Date): ActiveSettlementBreakdown {
   let activeCount = 0;
   let awaitingSettlementCount = 0;
-  for (const campaign of openCampaigns) {
-    if (campaign.status !== "OPEN" && campaign.status !== "ASSIGNED") continue;
-    const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-    const openPut = campaign.status === "OPEN" ? getCurrentOpenPut(campaign.events) : null;
-    const openCall = campaign.status === "ASSIGNED" ? getCurrentOpenCall(campaign.events) : null;
-    const legExpiration = openCall?.expiration ?? openPut?.expiration ?? null;
-    // No live PositionAssessmentDisplay is resolved here (this summary only reads raw campaign/
-    // event data, never a per-campaign live evaluation) - calendar-only fallback, an accepted
-    // limitation for the SAME-DAY, after-session-close edge case (see isAwaitingSettlement's own
-    // doc comment); correct for every other case, including the day-after one.
-    if (isAwaitingSettlement(summary.currentStage, legExpiration, asOf, null)) {
+  for (const row of rows) {
+    if (isAwaitingSettlement(row.stage, row.expiration, asOf, row.display)) {
       awaitingSettlementCount += 1;
     } else {
       activeCount += 1;

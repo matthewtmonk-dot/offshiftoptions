@@ -1,4 +1,3 @@
-import { Suspense } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
@@ -14,7 +13,7 @@ import { getCurrentOpenCall, summarizeCampaign } from "@/domain/finance/campaign
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { summarizeThisWeek, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
-import { attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows, type PositionToReviewRow } from "@/domain/finance/positionReviewRows";
+import { attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows } from "@/domain/finance/positionReviewRows";
 import {
   accountValueCard,
   activeSettlementBreakdown,
@@ -34,9 +33,6 @@ const POSITIONS_TO_REVIEW_LIMIT = 6;
 /** Tracker's own Performance tab, always the viewer's own scope - never the Open-view default
  * `/positions` naturally lands on (Astra review: a bare "Performance" link must not open Open). */
 const TRACKER_PERFORMANCE_HREF = "/positions?scope=mine&view=performance";
-
-type DashboardAccount = Awaited<ReturnType<typeof getDashboardData>>["ownAccounts"][number];
-type DashboardOpenCampaign = Awaited<ReturnType<typeof getDashboardData>>["openCampaigns"][number];
 
 export default async function DashboardPage() {
   const user = await requireCurrentUser();
@@ -105,18 +101,37 @@ export default async function DashboardPage() {
   const wholeAccountGain = wholeAccountGainCard(report);
   const confirmedTradingPL = confirmedTradingPLCard(report, winLoss);
   const openCampaigns = openCampaignsCard(data.openCampaigns);
-  const exposureSummary = activeSettlementBreakdown(data.openCampaigns, asOf);
   const capitalPanel = capitalPanelViewModel(report, exposure);
   const closedThisWeek = closedThisWeekViewModel(report, thisWeek);
   const scannerInsight = scannerInsightViewModel(data.latestScanRun, neverTradeTickers);
   const chatPreview = chatPreviewViewModel(unreadChatCount, data.recentMessages);
 
   // Dashboard V2 Phase 2 - the full owner-scoped set is evaluated and priority-sorted (never
-  // sorted after truncation) by PositionsToReviewWithStatus below, before it slices to
-  // POSITIONS_TO_REVIEW_LIMIT; `allReviewRows` here is only the factual row list, in its
-  // pre-evaluation order.
+  // sorted after truncation), before it slices to POSITIONS_TO_REVIEW_LIMIT; `allReviewRows` here
+  // is only the factual row list, in its pre-evaluation order.
   const allReviewRows = positionsToReviewRows(data.openCampaigns);
   const rollBufferPercent = Number(data.settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
+
+  // Summary-consistency blocker repair - resolved ONCE, here, so the compact header/"Open
+  // Campaigns" card summary (activeSettlementBreakdown) and the Positions panel
+  // (DashboardPositionSections) read the IDENTICAL display-attached rows - never two
+  // independently-derived classifications of the same campaign (previously the header/card summary
+  // recomputed its own classification from raw campaign data with no live display at all, which
+  // could disagree with a row's own badge on a same-day, after-session-close expiration - see
+  // activeSettlementBreakdown's own doc comment). This does mean the whole page now waits for this
+  // resolution before its first byte, rather than streaming the header ahead of a Suspense-deferred
+  // Positions panel as before - an accepted, necessary consequence of there being only one
+  // authoritative classification instead of two. Codex P1 (B8) - `asOf` selects which NY date to
+  // request session evidence for; the real evaluation instant is captured fresh AFTER
+  // resolvePositionAssessmentDisplaysForUser's own retrieval completes, never reused from before
+  // this page even started fetching.
+  const reviewAccounts = data.ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
+  const resolvedDisplays = allReviewRows.length === 0 ? [] : await resolvePositionAssessmentDisplaysForUser(user.id, data.openCampaigns, reviewAccounts, rollBufferPercent, asOf, () => new Date());
+  const displaysByCampaignId = new Map(resolvedDisplays.map((entry) => [entry.campaignId, entry.display]));
+  const sortedReviewRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(allReviewRows, displaysByCampaignId));
+  const reviewEntries: DisplayEntry[] = sortedReviewRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
+
+  const exposureSummary = activeSettlementBreakdown(sortedReviewRows, asOf);
 
   const checkpointLabel = getNextLstCheckpointLabel();
 
@@ -198,17 +213,12 @@ export default async function DashboardPage() {
                 </IntentPrefetchLink>
               </EmptyState>
             ) : (
-              <Suspense fallback={<p className="text-xs text-zinc-500">Checking current status…</p>}>
-                <PositionsToReviewWithStatus
-                  userId={user.id}
-                  ownAccounts={data.ownAccounts}
-                  campaigns={data.openCampaigns}
-                  rows={allReviewRows}
-                  rollBufferPercent={rollBufferPercent}
-                  asOf={asOf}
-                  limit={POSITIONS_TO_REVIEW_LIMIT}
-                />
-              </Suspense>
+              <ClientPresentationProvider entries={reviewEntries} now={asOf}>
+                <div className="space-y-3">
+                  <FreshnessStrip entries={reviewEntries} now={asOf} />
+                  <DashboardPositionSections rows={sortedReviewRows} now={asOf} limit={POSITIONS_TO_REVIEW_LIMIT} />
+                </div>
+              </ClientPresentationProvider>
             )}
           </Panel>
         </div>
@@ -363,54 +373,5 @@ function CapitalLine({ label, value, detail, emphasize = false }: { label: strin
         {detail ? <div className="text-xs text-zinc-500">{detail}</div> : null}
       </div>
     </div>
-  );
-}
-
-/**
- * Phase 2B - resolves the shared CURRENT/LAST_VALID/UNAVAILABLE display for every relevant open
- * campaign (never just the truncated slice - see resolvePositionAssessmentDisplaysForUser's own
- * contract), attaches it to each factual row, sorts the FULL set by the ticket's deterministic
- * priority order, and only THEN truncates to `limit`. Tracker (positions/page.tsx) resolves the
- * identical orchestration for the same campaign, so the two pages can never disagree about a
- * position's status.
- */
-async function PositionsToReviewWithStatus({
-  userId,
-  ownAccounts,
-  campaigns,
-  rows,
-  rollBufferPercent,
-  asOf,
-  limit,
-}: {
-  userId: string;
-  ownAccounts: DashboardAccount[];
-  campaigns: DashboardOpenCampaign[];
-  rows: PositionToReviewRow[];
-  rollBufferPercent: number;
-  asOf: Date;
-  limit: number;
-}) {
-  const accounts = ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
-  // Codex P1 (B8) - `asOf` selects which NY date to request session evidence for; the real
-  // evaluation instant is captured fresh AFTER resolvePositionAssessmentDisplaysForUser's own
-  // retrieval completes, never reused from before this page even started fetching.
-  const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
-  const displaysByCampaignId = new Map(resolved.map((entry) => [entry.campaignId, entry.display]));
-  const sortedRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(rows, displaysByCampaignId));
-  const entries: DisplayEntry[] = sortedRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
-
-  // Compact position UX, final blocker repair - Attention Now and Open Positions are no longer
-  // split here (server-side, once, at `asOf`). DashboardPositionSections (client-freshness.tsx)
-  // renders BOTH sections together from the full `sortedRows` set, re-partitioning live as each
-  // row's own guidance deadline passes in the browser - see its own doc comment for why a single
-  // server-side split could let a row vanish from both sections at once.
-  return (
-    <ClientPresentationProvider entries={entries} now={asOf}>
-      <div className="space-y-3">
-        <FreshnessStrip entries={entries} now={asOf} />
-        <DashboardPositionSections rows={sortedRows} now={asOf} limit={limit} />
-      </div>
-    </ClientPresentationProvider>
   );
 }

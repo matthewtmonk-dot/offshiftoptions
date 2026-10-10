@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { AccountReportingSummary } from "@/domain/finance/reporting";
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
+import type { CampaignCurrentStage } from "@/domain/finance/campaigns";
+import type { PositionReviewResult } from "@/domain/finance/positionReview";
+import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
+import { currentActivityLabel, isAwaitingSettlement } from "@/domain/finance/positionActivity";
 import {
   accountValueCard,
   activeSettlementBreakdown,
@@ -235,28 +239,30 @@ describe("openCampaignsCard", () => {
 // Weekend / Settlement Clarity - ticket requirement 5: "Dashboard summary: 1 active + 4 settling
 // yields correct display counts," reproduced against the ticket's own exact Saturday Oct 10
 // production scenario (BBWI/CELH/SOFI/PATH expired Oct 9, UPST still active to Oct 23).
+/**
+ * Weekend / Settlement Clarity - summary-consistency blocker repair. activeSettlementBreakdown now
+ * takes the SAME already-sorted, already-display-attached rows DashboardPositionSections/Tracker's
+ * grouping render from (stage/expiration/display per row) instead of re-walking raw campaign data
+ * with a null display - so the header/card summary can no longer disagree with what a row's own
+ * badge and group actually show, including on a same-day, after-session-close expiration.
+ */
 describe("activeSettlementBreakdown - Weekend / Settlement Clarity", () => {
   const asOf = new Date("2026-10-10T12:00:00Z");
-  function sellPutEvents(expiration: Date) {
-    return [{ type: "SELL_PUT", occurredAt: new Date("2026-09-01"), strike: 10, contracts: 1, expiration }];
-  }
-  function assignedWithCallEvents(callExpiration: Date) {
-    return [
-      { type: "SELL_PUT", occurredAt: new Date("2026-08-01"), strike: 10, contracts: 1, expiration: new Date("2026-08-15") },
-      { type: "ASSIGNMENT", occurredAt: new Date("2026-08-15"), shares: 100, strike: 10 },
-      { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-08-16"), strike: 12, contracts: 1, expiration: callExpiration },
-    ];
+  const todayExpiration = new Date("2026-10-10");
+
+  function row(stage: CampaignCurrentStage, expiration: Date | null, display: PositionAssessmentDisplay | null = null) {
+    return { stage, expiration, display };
   }
 
-  it("1 active put + 3 expired puts + 1 expired covered call => '1 active · 4 settling'", () => {
+  it("1 active put + 3 expired puts + 1 expired covered call => '1 active · 4 settling' (the ticket's own Saturday scenario)", () => {
     const breakdown = activeSettlementBreakdown(
       [
-        { status: "OPEN", events: sellPutEvents(new Date("2026-10-23")) }, // UPST - active
-        { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) }, // BBWI - settling
-        { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) }, // CELH - settling
-        { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) }, // SOFI - settling
-        { status: "ASSIGNED", events: assignedWithCallEvents(new Date("2026-10-09")) }, // PATH - settling
-      ] as never,
+        row("Cash-secured put", new Date("2026-10-23")), // UPST - active
+        row("Expiration processing", new Date("2026-10-09")), // BBWI - settling
+        row("Expiration processing", new Date("2026-10-09")), // CELH - settling
+        row("Expiration processing", new Date("2026-10-09")), // SOFI - settling
+        row("Covered call", new Date("2026-10-09")), // PATH - settling
+      ],
       asOf,
     );
     expect(breakdown.activeCount).toBe(1);
@@ -264,22 +270,108 @@ describe("activeSettlementBreakdown - Weekend / Settlement Clarity", () => {
     expect(breakdown.label).toBe("1 active · 4 settling");
   });
 
-  it("never alters the underlying open-campaign total - openCampaignsCard's own count is independent and unaffected", () => {
-    const campaigns = [
-      { status: "OPEN", events: sellPutEvents(new Date("2026-10-23")) },
-      { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) },
-    ] as never;
-    expect(openCampaignsCard(campaigns).count).toBe(2);
-    const breakdown = activeSettlementBreakdown(campaigns, asOf);
-    expect(breakdown.activeCount + breakdown.awaitingSettlementCount).toBe(openCampaignsCard(campaigns).count);
+  it("every row counts toward exactly one side - the two counts always sum to the row count", () => {
+    const rows = [row("Cash-secured put", new Date("2026-10-23")), row("Expiration processing", new Date("2026-10-09"))];
+    const breakdown = activeSettlementBreakdown(rows, asOf);
+    expect(breakdown.activeCount + breakdown.awaitingSettlementCount).toBe(rows.length);
   });
 
   it("omits a zero-count side entirely rather than showing '0 settling'", () => {
-    expect(activeSettlementBreakdown([{ status: "OPEN", events: sellPutEvents(new Date("2026-10-23")) }] as never, asOf).label).toBe("1 active");
+    expect(activeSettlementBreakdown([row("Cash-secured put", new Date("2026-10-23"))], asOf).label).toBe("1 active");
   });
 
   it("reads as a neutral 'no open campaigns' state when empty, matching openCampaignsCard's own empty wording", () => {
     expect(activeSettlementBreakdown([], asOf).label).toBe("No open campaigns");
+  });
+
+  /**
+   * Summary-consistency blocker repair - Codex found that a same-day, after-session-close row
+   * could correctly show SETTLEMENT PENDING / group under Awaiting Settlement (both driven by the
+   * row's own live `display`) while the header/card summary - previously computed from raw
+   * campaign data with no display at all - still silently counted it as active. These cases prove
+   * the row's own classification (currentActivityLabel/isAwaitingSettlement) and the summary
+   * (activeSettlementBreakdown) now agree in every case, because both read the identical
+   * `{stage, expiration, display}` input - never two independently-derived classifications.
+   */
+  describe("row classification and summary classification always agree (the actual repair)", () => {
+    function reviewFixture(overrides: Partial<PositionReviewResult> = {}): PositionReviewResult {
+      return {
+        action: "COMFORTABLE",
+        lifecycle: "CURRENT_PUT",
+        evidence: { position: "SCHWAB_CONFIRMED", quote: "ELIGIBLE", quoteIneligibleReason: null, session: "OPEN" },
+        explanation: {
+          reasonCodes: [], optionType: "PUT", strike: 25, stockPrice: 30, dollarDistance: 5, percentageDistance: 20,
+          moneyness: "OTM", bufferPercent: 3, expiration: todayExpiration, daysToExpiration: 0,
+          quoteTradeTime: asOf, quoteAgeMs: 0, positionEvidenceAsOf: asOf,
+          activeGuidanceDeadline: asOf, evaluatedAt: asOf,
+        },
+        priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-10", ticker: "XYZ", accountId: "a1", campaignId: "c1" },
+        ...overrides,
+      };
+    }
+    function liveSessionDisplay(optionType: "PUT" | "CALL"): PositionAssessmentDisplay {
+      return { state: "CURRENT", current: reviewFixture({ action: "WATCH", explanation: { ...reviewFixture().explanation, optionType } }), lastValid: null };
+    }
+    function sessionEndedDisplay(optionType: "PUT" | "CALL"): PositionAssessmentDisplay {
+      return {
+        state: "UNAVAILABLE",
+        currentUnavailable: reviewFixture({
+          action: "CANNOT_ASSESS",
+          lifecycle: "EXPIRATION_SESSION_ENDED",
+          explanation: { ...reviewFixture().explanation, optionType, reasonCodes: ["EXPIRATION_SESSION_ENDED"] },
+        }),
+      };
+    }
+
+    it("A. same-day, live PUT: row reads SHORT PUT OPEN / active, summary counts it active", () => {
+      const r = row("Cash-secured put", todayExpiration, liveSessionDisplay("PUT"));
+      expect(currentActivityLabel(r.stage, r.expiration, asOf, r.display)).toBe("SHORT PUT OPEN");
+      expect(isAwaitingSettlement(r.stage, r.expiration, asOf, r.display)).toBe(false);
+      const breakdown = activeSettlementBreakdown([r], asOf);
+      expect(breakdown.activeCount).toBe(1);
+      expect(breakdown.awaitingSettlementCount).toBe(0);
+    });
+
+    it("B. same-day, session-ended PUT: row reads SETTLEMENT PENDING / settling, summary counts it settling", () => {
+      const r = row("Cash-secured put", todayExpiration, sessionEndedDisplay("PUT"));
+      expect(currentActivityLabel(r.stage, r.expiration, asOf, r.display)).toBe("SETTLEMENT PENDING");
+      expect(isAwaitingSettlement(r.stage, r.expiration, asOf, r.display)).toBe(true);
+      const breakdown = activeSettlementBreakdown([r], asOf);
+      expect(breakdown.activeCount).toBe(0);
+      expect(breakdown.awaitingSettlementCount).toBe(1);
+    });
+
+    it("C. same-day, live COVERED CALL: row reads COVERED CALL OPEN / active, summary counts it active", () => {
+      const r = row("Covered call", todayExpiration, liveSessionDisplay("CALL"));
+      expect(currentActivityLabel(r.stage, r.expiration, asOf, r.display)).toBe("COVERED CALL OPEN");
+      expect(isAwaitingSettlement(r.stage, r.expiration, asOf, r.display)).toBe(false);
+      const breakdown = activeSettlementBreakdown([r], asOf);
+      expect(breakdown.activeCount).toBe(1);
+      expect(breakdown.awaitingSettlementCount).toBe(0);
+    });
+
+    it("D. same-day, session-ended COVERED CALL: row reads SETTLEMENT PENDING / settling, summary counts it settling", () => {
+      const r = row("Covered call", todayExpiration, sessionEndedDisplay("CALL"));
+      expect(currentActivityLabel(r.stage, r.expiration, asOf, r.display)).toBe("SETTLEMENT PENDING");
+      expect(isAwaitingSettlement(r.stage, r.expiration, asOf, r.display)).toBe(true);
+      const breakdown = activeSettlementBreakdown([r], asOf);
+      expect(breakdown.activeCount).toBe(0);
+      expect(breakdown.awaitingSettlementCount).toBe(1);
+    });
+
+    it("mixed A-D set: summary totals match exactly how many rows individually classify as settling", () => {
+      const rows = [
+        row("Cash-secured put", todayExpiration, liveSessionDisplay("PUT")), // A - active
+        row("Cash-secured put", todayExpiration, sessionEndedDisplay("PUT")), // B - settling
+        row("Covered call", todayExpiration, liveSessionDisplay("CALL")), // C - active
+        row("Covered call", todayExpiration, sessionEndedDisplay("CALL")), // D - settling
+      ];
+      const expectedSettling = rows.filter((r) => isAwaitingSettlement(r.stage, r.expiration, asOf, r.display)).length;
+      const breakdown = activeSettlementBreakdown(rows, asOf);
+      expect(breakdown.awaitingSettlementCount).toBe(expectedSettling);
+      expect(breakdown.activeCount).toBe(rows.length - expectedSettling);
+      expect(breakdown.label).toBe("2 active · 2 settling");
+    });
   });
 });
 
