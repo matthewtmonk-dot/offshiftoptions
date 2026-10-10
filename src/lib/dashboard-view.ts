@@ -2,9 +2,8 @@ import "server-only";
 import { friendlyReportingReason, type AccountReportingSummary } from "@/domain/finance/reporting";
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
-import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignCurrentStage, type CampaignStatusInput } from "@/domain/finance/campaigns";
-import { comparePositionReviewPriority } from "@/domain/finance/positionReview";
-import { isKnownTransientFallbackReason, underlyingPositionReviewResult, type PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
+import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignStatusInput } from "@/domain/finance/campaigns";
+import type { PositionToReviewRow } from "@/domain/finance/positionReviewRows";
 import {
   accountValueDetail,
   accountValueUnavailableReason,
@@ -161,21 +160,6 @@ export function openCampaignsCard(openCampaigns: { status: CampaignStatusInput; 
 // Positions to Review (safe fields only - no fabricated/current P/L, no recommendations)
 // ---------------------------------------------------------------------------
 
-export type PositionToReviewRow = {
-  campaignId: string;
-  ownerId: string;
-  accountId: string;
-  ticker: string;
-  status: "OPEN" | "ASSIGNED";
-  stage: CampaignCurrentStage;
-  legType: "PUT" | "CALL" | null;
-  strike: number | null;
-  expiration: Date | null;
-  /** Contracts for an option leg, shares held for an assigned-with-no-call row. */
-  quantity: number | null;
-  quantityUnit: "contracts" | "shares" | null;
-};
-
 /**
  * Deliberately excludes any money field: the architecture review found the prior dashboard's open
  * -row figure unsafe (`realizedPL ?? 0`, fabricating a confirmed-looking $0 for an OPEN campaign
@@ -185,6 +169,13 @@ export type PositionToReviewRow = {
  * for the follow-up. Only already-certain lifecycle facts are shown here. `campaigns` is expected
  * to already be scoped to OPEN/ASSIGNED only (the caller's own query filters this) - a CLOSED
  * entry, if one ever slipped through, is defensively excluded rather than misrendered.
+ *
+ * PositionToReviewRow/PositionToReviewDisplayRow and everything that operates on them
+ * (attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows, attentionNowRows,
+ * partitionPositionReviewRows) now live in @/domain/finance/positionReviewRows - a plain domain
+ * module, not "server-only"-tagged like this file - because the Dashboard's live client-side
+ * section membership (client-freshness.tsx) needs to call them too. This function stays here since
+ * it reads raw campaign/event data only this (server-only) module has.
  */
 export function positionsToReviewRows(
   campaigns: { id: string; ownerId: string; accountId: string; ticker: string; status: CampaignStatusInput; events: Parameters<typeof summarizeCampaign>[0]["events"] }[],
@@ -209,96 +200,6 @@ export function positionsToReviewRows(
       quantityUnit: leg ? ("contracts" as const) : campaign.status === "ASSIGNED" ? ("shares" as const) : null,
     }];
   });
-}
-
-/**
- * Phase 2B - merges each factual row with its shared orchestration display (CURRENT/LAST_VALID/
- * UNAVAILABLE), by campaign id. A row absent from `displaysByCampaignId` (no leg the shared
- * evaluator could resolve at all, e.g. a "Review needed" legacy row) gets `display: null` -
- * rendered distinctly, never defaulted to a guessed status. Supersedes the old
- * positionConfirmationStatus/ConfirmationBadge pair entirely: the underlying live result's
- * evidence.position already carries the same (and more complete) confirmation states, and keeping
- * both would risk the two disagreeing.
- */
-export type PositionToReviewDisplayRow = PositionToReviewRow & { display: PositionAssessmentDisplay | null };
-
-export function attachPositionAssessmentDisplays(
-  rows: PositionToReviewRow[],
-  displaysByCampaignId: ReadonlyMap<string, PositionAssessmentDisplay>,
-): PositionToReviewDisplayRow[] {
-  return rows.map((row) => ({ ...row, display: displaysByCampaignId.get(row.campaignId) ?? null }));
-}
-
-/**
- * The ticket's own deterministic priority ordering, applied to full display rows rather than bare
- * PositionReviewResults - callers MUST sort the complete owner-scoped set before truncating for
- * display (never sort an already-truncated slice). A row with no display (no leg the shared
- * evaluator could resolve) sorts after every row that does have one - there is nothing to
- * prioritize it against, so it is treated as the least actionable case rather than guessed into a
- * priority group. Sorts on the underlying live PositionReviewResult regardless of CURRENT/
- * LAST_VALID/UNAVAILABLE state (underlyingPositionReviewResult) - this is a type-shape change
- * only, not a new sort policy: a LAST_VALID/UNAVAILABLE row's `currentUnavailable` already carries
- * the exact same priority/lifecycle fields a CANNOT_ASSESS row always had, pre-Phase-2B.
- */
-export function sortPositionToReviewDisplayRows<T extends { display: PositionAssessmentDisplay | null }>(rows: T[]): T[] {
-  return [...rows].sort((a, b) => {
-    if (a.display && b.display) return comparePositionReviewPriority(underlyingPositionReviewResult(a.display), underlyingPositionReviewResult(b.display));
-    if (a.display && !b.display) return -1;
-    if (!a.display && b.display) return 1;
-    return 0;
-  });
-}
-
-/**
- * LST "Attention-First Freshness" Phase 1 - "Attention Now" section: only rows genuinely needing
- * review/action RIGHT NOW, never a historical (LAST_VALID) Watch/Review carried over from a stale
- * evaluation - a LAST_VALID row's own action is useful CONTEXT elsewhere on the page, but this app
- * can no longer confirm it still applies, so it must never be promoted into an attention-demanding
- * list. Two cases qualify:
- *   1. A live CURRENT result whose action is WATCH/REVIEW_ROLL/REVIEW_CALL (COMFORTABLE and
- *      CANNOT_ASSESS are excluded - "current, no action needed" and "nothing to report" are not
- *      attention items).
- *   2. A live UNAVAILABLE result carrying a genuine CONTRADICTION reason - any reasonCode outside
- *      isKnownTransientFallbackReason's existing allowlist (reused verbatim from the approved
- *      historical-fallback eligibility rule, never a new/independent interpretation of "transient
- *      vs. contradictory"). An ordinary transient gap (market closed, quote momentarily
- *      unavailable) never appears here even when no historical fallback exists for it.
- * Input rows are assumed already sorted (sortPositionToReviewDisplayRows) - this only filters,
- * never reorders.
- *
- * Codex blocker repair (B1) - this is the SERVER-SIDE candidate list only, computed once at page
- * render against `now`. A case-1 (CURRENT Watch/Review) row can still expire client-side at its
- * own trusted guidance deadline before the next server render - `AttentionNowList`
- * (client-freshness.tsx) wraps this list and additionally removes a CURRENT-sourced row the
- * instant useActiveGuidanceExpired reports it expired, so the rendered list never disagrees with
- * what that row's own visible badge is showing. A case-2 (UNAVAILABLE contradiction) row has no
- * guidance deadline at all and passes through the client layer unchanged.
- */
-export function attentionNowRows<T extends { display: PositionAssessmentDisplay | null }>(rows: T[]): T[] {
-  return rows.filter((row) => {
-    const display = row.display;
-    if (!display) return false;
-    if (display.state === "CURRENT") {
-      return display.current.action === "WATCH" || display.current.action === "REVIEW_ROLL" || display.current.action === "REVIEW_CALL";
-    }
-    if (display.state === "UNAVAILABLE") {
-      return display.currentUnavailable.explanation.reasonCodes.some((code) => !isKnownTransientFallbackReason(code));
-    }
-    // LAST_VALID - a historical action is context, never an attention-demanding item.
-    return false;
-  });
-}
-
-/**
- * Compact position UX - "Open Positions" must never repeat a row Attention Now already surfaced
- * (same campaign shown twice just because it is both open and attention-worthy wastes the
- * attention-first section's own point). Pure display-filtering/deduplication only - never changes
- * which rows qualify as attention (attentionNowRows itself is untouched); callers compute
- * attentionNowRows(rows) first and pass that same list in here to get the remainder.
- */
-export function excludeAttentionRows<T extends { campaignId: string }>(rows: readonly T[], attentionRows: readonly { campaignId: string }[]): T[] {
-  const attentionIds = new Set(attentionRows.map((row) => row.campaignId));
-  return rows.filter((row) => !attentionIds.has(row.campaignId));
 }
 
 // ---------------------------------------------------------------------------

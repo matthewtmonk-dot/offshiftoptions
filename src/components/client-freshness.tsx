@@ -4,6 +4,9 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { Info } from "lucide-react";
 import { useActiveGuidanceExpired } from "@/components/use-active-guidance-expired";
 import { PositionToReviewRowView } from "@/components/position-to-review-row";
+import { EmptyState } from "@/components/ui";
+import { LastValidNotice } from "@/components/last-valid-notice";
+import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import {
   classifyFreshnessStripStateFromObservations,
@@ -13,8 +16,8 @@ import {
   type EffectivePresentation,
   type FreshnessStripState,
 } from "@/domain/finance/presentationFreshness";
+import { partitionPositionReviewRows, type PositionToReviewDisplayRow } from "@/domain/finance/positionReviewRows";
 import { formatEtCompactDateTime, formatEtTime } from "@/lib/format";
-import type { PositionToReviewDisplayRow } from "@/lib/dashboard-view";
 
 /**
  * Codex blocker repair (B1, two rounds) - the shared client presentation-state layer. The server
@@ -45,8 +48,18 @@ import type { PositionToReviewDisplayRow } from "@/lib/dashboard-view";
  * Schwab/market-data. One observer component mounts per CURRENT entry only (LAST_VALID/UNAVAILABLE
  * never change client-side, so they need no live tracking at all) - each observer is its OWN
  * component instance with exactly one unconditional hook call, never a hook called inside a loop
- * or conditionally (both FreshnessStrip and AttentionNowList below read the already-resolved
- * shared Map via a single top-level `useContext` call each, then do plain, hook-free lookups).
+ * or conditionally (FreshnessStrip and DashboardPositionSections below each read the already-
+ * resolved shared Map via a single top-level `useContext` call, then do plain, hook-free lookups).
+ *
+ * Compact position UX, final blocker repair - DashboardPositionSections replaces the old
+ * AttentionNowList: Attention Now and Open Positions previously derived from two independent
+ * sources (a client-side-filtered Attention Now list vs. a server-computed-once Open Positions
+ * remainder), which could drift apart - a row leaving Attention Now the instant its guidance
+ * deadline passed in the browser never got added back to Open Positions until the next server
+ * render, so it temporarily vanished from BOTH sections. DashboardPositionSections renders both
+ * sections together from ONE live partition (partitionPositionReviewRows,
+ * domain/finance/positionReviewRows.ts) - every row ends up in exactly one bucket, by construction,
+ * so the two sections can never disagree about where a row belongs.
  *
  * Testing note: this repo has no React/DOM component-render harness (vitest.config.mts runs
  * `environment: "node"`, only picks up `*.test.ts`, and has no @testing-library/react or jsdom
@@ -81,7 +94,8 @@ function RowObserver({ revisionKey, display, now, onReport }: { revisionKey: str
 }
 
 /** Wraps a subtree with the shared live-presentation state for `entries`. Mount this once per page
- * (Dashboard) around both FreshnessStrip and AttentionNowList so they share one set of observers.
+ * (Dashboard) around both FreshnessStrip and DashboardPositionSections so they share one set of
+ * observers.
  * `entries` CAN change across a render (e.g. a manual "Refresh status" click re-resolves the
  * server's own displays and calls `router.refresh()`) - when a campaign's revision key changes
  * (new CURRENT evaluation) or it leaves CURRENT state entirely, its OLD observer unmounts (its
@@ -182,34 +196,65 @@ export function FreshnessStrip({ entries, now }: { entries: readonly DisplayEntr
 }
 
 /**
- * Dashboard's "Attention Now" list - the server already narrowed `rows` down to genuine candidates
- * (attentionNowRows, dashboard-view.ts: live CURRENT Watch/Review-roll/Review-call, or live
- * UNAVAILABLE with a real contradiction reason). This client wrapper additionally removes a
- * CURRENT-sourced row the instant its own trusted guidance deadline passes, AND immediately defers
- * to a fresher server replacement (LAST_VALID/UNAVAILABLE/a new CURRENT revision) rather than ever
- * reusing a report computed for an older revision - see resolveEffectivePresentation's own lookup
- * rule. An UNAVAILABLE-sourced contradiction row is unaffected either way (it never had a deadline
- * to expire in the first place, so it passes straight through). Must be rendered inside
+ * Dashboard's "Attention Now" + "Open Positions" sections, rendered together from ONE live
+ * partition (partitionPositionReviewRows, domain/finance/positionReviewRows.ts) - see this file's
+ * own top-of-file comment for why these two sections must never be derived independently. `rows`
+ * is the FULL priority-sorted set of open rows (not pre-split by the server) - this component does
+ * the split itself, every render, from the current live client state, so a row leaving Attention
+ * Now the instant its guidance deadline passes is, in the SAME render, already present in Open
+ * Positions - never missing from both, never shown in both. `limit` caps how many Open Positions
+ * rows are actually rendered (the rest surface via the "+N more in Tracker" link), matching the
+ * Dashboard's existing POSITIONS_TO_REVIEW_LIMIT. Must be rendered inside
  * ClientPresentationProvider, keyed by the SAME campaignId used to build its `entries`. One
- * `useContext` call here, then a plain (hook-free) filter - never a hook called per row.
+ * `useContext` call here, then a plain (hook-free) partition - never a hook called per row.
  */
-export function AttentionNowList({ rows, now }: { rows: readonly PositionToReviewDisplayRow[]; now: Date }) {
+export function DashboardPositionSections({ rows, now, limit }: { rows: readonly PositionToReviewDisplayRow[]; now: Date; limit: number }) {
   const liveByRevision = useContext(LiveObservationsContext);
-  const visible = rows.filter((row) => {
-    const display = row.display;
-    if (!display) return false;
-    if (display.state !== "CURRENT") return true; // UNAVAILABLE contradiction - deadline-independent
-    return resolveEffectivePresentation(liveByRevision, row.campaignId, display, now).stillLiveCurrent;
-  });
+  const { attention, open } = partitionPositionReviewRows(rows, liveByRevision, now);
+  const visibleOpen = open.slice(0, limit);
+  const hiddenCount = open.length - visibleOpen.length;
+  // A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never LAST_VALID) -
+  // see positionAssessmentOrchestration.ts's own owner-isolation check - so this notice only ever
+  // reflects the viewer's own historical data, never a buddy's.
+  const hasLastValid = visibleOpen.some((row) => row.display?.state === "LAST_VALID");
 
-  if (visible.length === 0) {
-    return <p className="text-xs text-zinc-500">No new attention items.</p>;
-  }
   return (
-    <div className="space-y-1.5">
-      {visible.map((row) => (
-        <PositionToReviewRowView key={row.campaignId} row={row} now={now} />
-      ))}
-    </div>
+    <>
+      <div>
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Attention Now</h3>
+        {attention.length === 0 ? (
+          <p className="text-xs text-zinc-500">No new attention items.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {attention.map((row) => (
+              <PositionToReviewRowView key={row.campaignId} row={row} now={now} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
+        {hasLastValid ? (
+          <div className="mb-2">
+            <LastValidNotice />
+          </div>
+        ) : null}
+        {open.length === 0 ? (
+          <EmptyState>Every open position is already listed above in Attention Now.</EmptyState>
+        ) : (
+          <div className="space-y-1.5">
+            {visibleOpen.map((row) => (
+              <PositionToReviewRowView key={row.campaignId} row={row} now={now} />
+            ))}
+          </div>
+        )}
+        {hiddenCount > 0 ? (
+          <IntentPrefetchLink href="/positions" className="mt-1.5 block text-center text-xs text-zinc-500 hover:text-sky-300">
+            +{hiddenCount} more in Tracker
+          </IntentPrefetchLink>
+        ) : null}
+      </div>
+    </>
   );
 }

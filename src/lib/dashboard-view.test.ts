@@ -2,21 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { AccountReportingSummary } from "@/domain/finance/reporting";
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
-import type { PositionReviewResult } from "@/domain/finance/positionReview";
-import type { PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import {
   accountValueCard,
-  attachPositionAssessmentDisplays,
-  attentionNowRows,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
   confirmedTradingPLCard,
-  excludeAttentionRows,
   openCampaignsCard,
   positionsToReviewRows,
   scannerInsightViewModel,
-  sortPositionToReviewDisplayRows,
   wholeAccountGainCard,
 } from "./dashboard-view";
 
@@ -421,153 +415,6 @@ describe("positionsToReviewRows", () => {
 
   it("excludes a CLOSED entry defensively rather than misrendering it", () => {
     expect(positionsToReviewRows([{ id: "c1", ownerId: "u1", accountId: "a1", ticker: "XYZ", status: "CLOSED", events: [] }] as never)).toEqual([]);
-  });
-});
-
-describe("Phase 2B - attachPositionAssessmentDisplays / sortPositionToReviewDisplayRows", () => {
-  function reviewFixture(overrides: Partial<PositionReviewResult> = {}): PositionReviewResult {
-    return {
-      action: "COMFORTABLE",
-      lifecycle: "CURRENT_PUT",
-      evidence: { position: "SCHWAB_CONFIRMED", quote: "ELIGIBLE", quoteIneligibleReason: null, session: "OPEN" },
-      explanation: {
-        reasonCodes: [], optionType: "PUT", strike: 25, stockPrice: 30, dollarDistance: 5, percentageDistance: 20,
-        moneyness: "OTM", bufferPercent: 3, expiration: new Date("2026-10-02"), daysToExpiration: 10,
-        quoteTradeTime: new Date("2026-06-15T16:00:00Z"), quoteAgeMs: 0, positionEvidenceAsOf: new Date("2026-06-15T16:00:00Z"),
-        activeGuidanceDeadline: new Date("2026-06-15T16:02:00Z"), evaluatedAt: new Date("2026-06-15T16:00:00Z"),
-      },
-      priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "XYZ", accountId: "a1", campaignId: "c1" },
-      ...overrides,
-    };
-  }
-
-  function displayFixture(overrides: Partial<PositionReviewResult> = {}): PositionAssessmentDisplay {
-    return { state: "CURRENT", current: reviewFixture(overrides), lastValid: null };
-  }
-
-  function row(campaignId: string) {
-    return { campaignId, ownerId: "u1", accountId: "a1", ticker: "XYZ", status: "OPEN" as const, stage: "Cash-secured put" as const, legType: "PUT" as const, strike: 25, expiration: new Date("2026-10-02"), quantity: 1, quantityUnit: "contracts" as const };
-  }
-
-  it("attaches a matching display by campaign id, and null when none exists", () => {
-    const displays = new Map([["c1", displayFixture()]]);
-    const [attached1, attached2] = attachPositionAssessmentDisplays([row("c1"), row("c2")], displays);
-    expect(attached1.display).toEqual(displayFixture());
-    expect(attached2.display).toBeNull();
-  });
-
-  it("sorts by the shared evaluator's own priority order, never by input order", () => {
-    const reviewRoll = displayFixture({ action: "REVIEW_ROLL", priority: { group: 4, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "AAA", accountId: "a1", campaignId: "c1" } });
-    const comfortable = displayFixture({ priority: { group: 8, withinExpirationTodaySubgroup: null, expirationSortKey: "2026-10-02", ticker: "ZZZ", accountId: "a1", campaignId: "c2" } });
-    const attached = attachPositionAssessmentDisplays([row("c2"), row("c1")], new Map([["c1", reviewRoll], ["c2", comfortable]]));
-    expect(sortPositionToReviewDisplayRows(attached).map((r) => r.campaignId)).toEqual(["c1", "c2"]);
-  });
-
-  it("sorts a row with no evaluable display after every row that has one, rather than guessing a priority", () => {
-    const attached = attachPositionAssessmentDisplays([row("c1"), row("c2")], new Map([["c1", displayFixture()]]));
-    expect(sortPositionToReviewDisplayRows(attached).map((r) => r.campaignId)).toEqual(["c1", "c2"]);
-  });
-
-  // Attention-First Freshness Phase 1 - "Attention Now" never promotes a row that doesn't
-  // genuinely need review right now: COMFORTABLE (current, no action) and historical (LAST_VALID)
-  // actions are both excluded, even though a LAST_VALID row can carry a WATCH/REVIEW_ROLL action
-  // of its own - that action is only confirmed-stale context, never a live attention item.
-  describe("attentionNowRows", () => {
-    function unavailableDisplay(reasonCodes: string[]): PositionAssessmentDisplay {
-      return { state: "UNAVAILABLE", currentUnavailable: reviewFixture({ action: "CANNOT_ASSESS", explanation: { ...reviewFixture().explanation, reasonCodes } }) };
-    }
-    function lastValidDisplay(action: PositionReviewResult["action"]): PositionAssessmentDisplay {
-      return {
-        state: "LAST_VALID",
-        currentUnavailable: reviewFixture({ action: "CANNOT_ASSESS", explanation: { ...reviewFixture().explanation, reasonCodes: ["MARKET_CLOSED"] } }),
-        lastValid: {
-          scope: { ownerId: "u1", accountId: "a1", campaignId: "c1", openingEventId: "e1" }, contextFingerprint: "fp",
-          action: action === "CANNOT_ASSESS" ? "COMFORTABLE" : action, reasonCodes: [], evaluatedAt: new Date("2026-06-15T16:00:00Z"),
-          nySessionDate: "2026-06-15", regularSessionStart: new Date("2026-06-15T13:30:00Z"), regularSessionEnd: new Date("2026-06-15T20:00:00Z"),
-          underlyingPrice: 30, underlyingTradeTime: new Date("2026-06-15T16:00:00Z"), ticker: "XYZ", optionType: "PUT", strike: 25,
-          expiration: new Date("2026-10-02"), contracts: 1, moneyness: "OTM", dollarDistance: 5, percentageDistance: 20,
-          appliedRollBufferPercent: 3, positionEvidenceSource: "MANUAL_POSITION", brokerReceiptAt: null, evaluationPolicyVersion: 1,
-        },
-      };
-    }
-
-    it("excludes a CURRENT Comfortable row - current, no action needed is not an attention item", () => {
-      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "COMFORTABLE" })]]));
-      expect(attentionNowRows(attached)).toHaveLength(0);
-    });
-
-    it("includes a CURRENT Watch/Review roll/Review call row", () => {
-      for (const action of ["WATCH", "REVIEW_ROLL", "REVIEW_CALL"] as const) {
-        const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action })]]));
-        expect(attentionNowRows(attached).map((r) => r.campaignId)).toEqual(["c1"]);
-      }
-    });
-
-    it("excludes a row with no display at all", () => {
-      const attached = attachPositionAssessmentDisplays([row("c1")], new Map());
-      expect(attentionNowRows(attached)).toHaveLength(0);
-    });
-
-    it("excludes a LAST_VALID row even when its own stored action is Watch/Review - historical action is context, never a live attention item", () => {
-      const attached = [{ ...row("c1"), display: lastValidDisplay("WATCH") }];
-      expect(attentionNowRows(attached)).toHaveLength(0);
-    });
-
-    it("excludes an UNAVAILABLE row carrying only a known transient/benign reason (market closed, quote momentarily unavailable)", () => {
-      const attached = [{ ...row("c1"), display: unavailableDisplay(["MARKET_CLOSED"]) }];
-      expect(attentionNowRows(attached)).toHaveLength(0);
-    });
-
-    it("includes an UNAVAILABLE row carrying a genuine contradiction reason (e.g. past-expiration unresolved)", () => {
-      const attached = [{ ...row("c1"), display: unavailableDisplay(["PAST_EXPIRATION_UNRESOLVED"]) }];
-      expect(attentionNowRows(attached).map((r) => r.campaignId)).toEqual(["c1"]);
-    });
-
-    it("returns an empty list (never a guessed/placeholder item) when nothing needs attention - supports the Dashboard's own 'No new attention items' empty state", () => {
-      const attached = attachPositionAssessmentDisplays([row("c1"), row("c2")], new Map([
-        ["c1", displayFixture({ action: "COMFORTABLE" })],
-        ["c2", lastValidDisplay("REVIEW_ROLL")],
-      ]));
-      expect(attentionNowRows(attached)).toEqual([]);
-    });
-  });
-
-  // Compact position UX - Dashboard's "Open Positions" must never repeat a row Attention Now
-  // already surfaced (the AAP/F/IONQ/WBD duplicate-rows bug the ticket calls out). Display
-  // filtering/dedup only - never changes which rows attentionNowRows itself selects.
-  describe("excludeAttentionRows (Compact position UX)", () => {
-    it("A: an attention-qualifying row (e.g. WATCH) is excluded from the remainder, so it is never shown twice", () => {
-      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "WATCH" })]]));
-      const attention = attentionNowRows(attached);
-      expect(attention.map((r) => r.campaignId)).toEqual(["c1"]);
-      expect(excludeAttentionRows(attached, attention)).toEqual([]);
-    });
-
-    it("B: an open row that does NOT qualify for attention (e.g. COMFORTABLE) still appears in the remainder", () => {
-      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "COMFORTABLE" })]]));
-      const attention = attentionNowRows(attached);
-      expect(attention).toEqual([]);
-      expect(excludeAttentionRows(attached, attention).map((r) => r.campaignId)).toEqual(["c1"]);
-    });
-
-    it("mixed set: only the non-attention row remains, in its original relative order", () => {
-      const attached = attachPositionAssessmentDisplays(
-        [row("c1"), row("c2")],
-        new Map([
-          ["c1", displayFixture({ action: "REVIEW_ROLL" })],
-          ["c2", displayFixture({ action: "COMFORTABLE" })],
-        ]),
-      );
-      const attention = attentionNowRows(attached);
-      expect(attention.map((r) => r.campaignId)).toEqual(["c1"]);
-      expect(excludeAttentionRows(attached, attention).map((r) => r.campaignId)).toEqual(["c2"]);
-    });
-
-    it("when every row qualifies for attention, the remainder is empty - supports Dashboard's own Open Positions empty state", () => {
-      const attached = attachPositionAssessmentDisplays([row("c1")], new Map([["c1", displayFixture({ action: "WATCH" })]]));
-      const attention = attentionNowRows(attached);
-      expect(excludeAttentionRows(attached, attention)).toEqual([]);
-    });
   });
 });
 

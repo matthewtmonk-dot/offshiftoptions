@@ -1,6 +1,6 @@
 import { Badge } from "@/components/ui";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
-import type { PositionToReviewDisplayRow } from "@/lib/dashboard-view";
+import type { PositionToReviewDisplayRow } from "@/domain/finance/positionReviewRows";
 import { money, shortCalendarDate } from "@/lib/format";
 import { activityTone, currentActivityLabel } from "@/domain/finance/positionActivity";
 

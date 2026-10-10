@@ -2,9 +2,7 @@ import { Suspense } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
-import { LastValidNotice } from "@/components/last-valid-notice";
-import { ClientPresentationProvider, FreshnessStrip, AttentionNowList, type DisplayEntry } from "@/components/client-freshness";
-import { PositionToReviewRowView } from "@/components/position-to-review-row";
+import { ClientPresentationProvider, FreshnessStrip, DashboardPositionSections, type DisplayEntry } from "@/components/client-freshness";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { requireCurrentUser } from "@/lib/auth";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
@@ -16,21 +14,17 @@ import { getCurrentOpenCall, summarizeCampaign } from "@/domain/finance/campaign
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { summarizeThisWeek, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
+import { attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows, type PositionToReviewRow } from "@/domain/finance/positionReviewRows";
 import {
   accountValueCard,
-  attachPositionAssessmentDisplays,
-  attentionNowRows,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
   confirmedTradingPLCard,
-  excludeAttentionRows,
   openCampaignsCard,
   positionsToReviewRows,
   scannerInsightViewModel,
-  sortPositionToReviewDisplayRows,
   wholeAccountGainCard,
-  type PositionToReviewRow,
 } from "@/lib/dashboard-view";
 
 export const dynamic = "force-dynamic";
@@ -399,48 +393,18 @@ async function PositionsToReviewWithStatus({
   const resolved = await resolvePositionAssessmentDisplaysForUser(userId, campaigns, accounts, rollBufferPercent, asOf, () => new Date());
   const displaysByCampaignId = new Map(resolved.map((entry) => [entry.campaignId, entry.display]));
   const sortedRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(rows, displaysByCampaignId));
-  const attentionRows = attentionNowRows(sortedRows);
-  // Compact position UX - a position already surfaced in Attention Now must never repeat under
-  // Open Positions (same campaign shown twice just because it is both open and attention-worthy
-  // wastes the attention-first section's own point) - see excludeAttentionRows's own doc comment.
-  // Display filtering only: attentionRows itself is computed above, unchanged.
-  const openOnlyRows = excludeAttentionRows(sortedRows, attentionRows);
-  const visibleRows = openOnlyRows.slice(0, limit);
-  const hiddenCount = openOnlyRows.length - visibleRows.length;
-  // A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never LAST_VALID) -
-  // see positionAssessmentOrchestration.ts's own owner-isolation check - so this notice only ever
-  // appears from the viewer's own historical data, never a buddy's.
-  const hasLastValid = visibleRows.some((row) => row.display?.state === "LAST_VALID");
   const entries: DisplayEntry[] = sortedRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
 
+  // Compact position UX, final blocker repair - Attention Now and Open Positions are no longer
+  // split here (server-side, once, at `asOf`). DashboardPositionSections (client-freshness.tsx)
+  // renders BOTH sections together from the full `sortedRows` set, re-partitioning live as each
+  // row's own guidance deadline passes in the browser - see its own doc comment for why a single
+  // server-side split could let a row vanish from both sections at once.
   return (
     <ClientPresentationProvider entries={entries} now={asOf}>
       <div className="space-y-3">
         <FreshnessStrip entries={entries} now={asOf} />
-
-        <div>
-          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Attention Now</h3>
-          <AttentionNowList rows={attentionRows} now={asOf} />
-        </div>
-
-        <div>
-          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
-          {hasLastValid ? <div className="mb-2"><LastValidNotice /></div> : null}
-          {openOnlyRows.length === 0 ? (
-            <EmptyState>Every open position is already listed above in Attention Now.</EmptyState>
-          ) : (
-            <div className="space-y-1.5">
-              {visibleRows.map((row) => (
-                <PositionToReviewRowView key={row.campaignId} row={row} now={asOf} />
-              ))}
-            </div>
-          )}
-          {hiddenCount > 0 ? (
-            <IntentPrefetchLink href="/positions" className="mt-1.5 block text-center text-xs text-zinc-500 hover:text-sky-300">
-              +{hiddenCount} more in Tracker
-            </IntentPrefetchLink>
-          ) : null}
-        </div>
+        <DashboardPositionSections rows={sortedRows} now={asOf} limit={limit} />
       </div>
     </ClientPresentationProvider>
   );
