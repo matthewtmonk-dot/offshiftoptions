@@ -391,15 +391,38 @@ export function evaluateHistoricalAssessmentEligibility(input: StoredAssessmentM
 }
 
 /**
- * Phase 1 (attention-first freshness) - exposes the same transient/benign-reason allowlist
- * evaluateHistoricalAssessmentEligibility already gates on, so a presentation layer (e.g.
- * Dashboard's "Attention Now" filter) can tell an ordinary transient evidence gap (market closed,
- * quote momentarily unavailable) apart from a genuine contradiction worth surfacing for review
- * (past-expiration unresolved, assigned-shares-no-call, coverage ambiguity, incomplete terms) -
- * without re-deriving or duplicating this allowlist a second time.
+ * Historical-fallback eligibility ONLY - "is it safe to show a durable historical row in place of
+ * this CANNOT_ASSESS result." Deliberately NOT used for "should a human's eye be drawn here
+ * right now" any more (see isRoutineCannotAssessReason below for that, separate, question) -
+ * PAST_EXPIRATION_UNRESOLVED/EXPIRATION_SESSION_ENDED are intentionally absent from this allowlist
+ * (showing stale pre-expiration guidance for an already-expired contract would be misleading) even
+ * though they are completely routine, expected waiting from a PRESENTATION point of view - the two
+ * questions diverge exactly there, which is why a presentation layer must never reuse this one as
+ * a proxy for "is this attention-worthy."
  */
 export function isKnownTransientFallbackReason(code: string): boolean {
   return ALLOWED_FALLBACK_REASONS.has(code);
+}
+
+/**
+ * Weekend / Settlement Clarity - "should a human's eye be drawn to this CANNOT_ASSESS row right
+ * now," deliberately SEPARATE from isKnownTransientFallbackReason above (a different,
+ * fallback-safety question that intentionally excludes PAST_EXPIRATION_UNRESOLVED/
+ * EXPIRATION_SESSION_ENDED for reasons that have nothing to do with urgency). A routine reason -
+ * market hours, a quote hiccup, or simply waiting on Schwab's own ordinary post-expiration
+ * settlement confirmation - never needs a loud badge or an Attention Now slot; the activity badge
+ * ("SETTLEMENT PENDING") and a one-sentence evidence line already explain it. This is the ONE
+ * shared ground truth both the per-row badge (PositionReviewActionBadge/cannotAssessPresentationTier,
+ * position-review-badge.tsx) and Dashboard's Attention Now list membership (isAttentionRow,
+ * positionReviewRows.ts) must use - they must never diverge, or a row could show no badge (calm)
+ * while still occupying an Attention Now slot (the exact bug this ticket fixes). Everything else -
+ * a genuine broker-evidenced mismatch, incomplete/missing terms, assigned shares with no call sold,
+ * an unrecognized reason - is NOT routine and keeps drawing attention, never silently calmed.
+ */
+const ROUTINE_CANNOT_ASSESS_REASONS = new Set(["MARKET_CLOSED", "QUOTE_UNAVAILABLE", "EXPIRATION_SESSION_ENDED", "PAST_EXPIRATION_UNRESOLVED"]);
+
+export function isRoutineCannotAssessReason(code: string): boolean {
+  return ROUTINE_CANNOT_ASSESS_REASONS.has(code) || code.startsWith("QUOTE_");
 }
 
 /**

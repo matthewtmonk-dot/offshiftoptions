@@ -16,8 +16,12 @@ import { activityTone, currentActivityLabel } from "@/domain/finance/positionAct
 export function PositionToReviewRowView({ row, now = new Date(), loading = false }: { row: PositionToReviewDisplayRow; now?: Date; loading?: boolean }) {
   // Compact position UX - the SAME louder activity-first label/color Tracker's cards use (never a
   // second, independently-invented interpretation of `row.stage`), so Dashboard's triage view and
-  // Tracker's investigation view never disagree about what state a position is in.
-  const activityLabel = currentActivityLabel(row.stage);
+  // Tracker's investigation view never disagree about what state a position is in. Weekend /
+  // Settlement Clarity - now also expiration-aware (row.expiration is the currently open leg's own
+  // expiration, put or call - see positionsToReviewRows), so an expired-unresolved covered call
+  // reads SETTLEMENT PENDING here exactly like an expired put, never left looking still-active.
+  const activityLabel = currentActivityLabel(row.stage, row.expiration, now);
+  const awaitingSettlement = activityLabel === "SETTLEMENT PENDING";
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
       <div className="min-w-0">
@@ -27,7 +31,10 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
           {row.legType ? (
             <span className="text-[13px] text-zinc-300 tabular-nums">
               {money(row.strike)} {row.legType === "PUT" ? "Put" : "Call"}
-              {row.expiration ? ` · ${shortCalendarDate(row.expiration)}` : ""}
+              {/* Weekend / Settlement Clarity - an expired-unresolved leg reads "expired <date>",
+                  never the same forward-looking date phrasing an active, future-dated leg gets -
+                  a past date alone (or a negative DTE elsewhere) is too easy to misread as active. */}
+              {row.expiration ? ` · ${awaitingSettlement ? "expired " : ""}${shortCalendarDate(row.expiration)}` : ""}
               {row.quantity !== null ? ` · ${row.quantity}${row.quantityUnit === "contracts" ? "x" : " sh"}` : ""}
             </span>
           ) : null}

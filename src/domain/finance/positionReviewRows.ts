@@ -1,6 +1,6 @@
 import type { CampaignCurrentStage } from "./campaigns";
 import { comparePositionReviewPriority } from "./positionReview";
-import { isKnownTransientFallbackReason, underlyingPositionReviewResult, type PositionAssessmentDisplay } from "./positionReviewAssessment";
+import { isRoutineCannotAssessReason, underlyingPositionReviewResult, type PositionAssessmentDisplay } from "./positionReviewAssessment";
 import { resolveEffectivePresentation, type EffectivePresentation } from "./presentationFreshness";
 
 /**
@@ -80,9 +80,17 @@ export function sortPositionToReviewDisplayRows<T extends { display: PositionAss
  *      both the initial server render and every live client re-partition - never two independently
  *      drifting notions of "is this current and actionable."
  *   2. A live UNAVAILABLE result carrying a genuine CONTRADICTION reason - any reasonCode outside
- *      isKnownTransientFallbackReason's existing allowlist (reused verbatim from the approved
- *      historical-fallback eligibility rule). An ordinary transient gap (market closed, quote
- *      momentarily unavailable) never appears here even when no historical fallback exists for it.
+ *      isRoutineCannotAssessReason's allowlist (positionReviewAssessment.ts - the SAME allowlist
+ *      the per-row CANNOT_ASSESS badge uses, see cannotAssessPresentationTier). Weekend / Settlement
+ *      Clarity fix: this used to reuse isKnownTransientFallbackReason (a DIFFERENT, stricter
+ *      allowlist built for historical-fallback safety) as a proxy for "is this a contradiction" -
+ *      PAST_EXPIRATION_UNRESOLVED/EXPIRATION_SESSION_ENDED are deliberately NOT in that allowlist
+ *      (fallback isn't safe once a contract has expired) even though they are completely routine
+ *      settlement-waiting, not contradictions, so an expired-but-unresolved put or covered call was
+ *      incorrectly pulled into Attention Now despite its own badge correctly rendering calm (no
+ *      badge at all). isRoutineCannotAssessReason is the correct, shared ground truth for this
+ *      question. An ordinary transient gap (market closed, quote momentarily unavailable) still
+ *      never appears here even when no historical fallback exists for it.
  *      This case has no deadline of its own, so `currentStillLive` is irrelevant to it.
  */
 export function isAttentionRow(display: PositionAssessmentDisplay | null, currentStillLive: boolean): boolean {
@@ -92,7 +100,7 @@ export function isAttentionRow(display: PositionAssessmentDisplay | null, curren
     return display.current.action === "WATCH" || display.current.action === "REVIEW_ROLL" || display.current.action === "REVIEW_CALL";
   }
   if (display.state === "UNAVAILABLE") {
-    return display.currentUnavailable.explanation.reasonCodes.some((code) => !isKnownTransientFallbackReason(code));
+    return display.currentUnavailable.explanation.reasonCodes.some((code) => !isRoutineCannotAssessReason(code));
   }
   // LAST_VALID - a historical action is context, never an attention-demanding item.
   return false;

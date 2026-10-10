@@ -3,6 +3,7 @@ import { friendlyReportingReason, type AccountReportingSummary } from "@/domain/
 import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
 import { getCurrentOpenCall, getCurrentOpenPut, summarizeCampaign, type CampaignStatusInput } from "@/domain/finance/campaigns";
+import { isAwaitingSettlement } from "@/domain/finance/positionActivity";
 import type { PositionToReviewRow } from "@/domain/finance/positionReviewRows";
 import {
   accountValueDetail,
@@ -154,6 +155,49 @@ export function openCampaignsCard(openCampaigns: { status: CampaignStatusInput; 
   if (assignedNoCall > 0) parts.push(`${assignedNoCall} assigned`);
   if (reviewNeeded > 0) parts.push(`${reviewNeeded} needs review`);
   return { count: total, breakdownLabel: parts.length > 0 ? parts.join(" · ") : "No open campaigns" };
+}
+
+export type ActiveSettlementBreakdown = {
+  activeCount: number;
+  awaitingSettlementCount: number;
+  label: string;
+};
+
+/**
+ * Weekend / Settlement Clarity - the Dashboard's quick top-of-page exposure summary (compact
+ * header + the "Open Campaigns" card's own detail line) used to show the SAME put/covered-call
+ * instrument breakdown openCampaignsCard above does ("4 puts · 1 covered call"), which reads as
+ * "5 active market positions" even when most of those campaigns are simply awaiting ordinary
+ * post-expiration settlement, not genuinely exposed right now. This answers the honest, higher-
+ * level question instead: how many of these open campaigns are genuinely active versus just
+ * waiting on Schwab's own settlement confirmation - reusing the SAME currentActivityLabel each
+ * individual row's own badge already shows (never a third, independently-invented classification).
+ * `openCampaigns.count`/`openCampaignsCard` itself is NEVER altered by this - the underlying open-
+ * campaign total and its accounting-facing breakdown stay exactly as they were; this is additive,
+ * presentation-only.
+ */
+export function activeSettlementBreakdown(
+  openCampaigns: { status: CampaignStatusInput; events: Parameters<typeof summarizeCampaign>[0]["events"] }[],
+  asOf: Date,
+): ActiveSettlementBreakdown {
+  let activeCount = 0;
+  let awaitingSettlementCount = 0;
+  for (const campaign of openCampaigns) {
+    if (campaign.status !== "OPEN" && campaign.status !== "ASSIGNED") continue;
+    const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+    const openPut = campaign.status === "OPEN" ? getCurrentOpenPut(campaign.events) : null;
+    const openCall = campaign.status === "ASSIGNED" ? getCurrentOpenCall(campaign.events) : null;
+    const legExpiration = openCall?.expiration ?? openPut?.expiration ?? null;
+    if (isAwaitingSettlement(summary.currentStage, legExpiration, asOf)) {
+      awaitingSettlementCount += 1;
+    } else {
+      activeCount += 1;
+    }
+  }
+  const parts: string[] = [];
+  if (activeCount > 0) parts.push(`${activeCount} active`);
+  if (awaitingSettlementCount > 0) parts.push(`${awaitingSettlementCount} settling`);
+  return { activeCount, awaitingSettlementCount, label: parts.length > 0 ? parts.join(" · ") : "No open campaigns" };
 }
 
 // ---------------------------------------------------------------------------

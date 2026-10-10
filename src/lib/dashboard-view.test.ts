@@ -4,6 +4,7 @@ import type { CampaignExposureSummary } from "@/domain/finance/brokerPositions";
 import type { WinLossSummary, ThisWeekSummary } from "@/domain/finance/performance";
 import {
   accountValueCard,
+  activeSettlementBreakdown,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
@@ -228,6 +229,57 @@ describe("openCampaignsCard", () => {
   });
   it("reads as a neutral 'no open campaigns' state when empty", () => {
     expect(openCampaignsCard([]).breakdownLabel).toBe("No open campaigns");
+  });
+});
+
+// Weekend / Settlement Clarity - ticket requirement 5: "Dashboard summary: 1 active + 4 settling
+// yields correct display counts," reproduced against the ticket's own exact Saturday Oct 10
+// production scenario (BBWI/CELH/SOFI/PATH expired Oct 9, UPST still active to Oct 23).
+describe("activeSettlementBreakdown - Weekend / Settlement Clarity", () => {
+  const asOf = new Date("2026-10-10T12:00:00Z");
+  function sellPutEvents(expiration: Date) {
+    return [{ type: "SELL_PUT", occurredAt: new Date("2026-09-01"), strike: 10, contracts: 1, expiration }];
+  }
+  function assignedWithCallEvents(callExpiration: Date) {
+    return [
+      { type: "SELL_PUT", occurredAt: new Date("2026-08-01"), strike: 10, contracts: 1, expiration: new Date("2026-08-15") },
+      { type: "ASSIGNMENT", occurredAt: new Date("2026-08-15"), shares: 100, strike: 10 },
+      { type: "SELL_COVERED_CALL", occurredAt: new Date("2026-08-16"), strike: 12, contracts: 1, expiration: callExpiration },
+    ];
+  }
+
+  it("1 active put + 3 expired puts + 1 expired covered call => '1 active · 4 settling'", () => {
+    const breakdown = activeSettlementBreakdown(
+      [
+        { status: "OPEN", events: sellPutEvents(new Date("2026-10-23")) }, // UPST - active
+        { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) }, // BBWI - settling
+        { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) }, // CELH - settling
+        { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) }, // SOFI - settling
+        { status: "ASSIGNED", events: assignedWithCallEvents(new Date("2026-10-09")) }, // PATH - settling
+      ] as never,
+      asOf,
+    );
+    expect(breakdown.activeCount).toBe(1);
+    expect(breakdown.awaitingSettlementCount).toBe(4);
+    expect(breakdown.label).toBe("1 active · 4 settling");
+  });
+
+  it("never alters the underlying open-campaign total - openCampaignsCard's own count is independent and unaffected", () => {
+    const campaigns = [
+      { status: "OPEN", events: sellPutEvents(new Date("2026-10-23")) },
+      { status: "OPEN", events: sellPutEvents(new Date("2026-10-09")) },
+    ] as never;
+    expect(openCampaignsCard(campaigns).count).toBe(2);
+    const breakdown = activeSettlementBreakdown(campaigns, asOf);
+    expect(breakdown.activeCount + breakdown.awaitingSettlementCount).toBe(openCampaignsCard(campaigns).count);
+  });
+
+  it("omits a zero-count side entirely rather than showing '0 settling'", () => {
+    expect(activeSettlementBreakdown([{ status: "OPEN", events: sellPutEvents(new Date("2026-10-23")) }] as never, asOf).label).toBe("1 active");
+  });
+
+  it("reads as a neutral 'no open campaigns' state when empty, matching openCampaignsCard's own empty wording", () => {
+    expect(activeSettlementBreakdown([], asOf).label).toBe("No open campaigns");
   });
 });
 

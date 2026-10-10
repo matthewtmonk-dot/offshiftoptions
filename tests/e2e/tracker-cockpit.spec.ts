@@ -16,7 +16,9 @@ test("open cards expose the active contract and distinguish DTE, campaign age an
   const card = page.getByTestId("campaign-card-AAP");
   const summary = card.locator("summary").first();
   await expect(summary.getByTestId("active-put-contract")).toContainText(/\$[\d,.]+ Put/);
-  await expect(summary.getByTestId("active-put-contract")).toContainText(/\d+ DTE/);
+  // Weekend / Settlement Clarity - an expired-unresolved put now reads "expired <date>" instead of
+  // a negative DTE, so this accepts either an active future-dated "N DTE" or an "expired" put.
+  await expect(summary.getByTestId("active-put-contract")).toContainText(/\d+ DTE|expired /);
   await expect(summary.getByText("Days open", { exact: true })).toBeVisible();
   await expect(summary.getByText("Net premium", { exact: true })).toBeVisible();
   await expect(summary.getByText(/Cash flow · not realized/)).toBeVisible();

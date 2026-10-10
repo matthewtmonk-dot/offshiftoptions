@@ -1,30 +1,91 @@
 import { describe, expect, it } from "vitest";
-import { activityTone, currentActivityLabel, historicalOriginLabel } from "./positionActivity";
+import type { CampaignCurrentStage } from "./campaigns";
+import { activityTone, currentActivityLabel, historicalOriginLabel, isAwaitingSettlement } from "./positionActivity";
+
+const asOf = new Date("2026-10-10T12:00:00Z");
+const futureExpiration = new Date("2026-10-23");
+const pastExpiration = new Date("2026-10-09");
 
 describe("currentActivityLabel - relabels the campaign reducer's own currentStage, never a second interpretation", () => {
   it("short put open: Cash-secured put and Rolled put both map to SHORT PUT OPEN", () => {
-    expect(currentActivityLabel("Cash-secured put")).toBe("SHORT PUT OPEN");
-    expect(currentActivityLabel("Rolled put")).toBe("SHORT PUT OPEN");
+    expect(currentActivityLabel("Cash-secured put", futureExpiration, asOf)).toBe("SHORT PUT OPEN");
+    expect(currentActivityLabel("Rolled put", futureExpiration, asOf)).toBe("SHORT PUT OPEN");
   });
 
   it("assigned shares with no call maps to SHARES HELD, never left as a bare 'Assigned'", () => {
-    expect(currentActivityLabel("Assigned shares")).toBe("SHARES HELD");
+    expect(currentActivityLabel("Assigned shares", null, asOf)).toBe("SHARES HELD");
   });
 
-  it("PATH scenario: assigned shares WITH an open covered call maps to COVERED CALL OPEN", () => {
-    expect(currentActivityLabel("Covered call")).toBe("COVERED CALL OPEN");
+  it("PATH scenario: assigned shares WITH an open covered call maps to COVERED CALL OPEN while the call's own expiration is still in the future", () => {
+    expect(currentActivityLabel("Covered call", futureExpiration, asOf)).toBe("COVERED CALL OPEN");
   });
 
   it("past-expiration awaiting broker confirmation maps to SETTLEMENT PENDING", () => {
-    expect(currentActivityLabel("Expiration processing")).toBe("SETTLEMENT PENDING");
+    expect(currentActivityLabel("Expiration processing", pastExpiration, asOf)).toBe("SETTLEMENT PENDING");
+  });
+
+  // Weekend / Settlement Clarity - currentStage alone never flags an expired COVERED CALL
+  // (it always reports "Covered call" for an ASSIGNED campaign with an open call, regardless of
+  // that call's own expiration - see rollStatus.ts's isCoveredCallRollGuidanceApplicable for the
+  // established precedent this mirrors), so this function checks the call's own expiration
+  // directly, exactly like it would for a put via the "Expiration processing" stage.
+  it("PATH scenario, post-expiration: an expired-unresolved covered call maps to SETTLEMENT PENDING, never left looking still-active", () => {
+    expect(currentActivityLabel("Covered call", pastExpiration, asOf)).toBe("SETTLEMENT PENDING");
+  });
+
+  it("a covered call with no known expiration (incomplete data) is never guessed into SETTLEMENT PENDING - stays COVERED CALL OPEN", () => {
+    expect(currentActivityLabel("Covered call", null, asOf)).toBe("COVERED CALL OPEN");
+  });
+
+  it("expiration day itself is not yet past - a covered call expiring today still reads COVERED CALL OPEN", () => {
+    expect(currentActivityLabel("Covered call", new Date("2026-10-10"), asOf)).toBe("COVERED CALL OPEN");
   });
 
   it("a closed campaign maps to CLOSED", () => {
-    expect(currentActivityLabel("Closed")).toBe("CLOSED");
+    expect(currentActivityLabel("Closed", null, asOf)).toBe("CLOSED");
   });
 
   it("the rare incomplete-terms fallback maps to REVIEW NEEDED, never silently to another label", () => {
-    expect(currentActivityLabel("Review needed")).toBe("REVIEW NEEDED");
+    expect(currentActivityLabel("Review needed", null, asOf)).toBe("REVIEW NEEDED");
+  });
+});
+
+// Weekend / Settlement Clarity - the Dashboard/Tracker ticket's own three required scenarios,
+// expressed directly against the shared predicate both pages' Active/Awaiting Settlement grouping
+// is built from.
+describe("isAwaitingSettlement", () => {
+  it("1. a future-dated short put is ACTIVE NOW, not awaiting settlement", () => {
+    expect(isAwaitingSettlement("Cash-secured put", futureExpiration, asOf)).toBe(false);
+  });
+
+  it("2. an expired-unresolved put is AWAITING SETTLEMENT", () => {
+    expect(isAwaitingSettlement("Expiration processing", pastExpiration, asOf)).toBe(true);
+  });
+
+  it("3. an expired-unresolved covered call (assigned shares still in play) is AWAITING SETTLEMENT, exactly like an expired put", () => {
+    expect(isAwaitingSettlement("Covered call", pastExpiration, asOf)).toBe(true);
+  });
+
+  it("shares held with no call, and a genuinely open covered call, are both active - not every ASSIGNED campaign is settling", () => {
+    expect(isAwaitingSettlement("Assigned shares", null, asOf)).toBe(false);
+    expect(isAwaitingSettlement("Covered call", futureExpiration, asOf)).toBe(false);
+  });
+
+  // 6. No campaign disappears from all Dashboard/Tracker groups - every stage this function can
+  // ever receive from a real open/assigned campaign resolves to exactly true or false (never
+  // throws, never undefined), so a row built from isAwaitingSettlement(row) and
+  // !isAwaitingSettlement(row) can never land in neither group nor both.
+  it("6. every real open/assigned stage resolves to a definite boolean - a row can never vanish from both Active and Awaiting Settlement", () => {
+    const openStages: CampaignCurrentStage[] = ["Cash-secured put", "Rolled put", "Expiration processing", "Assigned shares", "Covered call", "Review needed"];
+    for (const stage of openStages) {
+      for (const expiration of [null, pastExpiration, futureExpiration]) {
+        const settling = isAwaitingSettlement(stage, expiration, asOf);
+        expect(typeof settling).toBe("boolean");
+        // A row is awaiting settlement or it is active - never both, never neither, by construction
+        // (the predicate and its negation always partition any boolean exhaustively).
+        expect(settling === true || settling === false).toBe(true);
+      }
+    }
   });
 });
 

@@ -105,8 +105,26 @@ describe("attentionNowRows - the server-side, render-time-only candidate list", 
     expect(attentionNowRows(attached)).toHaveLength(0);
   });
 
-  it("includes an UNAVAILABLE row carrying a genuine contradiction reason (e.g. past-expiration unresolved)", () => {
-    const attached = [{ ...row("c1"), display: unavailableDisplay(["PAST_EXPIRATION_UNRESOLVED"]) }];
+  // Weekend / Settlement Clarity - PAST_EXPIRATION_UNRESOLVED/EXPIRATION_SESSION_ENDED are routine
+  // settlement waiting (isRoutineCannotAssessReason), NOT a contradiction - an expired-but-
+  // unresolved put/covered call must never occupy an Attention Now slot on its own. This was the
+  // actual Codex-found bug: these two reason codes are deliberately absent from the DIFFERENT,
+  // stricter isKnownTransientFallbackReason allowlist (fallback-safety, not urgency), and this
+  // function used to reuse THAT allowlist as a proxy for "is this a contradiction," incorrectly
+  // promoting routine settlement-wait rows into Attention Now despite their own badge rendering
+  // calm (cannotAssessPresentationTier).
+  it("excludes an UNAVAILABLE row carrying only routine settlement-wait reasons (past-expiration unresolved, expiration session ended) - routine waiting alone is never Attention Now", () => {
+    expect(attentionNowRows([{ ...row("c1"), display: unavailableDisplay(["PAST_EXPIRATION_UNRESOLVED"]) }])).toHaveLength(0);
+    expect(attentionNowRows([{ ...row("c1"), display: unavailableDisplay(["EXPIRATION_SESSION_ENDED"]) }])).toHaveLength(0);
+  });
+
+  it("includes an UNAVAILABLE row carrying a genuine contradiction reason (e.g. a broker-evidenced position mismatch)", () => {
+    const attached = [{ ...row("c1"), display: unavailableDisplay(["POSITION_MISMATCH_AMBIGUOUS"]) }];
+    expect(attentionNowRows(attached).map((r) => r.campaignId)).toEqual(["c1"]);
+  });
+
+  it("includes an UNAVAILABLE row even when a routine settlement-wait reason is mixed with a genuine one - one real issue is never hidden by an accompanying routine one", () => {
+    const attached = [{ ...row("c1"), display: unavailableDisplay(["PAST_EXPIRATION_UNRESOLVED", "ASSIGNED_SHARES_NO_CALL"]) }];
     expect(attentionNowRows(attached).map((r) => r.campaignId)).toEqual(["c1"]);
   });
 

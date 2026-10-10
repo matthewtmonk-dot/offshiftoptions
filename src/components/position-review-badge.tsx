@@ -1,6 +1,7 @@
 import { CheckCircle2, CircleAlert, CircleHelp, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui";
 import type { PositionReviewAction, PositionReviewEvidence, PositionReviewResult } from "@/domain/finance/positionReview";
+import { isRoutineCannotAssessReason } from "@/domain/finance/positionReviewAssessment";
 import { formatEtTime } from "@/lib/format";
 
 /**
@@ -57,8 +58,6 @@ function actionLabel(result: PositionReviewResult): string {
 
 const CANNOT_ASSESS_REASON_LABELS: Record<string, string> = {
   ASSIGNED_SHARES_NO_CALL: "Assigned shares - review next step",
-  PAST_EXPIRATION_UNRESOLVED: "Expiration pending",
-  EXPIRATION_SESSION_ENDED: "Expiration session ended - awaiting confirmation",
   EXPIRATION_UNKNOWN: "Expiration unknown",
   INCOMPLETE_TERMS: "Incomplete position terms",
   MISSING_CONTRACTS: "Contract quantity missing",
@@ -68,11 +67,24 @@ const CANNOT_ASSESS_REASON_LABELS: Record<string, string> = {
   POSITION_UNSUPPORTED_CONTRACT_DELIVERABLE: "Contract deliverable can't be verified",
 };
 
+/**
+ * Weekend / Settlement Clarity - PAST_EXPIRATION_UNRESOLVED/EXPIRATION_SESSION_ENDED get
+ * option-type-aware wording instead of the flat map above: "expiration pending" reads naturally
+ * for an expired put, but an expired COVERED CALL leaves assigned shares in play too, so its wait
+ * is for the call/share settlement together, not just "expiration." Never claims an outcome
+ * (called away, shares retained, expired worthless) - only that confirmation is still pending.
+ */
+export function expirationWaitLabel(code: "PAST_EXPIRATION_UNRESOLVED" | "EXPIRATION_SESSION_ENDED", optionType: "PUT" | "CALL" | null): string {
+  const prefix = code === "EXPIRATION_SESSION_ENDED" ? "Expiration session ended - awaiting " : "Awaiting ";
+  return prefix + (optionType === "CALL" ? "covered-call/share settlement confirmation" : "Schwab expiration confirmation");
+}
+
 /** Picks the single most relevant human-readable reason for a CANNOT_ASSESS row, in the same
  * priority order priorityGroupOf uses internally - never a raw reason CODE shown to the user. */
 function cannotAssessReasonLabel(result: PositionReviewResult): string {
   const codes = result.explanation.reasonCodes;
   for (const code of codes) {
+    if (code === "PAST_EXPIRATION_UNRESOLVED" || code === "EXPIRATION_SESSION_ENDED") return expirationWaitLabel(code, result.explanation.optionType);
     if (CANNOT_ASSESS_REASON_LABELS[code]) return CANNOT_ASSESS_REASON_LABELS[code];
     if (code.startsWith("QUOTE_")) return "Quote unavailable";
     if (code.startsWith("POSITION_")) return "Position not confirmed";
@@ -94,14 +106,19 @@ function cannotAssessReasonLabel(result: PositionReviewResult): string {
  * lifecycle/activity badge that already explains the situation. Everything else (a genuine broker-
  * evidenced mismatch, incomplete/missing terms, an unrecognized reason) gets ATTENTION tier -
  * still never alarming RED (nothing here is a financial loss), but AMBER, worth a glance.
+ *
+ * Weekend / Settlement Clarity - the CALM allowlist itself now lives in `isRoutineCannotAssessReason`
+ * (positionReviewAssessment.ts), shared verbatim with Dashboard's Attention Now list membership
+ * (`isAttentionRow`, positionReviewRows.ts) - a row that shows no badge here can no longer still
+ * occupy an Attention Now slot, which is exactly the inconsistency that let routine settlement-
+ * wait rows (expired puts/calls awaiting Schwab confirmation) appear in Attention Now despite
+ * rendering calmly everywhere else.
  */
 export type CannotAssessPresentationTier = "calm" | "attention";
 
-const CALM_CANNOT_ASSESS_REASONS = new Set(["MARKET_CLOSED", "QUOTE_UNAVAILABLE", "EXPIRATION_SESSION_ENDED", "PAST_EXPIRATION_UNRESOLVED"]);
-
 export function cannotAssessPresentationTier(reasonCodes: readonly string[]): CannotAssessPresentationTier {
   if (reasonCodes.length === 0) return "attention";
-  return reasonCodes.every((code) => CALM_CANNOT_ASSESS_REASONS.has(code) || code.startsWith("QUOTE_")) ? "calm" : "attention";
+  return reasonCodes.every((code) => isRoutineCannotAssessReason(code)) ? "calm" : "attention";
 }
 
 const POSITION_EVIDENCE_LABELS: Record<PositionReviewEvidence["position"], string> = {

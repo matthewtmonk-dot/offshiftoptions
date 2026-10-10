@@ -22,7 +22,7 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { ClientPresentationProvider, FreshnessStrip, type DisplayEntry } from "@/components/client-freshness";
-import { activityTone, currentActivityLabel, historicalOriginLabel } from "@/domain/finance/positionActivity";
+import { activityTone, currentActivityLabel, historicalOriginLabel, isAwaitingSettlement } from "@/domain/finance/positionActivity";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -384,6 +384,20 @@ export default async function PositionsPage({
     realizedByAccount.set(row.campaign.accountId, (realizedByAccount.get(row.campaign.accountId) ?? 0) + pl);
   }
 
+  // Weekend / Settlement Clarity - the Open tab groups by the SAME activity label each card's own
+  // badge shows (never a second, independently-invented classification), so an expired-unresolved
+  // put/covered call reads clearly as awaiting settlement rather than looking visually equivalent
+  // to a future-dated active position. `assignedSummaryByCampaignId` is resolved once here (the
+  // same override each CampaignCard itself receives) so grouping and rendering can never disagree
+  // about which summary a row actually used.
+  const effectiveOpenRows = openRows.map((row) => (assignedSummaryByCampaignId.has(row.campaign.id) ? { ...row, summary: assignedSummaryByCampaignId.get(row.campaign.id)! } : row));
+  const rowAwaitingSettlement = (row: (typeof effectiveOpenRows)[number]) => {
+    const legExpiration = row.campaign.status === "ASSIGNED" ? getCurrentOpenCall(row.campaign.events)?.expiration ?? null : getCurrentOpenPut(row.campaign.events)?.expiration ?? null;
+    return isAwaitingSettlement(row.summary.currentStage, legExpiration, snapshotCheckedAt);
+  };
+  const activeOpenRows = effectiveOpenRows.filter((row) => !rowAwaitingSettlement(row));
+  const awaitingSettlementOpenRows = effectiveOpenRows.filter((row) => rowAwaitingSettlement(row));
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -475,25 +489,53 @@ export default async function PositionsPage({
           {openRows.some((row) => positionAssessmentDisplayByCampaignId.get(row.campaign.id)?.state === "LAST_VALID") ? <LastValidNotice /> : null}
 
           <div className="space-y-2.5">
-            {openRows.map((row) => (
-              <CampaignCard
-                key={row.campaign.id}
-                row={assignedSummaryByCampaignId.has(row.campaign.id) ? { ...row, summary: assignedSummaryByCampaignId.get(row.campaign.id)! } : row}
-                currentUserId={user.id}
-                display={positionAssessmentDisplayByCampaignId.get(row.campaign.id) ?? null}
-                openView
-                quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
-                asOf={snapshotCheckedAt}
-                scope={scope}
-              />
-            ))}
             {openRows.length === 0 ? (
               <EmptyState>
                 {data.ownAccounts.length === 0
                   ? "Add an account below, then start a campaign."
                   : "No open campaigns for this view. Create one below to start the history."}
               </EmptyState>
-            ) : null}
+            ) : (
+              <>
+                {activeOpenRows.length > 0 ? (
+                  <div className="space-y-2.5">
+                    {awaitingSettlementOpenRows.length > 0 ? <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Active</h3> : null}
+                    {activeOpenRows.map((row) => (
+                      <CampaignCard
+                        key={row.campaign.id}
+                        row={row}
+                        currentUserId={user.id}
+                        display={positionAssessmentDisplayByCampaignId.get(row.campaign.id) ?? null}
+                        openView
+                        quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
+                        asOf={snapshotCheckedAt}
+                        scope={scope}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {/* Weekend / Settlement Clarity - routine, expected waiting on Schwab's own
+                    post-expiration confirmation gets its own clearly-labeled group, never mixed in
+                    looking visually equivalent to a future-dated active position. */}
+                {awaitingSettlementOpenRows.length > 0 ? (
+                  <div className="space-y-2.5">
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Awaiting Settlement ({awaitingSettlementOpenRows.length})</h3>
+                    {awaitingSettlementOpenRows.map((row) => (
+                      <CampaignCard
+                        key={row.campaign.id}
+                        row={row}
+                        currentUserId={user.id}
+                        display={positionAssessmentDisplayByCampaignId.get(row.campaign.id) ?? null}
+                        openView
+                        quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
+                        asOf={snapshotCheckedAt}
+                        scope={scope}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            )}
             {data.legacyTrades.length ? <LegacySnapshots trades={data.legacyTrades} /> : null}
           </div>
           <SchwabPositionsPanel positions={schwabPositions} userId={user.id} accounts={data.ownAccounts} campaigns={trackedPuts} linkedSymbols={linkedCampaignSymbols} />
@@ -780,7 +822,12 @@ function CampaignCard({
   // put used to show the bare literal "OPEN" while an assigned-with-call campaign already got the
   // richer label. CLOSED keeps its own literal text (already matches currentActivityLabel's own
   // "CLOSED" output exactly, so this is a no-op for that case either way).
-  const activityLabel = campaign.status === "CLOSED" ? campaign.status : currentActivityLabel(summary.currentStage);
+  // Weekend / Settlement Clarity - the currently relevant open leg's own expiration (the call's
+  // once assigned+covered, the put's otherwise), so an expired-unresolved covered call reads
+  // SETTLEMENT PENDING exactly like an expired put - see currentActivityLabel's own doc comment.
+  const openLegExpiration = openCall?.expiration ?? openPut?.expiration ?? null;
+  const activityLabel = campaign.status === "CLOSED" ? campaign.status : currentActivityLabel(summary.currentStage, openLegExpiration, asOf);
+  const awaitingSettlement = activityLabel === "SETTLEMENT PENDING";
   const originLabel = historicalOriginLabel({ status: campaign.status, events: campaign.events });
 
   // Compact position UX - the activity badge's own color now follows the SAME activity label it
@@ -812,14 +859,17 @@ function CampaignCard({
                 repair B3): this app has no event proving a call was actually exercised, so it
                 never claims "Called away" - only the fully-provable fact that shares were sold. */}
             {campaign.status === "CLOSED" && originLabel ? <span className="text-xs text-zinc-500">{originLabel}</span> : null}
+            {/* Weekend / Settlement Clarity - an expired-unresolved leg reads "expired <date>",
+                never the same "<date> · N DTE" phrasing an active, future-dated leg gets (a
+                negative DTE is too easy to misread as just a smaller active number). */}
             {openView && openPut ? (
               <span className="text-[13px] text-zinc-300" data-testid="active-put-contract">
-                {money(openPut.strike)} Put · {shortCalendarDate(openPut.expiration)} · {dte ?? "-"} DTE · {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}
+                {money(openPut.strike)} Put · {awaitingSettlement ? `expired ${shortCalendarDate(openPut.expiration)}` : `${shortCalendarDate(openPut.expiration)} · ${dte ?? "-"} DTE`} · {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}
               </span>
             ) : null}
             {openView && openCall ? (
               <span className="text-[13px] text-zinc-300" data-testid="active-call-contract">
-                {money(openCall.strike)} Call · {shortCalendarDate(openCall.expiration)} · {dte ?? "-"} DTE · {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}
+                {money(openCall.strike)} Call · {awaitingSettlement ? `expired ${shortCalendarDate(openCall.expiration)}` : `${shortCalendarDate(openCall.expiration)} · ${dte ?? "-"} DTE`} · {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}
               </span>
             ) : null}
           </div>

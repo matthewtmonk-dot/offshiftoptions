@@ -17,6 +17,7 @@ import {
   type FreshnessStripState,
 } from "@/domain/finance/presentationFreshness";
 import { partitionPositionReviewRows, type PositionToReviewDisplayRow } from "@/domain/finance/positionReviewRows";
+import { isAwaitingSettlement } from "@/domain/finance/positionActivity";
 import { formatEtCompactDateTime, formatEtTime } from "@/lib/format";
 
 /**
@@ -207,12 +208,25 @@ export function FreshnessStrip({ entries, now }: { entries: readonly DisplayEntr
  * Dashboard's existing POSITIONS_TO_REVIEW_LIMIT. Must be rendered inside
  * ClientPresentationProvider, keyed by the SAME campaignId used to build its `entries`. One
  * `useContext` call here, then a plain (hook-free) partition - never a hook called per row.
+ *
+ * Weekend / Settlement Clarity - the "Open Positions" list itself is further split into "Active
+ * Now" and "Awaiting Settlement" (an expired-but-unresolved put/covered call, routine CANNOT_ASSESS
+ * waiting for Schwab's own settlement confirmation - see currentActivityLabel's own doc comment).
+ * This is purely a display regrouping of the SAME visible rows, by the SAME activity label each
+ * row's own badge already shows - never a third, independently-derived classification. Routine
+ * settlement waiting alone is never attention-worthy on its own (see isAttentionRow); a settlement
+ * row only ever appears above, in Attention Now, if it ALSO carries a genuine contradiction.
+ * An empty bucket is simply omitted (never an empty-state box per bucket) - only the single
+ * combined "every open position is already shown above" message covers the case where there are no
+ * open rows at all.
  */
 export function DashboardPositionSections({ rows, now, limit }: { rows: readonly PositionToReviewDisplayRow[]; now: Date; limit: number }) {
   const liveByRevision = useContext(LiveObservationsContext);
   const { attention, open } = partitionPositionReviewRows(rows, liveByRevision, now);
   const visibleOpen = open.slice(0, limit);
   const hiddenCount = open.length - visibleOpen.length;
+  const activeNow = visibleOpen.filter((row) => !isAwaitingSettlement(row.stage, row.expiration, now));
+  const awaitingSettlement = visibleOpen.filter((row) => isAwaitingSettlement(row.stage, row.expiration, now));
   // A Buddy-scoped campaign can only ever resolve to CURRENT or UNAVAILABLE (never LAST_VALID) -
   // see positionAssessmentOrchestration.ts's own owner-isolation check - so this notice only ever
   // reflects the viewer's own historical data, never a buddy's.
@@ -233,28 +247,47 @@ export function DashboardPositionSections({ rows, now, limit }: { rows: readonly
         )}
       </div>
 
-      <div>
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
-        {hasLastValid ? (
-          <div className="mb-2">
-            <LastValidNotice />
-          </div>
-        ) : null}
-        {open.length === 0 ? (
+      {hasLastValid ? <LastValidNotice /> : null}
+
+      {rows.length === 0 ? (
+        <div>
+          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
+          <EmptyState>No open positions yet.</EmptyState>
+        </div>
+      ) : open.length === 0 ? (
+        <div>
+          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
           <EmptyState>Every open position is already listed above in Attention Now.</EmptyState>
-        ) : (
-          <div className="space-y-1.5">
-            {visibleOpen.map((row) => (
-              <PositionToReviewRowView key={row.campaignId} row={row} now={now} />
-            ))}
-          </div>
-        )}
-        {hiddenCount > 0 ? (
-          <IntentPrefetchLink href="/positions" className="mt-1.5 block text-center text-xs text-zinc-500 hover:text-sky-300">
-            +{hiddenCount} more in Tracker
-          </IntentPrefetchLink>
-        ) : null}
-      </div>
+        </div>
+      ) : (
+        <>
+          {activeNow.length > 0 ? (
+            <div>
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Active Now</h3>
+              <div className="space-y-1.5">
+                {activeNow.map((row) => (
+                  <PositionToReviewRowView key={row.campaignId} row={row} now={now} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {awaitingSettlement.length > 0 ? (
+            <div>
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Awaiting Settlement ({awaitingSettlement.length})</h3>
+              <div className="space-y-1.5">
+                {awaitingSettlement.map((row) => (
+                  <PositionToReviewRowView key={row.campaignId} row={row} now={now} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </>
+      )}
+      {hiddenCount > 0 ? (
+        <IntentPrefetchLink href="/positions" className="block text-center text-xs text-zinc-500 hover:text-sky-300">
+          +{hiddenCount} more in Tracker
+        </IntentPrefetchLink>
+      ) : null}
     </>
   );
 }

@@ -17,6 +17,7 @@ import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows, type PositionToReviewRow } from "@/domain/finance/positionReviewRows";
 import {
   accountValueCard,
+  activeSettlementBreakdown,
   capitalPanelViewModel,
   chatPreviewViewModel,
   closedThisWeekViewModel,
@@ -104,6 +105,7 @@ export default async function DashboardPage() {
   const wholeAccountGain = wholeAccountGainCard(report);
   const confirmedTradingPL = confirmedTradingPLCard(report, winLoss);
   const openCampaigns = openCampaignsCard(data.openCampaigns);
+  const exposureSummary = activeSettlementBreakdown(data.openCampaigns, asOf);
   const capitalPanel = capitalPanelViewModel(report, exposure);
   const closedThisWeek = closedThisWeekViewModel(report, thisWeek);
   const scannerInsight = scannerInsightViewModel(data.latestScanRun, neverTradeTickers);
@@ -125,7 +127,10 @@ export default async function DashboardPage() {
         <span>
           <span className="font-semibold text-zinc-100">Hey {user.name}</span> -{" "}
           <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "SCHWAB SCAN" : "DEMO SCANNER"}</Badge>{" "}
-          {openCampaigns.count} campaign{openCampaigns.count === 1 ? "" : "s"} open - win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
+          {/* Weekend / Settlement Clarity - "N campaigns open" read as N currently-exposed market
+              positions even when most are just awaiting ordinary post-expiration settlement; this
+              quick exposure summary now says how many are genuinely active vs. settling instead. */}
+          {exposureSummary.label} - win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
         </span>
         <span className="flex flex-col items-end gap-0.5 text-right">
           <span className="text-xs font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
@@ -170,7 +175,7 @@ export default async function DashboardPage() {
           label="Open Campaigns"
           href="/positions"
           value={String(openCampaigns.count)}
-          detail={openCampaigns.breakdownLabel}
+          detail={exposureSummary.label}
         />
       </section>
 
