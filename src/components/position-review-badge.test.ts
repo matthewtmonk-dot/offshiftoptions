@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionLabelFor, moneynessDistanceLabel } from "./position-review-badge";
+import { actionLabelFor, cannotAssessPresentationTier, moneynessDistanceLabel } from "./position-review-badge";
 
 describe("actionLabelFor", () => {
   it("labels the four persistable actions", () => {
@@ -16,6 +16,41 @@ describe("actionLabelFor", () => {
 
   it("labels CANNOT_ASSESS", () => {
     expect(actionLabelFor("CANNOT_ASSESS", [])).toBe("Cannot assess");
+  });
+});
+
+describe("cannotAssessPresentationTier (compact position UX) - deliberately separate from the trust-sensitive isKnownTransientFallbackReason allowlist", () => {
+  it("settlement pending scenario: EXPIRATION_SESSION_ENDED (the ticket's own 'awaiting confirmation' example) is CALM, not a loud attention state", () => {
+    expect(cannotAssessPresentationTier(["EXPIRATION_SESSION_ENDED"])).toBe("calm");
+  });
+
+  it("routine market/quote unavailability is CALM", () => {
+    expect(cannotAssessPresentationTier(["MARKET_CLOSED"])).toBe("calm");
+    expect(cannotAssessPresentationTier(["QUOTE_UNAVAILABLE"])).toBe("calm");
+    expect(cannotAssessPresentationTier(["QUOTE_EVIDENCE_UNAVAILABLE"])).toBe("calm");
+    expect(cannotAssessPresentationTier(["PAST_EXPIRATION_UNRESOLVED"])).toBe("calm");
+  });
+
+  it("unavailable assessment scenario: a genuine broker-evidenced mismatch is ATTENTION, not silently calmed", () => {
+    expect(cannotAssessPresentationTier(["POSITION_MISMATCH_AMBIGUOUS"])).toBe("attention");
+    expect(cannotAssessPresentationTier(["POSITION_INSUFFICIENT_SHARE_COVERAGE"])).toBe("attention");
+  });
+
+  it("incomplete/missing terms are ATTENTION - a real data problem, not routine waiting", () => {
+    expect(cannotAssessPresentationTier(["INCOMPLETE_TERMS"])).toBe("attention");
+    expect(cannotAssessPresentationTier(["MISSING_CONTRACTS"])).toBe("attention");
+  });
+
+  it("a mix of calm and non-calm reasons is ATTENTION overall - one real issue is never hidden by an accompanying routine one", () => {
+    expect(cannotAssessPresentationTier(["MARKET_CLOSED", "ASSIGNED_SHARES_NO_CALL"])).toBe("attention");
+  });
+
+  it("no reason codes at all defaults to ATTENTION - never silently calm an unrecognized/empty state", () => {
+    expect(cannotAssessPresentationTier([])).toBe("attention");
+  });
+
+  it("an unrecognized reason code defaults to ATTENTION, never calm by accident", () => {
+    expect(cannotAssessPresentationTier(["SOME_FUTURE_REASON_THIS_TEST_DOES_NOT_KNOW_ABOUT"])).toBe("attention");
   });
 });
 

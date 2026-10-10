@@ -22,7 +22,7 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { ClientPresentationProvider, FreshnessStrip, type DisplayEntry } from "@/components/client-freshness";
-import { currentActivityLabel, historicalOriginLabel } from "@/domain/finance/positionActivity";
+import { activityTone, currentActivityLabel, historicalOriginLabel } from "@/domain/finance/positionActivity";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
 import { describeBrokerPositionForDisplay, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
 import {
@@ -775,17 +775,23 @@ function CampaignCard({
   const activityLabel = campaign.status === "CLOSED" ? campaign.status : currentActivityLabel(summary.currentStage);
   const originLabel = historicalOriginLabel({ status: campaign.status, events: campaign.events });
 
+  // Compact position UX - the activity badge's own color now follows the SAME activity label it
+  // displays (blue for an ordinary open state, amber for settlement/review states) rather than the
+  // coarser campaign.status - see activityTone's own doc comment. CLOSED keeps its existing,
+  // unchanged P/L-colored tone (a financial outcome, not a lifecycle state).
+  const activityBadgeTone = campaign.status === "CLOSED" ? statusTone(campaign.status, plValue) : activityTone(activityLabel);
+
   return (
     <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
-      <summary className="relative grid cursor-pointer list-none gap-3 p-4 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
+      <summary className="relative grid cursor-pointer list-none gap-2 p-3 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
         <div className="min-w-0 pr-5 xl:pr-0">
           {/* Ticker + lifecycle status dominate this line - the assessment badge gets its own
               line below so it reads as a distinct, scannable signal rather than competing with
               status pills for the same visual weight (ticket's "assessment badge immediately
               recognizable" goal). */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-2xl font-bold tracking-tight text-zinc-50">{campaign.ticker}</span>
-            <Badge tone={statusTone(campaign.status, plValue)}>{activityLabel}</Badge>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xl font-bold tracking-tight text-zinc-50">{campaign.ticker}</span>
+            <Badge tone={activityBadgeTone}>{activityLabel}</Badge>
             {campaign.status === "CLOSED" ? (
               <Badge tone={plValue === null ? "neutral" : plValue < 0 ? "bad" : "good"}>
                 {expiredWorthless ? "EXPIRED OTM · " : ""}
@@ -798,64 +804,53 @@ function CampaignCard({
                 repair B3): this app has no event proving a call was actually exercised, so it
                 never claims "Called away" - only the fully-provable fact that shares were sold. */}
             {campaign.status === "CLOSED" && originLabel ? <span className="text-xs text-zinc-500">{originLabel}</span> : null}
-            {!openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
+            {openView && openPut ? (
+              <span className="text-[13px] text-zinc-300" data-testid="active-put-contract">
+                {money(openPut.strike)} Put · {shortCalendarDate(openPut.expiration)} · {dte ?? "-"} DTE · {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}
+              </span>
+            ) : null}
+            {openView && openCall ? (
+              <span className="text-[13px] text-amber-200" data-testid="active-call-contract">
+                {money(openCall.strike)} Call · {shortCalendarDate(openCall.expiration)} · {dte ?? "-"} DTE · {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}
+              </span>
+            ) : null}
           </div>
-          {openView && openPut ? (
-            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[15px]" data-testid="active-put-contract">
-              <span className="font-semibold text-zinc-100">{money(openPut.strike)} Put</span>
-              <span className="text-zinc-300">{shortCalendarDate(openPut.expiration)}</span>
-              {/* Codex P2 - the shared evaluator's own NY-calendar DTE, matching exactly what
-                  Dashboard shows for the same campaign. Never falls back to the legacy UTC-based
-                  calculations.daysToExpiration - that calculation uses different (UTC, not
-                  NY-calendar) semantics, so silently substituting it would show a DTE that could
-                  disagree with the evaluator's own expiration-state logic right next to it.
-                  Shows "-" rather than an incompatible number when evaluation didn't populate
-                  this leg. */}
-              <span className="font-semibold text-zinc-100">{dte ?? "-"} DTE</span>
-              <span className="text-[13px] text-zinc-400">Short {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}</span>
-            </div>
-          ) : null}
-          {openView && openCall ? (
-            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[15px]" data-testid="active-call-contract">
-              <span className="font-semibold text-amber-200">{campaign.ticker} {money(openCall.strike)} Call</span>
-              <span className="text-zinc-300">{shortCalendarDate(openCall.expiration)}</span>
-              {/* Codex P2 - same NY-calendar-only DTE as the put contract above, no legacy fallback. */}
-              <span className="font-semibold text-zinc-100">{dte ?? "-"} DTE</span>
-              <span className="text-[13px] text-zinc-400">Short {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}</span>
-              {openCallEventRow ? (
-                <span className="text-[13px] text-zinc-400">Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span>
-              ) : null}
-            </div>
-          ) : null}
           {/* Attention-First Freshness Phase 1 - the PATH-style "shares assigned at $X" origin
               context, shown for every ASSIGNED campaign (with or without an open call) right in
               the compact summary - not only inside the expanded Assigned Stock detail below - so
               "COVERED CALL OPEN"/"SHARES HELD" above never reads as unexplained. */}
           {openView && campaign.status === "ASSIGNED" ? (
-            <div className="mt-1 text-[13px] text-zinc-400">
+            <div className="mt-0.5 text-[13px] text-zinc-400">
               {summary.sharesHeld} shares{latestAssignmentEvent ? ` assigned at ${money(latestAssignmentEvent.strike)}` : ""}
               {originLabel ? <span className="ml-1.5 text-zinc-500">· {originLabel}</span> : null}
+              {openCallEventRow ? <span className="ml-1.5 text-zinc-500">· Premium collected {money(optionLegValue(openCallEventRow) ?? 0)}</span> : null}
             </div>
           ) : null}
-          {/* The dominant assessment signal (Comfortable/Watch/Review roll/Review call/Cannot
-              assess), on its own line with real breathing room - immediately recognizable before
-              a reader even reaches the smaller provenance line below. */}
+          {/* The dominant assessment signal (Comfortable/Watch/Review roll/Review call), on its
+              own compact line - immediately recognizable, but no longer a large "Cannot assess"
+              control for the routine case: PositionReviewActionBadge renders nothing at all for a
+              calm CANNOT_ASSESS (the activity badge above and the one-sentence evidence line below
+              already explain it) and only a small amber chip for a genuinely non-routine one. */}
           {openView && display ? (
-            <div className="mt-2">
+            <div className="mt-1">
               <LivePositionAssessmentBadge display={display} now={asOf} />
               <LivePositionAssessmentEvidenceLine display={display} now={asOf} />
             </div>
           ) : null}
-          {/* Provenance/context - deliberately the smallest, most muted text in the card. */}
-          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
+          {/* Provenance/context - deliberately the smallest, most muted text in the card. The
+              visibility affordance (compact position UX) now lives ONLY here, next to the account
+              identifier it describes - never as a loud badge in the primary row above. */}
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-zinc-500">
             <span>{isOwner ? "You" : campaign.owner.name}</span>
-            <span>{accountVisibleToViewer ? campaign.account.name : "Private account"}</span>
-            <span>{summary.currentStage}</span>
-            {openView ? <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} /> : null}
+            <span>
+              {accountVisibleToViewer ? campaign.account.name : "Private account"}
+              {" · "}
+              <VisibilityBadge effectiveVisibility={effectiveVisibility} rawVisibility={campaign.visibility} />
+            </span>
           </div>
         </div>
         {openView ? (
-          <div className="grid grid-cols-[1fr_1fr_auto] items-start gap-x-4 gap-y-2 sm:grid-cols-[1fr_1fr_auto_auto]">
+          <div className="grid grid-cols-[1fr_1fr_auto] items-start gap-x-3 gap-y-1.5 sm:grid-cols-[1fr_1fr_auto_auto]">
             <div>
               <SummaryCell
                 label="Stock snapshot"
@@ -864,7 +859,12 @@ function CampaignCard({
                     <>
                       {money(quoteSnapshot.price)}
                       {distanceDollars !== null ? (
-                        <span className="ml-1 font-normal text-zinc-400">
+                        // Compact position UX - the ticket's "GREEN for favorable / RED for
+                        // adverse price movement" color rule, applied to this app's existing
+                        // distance-to-strike figure (the closest real "is this moving the right
+                        // way" number already on the page) - never a new daily-move metric, which
+                        // would require data this app doesn't already fetch.
+                        <span className={`ml-1 font-normal ${toneClass(distanceDollars)}`}>
                           · {signedMoney(distanceDollars)}
                           {distancePct !== null ? ` / ${distancePct >= 0 ? "+" : ""}${percent(distancePct)}` : ""}
                         </span>
@@ -875,17 +875,17 @@ function CampaignCard({
                   )
                 }
                 help="Schwab's latest available stock price; it may be delayed or from the last session. Time is the provider quote/trade time when supplied, otherwise retrieval time. Distance from strike and Roll status both use this snapshot." />
-              <p className="mt-1 max-w-48 text-xs text-zinc-500">{quoteSnapshot ? snapshotTime(quoteSnapshot.asOf) : summary.currentStage === "Expiration processing" ? "Awaiting brokerage evidence" : openPut ? "Refresh to check prices" : "No active put"}</p>
+              <p className="mt-0.5 max-w-48 text-xs text-zinc-500">{quoteSnapshot ? snapshotTime(quoteSnapshot.asOf) : summary.currentStage === "Expiration processing" ? "Awaiting brokerage evidence" : openPut ? "Refresh to check prices" : "No active put"}</p>
             </div>
             <div>
               <SummaryCell label="Option Cash Flow" value={signedMoney(summary.netOptionPremium)} tone={summary.netOptionPremium}
                 help={HELP.netPremium} helpTestId={`help-summary-premium-${campaign.ticker}`} />
-              <p className="mt-1 text-xs text-zinc-500">Cash flow · not realized profit{!netPLExact ? " · fees pending" : ""}</p>
+              <p className="mt-0.5 text-xs text-zinc-500">Cash flow · not realized profit{!netPLExact ? " · fees pending" : ""}</p>
             </div>
             <SummaryCell label="Days open" value={summary.daysActive ?? "UNKNOWN"} help="Campaign age since the first opening. DTE counts calendar days until the active put expires." />
-            <ChevronDown className="absolute right-3 top-4 size-5 justify-self-end text-zinc-500 transition group-open:rotate-180 sm:static" aria-hidden />
+            <ChevronDown className="absolute right-3 top-3 size-5 justify-self-end text-zinc-500 transition group-open:rotate-180 sm:static" aria-hidden />
           </div>
-        ) : <div className="grid grid-cols-2 items-center gap-3 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] xl:min-w-[520px]">
+        ) : <div className="grid grid-cols-2 items-center gap-2 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] xl:min-w-[520px]">
           <SummaryCell
             label="Realized"
             value={
@@ -2303,6 +2303,16 @@ function HelpLabel({
   );
 }
 
+/**
+ * Compact position UX - demoted from a full colored Badge pill to a small, muted inline
+ * affordance (icon + short text, matching the rest of the provenance line's own text-zinc-500
+ * styling). This is implementation/account-scope metadata, not a trading signal - the ticket's
+ * own "Private via account" complaint was specifically about this badge competing for primary-row
+ * visual space on almost every card. The same ownership/scoping information is still shown, just
+ * no longer loud enough to compete with the ticker/lifecycle/assessment signals above it. Never
+ * rendered in the primary ticker/status row any more - only in the secondary provenance line
+ * alongside the owner/account name it already sits next to.
+ */
 function VisibilityBadge({
   effectiveVisibility,
   rawVisibility,
@@ -2310,12 +2320,13 @@ function VisibilityBadge({
   effectiveVisibility: "PRIVATE" | "SHARED";
   rawVisibility: "INHERIT" | "PRIVATE" | "SHARED";
 }) {
+  const Icon = effectiveVisibility === "SHARED" ? Users : Lock;
   return (
-    <Badge tone={effectiveVisibility === "SHARED" ? "info" : "warn"}>
-      {effectiveVisibility === "SHARED" ? <Users className="mr-1 size-3.5" aria-hidden /> : <Lock className="mr-1 size-3.5" aria-hidden />}
+    <span className="inline-flex items-center gap-1">
+      <Icon className="size-3" aria-hidden />
       {effectiveVisibility === "SHARED" ? "Shared" : "Private"}
       {rawVisibility === "INHERIT" ? " via account" : null}
-    </Badge>
+    </span>
   );
 }
 

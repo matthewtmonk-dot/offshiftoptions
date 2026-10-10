@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentActivityLabel, historicalOriginLabel } from "./positionActivity";
+import { activityTone, currentActivityLabel, historicalOriginLabel } from "./positionActivity";
 
 describe("currentActivityLabel - relabels the campaign reducer's own currentStage, never a second interpretation", () => {
   it("short put open: Cash-secured put and Rolled put both map to SHORT PUT OPEN", () => {
@@ -25,6 +25,32 @@ describe("currentActivityLabel - relabels the campaign reducer's own currentStag
 
   it("the rare incomplete-terms fallback maps to REVIEW NEEDED, never silently to another label", () => {
     expect(currentActivityLabel("Review needed")).toBe("REVIEW NEEDED");
+  });
+});
+
+describe("activityTone (compact position UX) - color keyed on the activity label, never the coarser campaign.status", () => {
+  it("normal short put open: ordinary active state is BLUE (info), never amber/urgent", () => {
+    expect(activityTone("SHORT PUT OPEN")).toBe("info");
+  });
+
+  it("PATH scenario: covered call open is BLUE, same as an ordinary open put - holding a covered call is not itself urgent", () => {
+    expect(activityTone("COVERED CALL OPEN")).toBe("info");
+  });
+
+  it("shares held (assigned, no call yet) is BLUE - an ordinary active state, not a warning", () => {
+    expect(activityTone("SHARES HELD")).toBe("info");
+  });
+
+  it("settlement pending genuinely needs a look and is AMBER (warn), never calm blue and never alarming red", () => {
+    expect(activityTone("SETTLEMENT PENDING")).toBe("warn");
+  });
+
+  it("review needed is AMBER, matching settlement pending's own urgency tier", () => {
+    expect(activityTone("REVIEW NEEDED")).toBe("warn");
+  });
+
+  it("closed is neutral by itself - callers use the campaign's own P/L-colored tone instead for a closed campaign's real financial outcome", () => {
+    expect(activityTone("CLOSED")).toBe("neutral");
   });
 });
 

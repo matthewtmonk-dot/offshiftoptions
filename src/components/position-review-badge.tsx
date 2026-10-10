@@ -80,6 +80,30 @@ function cannotAssessReasonLabel(result: PositionReviewResult): string {
   return "Cannot assess";
 }
 
+/**
+ * Compact position UX - a PRESENTATION-ONLY tier deciding how loudly a CANNOT_ASSESS row should
+ * compete for attention, deliberately separate from the trust-sensitive `isKnownTransientFallbackReason`
+ * allowlist (scheduled-capture.ts/positionReviewAssessment.ts) - that allowlist answers "is it safe
+ * to show a historical fallback for this reason," a data-integrity question; this answers "should
+ * a human's eye be drawn here," a UX question, and the two deliberately disagree in places (e.g.
+ * EXPIRATION_SESSION_ENDED is routine/calm here - it is simply the ordinary end-of-day wait for
+ * Schwab's own settlement confirmation - but is NOT allowlisted for historical fallback, since
+ * showing stale pre-expiration guidance for an already-expired contract would be misleading).
+ * CALM reasons are routine, expected, and resolve on their own (market hours, a quote hiccup, the
+ * normal post-expiration settlement wait) - these never need a colored badge competing with the
+ * lifecycle/activity badge that already explains the situation. Everything else (a genuine broker-
+ * evidenced mismatch, incomplete/missing terms, an unrecognized reason) gets ATTENTION tier -
+ * still never alarming RED (nothing here is a financial loss), but AMBER, worth a glance.
+ */
+export type CannotAssessPresentationTier = "calm" | "attention";
+
+const CALM_CANNOT_ASSESS_REASONS = new Set(["MARKET_CLOSED", "QUOTE_UNAVAILABLE", "EXPIRATION_SESSION_ENDED", "PAST_EXPIRATION_UNRESOLVED"]);
+
+export function cannotAssessPresentationTier(reasonCodes: readonly string[]): CannotAssessPresentationTier {
+  if (reasonCodes.length === 0) return "attention";
+  return reasonCodes.every((code) => CALM_CANNOT_ASSESS_REASONS.has(code) || code.startsWith("QUOTE_")) ? "calm" : "attention";
+}
+
 const POSITION_EVIDENCE_LABELS: Record<PositionReviewEvidence["position"], string> = {
   SCHWAB_CONFIRMED: "Schwab confirmed",
   AWAITING_CONFIRMATION: "Awaiting confirmation",
@@ -91,8 +115,30 @@ const POSITION_EVIDENCE_LABELS: Record<PositionReviewEvidence["position"], strin
   UNSUPPORTED_CONTRACT_DELIVERABLE: "Contract deliverable unverified",
 };
 
-/** The compact colored action badge alone - text + icon, color never the only signal. */
+/**
+ * The compact colored action badge alone - text + icon, color never the only signal.
+ *
+ * Compact position UX - CANNOT_ASSESS no longer renders as a large neutral badge competing with
+ * the lifecycle/activity badge that already explains the situation (e.g. "SETTLEMENT PENDING").
+ * A CALM-tier reason (routine, expected, resolves on its own) renders NOTHING here at all - the
+ * evidence line below already carries the one-sentence reason in small, de-emphasized text, which
+ * is enough. An ATTENTION-tier reason (a genuine broker-evidenced mismatch, incomplete terms, or
+ * anything this app doesn't specifically recognize as routine) still gets a small amber chip, so a
+ * real, non-routine uncertainty doesn't visually disappear next to the calm cases - never RED
+ * (nothing here is a realized loss), and never the loud original wording.
+ */
 export function PositionReviewActionBadge({ result }: { result: PositionReviewResult }) {
+  if (result.action === "CANNOT_ASSESS") {
+    if (cannotAssessPresentationTier(result.explanation.reasonCodes) === "calm") {
+      return null;
+    }
+    return (
+      <Badge tone="warn">
+        <CircleHelp aria-hidden size={13} />
+        <span className="ml-1">Needs confirmation</span>
+      </Badge>
+    );
+  }
   const Icon = ICON_BY_ACTION[result.action];
   return (
     <Badge tone={TONE_BY_ACTION[result.action]}>

@@ -30,6 +30,32 @@ export function currentActivityLabel(stage: CampaignCurrentStage): CurrentActivi
 }
 
 /**
+ * Compact position UX - the activity-state badge's own color, keyed on the SAME activity label
+ * above rather than the coarser campaign.status (OPEN/ASSIGNED/CLOSED) a prior pass used. Matches
+ * the ticket's own semantic-color rule: BLUE for an ordinary, non-urgent active-position state
+ * (an open put/call, or shares simply being held - nothing requires a decision right now), AMBER
+ * for a state that genuinely needs a look (settlement/expiration still resolving, or a decision
+ * point like "no call sold yet against these shares"). CLOSED is handled by the caller with its
+ * own existing P/L-colored tone (good/bad/neutral) - this function is never consulted for it, but
+ * still returns a safe "neutral" rather than throwing if ever called with it directly.
+ */
+export type ActivityTone = "info" | "warn" | "neutral";
+
+export function activityTone(label: CurrentActivityLabel): ActivityTone {
+  switch (label) {
+    case "SHORT PUT OPEN":
+    case "COVERED CALL OPEN":
+    case "SHARES HELD":
+      return "info";
+    case "SETTLEMENT PENDING":
+    case "REVIEW NEEDED":
+      return "warn";
+    case "CLOSED":
+      return "neutral";
+  }
+}
+
+/**
  * Secondary, muted ORIGIN context - "how did we get here," never the primary activity signal above.
  * Reads only the campaign's own append-only event history (never inferred from moneyness/price,
  * expiration, or a strike/price relationship).
