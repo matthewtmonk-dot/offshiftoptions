@@ -21,6 +21,7 @@ import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
+import { CoveredCallOutcomePlanner } from "@/components/covered-call-outcome-planner";
 import { ClientPresentationProvider, FreshnessStrip, type DisplayEntry } from "@/components/client-freshness";
 import { activityTone, currentActivityLabel, historicalOriginLabel, isAwaitingSettlement } from "@/domain/finance/positionActivity";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
@@ -1146,6 +1147,27 @@ function CampaignCard({
             ) : null}
           </div>
         </div>
+        {/* Covered Call Outcome Planner - full width (not confined to the xl:grid-cols split
+            above), available for every ASSIGNED campaign regardless of call state (no call yet,
+            an open call, or an expired call awaiting settlement) - never on an ordinary short-put
+            campaign with no assigned shares. Closed by default - see its own doc comment for why
+            it lives here rather than a new top-level page. */}
+        {campaign.status === "ASSIGNED" ? (
+          <div className="mt-4">
+            <CoveredCallOutcomePlanner
+              ticker={campaign.ticker}
+              assignedPrice={latestAssignmentEvent ? toNumber(latestAssignmentEvent.strike) : null}
+              shares={summary.sharesHeld}
+              priorOptionCashFlow={summary.netOptionPremium}
+              feesFullyKnown={netPLExact}
+              existingCallStrike={openCall?.strike ?? null}
+              hasOpenCall={openCall !== null}
+              settlementPending={awaitingSettlement}
+              currentStockPrice={quoteSnapshot?.price ?? null}
+              currentStockPriceAsOf={quoteSnapshot?.asOf ?? null}
+            />
+          </div>
+        ) : null}
       </div>
     </details>
   );
