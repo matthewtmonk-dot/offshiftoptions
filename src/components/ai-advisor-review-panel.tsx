@@ -4,7 +4,14 @@ import { useState, useTransition } from "react";
 import { Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui";
 import { requestAiAdvisorReviewAction } from "@/app/(app)/ai-advisor-actions";
-import type { AiAdvisorReviewResult } from "@/domain/scanner/aiAdvisorReview";
+import {
+  hardRuleSummaryLabel,
+  hardRuleSummaryState,
+  resolveAiAdvisorPresentation,
+  scannerReadinessPresentation,
+  type AiAdvisorReviewResult,
+  type AiAdvisorReviewSource,
+} from "@/domain/scanner/aiAdvisorReview";
 import { shortDateTime } from "@/lib/format";
 
 type AiAdvisorReview = AiAdvisorReviewResult;
@@ -15,21 +22,15 @@ type AiAdvisorState =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "done"; review: AiAdvisorReview; ticker: string; evaluatedAt: string; unknownHardRules: RuleFinding[] };
-
-const decisionTone: Record<AiAdvisorReview["decision"], "good" | "warn" | "neutral" | "info"> = {
-  CONSIDER: "good",
-  WATCH: "warn",
-  PASS: "neutral",
-  INSUFFICIENT_DATA: "info",
-};
-
-const decisionLabel: Record<AiAdvisorReview["decision"], string> = {
-  CONSIDER: "CONSIDER",
-  WATCH: "WATCH",
-  PASS: "PASS",
-  INSUFFICIENT_DATA: "INSUFFICIENT DATA",
-};
+  | {
+      status: "done";
+      review: AiAdvisorReview;
+      reviewSource: AiAdvisorReviewSource;
+      scannerReadiness: string;
+      ticker: string;
+      evaluatedAt: string;
+      unknownHardRules: RuleFinding[];
+    };
 
 function BulletList({ items }: { items: string[] }) {
   if (items.length === 0) return null;
@@ -49,11 +50,17 @@ function BulletList({ items }: { items: string[] }) {
 
 /**
  * AI Advisor V1 - Scanner's "AI Review" trigger + inline result panel. Decision support only: the
- * UI never claims more authority than the deterministic scanner itself, and a hard LST rule failure
- * is always shown prominently regardless of what the model's own prose says (`hardRuleFailures`
- * comes back from the server already enforced to be the packet's own authoritative list - see
- * enforceHardRuleConsistency, domain/scanner/aiAdvisorReview.ts). A failed/unavailable AI call
- * never changes or hides any deterministic Scanner data on this page.
+ * UI never claims more authority than the deterministic scanner itself.
+ *
+ * Final guardrail repair: the deterministic Scanner readiness chip is ALWAYS shown beside the AI/
+ * gate result (never only the AI's own badge) - a green CONSIDER is only ever shown when Scanner
+ * readiness itself is PASS (see resolveAiAdvisorPresentation); a soft-preference-driven Scanner FAIL
+ * with an otherwise-interested model renders as amber "CONSIDER WITH TRADEOFFS", never a plain green
+ * CONSIDER. When `reviewSource` is a hard-rule gate (no OpenAI call was made at all - decided purely
+ * by deterministic code), the panel labels the result "LST GATE", never "AI Take", so it can never
+ * be mistaken for a completed AI model review. The single "Hard rules" summary box always reads
+ * exactly one of FAILED / UNKNOWN / ALL PASSED (hardRuleSummaryState) - it can never say "All
+ * passed" while a hard rule is still UNKNOWN.
  */
 export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string }) {
   const [state, setState] = useState<AiAdvisorState>({ status: "idle" });
@@ -70,7 +77,15 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
     startTransition(async () => {
       const outcome = await requestAiAdvisorReviewAction(scanResultId);
       if (outcome.ok) {
-        setState({ status: "done", review: outcome.review, ticker: outcome.ticker, evaluatedAt: outcome.evaluatedAt, unknownHardRules: outcome.unknownHardRules });
+        setState({
+          status: "done",
+          review: outcome.review,
+          reviewSource: outcome.reviewSource,
+          scannerReadiness: outcome.scannerReadiness,
+          ticker: outcome.ticker,
+          evaluatedAt: outcome.evaluatedAt,
+          unknownHardRules: outcome.unknownHardRules,
+        });
       } else {
         setState({ status: "error", message: outcome.error });
       }
@@ -103,14 +118,30 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
     );
   }
 
-  const { review, ticker, evaluatedAt, unknownHardRules } = state;
+  const { review, reviewSource, scannerReadiness, ticker, evaluatedAt, unknownHardRules } = state;
+  const isDeterministicGate = reviewSource !== "MODEL";
+  const presentation = resolveAiAdvisorPresentation({ decision: review.decision, reviewSource, scannerReadiness });
+  const scannerChip = scannerReadinessPresentation(scannerReadiness);
+  const hardState = hardRuleSummaryState(review.hardRuleFailures.length, unknownHardRules.length);
+  // A hard-rule gate's own mainConcerns/unknownCriticalEvidence are just the same rule explanations
+  // already rendered in the "Hard rules" box below - hidden here to avoid showing the identical
+  // evidence twice under two different headings.
+  const showMainConcerns = reviewSource !== "HARD_RULE_GATE";
+  const showUnknownCriticalEvidence = reviewSource !== "HARD_UNKNOWN_GATE";
+
   return (
     <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3" data-testid="ai-advisor-review-panel">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">AI Take</span>
-          <Badge tone={decisionTone[review.decision]}>{decisionLabel[review.decision]}</Badge>
-          <span className="text-xs text-zinc-500">· {review.confidence} confidence</span>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Scanner</span>
+            <Badge tone={scannerChip.tone}>{scannerChip.label}</Badge>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{isDeterministicGate ? "LST Gate" : "AI Take"}</span>
+            <Badge tone={presentation.tone}>{presentation.label}</Badge>
+            {!isDeterministicGate ? <span className="text-xs text-zinc-500">· {review.confidence} confidence</span> : null}
+          </div>
         </div>
         <button type="button" onClick={handleClick} disabled={requestInFlight} className="text-xs text-zinc-500 hover:text-sky-300 disabled:cursor-wait disabled:opacity-75">
           Re-run
@@ -127,21 +158,30 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
         </div>
       ) : null}
 
-      {review.mainConcerns.length > 0 ? (
+      {showMainConcerns && review.mainConcerns.length > 0 ? (
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Watch</p>
           <BulletList items={review.mainConcerns} />
         </div>
       ) : null}
 
-      {/* Hard rules are always shown, never only on failure - "All passed" is itself meaningful
-          confirmation, and a real failure must never be visually smaller or less prominent than a
-          deterministic Scanner badge elsewhere on this page. */}
-      <div className={review.hardRuleFailures.length > 0 ? "rounded-md border border-red-400/40 bg-red-400/10 p-2" : ""}>
-        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Hard rules</p>
-        {review.hardRuleFailures.length === 0 ? (
-          <p className="mt-1 text-[13px] text-emerald-200">All passed</p>
-        ) : (
+      {/* The ONE hard-rule summary box - exactly FAILED / UNKNOWN / ALL PASSED, never "All passed"
+          while a hard rule is still UNKNOWN (hardRuleSummaryState, aiAdvisorReview.ts). A real
+          failure or unknown must never be visually smaller or less prominent than a deterministic
+          Scanner badge elsewhere on this page. */}
+      <div
+        className={
+          hardState === "FAILED"
+            ? "rounded-md border border-red-400/40 bg-red-400/10 p-2"
+            : hardState === "UNKNOWN"
+              ? "rounded-md border border-sky-400/40 bg-sky-400/10 p-2"
+              : "rounded-md border border-zinc-800 p-2"
+        }
+      >
+        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{hardRuleSummaryLabel(hardState)}</p>
+        {hardState === "ALL_PASSED" ? (
+          <p className="mt-1 text-[13px] text-emerald-200">All known hard LST rules passed.</p>
+        ) : hardState === "FAILED" ? (
           <ul className="mt-1 space-y-1 text-[13px] text-red-200">
             {review.hardRuleFailures.map((failure) => (
               <li key={failure.ruleId}>
@@ -149,16 +189,7 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
               </li>
             ))}
           </ul>
-        )}
-      </div>
-
-      {/* Companion to "Hard rules" above, same reliability guarantee - a hard rule that's UNKNOWN
-          (missing/stale evidence on a gate) is a distinct finding from a FAIL, computed directly
-          from the deterministic packet, never only from the model's own prose. Only rendered when
-          non-empty - "All passed" above already covers the common, fully-known case. */}
-      {unknownHardRules.length > 0 ? (
-        <div className="rounded-md border border-sky-400/40 bg-sky-400/10 p-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Hard rules - unknown</p>
+        ) : (
           <ul className="mt-1 space-y-1 text-[13px] text-sky-200">
             {unknownHardRules.map((finding) => (
               <li key={finding.ruleId}>
@@ -166,8 +197,8 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
               </li>
             ))}
           </ul>
-        </div>
-      ) : null}
+        )}
+      </div>
 
       {review.softPreferenceNotes.length > 0 ? (
         <div>
@@ -176,7 +207,7 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
         </div>
       ) : null}
 
-      {review.unknownCriticalEvidence.length > 0 ? (
+      {showUnknownCriticalEvidence && review.unknownCriticalEvidence.length > 0 ? (
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Missing evidence</p>
           <BulletList items={review.unknownCriticalEvidence} />
@@ -199,9 +230,13 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
 
       <div className="border-t border-zinc-800 pt-2 text-xs text-zinc-500">
         <p>
-          Reviewed from OSO snapshot · {ticker} · {shortDateTime(evaluatedAt)}
+          {isDeterministicGate ? "Deterministic LST gate - no AI model was called" : "Reviewed from OSO snapshot"} · {ticker} · {shortDateTime(evaluatedAt)}
         </p>
-        <p className="mt-0.5">AI decision support - verify the trade before placing an order.</p>
+        <p className="mt-0.5">
+          {isDeterministicGate
+            ? "A hard LST rule already decided this outcome - verify the underlying evidence before placing an order."
+            : "AI decision support - verify the trade before placing an order."}
+        </p>
       </div>
     </div>
   );

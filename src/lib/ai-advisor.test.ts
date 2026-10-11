@@ -35,6 +35,8 @@ function scanResultRow(overrides: Record<string, unknown> = {}) {
     snapshotJson: { price: 45, strike: 40, optionBid: 1.2 },
     run: { ownerId: "matt-id" },
     criterionResults: [
+      // "Stock price" is a HARD/gating rule (GATING_RULE_KEYS, profile.ts) - PASS here keeps the
+      // default fixture out of either short-circuit gate, so most tests reach the provider.
       { criterionName: "Stock price", actualValue: "45", operator: "GTE", desiredValue: "20", status: "PASS", explanation: "Stock price $45.00 is above the $20.00 minimum." },
     ],
     ...overrides,
@@ -57,6 +59,8 @@ describe("requestAiAdvisorReviewForUser", () => {
     const outcome = await requestAiAdvisorReviewForUser("matt-id", "result-1", { provider });
 
     expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(outcome.reviewSource).toBe("MODEL");
     expect(provider.review).toHaveBeenCalledTimes(1);
     const packetSent = (provider.review as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(packetSent.identity.ticker).toBe("XYZ");
@@ -65,30 +69,62 @@ describe("requestAiAdvisorReviewForUser", () => {
     expect(packetSent.rules[0].status).toBe("PASS");
   });
 
-  // 2. hard-rule failure -> failure is included and cannot disappear from rendered result
-  it("2. a hard-rule failure is included in the result and cannot disappear even if the model omits it", async () => {
+  // 2/10. hard-rule FAIL -> the OpenAI call is structurally skipped, final decision is SKIP, and a
+  // misleading model answer (even "all rules passed") can never be rendered because it is never
+  // produced in the first place.
+  it("2. a hard-rule failure short-circuits to a deterministic SKIP and the provider is never called, even if it would have returned a misleading CONSIDER", async () => {
     mocks.db.scanResult.findUnique.mockResolvedValue(
       scanResultRow({ criterionResults: [{ criterionName: "Stock price", actualValue: "5", operator: "GTE", desiredValue: "20", status: "FAIL", explanation: "Below minimum price." }] }),
     );
-    const provider = fakeProvider(reviewFixture({ decision: "CONSIDER", hardRuleFailures: [] })); // model wrongly omits it
+    const provider = fakeProvider(reviewFixture({ decision: "CONSIDER", headline: "This candidate meets all LST rules!", hardRuleFailures: [] }));
     const outcome = await requestAiAdvisorReviewForUser("matt-id", "result-1", { provider });
 
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("unreachable");
+    expect(provider.review).not.toHaveBeenCalled(); // the model is never asked - not merely overridden afterward
+    expect(outcome.reviewSource).toBe("HARD_RULE_GATE");
+    expect(outcome.review.decision).toBe("SKIP");
+    expect(outcome.review.headline).toBe("Hard LST rule failed."); // never the misleading model text above
     expect(outcome.review.hardRuleFailures).toEqual([{ ruleId: "price", explanation: "Below minimum price." }]);
-    expect(outcome.review.decision).toBe("PASS"); // never shown as CONSIDER despite the model's own answer
   });
 
-  // 3. UNKNOWN critical evidence -> packet preserves UNKNOWN, never converts to zero/pass
-  it("3. UNKNOWN evidence reaches the provider as UNKNOWN, never silently converted to zero or PASS", async () => {
+  // 3. UNKNOWN evidence on a SOFT (non-gating) rule still reaches the provider as UNKNOWN - a soft
+  // unknown does not gate the call, only a HARD one does (see test 3b below).
+  it("3. UNKNOWN evidence on a soft rule reaches the provider as UNKNOWN, never silently converted to zero or PASS", async () => {
     mocks.db.scanResult.findUnique.mockResolvedValue(
-      scanResultRow({ criterionResults: [{ criterionName: "Open interest", actualValue: null, operator: "GTE", desiredValue: "50", status: "UNKNOWN", explanation: "Open interest is unknown for this candidate." }] }),
+      scanResultRow({
+        criterionResults: [
+          { criterionName: "Stock price", actualValue: "45", operator: "GTE", desiredValue: "20", status: "PASS", explanation: "ok" },
+          { criterionName: "RSI", actualValue: null, operator: "LTE", desiredValue: "40", status: "UNKNOWN", explanation: "RSI is unknown for this candidate." },
+        ],
+      }),
     );
     const provider = fakeProvider();
-    await requestAiAdvisorReviewForUser("matt-id", "result-1", { provider });
+    const outcome = await requestAiAdvisorReviewForUser("matt-id", "result-1", { provider });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(outcome.reviewSource).toBe("MODEL");
     const packetSent = (provider.review as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(packetSent.rules[0].status).toBe("UNKNOWN");
-    expect(packetSent.rules[0].actualValue).toBe("unknown");
+    const rsiRule = packetSent.rules.find((rule: { ruleId: string }) => rule.ruleId === "rsi");
+    expect(rsiRule.status).toBe("UNKNOWN");
+    expect(rsiRule.actualValue).toBe("unknown");
+  });
+
+  // 3b/4. a HARD rule's UNKNOWN (not a FAIL) short-circuits to INSUFFICIENT_DATA, never "all passed",
+  // and the provider is never called - same structural guarantee as the hard-FAIL gate.
+  it("3b. a hard-rule UNKNOWN (no FAIL) short-circuits to a deterministic INSUFFICIENT_DATA and the provider is never called, even if it would have returned CONSIDER", async () => {
+    mocks.db.scanResult.findUnique.mockResolvedValue(
+      scanResultRow({ criterionResults: [{ criterionName: "Stock price", actualValue: null, operator: "GTE", desiredValue: "20", status: "UNKNOWN", explanation: "Stock price is unknown for this candidate." }] }),
+    );
+    const provider = fakeProvider(reviewFixture({ decision: "CONSIDER" }));
+    const outcome = await requestAiAdvisorReviewForUser("matt-id", "result-1", { provider });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(provider.review).not.toHaveBeenCalled();
+    expect(outcome.reviewSource).toBe("HARD_UNKNOWN_GATE");
+    expect(outcome.review.decision).toBe("INSUFFICIENT_DATA");
+    expect(outcome.unknownHardRules).toEqual([{ ruleId: "price", explanation: "Stock price is unknown for this candidate." }]);
   });
 
   // 4. quote/freshness missing -> explicit missing evidence
@@ -178,14 +214,28 @@ describe("requestAiAdvisorReviewForUser", () => {
     expect(JSON.stringify(okOutcome)).not.toMatch(/OPENAI_API_KEY|apiKey/i);
   });
 
-  it("surfaces an UNKNOWN hard rule in outcome.unknownHardRules, computed from the packet directly - never only from the model's own text", async () => {
+  // 6 (ticket's "soft fail" case). all hard PASS + a soft rule FAIL (Scanner readiness FAIL overall)
+  // + AI CONSIDER -> the call still reaches the model (soft failures never gate), and the outcome's
+  // own scannerReadiness still reads FAIL so the UI can render "CONSIDER WITH TRADEOFFS", never a
+  // plain/green CONSIDER.
+  it("a soft-rule FAIL with hard rules passing still reaches the provider, and the outcome carries the Scanner's own (non-PASS) readiness alongside a model CONSIDER", async () => {
     mocks.db.scanResult.findUnique.mockResolvedValue(
-      scanResultRow({ criterionResults: [{ criterionName: "Stock price", actualValue: null, operator: "GTE", desiredValue: "20", status: "UNKNOWN", explanation: "Stock price is unknown for this candidate." }] }),
+      scanResultRow({
+        criterionResults: [
+          { criterionName: "Stock price", actualValue: "45", operator: "GTE", desiredValue: "20", status: "PASS", explanation: "ok" },
+          { criterionName: "RSI", actualValue: "80", operator: "LTE", desiredValue: "40", status: "FAIL", explanation: "RSI is too high." },
+        ],
+      }),
     );
-    const outcome = await requestAiAdvisorReviewForUser("matt-id", "result-1", { provider: fakeProvider() });
+    const provider = fakeProvider(reviewFixture({ decision: "CONSIDER", softPreferenceNotes: ["RSI missed, but the setup is still interesting."] }));
+    const outcome = await requestAiAdvisorReviewForUser("matt-id", "result-1", { provider });
+
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("unreachable");
-    expect(outcome.unknownHardRules).toEqual([{ ruleId: "price", explanation: "Stock price is unknown for this candidate." }]);
+    expect(provider.review).toHaveBeenCalledTimes(1);
+    expect(outcome.reviewSource).toBe("MODEL");
+    expect(outcome.review.decision).toBe("CONSIDER");
+    expect(outcome.scannerReadiness).toBe("FAIL"); // Scanner's own readiness - never silently promoted to PASS
   });
 
   it("rejects an empty scanResultId before ever touching prisma", async () => {

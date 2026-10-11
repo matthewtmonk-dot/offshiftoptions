@@ -91,6 +91,26 @@ describe("createAiAdvisorProvider - dev-mock gating", () => {
     expect(review.summary.toLowerCase()).toMatch(/placeholder/);
   });
 
+  // The mock is only ever reached once src/lib/ai-advisor.ts has already confirmed every hard LST
+  // rule is known-passing - it never needs to (and never does) simulate a hard-rule-failing packet,
+  // and it must never return the old ambiguous "PASS" decision value.
+  it("the dev mock's decision mirrors Scanner readiness (NEEDS_DATA -> INSUFFICIENT_DATA, otherwise CONSIDER) and never returns the old PASS value", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("AI_ADVISOR_DEV_MOCK", "1");
+    vi.stubEnv("OPENAI_API_KEY", "");
+    const provider = createAiAdvisorProvider();
+
+    const needsData = await provider.review({ identity: { ticker: "XYZ" }, rules: [], riskContext: { deterministicReadiness: "NEEDS_DATA" } } as never);
+    expect(needsData.decision).toBe("INSUFFICIENT_DATA");
+
+    const softFail = await provider.review({ identity: { ticker: "XYZ" }, rules: [], riskContext: { deterministicReadiness: "FAIL" } } as never);
+    expect(softFail.decision).toBe("CONSIDER");
+    expect(softFail.softPreferenceNotes.length).toBeGreaterThan(0); // flags the tradeoff rather than hiding it
+
+    expect(needsData.hardRuleFailures).toEqual([]);
+    expect(softFail.hardRuleFailures).toEqual([]);
+  });
+
   it("never activates the dev mock merely because the flag is set - the real key's absence is a SEPARATE required condition", async () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("AI_ADVISOR_DEV_MOCK", "0"); // flag explicitly off

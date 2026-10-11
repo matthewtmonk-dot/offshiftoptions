@@ -1,7 +1,14 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { buildAiAdvisorPacket, unknownHardRules, validateAiAdvisorPacket } from "@/domain/scanner/aiAdvisorPacket";
-import { enforceHardRuleConsistency, LST_ADVISOR_PROMPT_VERSION, type AiAdvisorReviewResult } from "@/domain/scanner/aiAdvisorReview";
+import { buildAiAdvisorPacket, hardRuleFailures, unknownHardRules, validateAiAdvisorPacket } from "@/domain/scanner/aiAdvisorPacket";
+import {
+  buildHardRuleFailureGateResult,
+  buildHardRuleUnknownGateResult,
+  enforceHardRuleConsistency,
+  LST_ADVISOR_PROMPT_VERSION,
+  type AiAdvisorReviewResult,
+  type AiAdvisorReviewSource,
+} from "@/domain/scanner/aiAdvisorReview";
 import { AiAdvisorProviderError, createAiAdvisorProvider, type AiAdvisorProvider } from "./ai-advisor-provider";
 
 /**
@@ -15,11 +22,26 @@ import { AiAdvisorProviderError, createAiAdvisorProvider, type AiAdvisorProvider
  * research are - see app-data.ts's own getScannerPageData). A result that doesn't exist or belongs
  * to a different user returns the SAME generic "not available" message either way - never confirms
  * or denies that another user's scan result exists.
+ *
+ * Final guardrail repair: a hard-rule FAIL or UNKNOWN on the packet is now resolved ENTIRELY by
+ * deterministic code, BEFORE `options.provider`/`createAiAdvisorProvider()` is ever touched - the
+ * OpenAI call (or the injected test provider) is structurally unreachable for those two cases, not
+ * merely overridden afterward. This is the ticket's own "safest V1 option": it removes any chance
+ * of contradictory model prose for an already-decided outcome, and saves the API cost of a call
+ * whose result is fully determined without it.
  */
 export type AiAdvisorReviewOutcome =
   | {
       ok: true;
       review: AiAdvisorReviewResult;
+      /** "MODEL" only when OpenAI (or the injected provider) was actually called - "HARD_RULE_GATE"/
+       * "HARD_UNKNOWN_GATE" mean the result is pure deterministic LST gating, and the UI must label
+       * it as such rather than as a completed AI model review. */
+      reviewSource: AiAdvisorReviewSource;
+      /** The packet's own `classifyReadiness` answer (scanner.ts) - PASS/NEAR/NEEDS_DATA/FAIL -
+       * threaded through so the panel can always show deterministic Scanner readiness beside the
+       * AI/gate result, and so a green "CONSIDER" is only ever shown when this is PASS. */
+      scannerReadiness: string;
       promptVersion: string;
       ticker: string;
       evaluatedAt: string;
@@ -68,6 +90,34 @@ export async function requestAiAdvisorReviewForUser(
     return { ok: false, error: validation.error };
   }
 
+  const failures = hardRuleFailures(packet);
+  if (failures.length > 0) {
+    return {
+      ok: true,
+      review: buildHardRuleFailureGateResult(packet),
+      reviewSource: "HARD_RULE_GATE",
+      scannerReadiness: packet.riskContext.deterministicReadiness,
+      promptVersion: LST_ADVISOR_PROMPT_VERSION,
+      ticker: packet.identity.ticker,
+      evaluatedAt: packet.timing.evaluatedAt,
+      unknownHardRules: [],
+    };
+  }
+
+  const unknownHard = unknownHardRules(packet);
+  if (unknownHard.length > 0) {
+    return {
+      ok: true,
+      review: buildHardRuleUnknownGateResult(packet),
+      reviewSource: "HARD_UNKNOWN_GATE",
+      scannerReadiness: packet.riskContext.deterministicReadiness,
+      promptVersion: LST_ADVISOR_PROMPT_VERSION,
+      ticker: packet.identity.ticker,
+      evaluatedAt: packet.timing.evaluatedAt,
+      unknownHardRules: unknownHard.map((rule) => ({ ruleId: rule.ruleId, explanation: rule.explanation })),
+    };
+  }
+
   const provider = options?.provider ?? createAiAdvisorProvider();
 
   try {
@@ -76,17 +126,19 @@ export async function requestAiAdvisorReviewForUser(
     return {
       ok: true,
       review: consistent,
+      reviewSource: "MODEL",
+      scannerReadiness: packet.riskContext.deterministicReadiness,
       promptVersion: LST_ADVISOR_PROMPT_VERSION,
       ticker: packet.identity.ticker,
       evaluatedAt: packet.timing.evaluatedAt,
-      unknownHardRules: unknownHardRules(packet).map((rule) => ({ ruleId: rule.ruleId, explanation: rule.explanation })),
+      unknownHardRules: [],
     };
   } catch (error) {
     return { ok: false, error: friendlyProviderError(error) };
   }
 }
 
-/** Never makes a failed AI call look like a PASS/CONSIDER result - every branch here is a plain
+/** Never makes a failed AI call look like a SKIP/CONSIDER result - every branch here is a plain
  * "unavailable, nothing changed" message, matching the ticket's own required copy style. The
  * specific `reason` is never shown to the user (no SDK/network internals leaked), only logged via
  * the thrown error's own `cause` chain for server-side debugging. */

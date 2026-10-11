@@ -1,7 +1,7 @@
 import "server-only";
 import OpenAI, { APIConnectionError, APIConnectionTimeoutError, APIError, AuthenticationError, RateLimitError } from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
-import { hardRuleFailures, type AiAdvisorCandidatePacket } from "@/domain/scanner/aiAdvisorPacket";
+import type { AiAdvisorCandidatePacket } from "@/domain/scanner/aiAdvisorPacket";
 import { AiAdvisorReviewSchema, buildAiAdvisorDeveloperPrompt, buildAiAdvisorUserPrompt, type AiAdvisorReviewResult } from "@/domain/scanner/aiAdvisorReview";
 
 /**
@@ -103,20 +103,19 @@ export function createOpenAiAdvisorProvider(): AiAdvisorProvider {
  * even under misconfiguration - the explicit flag and the real-key check are independent gates, not
  * a single switch. Every field is unmistakably labeled so a mock response can never be confused
  * with a real AI review.
+ *
+ * `review()` here is only ever reached once src/lib/ai-advisor.ts has already confirmed every hard
+ * LST rule on the packet is known and passing (a hard FAIL/UNKNOWN short-circuits before any
+ * provider - real or mock - is ever constructed), so this fixture never needs to simulate a
+ * hard-rule-failing packet: it always returns `hardRuleFailures: []`, matching what the real model
+ * would also always receive.
  */
 function createDevMockAdvisorProvider(): AiAdvisorProvider {
   return {
     async review(packet) {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      const failures = hardRuleFailures(packet);
-      const decision =
-        failures.length > 0
-          ? "PASS"
-          : packet.riskContext.deterministicReadiness === "NEEDS_DATA"
-            ? "INSUFFICIENT_DATA"
-            : packet.riskContext.deterministicReadiness === "PASS"
-              ? "CONSIDER"
-              : "WATCH";
+      const decision = packet.riskContext.deterministicReadiness === "NEEDS_DATA" ? "INSUFFICIENT_DATA" : "CONSIDER";
+      const softTradeoff = packet.riskContext.deterministicReadiness !== "PASS" && decision === "CONSIDER";
       return {
         decision,
         confidence: "LOW",
@@ -125,9 +124,9 @@ function createDevMockAdvisorProvider(): AiAdvisorProvider {
           "This is a development-only placeholder response, shown because OPENAI_API_KEY is not configured locally and AI_ADVISOR_DEV_MOCK=1 is set. It does not reflect any real model output and must never appear in production.",
         strongestReasons: ["(dev mock) placeholder reason"],
         mainConcerns: ["(dev mock) placeholder concern"],
-        hardRuleFailures: failures.map((rule) => ({ ruleId: rule.ruleId, explanation: rule.explanation })),
+        hardRuleFailures: [],
         unknownCriticalEvidence: [],
-        softPreferenceNotes: [],
+        softPreferenceNotes: softTradeoff ? ["(dev mock) a soft LST preference missed, but the mock still finds this interesting"] : [],
         whatWouldChangeDecision: ["(dev mock) configure OPENAI_API_KEY to get a real review"],
         riskNotes: [],
       } satisfies AiAdvisorReviewResult;
