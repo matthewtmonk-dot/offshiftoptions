@@ -1,4 +1,5 @@
 import { round } from "./calculations";
+import type { CampaignEventKind, CampaignStatusInput } from "./campaigns";
 
 /**
  * Covered Call Outcome Planner - a deterministic, client-side "what-if" calculator for an
@@ -118,4 +119,26 @@ export function coveredCallOutcomeTone(result: Pick<CoveredCallOutcomeResult, "c
   if (result.campaignProfitIfCalled < 0) return "bad";
   if (result.campaignReturnPct >= targetReturnPct) return "good";
   return "warn";
+}
+
+/**
+ * Partial-sale blocker repair: `calculateCoveredCallOutcome` above takes `shares`/
+ * `priorOptionCashFlow` exactly as given and never re-derives them from the campaign's own event
+ * ledger - so it has no way to fold in a REALIZED stock gain/loss from an earlier `STOCK_SALE`
+ * event without either double-counting it or silently omitting it. A campaign with 200 shares
+ * assigned at $40, 100 already sold at $43 (a realized +$300 the planner's math never sees), and
+ * 100 shares still held stays `status: "ASSIGNED"` - so gating on status alone would still show
+ * the planner with understated math (missing that realized +$300 entirely).
+ *
+ * V1 fix (the safest release behavior, not full partial-sale accounting): once ANY `STOCK_SALE`
+ * event exists on the campaign, the planner is not eligible at all, regardless of how many shares
+ * remain held - never show possibly-misleading math. This is a separate, independent restriction
+ * from the already-accepted multi-assignment-lot limitation (multiple ASSIGNMENT events), which
+ * this function does not change.
+ */
+export function isCoveredCallOutcomePlannerEligible(
+  status: CampaignStatusInput,
+  events: readonly { type: CampaignEventKind }[],
+): boolean {
+  return status === "ASSIGNED" && !events.some((event) => event.type === "STOCK_SALE");
 }

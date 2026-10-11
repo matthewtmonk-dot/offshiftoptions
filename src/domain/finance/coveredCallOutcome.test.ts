@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { calculateCoveredCallOutcome, coveredCallOutcomeTone, type CoveredCallOutcomeInput } from "./coveredCallOutcome";
+import { calculateCoveredCallOutcome, coveredCallOutcomeTone, isCoveredCallOutcomePlannerEligible, type CoveredCallOutcomeInput } from "./coveredCallOutcome";
+import type { CampaignEventKind } from "./campaigns";
 
 function baseInput(overrides: Partial<CoveredCallOutcomeInput> = {}): CoveredCallOutcomeInput {
   return {
@@ -145,5 +146,54 @@ describe("coveredCallOutcomeTone - color represents total campaign outcome, neve
     expect(coveredCallOutcomeTone(zeroButBelowTarget, 1)).toBe("warn");
     const zeroAndTargetIsZero = { campaignProfitIfCalled: 0, campaignReturnPct: 0 };
     expect(coveredCallOutcomeTone(zeroAndTargetIsZero, 0)).toBe("good");
+  });
+});
+
+function events(...types: CampaignEventKind[]): { type: CampaignEventKind }[] {
+  return types.map((type) => ({ type }));
+}
+
+/**
+ * Partial-sale blocker repair: calculateCoveredCallOutcome above has no way to fold in a REALIZED
+ * stock gain/loss from an earlier STOCK_SALE event without double-counting or silently omitting
+ * it (it takes shares/priorOptionCashFlow exactly as given). A campaign with ANY STOCK_SALE event
+ * must therefore never be eligible for the planner, regardless of how many shares remain held -
+ * the safest V1 release behavior, never showing possibly-misleading "Final campaign P/L" math.
+ */
+describe("isCoveredCallOutcomePlannerEligible", () => {
+  // The ticket's own regression case: assign 200 @ $40, sell 100 @ $43, campaign remains ASSIGNED.
+  it("a partial share sale (200 assigned, 100 sold) leaves the campaign ASSIGNED but makes the planner ineligible", () => {
+    const eligible = isCoveredCallOutcomePlannerEligible("ASSIGNED", events("SELL_PUT", "ASSIGNMENT", "STOCK_SALE"));
+    expect(eligible).toBe(false);
+  });
+
+  it("a full (100%) stock sale is also ineligible, not only a partial one - STOCK_SALE alone is the signal, never a share-count threshold", () => {
+    const eligible = isCoveredCallOutcomePlannerEligible("ASSIGNED", events("SELL_PUT", "ASSIGNMENT", "STOCK_SALE"));
+    expect(eligible).toBe(false);
+  });
+
+  it("fully held assigned shares (no STOCK_SALE at all) -> planner shown", () => {
+    const eligible = isCoveredCallOutcomePlannerEligible("ASSIGNED", events("SELL_PUT", "ASSIGNMENT"));
+    expect(eligible).toBe(true);
+  });
+
+  it("assigned shares with an open covered call -> planner shown", () => {
+    const eligible = isCoveredCallOutcomePlannerEligible("ASSIGNED", events("SELL_PUT", "ASSIGNMENT", "SELL_COVERED_CALL"));
+    expect(eligible).toBe(true);
+  });
+
+  it("assigned shares with an expired call awaiting settlement -> planner shown", () => {
+    const eligible = isCoveredCallOutcomePlannerEligible("ASSIGNED", events("SELL_PUT", "ASSIGNMENT", "SELL_COVERED_CALL", "COVERED_CALL_EXPIRED"));
+    expect(eligible).toBe(true);
+  });
+
+  it("an ordinary short put (status OPEN, no assignment) -> planner hidden", () => {
+    const eligible = isCoveredCallOutcomePlannerEligible("OPEN", events("SELL_PUT"));
+    expect(eligible).toBe(false);
+  });
+
+  it("a closed campaign is never eligible, even if it once had assigned shares and no stock sale", () => {
+    const eligible = isCoveredCallOutcomePlannerEligible("CLOSED", events("SELL_PUT", "ASSIGNMENT"));
+    expect(eligible).toBe(false);
   });
 });

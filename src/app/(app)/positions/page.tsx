@@ -22,6 +22,7 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { CoveredCallOutcomePlanner } from "@/components/covered-call-outcome-planner";
+import { isCoveredCallOutcomePlannerEligible } from "@/domain/finance/coveredCallOutcome";
 import { ClientPresentationProvider, FreshnessStrip, type DisplayEntry } from "@/components/client-freshness";
 import { activityTone, currentActivityLabel, historicalOriginLabel, isAwaitingSettlement } from "@/domain/finance/positionActivity";
 import { summarizeAccountPerformance } from "@/domain/finance/accountLedger";
@@ -806,6 +807,7 @@ function CampaignCard({
   const openCall = campaign.status === "ASSIGNED" ? getCurrentOpenCall(campaign.events) : null;
   const openCallEventRow = openCall ? openCallEvent(campaign.events) : null;
   const latestAssignmentEvent = campaign.status === "ASSIGNED" ? latestAssignment(campaign.events) : null;
+  const plannerEligible = isCoveredCallOutcomePlannerEligible(campaign.status, campaign.events);
   const strikeVsBasis = openCall ? describeCallStrikeVsAdjustedBasis(openCall.strike, summary.adjustedBasis) : null;
   // A general, delayed/non-authoritative "roughly where is the stock" figure for the Stock
   // Snapshot info cell only - never the colored assessment advisory (see `display` above), which
@@ -1151,8 +1153,14 @@ function CampaignCard({
             above), available for every ASSIGNED campaign regardless of call state (no call yet,
             an open call, or an expired call awaiting settlement) - never on an ordinary short-put
             campaign with no assigned shares. Closed by default - see its own doc comment for why
-            it lives here rather than a new top-level page. */}
-        {campaign.status === "ASSIGNED" ? (
+            it lives here rather than a new top-level page.
+
+            Partial-sale blocker repair: eligibility additionally requires NO `STOCK_SALE` event on
+            the campaign (isCoveredCallOutcomePlannerEligible, coveredCallOutcome.ts) - the planner's
+            math never accounts for an already-realized partial-sale gain/loss, so showing it after a
+            partial sale would silently understate "Final campaign P/L." A still-ASSIGNED campaign
+            that fails only this check shows a brief explanatory note instead of the calculator. */}
+        {plannerEligible ? (
           <div className="mt-4">
             <CoveredCallOutcomePlanner
               ticker={campaign.ticker}
@@ -1166,6 +1174,10 @@ function CampaignCard({
               currentStockPrice={quoteSnapshot?.price ?? null}
               currentStockPriceAsOf={quoteSnapshot?.asOf ?? null}
             />
+          </div>
+        ) : campaign.status === "ASSIGNED" ? (
+          <div className="mt-4 rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-xs text-zinc-500" data-testid="covered-call-outcome-planner-unavailable">
+            Outcome Planner unavailable after a partial share sale.
           </div>
         ) : null}
       </div>
