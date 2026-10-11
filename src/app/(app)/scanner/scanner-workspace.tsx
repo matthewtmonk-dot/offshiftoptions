@@ -16,6 +16,7 @@ import {
   Table2,
 } from "lucide-react";
 import { EmptyState, FieldLabel } from "@/components/ui";
+import { AiAdvisorReviewPanel } from "@/components/ai-advisor-review-panel";
 import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
 import { formatCriterionValue, type CriterionResult, type ExclusionDiagnostic, type ScannerReadiness } from "@/domain/scanner/scanner";
 import { OPTION_CHAIN_ENRICHMENT_LIMIT } from "@/domain/scanner/live-scan";
@@ -801,8 +802,9 @@ function CandidateInspector({
             </details>
           ))}
         </div>
-        <div className="mt-4">
+        <div className="mt-4 flex flex-col gap-3">
           <RecommendMiniForm ticker={result.record.ticker} buddies={buddies} returnTo="/scanner" />
+          <AiAdvisorReviewPanel scanResultId={result.record.id} />
         </div>
       </section>
     </div>
