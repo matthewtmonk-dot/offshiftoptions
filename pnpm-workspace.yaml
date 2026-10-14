@@ -9,3 +9,14 @@ allowBuilds:
   prisma: true
   sharp: false
   unrs-resolver: false
+
+# Security: force patched versions of transitive dependencies that the pinned Prisma 7.10.0 CLI
+# tooling and Next.js pull in (found by `pnpm audit --prod`, 2026-10-14). Remove an entry once the
+# upstream package ships a release that no longer needs it.
+overrides:
+  lodash: '>=4.18.1'
+  fast-uri: '>=3.1.8'
+  source-map-js: '>=1.2.2'
+  mysql2: '>=3.23.1'
+  deepmerge-ts: '>=8.0.0'
+  sharp: '>=0.35.5'
