@@ -1,3 +1,4 @@
+import { Briefcase, Landmark, LineChart, Wallet, type LucideIcon } from "lucide-react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
@@ -165,6 +166,7 @@ export default async function DashboardPage() {
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="How am I doing?" data-testid="dashboard-summary-cards">
         <SummaryCard
           label="Account Value"
+          icon={Wallet}
           href="/account"
           value={accountValue.value}
           detail={accountValue.detail}
@@ -172,6 +174,7 @@ export default async function DashboardPage() {
         />
         <SummaryCard
           label="Whole-Account Gain"
+          icon={LineChart}
           href={TRACKER_PERFORMANCE_HREF}
           value={wholeAccountGain.value}
           tone={wholeAccountGain.tone}
@@ -180,6 +183,7 @@ export default async function DashboardPage() {
         />
         <SummaryCard
           label="Confirmed Trading P/L"
+          icon={Landmark}
           href={TRACKER_PERFORMANCE_HREF}
           value={confirmedTradingPL.value}
           tone={confirmedTradingPL.tone}
@@ -188,6 +192,7 @@ export default async function DashboardPage() {
         />
         <SummaryCard
           label="Open Campaigns"
+          icon={Briefcase}
           href="/positions"
           value={String(openCampaigns.count)}
           detail={exposureSummary.label}
@@ -235,6 +240,9 @@ export default async function DashboardPage() {
                 emphasize
               />
             </div>
+            {report.capitalUtilizationStatus === "OK" && report.currentCapitalUtilizationPercent !== null ? (
+              <UtilizationBar percent={report.currentCapitalUtilizationPercent} />
+            ) : null}
             {capitalPanel.ambiguousNotice ? <p className="text-xs text-amber-300">{capitalPanel.ambiguousNotice}</p> : null}
             <IntentPrefetchLink href="/account" className="block text-xs text-sky-300 hover:text-sky-200">
               View account detail
@@ -338,6 +346,7 @@ export default async function DashboardPage() {
 
 function SummaryCard({
   label,
+  icon: Icon,
   href,
   value,
   tone,
@@ -345,6 +354,7 @@ function SummaryCard({
   reason,
 }: {
   label: string;
+  icon: LucideIcon;
   href: string;
   value: string;
   tone?: number;
@@ -353,14 +363,39 @@ function SummaryCard({
 }) {
   // Semantic financial color only when a real tone was computed upstream (dashboard-view.ts) -
   // never applied decoratively, and never for every card (undefined/neutral stays near-white).
+  // The thin top accent follows the exact same tone, so an unavailable/neutral card stays gray.
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
+  const accentClass = tone === undefined || tone === 0 ? "bg-zinc-700" : tone > 0 ? "bg-emerald-400" : "bg-red-400";
   return (
-    <IntentPrefetchLink href={href} className="block rounded-lg border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400/50">
-      <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">{label}</div>
-      <div className={`mt-1.5 text-[26px] font-bold leading-tight tabular-nums ${toneClass}`}>{value}</div>
+    <IntentPrefetchLink href={href} className="group relative block overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400/50 hover:bg-zinc-900/80">
+      <span aria-hidden className={`absolute inset-x-0 top-0 h-0.5 ${accentClass}`} />
+      <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+        <span>{label}</span>
+        <Icon aria-hidden size={15} className="text-zinc-600 transition group-hover:text-sky-300" />
+      </div>
+      <div className={`mt-1.5 text-[28px] font-bold leading-tight tabular-nums ${toneClass}`}>{value}</div>
       {detail ? <div className="mt-1 text-[13px] text-zinc-400">{detail}</div> : null}
       {reason ? <div className="mt-1 text-[13px] text-amber-300">{reason}</div> : null}
     </IntentPrefetchLink>
+  );
+}
+
+/** Capital committed as a share of account value - a plain fill bar; the exact number is already
+ * printed in the line above it, so this is a glanceable companion, never a second source of truth. */
+function UtilizationBar({ percent }: { percent: number }) {
+  const clamped = Math.min(100, Math.max(0, percent));
+  const fill = clamped >= 90 ? "bg-amber-400" : "bg-sky-400";
+  return (
+    <div role="img" aria-label={`Capital committed: ${Math.round(percent)}% of account value`} className="pt-1">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+        <div className={`h-full rounded-full ${fill}`} style={{ width: `${clamped}%` }} />
+      </div>
+      <div className="mt-1 flex justify-between text-[11px] text-zinc-500">
+        <span>0%</span>
+        <span>{Math.round(percent)}% of account committed</span>
+        <span>100%</span>
+      </div>
+    </div>
   );
 }
 
