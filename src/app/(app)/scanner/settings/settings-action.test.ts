@@ -28,5 +28,6 @@ describe("submitSettingsAction", () => {
     const network = await submitSettingsAction(async () => { throw new TypeError("Failed to fetch"); }, form());
     expect(network.kind).toBe("error");
     expect(network.message).toMatch(/reload the page/i);
+    expect(network.message).toContain("(browser detail: Failed to fetch)");
   });
 });

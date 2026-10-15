@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { getCurrentSessionTokenHash, requireCurrentUser, signOut } from "@/lib/auth";
 import { changePasswordForUser } from "@/lib/account";
 import { checkMoreScannerOptionsForUser, type OptionCheckOutcome } from "@/lib/scanner-option-check";
+import { recordDiagnostic } from "@/lib/diagnostics";
 import { runSettingsMutation, type SettingsActionResult } from "@/lib/safe-action-error";
 import {
   addAccountLedgerEntryForUser,
@@ -387,19 +388,32 @@ export async function markAllNotificationsReadAction() {
  * form-post-then-redirect version crashed to Next's generic "This page couldn't load" screen in
  * production whenever anything in that round trip went wrong; this shape cannot.
  */
+/**
+ * Records "started" and then "finished (with how long it took)" in the diagnostics log. A start with no
+ * matching finish means the server died or the request was cut off mid-way - which is exactly what has
+ * to be told apart when a save "couldn't reach the server". See src/lib/diagnostics.ts.
+ */
+async function timedSettingsAction(source: string, run: () => Promise<SettingsActionResult>): Promise<SettingsActionResult> {
+  const startedAt = Date.now();
+  recordDiagnostic({ kind: "action", source, message: "started" });
+  const result = await run();
+  recordDiagnostic({ kind: "action", source, message: result.ok ? "finished ok" : `finished with error: ${result.error}`, durationMs: Date.now() - startedAt });
+  return result;
+}
+
 export async function saveScannerSettingsAction(formData: FormData): Promise<SettingsActionResult> {
   const user = await requireCurrentUser();
-  return runSettingsMutation("save your scanner settings", "Scanner settings saved.", () => updateScannerSettingsForUser(user.id, formData));
+  return timedSettingsAction("save scanner settings", () => runSettingsMutation("save your scanner settings", "Scanner settings saved.", () => updateScannerSettingsForUser(user.id, formData)));
 }
 
 export async function saveRollBufferAction(formData: FormData): Promise<SettingsActionResult> {
   const user = await requireCurrentUser();
-  return runSettingsMutation("save your roll buffer", "Roll Buffer saved.", () => updateRollBufferPercentForUser(user.id, formData.get("rollBufferPercent")));
+  return timedSettingsAction("save roll buffer", () => runSettingsMutation("save your roll buffer", "Roll Buffer saved.", () => updateRollBufferPercentForUser(user.id, formData.get("rollBufferPercent"))));
 }
 
 export async function resetScannerSettingsAction(): Promise<SettingsActionResult> {
   const user = await requireCurrentUser();
-  return runSettingsMutation("reset your scanner settings", "Reset to LST Core.", () => resetScannerSettingsToLstCoreForUser(user.id));
+  return timedSettingsAction("reset scanner settings", () => runSettingsMutation("reset your scanner settings", "Reset to LST Core.", () => resetScannerSettingsToLstCoreForUser(user.id)));
 }
 
 export async function runDemoScannerAction() {
