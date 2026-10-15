@@ -18,6 +18,7 @@ import {
   WalletCards,
 } from "lucide-react";
 import { Badge, EmptyState, FieldLabel } from "@/components/ui";
+import { DteBadge } from "@/components/dte-badge";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { LastValidNotice } from "@/components/last-valid-notice";
@@ -873,12 +874,12 @@ function CampaignCard({
                 negative DTE is too easy to misread as just a smaller active number). */}
             {openView && openPut ? (
               <span className="text-[13px] text-zinc-300" data-testid="active-put-contract">
-                {money(openPut.strike)} Put · {awaitingSettlement ? `expired ${shortCalendarDate(openPut.expiration)}` : `${shortCalendarDate(openPut.expiration)} · ${dte ?? "-"} DTE`} · {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}
+                {money(openPut.strike)} Put · {awaitingSettlement ? `expired ${shortCalendarDate(openPut.expiration)}` : <>{shortCalendarDate(openPut.expiration)} · <DteBadge dte={dte} /></>} · {openPut.contracts} {openPut.contracts === 1 ? "contract" : "contracts"}
               </span>
             ) : null}
             {openView && openCall ? (
               <span className="text-[13px] text-zinc-300" data-testid="active-call-contract">
-                {money(openCall.strike)} Call · {awaitingSettlement ? `expired ${shortCalendarDate(openCall.expiration)}` : `${shortCalendarDate(openCall.expiration)} · ${dte ?? "-"} DTE`} · {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}
+                {money(openCall.strike)} Call · {awaitingSettlement ? `expired ${shortCalendarDate(openCall.expiration)}` : <>{shortCalendarDate(openCall.expiration)} · <DteBadge dte={dte} /></>} · {openCall.contracts} {openCall.contracts === 1 ? "contract" : "contracts"}
               </span>
             ) : null}
           </div>

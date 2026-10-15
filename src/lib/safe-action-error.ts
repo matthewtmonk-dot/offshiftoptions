@@ -35,3 +35,28 @@ export function userFacingSaveError(error: unknown, what: string): { message: st
     internal: true,
   };
 }
+
+/** What a settings action tells the page. Never throws and never redirects, so a failure can only ever
+ * become an inline message - not a crash screen. */
+export type SettingsActionResult = { ok: true; message: string } | { ok: false; error: string };
+
+/**
+ * Runs one settings change and turns EVERY outcome into a SettingsActionResult: success -> the given
+ * message; a short validation message -> that message; anything internal (database, timeout) -> one
+ * short sentence with a reference code (logged server-side by name/code only).
+ */
+export async function runSettingsMutation(
+  what: string,
+  successMessage: string,
+  mutate: () => Promise<unknown>,
+  log: (...args: unknown[]) => void = console.error,
+): Promise<SettingsActionResult> {
+  try {
+    await mutate();
+    return { ok: true, message: successMessage };
+  } catch (error) {
+    const safe = userFacingSaveError(error, what);
+    if (safe.internal) log(`Failed to ${what}:`, error instanceof Error ? error.name : "unknown error", safe.reference);
+    return { ok: false, error: safe.message };
+  }
+}

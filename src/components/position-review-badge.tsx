@@ -1,7 +1,9 @@
+import { Fragment, type ReactNode } from "react";
 import { CheckCircle2, CircleAlert, CircleHelp, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui";
 import type { PositionReviewAction, PositionReviewEvidence, PositionReviewResult } from "@/domain/finance/positionReview";
 import { isRoutineCannotAssessReason } from "@/domain/finance/positionReviewAssessment";
+import { moneynessTone, type MoneynessTone } from "@/domain/finance/strikeGauge";
 import { formatEtTime } from "@/lib/format";
 
 /**
@@ -165,6 +167,23 @@ export function PositionReviewActionBadge({ result }: { result: PositionReviewRe
   );
 }
 
+const DISTANCE_TONE_CLASS: Record<MoneynessTone, string> = {
+  good: "font-semibold text-emerald-300",
+  watch: "font-semibold text-amber-300",
+  bad: "font-semibold text-red-300",
+};
+
+/** The "OTM by $0.31 / 2.5%" text, colored: green when comfortably out of the money, amber inside the
+ * roll buffer or at the strike, red when in the money. The words are always there, so color is never
+ * the only signal. No color at all when the tone can't be determined. */
+export function ColoredDistance({ label, tone }: { label: string; tone: MoneynessTone | null }) {
+  return (
+    <span data-testid="distance-to-strike" data-tone={tone ?? "none"} className={tone ? DISTANCE_TONE_CLASS[tone] : undefined}>
+      {label}
+    </span>
+  );
+}
+
 /**
  * Phase 2B - extracted so the historical presentation adapter can render the identical
  * moneyness-distance phrasing from a StoredLastValidAssessment's own (always non-null) moneyness/
@@ -189,14 +208,14 @@ export function moneynessDistanceLabel(args: { moneyness: "ITM" | "ATM" | "OTM" 
  */
 export function PositionReviewEvidenceLine({ result }: { result: PositionReviewResult }) {
   const { explanation, evidence } = result;
-  const parts: string[] = [];
+  const parts: ReactNode[] = [];
 
   if (result.action === "CANNOT_ASSESS") {
     parts.push(cannotAssessReasonLabel(result));
   } else {
     const distanceLabel = moneynessDistanceLabel(explanation);
     if (distanceLabel) {
-      parts.push(distanceLabel);
+      parts.push(<ColoredDistance key="distance" label={distanceLabel} tone={moneynessTone(explanation)} />);
     }
   }
 
@@ -215,7 +234,12 @@ export function PositionReviewEvidenceLine({ result }: { result: PositionReviewR
 
   return (
     <p className="mt-1 text-[13px] text-zinc-400">
-      {parts.join(" · ")}
+      {parts.map((part, index) => (
+        <Fragment key={index}>
+          {index > 0 ? " · " : null}
+          {part}
+        </Fragment>
+      ))}
       {freshnessLine ? <span className="block text-xs text-zinc-500">{freshnessLine}</span> : null}
     </p>
   );

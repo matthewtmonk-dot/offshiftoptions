@@ -12,7 +12,8 @@ import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { ensureMyLstScannerProfileForUser, MAX_ROLL_BUFFER_PERCENT, MIN_ROLL_BUFFER_PERCENT } from "@/lib/workflows";
-import { resetScannerSettingsToLstCoreAction, updateRollBufferAction, updateScannerSettingsAction } from "../../actions";
+import { resetScannerSettingsAction, saveRollBufferAction, saveScannerSettingsAction } from "../../actions";
+import { SettingsActionForm, SettingsStatusBanner, SettingsStatusProvider } from "./settings-action-form";
 
 export const dynamic = "force-dynamic";
 
@@ -33,12 +34,15 @@ export default async function ScannerSettingsPage({
     select: { rollBufferPercent: true },
   });
   const rollBufferPercent = Number(settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
+  // Changes whenever the saved settings do, so the (uncontrolled) fields below remount with the new values.
+  const revision = profile.updatedAt.getTime() + Math.round(rollBufferPercent * 1000);
   const rulesByKey = new Map(rules.map((rule) => [rule.key, rule]));
   const diff = diffScannerRulesFromLstCore(rules);
   const diffByKey = new Map(diff.map((entry) => [entry.key, entry]));
   const changedCount = diff.filter((entry) => entry.changed).length;
 
   return (
+    <SettingsStatusProvider>
     <div className="space-y-6">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
@@ -47,6 +51,8 @@ export default async function ScannerSettingsPage({
         </div>
         <Badge tone="info">{user.name}&apos;s private profile</Badge>
       </div>
+
+      <SettingsStatusBanner />
 
       {params.error ? (
         <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">
@@ -69,7 +75,7 @@ export default async function ScannerSettingsPage({
             ? "This profile matches LST Core."
             : `${changedCount} rule${changedCount === 1 ? "" : "s"} differ${changedCount === 1 ? "s" : ""} from LST Core.`}
         </p>
-        <form action={resetScannerSettingsToLstCoreAction}>
+        <SettingsActionForm action={resetScannerSettingsAction} revision={revision}>
           <button
             type="submit"
             className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-xs font-medium text-zinc-300 transition hover:border-amber-400/60 hover:text-amber-200"
@@ -77,10 +83,10 @@ export default async function ScannerSettingsPage({
             <RotateCcw className="size-3.5" aria-hidden />
             Reset all to LST Core
           </button>
-        </form>
+        </SettingsActionForm>
       </div>
 
-      <form action={updateRollBufferAction}>
+      <SettingsActionForm action={saveRollBufferAction} revision={revision}>
         <Panel
           title="Decision Support Preferences"
           action={
@@ -117,9 +123,9 @@ export default async function ScannerSettingsPage({
             </p>
           </div>
         </Panel>
-      </form>
+      </SettingsActionForm>
 
-      <form action={updateScannerSettingsAction} className="space-y-4">
+      <SettingsActionForm action={saveScannerSettingsAction} revision={revision} className="space-y-4">
         <Panel
           title="Criteria"
           action={
@@ -149,8 +155,9 @@ export default async function ScannerSettingsPage({
             {SCANNER_RULE_DEFINITIONS.length === 0 ? <EmptyState>No scanner settings are available.</EmptyState> : null}
           </div>
         </Panel>
-      </form>
+      </SettingsActionForm>
     </div>
+    </SettingsStatusProvider>
   );
 }
 
