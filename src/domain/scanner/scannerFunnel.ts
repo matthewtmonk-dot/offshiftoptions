@@ -22,6 +22,11 @@ export type FunnelRowInput = {
   stockScreen: StockScreenVerdict;
   /** True when RSI/Bollinger weren't ready for this row (pending/stale/failed technical cache). */
   technicalIncomplete: boolean;
+  /** Every enabled HARD (gating) rule - price, volume, open interest, bid, spread, delta, earnings,
+   * do-not-trade - is a definite PASS. An UNKNOWN or FAIL on any of them is not "clear". */
+  gatingClear: boolean;
+  /** A real option contract was selected for this row (no "no contract" reason code). */
+  contractSelected: boolean;
 };
 
 export type ScannerFunnel = {
@@ -33,6 +38,9 @@ export type ScannerFunnel = {
   optionChecked: number;
   pass: number;
   near: number;
+  /** Priced rows that clear every hard rule - may still miss a preference (RSI, %B, ROR). The pool
+   * "Best available" draws from when nothing PASSes, so capital isn't left idle on a thin week. */
+  bestAvailable: number;
   /** Stock-qualified but options not priced yet - the bottleneck the "Check options" action clears. */
   awaitingOptionCheck: number;
   /** Failed the stock screen (RSI/%B/price/earnings...) - never worth a user's time. */
@@ -61,11 +69,22 @@ export function isWorthALook(row: FunnelRowInput): boolean {
   return row.readiness === "PASS" || row.readiness === "NEAR" || isAwaitingOptionCheck(row);
 }
 
+/**
+ * "Best available": a priced row with a real contract that clears EVERY hard safety rule, whether or
+ * not it also meets every preference. Never promotes a row with a hard-rule FAIL or UNKNOWN - that is
+ * the line that keeps "best available" from quietly overriding a safety blocker. Includes PASS and
+ * NEAR (they clear the hard rules by definition) so the list reads best-first when sorted by score.
+ */
+export function isBestAvailable(row: FunnelRowInput): boolean {
+  return row.optionEnrichment === "ENRICHED" && row.contractSelected && row.gatingClear;
+}
+
 export function buildScannerFunnel(rows: readonly FunnelRowInput[]): ScannerFunnel {
   const funnel: ScannerFunnel = {
     total: rows.length,
     stockQualified: 0,
     optionChecked: 0,
+    bestAvailable: 0,
     pass: 0,
     near: 0,
     awaitingOptionCheck: 0,
@@ -75,6 +94,7 @@ export function buildScannerFunnel(rows: readonly FunnelRowInput[]): ScannerFunn
   };
   for (const row of rows) {
     if (row.optionEnrichment === null) funnel.legacy += 1;
+    if (isBestAvailable(row)) funnel.bestAvailable += 1;
     if (row.readiness === "PASS") funnel.pass += 1;
     if (row.readiness === "NEAR") funnel.near += 1;
     if (isStockQualified(row)) {
@@ -99,6 +119,7 @@ export function describeScannerFunnel(funnel: ScannerFunnel, options: { truncate
     parts.push(`${funnel.optionChecked} had options priced`);
     parts.push(`${funnel.pass} pass, ${funnel.near} near`);
     if (funnel.awaitingOptionCheck > 0) parts.push(`${funnel.awaitingOptionCheck}${plus} still waiting for an option check`);
+    if (funnel.pass === 0 && funnel.bestAvailable > 0) parts.push(`${funnel.bestAvailable} clear every hard rule (see Best available)`);
   }
   return parts.join(" - ");
 }
@@ -109,12 +130,16 @@ export function funnelInputOf(result: {
   readiness: ScannerReadiness;
   stockScreen: StockScreenVerdict;
   technicalReasonCode: string | null;
-  values: { optionEnrichment: string | null; rsi: number | null; bbPercent: number | null };
+  gatingClear: boolean;
+  values: { optionEnrichment: string | null; rsi: number | null; bbPercent: number | null; strike: number | null };
+  contractReasonCode: string | null;
 }): FunnelRowInput {
   return {
     readiness: result.readiness,
     optionEnrichment: result.values.optionEnrichment,
     stockScreen: result.stockScreen,
     technicalIncomplete: result.technicalReasonCode !== null || (result.values.rsi === null && result.values.bbPercent === null),
+    gatingClear: result.gatingClear,
+    contractSelected: result.contractReasonCode === null && result.values.strike !== null,
   };
 }

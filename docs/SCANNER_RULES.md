@@ -63,7 +63,11 @@ Engineering diagnostics are stored in the existing `ScanResult.snapshotJson`, wi
 2. **Check options.** `checkMoreScannerOptionsForUser` (`src/lib/scanner-option-check.ts`) prices up to 12 `NOT_ENRICHED_BUDGET` rows per call, most-oversold first, from the user's own latest LIVE scan, via `enrichPersistedStockStageRow` (the same `bestPutValues` contract selection and `evaluateCandidate` a full scan uses). Refuses when the scan is older than 24 h (stored price/RSI/Bollinger are scan-time values) or the user's rules changed after the scan. A failed chain request leaves the row untouched (retryable) - it is never written as "no options".
 3. **Timing guide.** `src/domain/scanner/timingGuide.ts`: weekend research from Saturday noon ET (technical prep's Saturday window ends 12:00 PM ET), Monday ~10:30 AM ET confirmation scan, Mon-Thu 3:00 PM position check, Friday roll call.
 
-**Open product decisions (not changed here):** (a) among strikes that satisfy every enabled gate the selector still prefers the highest annualized ROR - the strike closest to the stock price - rather than the most cushion that still meets the ROR target; (b) delta / spread / DTE / annualized-ROR rules are off by default; (c) the UNKNOWN score credit above.
+**Resolved October 14, 2026 (Matt):** (a) strike selection now prefers the MOST CUSHION that still meets the ROR target - among the top-scoring strikes that PASS an enabled `ror` rule, the lowest strike wins (then higher annualized ROR, then symbol); without a ROR rule, or when no top-scoring strike passes it, the earlier "highest annualized ROR" ordering applies; (b) hard `dte` 3-11, `delta` 0.12-0.30 and `spreadPercent` <= 25 are now ON by default (existing saved profiles keep their old rules until the user presses Reset to LST Core); the price range stays $10-50. Schwab placeholder Greeks (e.g. delta -999) are read as missing, not as a real delta.
+
+**Still open:** the UNKNOWN score credit (0.45) above.
+
+**Best available.** A priced row with a selected contract that clears every hard (gating) rule - price, volume, open interest, bid, spread, delta, earnings, do-not-trade - even if it misses a preference such as RSI, %B or ROR. It exists so a thin week never leaves capital idle without ever overriding a safety blocker; a hard-rule FAIL or UNKNOWN is never promoted.
 
 ## Historical seeded Phase 1 Rules
 

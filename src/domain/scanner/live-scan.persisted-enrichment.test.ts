@@ -67,7 +67,8 @@ describe("enrichPersistedStockStageRow (the on-demand 'Check options' path)", ()
     const [budgetLimited] = await evaluateLiveMarketScan({ ...scanInput([put(30), put(93)]), maxOptionChainLookups: 0 });
     const checked = enrichPersistedStockStageRow({ values: persisted(budgetLimited.values), options: [put(30), put(93)], rules, asOf })!;
     expect(checked.values.optionEnrichment).toBe("ENRICHED");
-    expect(checked.values.contractReasonCode).toBe("NO_WEEKLY_EXPIRATION");
+    // Default rules now include the 3-11 DTE range, so a chain with only 30/93 DTE has nothing in range.
+    expect(checked.values.contractReasonCode).toBe("NO_EXPIRATIONS_IN_CONFIGURED_RANGE");
   });
 
   it("refuses (returns null) instead of guessing when the stored row has no price", async () => {

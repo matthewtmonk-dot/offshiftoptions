@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scannerTimingGuide } from "./timingGuide";
+import { scannerTimingGuide, technicalReadyHint } from "./timingGuide";
 
 // All instants are written in UTC; the comment gives the America/New_York wall-clock time they mean.
 const phase = (iso: string) => scannerTimingGuide(new Date(iso)).phase;
@@ -57,5 +57,34 @@ describe("scannerTimingGuide", () => {
       const text = JSON.stringify(scannerTimingGuide(new Date(iso))).toLowerCase();
       expect(text).not.toMatch(/\b(buy now|sell now|place (an )?order|you should (buy|sell))\b/);
     }
+  });
+});
+
+describe("technicalReadyHint (when will fresh data be ready?)", () => {
+  const hint = (iso: string) => technicalReadyHint(new Date(iso));
+
+  it("the exact case from Matt's screenshot: a scan at 1:31 AM ET on a weekday points to the morning preparation", () => {
+    const text = hint("2026-10-15T05:31:00Z"); // Thu 1:31 AM EDT
+    expect(text).toMatch(/5:45 AM ET/);
+    expect(text).toMatch(/9:15 AM ET/);
+  });
+
+  it("while preparation is running it says so, and gives the finish time", () => {
+    expect(hint("2026-10-15T11:00:00Z")).toMatch(/being prepared right now.*9:15 AM ET/); // 7:00 AM EDT
+  });
+
+  it("Saturday: waits for noon ET, not 9:15", () => {
+    expect(hint("2026-10-17T08:00:00Z")).toMatch(/5:45 AM ET today.*noon ET/); // Sat 4:00 AM EDT
+    expect(hint("2026-10-17T14:00:00Z")).toMatch(/being prepared right now.*noon ET/); // Sat 10:00 AM EDT
+  });
+
+  it("after the window it does NOT promise data will arrive - it says the job may have failed", () => {
+    expect(hint("2026-10-15T15:00:00Z")).toMatch(/may have failed/); // Thu 11:00 AM EDT
+    expect(hint("2026-10-17T18:00:00Z")).toMatch(/may have failed/); // Sat 2:00 PM EDT
+    expect(hint("2026-10-18T15:00:00Z")).toMatch(/may have failed/); // Sunday
+  });
+
+  it("is DST-safe", () => {
+    expect(hint("2026-12-08T11:00:00Z")).toMatch(/being prepared right now/); // Tue 6:00 AM EST (UTC-5)
   });
 });

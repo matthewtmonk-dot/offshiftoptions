@@ -540,7 +540,7 @@ function contractsFromMap(mapValue: unknown, optionType: "PUT" | "CALL", fallbac
           ask,
           mark,
           last: numberValue(contract?.last) ?? undefined,
-          delta: numberValue(contract?.delta) ?? undefined,
+          delta: validDelta(numberValue(contract?.delta)) ?? undefined,
           gamma: numberValue(contract?.gamma) ?? undefined,
           theta: numberValue(contract?.theta) ?? undefined,
           vega: numberValue(contract?.vega) ?? undefined,
@@ -598,6 +598,13 @@ function numberValue(value: unknown): number | null {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** An option delta always lies within [-1, 1]. Schwab sends placeholders such as -999 when a Greek
+ * can't be computed; those must read as MISSING (so a delta rule shows UNKNOWN), never as a real,
+ * wildly out-of-range delta that would FAIL a good contract. */
+function validDelta(value: number | null): number | null {
+  return value !== null && Math.abs(value) <= 1 ? value : null;
 }
 
 function integerValue(value: unknown): number | null {

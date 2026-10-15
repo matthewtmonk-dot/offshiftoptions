@@ -25,7 +25,7 @@ import {
   scannerRowReasons,
   NOT_OPTION_ASSESSED_BADGE,
 } from "@/domain/scanner/option-enrichment";
-import { funnelInputOf, isWorthALook } from "@/domain/scanner/scannerFunnel";
+import { funnelInputOf, isBestAvailable, isWorthALook } from "@/domain/scanner/scannerFunnel";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
 import { money, percent, shortDate, shortDateTime, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
@@ -47,7 +47,7 @@ type SortKey =
   | "spreadPercent"
   | "earningsDistance";
 
-type QuickKey = "worth" | "all" | "pass" | "near" | "watchlist" | "strongest" | "premium" | "liquid" | "low-rsi" | "far-earnings";
+type QuickKey = "worth" | "best" | "all" | "pass" | "near" | "watchlist" | "strongest" | "premium" | "liquid" | "low-rsi" | "far-earnings";
 type QuickResearchStatus = "LIKE" | "WATCH" | "NEUTRAL" | "AVOID" | "NEVER_TRADE";
 type ScannerStatusOverride = {
   baseResult: ScannerViewResult;
@@ -77,6 +77,7 @@ const sortOptions: { key: SortKey; label: string }[] = [
 
 const oneClickFilters: { key: QuickKey; label: string }[] = [
   { key: "worth", label: "Worth a look" },
+  { key: "best", label: "Best available" },
   { key: "pass", label: "Pass" },
   { key: "near", label: "Near" },
   { key: "watchlist", label: "Watchlist" },
@@ -182,6 +183,7 @@ export function ScannerWorkspace({
       near: actionable.filter((result) => result.readiness === "NEAR").length,
       watchlist: actionable.filter((result) => result.researchStatus !== null).length,
       worth: actionable.filter((result) => isWorthALook(funnelInputOf(result))).length,
+      best: actionable.filter((result) => isBestAvailable(funnelInputOf(result))).length,
       all: actionable.length,
     }),
     [actionable],
@@ -281,7 +283,7 @@ export function ScannerWorkspace({
             }`}
           >
             {filter.label}
-            <span className="text-[10px] text-zinc-500">{counts[filter.key as "worth" | "pass" | "near" | "watchlist" | "all"]}</span>
+            <span className="text-[10px] text-zinc-500">{counts[filter.key as "worth" | "best" | "pass" | "near" | "watchlist" | "all"]}</span>
           </button>
         ))}
 
@@ -1073,14 +1075,18 @@ function resultBorder(result: ScannerViewResult) {
 
 function emptyViewMessage(quick: QuickKey): string {
   return quick === "worth"
-    ? "Nothing in this scan is worth a look right now: no PASS or NEAR candidates, and no qualified stock still waiting for an option check. Choose All to see everything that was screened, or run a fresh scan after the next data update."
-    : "No scanner candidates match this view.";
+    ? "Nothing in this scan is worth a look right now: no PASS or NEAR candidates, and no qualified stock still waiting for an option check. Try Best available (priced names that clear every hard rule but miss a preference), choose All to see everything screened, or run a fresh scan after the next data update."
+    : quick === "best"
+      ? "No priced candidate clears every hard rule (price, volume, open interest, bid, spread, delta, earnings) in this scan. Use Check options to price more names, or run a fresh scan."
+      : "No scanner candidates match this view.";
 }
 
 function applyQuickFilter(results: ScannerViewResult[], quick: QuickKey) {
   switch (quick) {
     case "worth":
       return results.filter((result) => isWorthALook(funnelInputOf(result)));
+    case "best":
+      return results.filter((result) => isBestAvailable(funnelInputOf(result)));
     case "pass":
       return results.filter((result) => result.readiness === "PASS");
     case "near":
