@@ -6,7 +6,7 @@ import { redirect } from "next/navigation";
 import { getCurrentSessionTokenHash, requireCurrentUser, signOut } from "@/lib/auth";
 import { changePasswordForUser } from "@/lib/account";
 import { checkMoreScannerOptionsForUser, type OptionCheckOutcome } from "@/lib/scanner-option-check";
-import { userFacingSaveError } from "@/lib/safe-action-error";
+import { runSettingsMutation, type SettingsActionResult } from "@/lib/safe-action-error";
 import {
   addAccountLedgerEntryForUser,
   addReactionForUser,
@@ -117,19 +117,6 @@ import {
 
 function redirectWithError(path: string, error: string): never {
   redirect(`${path}?error=${encodeURIComponent(error)}`);
-}
-
-/**
- * Redirect with a message that is safe to show and to put in a URL. A short validation message passes
- * through unchanged; an internal (database) error is logged server-side (name and code only - never the
- * query text) and replaced by one short sentence with a reference code. See safe-action-error.ts.
- */
-function redirectWithSafeError(path: string, error: unknown, what: string): never {
-  const safe = userFacingSaveError(error, what);
-  if (safe.internal) {
-    console.error(`Failed to ${what}:`, error instanceof Error ? error.name : "unknown error", safe.reference);
-  }
-  redirectWithError(path, safe.message);
 }
 
 function actionReturnPath(formData: FormData, fallback: string) {
@@ -394,48 +381,25 @@ export async function markAllNotificationsReadAction() {
   revalidatePath("/dashboard");
 }
 
-export async function updateScannerSettingsAction(formData: FormData) {
+/**
+ * Scanner Rules actions. They RETURN a result and never redirect or throw: the settings page calls them
+ * from the client (settings-action-form.tsx), shows the outcome inline and then refreshes. The earlier
+ * form-post-then-redirect version crashed to Next's generic "This page couldn't load" screen in
+ * production whenever anything in that round trip went wrong; this shape cannot.
+ */
+export async function saveScannerSettingsAction(formData: FormData): Promise<SettingsActionResult> {
   const user = await requireCurrentUser();
-
-  try {
-    await updateScannerSettingsForUser(user.id, formData);
-  } catch (error) {
-    redirectWithSafeError("/scanner/settings", error, "save your scanner settings");
-  }
-
-  revalidatePath("/scanner/settings");
-  revalidatePath("/scanner");
-  revalidatePath("/dashboard");
-  redirect("/scanner/settings?saved=1");
+  return runSettingsMutation("save your scanner settings", "Scanner settings saved.", () => updateScannerSettingsForUser(user.id, formData));
 }
 
-export async function updateRollBufferAction(formData: FormData) {
+export async function saveRollBufferAction(formData: FormData): Promise<SettingsActionResult> {
   const user = await requireCurrentUser();
-
-  try {
-    await updateRollBufferPercentForUser(user.id, formData.get("rollBufferPercent"));
-  } catch (error) {
-    redirectWithSafeError("/scanner/settings", error, "save your roll buffer");
-  }
-
-  revalidatePath("/scanner/settings");
-  revalidatePath("/dashboard");
-  revalidatePath("/positions");
-  redirect("/scanner/settings?saved=rollbuffer");
+  return runSettingsMutation("save your roll buffer", "Roll Buffer saved.", () => updateRollBufferPercentForUser(user.id, formData.get("rollBufferPercent")));
 }
 
-export async function resetScannerSettingsToLstCoreAction() {
+export async function resetScannerSettingsAction(): Promise<SettingsActionResult> {
   const user = await requireCurrentUser();
-  try {
-    await resetScannerSettingsToLstCoreForUser(user.id);
-  } catch (error) {
-    redirectWithSafeError("/scanner/settings", error, "reset your scanner settings");
-  }
-
-  revalidatePath("/scanner/settings");
-  revalidatePath("/scanner");
-  revalidatePath("/dashboard");
-  redirect("/scanner/settings?saved=core");
+  return runSettingsMutation("reset your scanner settings", "Reset to LST Core.", () => resetScannerSettingsToLstCoreForUser(user.id));
 }
 
 export async function runDemoScannerAction() {

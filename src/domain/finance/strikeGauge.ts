@@ -87,3 +87,38 @@ export function dteChipLabel(dte: number | null): string | null {
   if (dte === 0) return "today";
   return `${Math.trunc(dte)}d`;
 }
+
+/**
+ * How close a short option is to expiring, for color only. <= 1 day is "urgent" (expires today or
+ * tomorrow), 2-4 days is "soon", anything further is "normal". An unknown or already-past value gets
+ * no urgency at all rather than a guess.
+ */
+export type DteUrgency = "urgent" | "soon" | "normal" | "unknown";
+
+export function dteUrgency(dte: number | null): DteUrgency {
+  if (dte === null || !Number.isFinite(dte) || dte < 0) return "unknown";
+  if (dte <= 1) return "urgent";
+  if (dte <= 4) return "soon";
+  return "normal";
+}
+
+/**
+ * Good / watch / bad for the "OTM by $0.31 / 2.5%" line. Mirrors the evaluator exactly (positionReview.ts):
+ * in the money is bad; out of the money but inside the owner's roll buffer is watch; out of the money
+ * beyond the buffer is good; at the strike is watch. Null when the distance isn't known - no color is
+ * better than a wrong one.
+ */
+export type MoneynessTone = "good" | "watch" | "bad";
+
+export function moneynessTone(args: {
+  moneyness: "ITM" | "ATM" | "OTM" | null;
+  percentageDistance: number | null;
+  bufferPercent: number | null;
+}): MoneynessTone | null {
+  const { moneyness, percentageDistance, bufferPercent } = args;
+  if (moneyness === null) return null;
+  if (moneyness === "ITM") return "bad";
+  if (moneyness === "ATM") return "watch";
+  if (percentageDistance === null || !Number.isFinite(percentageDistance)) return null;
+  return bufferPercent !== null && Number.isFinite(bufferPercent) && percentageDistance <= bufferPercent ? "watch" : "good";
+}

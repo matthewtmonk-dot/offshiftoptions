@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildStrikeGaugeGeometry, dteChipLabel } from "./strikeGauge";
+import { buildStrikeGaugeGeometry, dteChipLabel, dteUrgency, moneynessTone } from "./strikeGauge";
 
 function zoneOf(pricePct: number, g: NonNullable<ReturnType<typeof buildStrikeGaugeGeometry>>) {
   const inside = (z: { startPct: number; endPct: number } | null) => z !== null && pricePct >= z.startPct - 1e-9 && pricePct <= z.endPct + 1e-9;
@@ -82,5 +82,43 @@ describe("dteChipLabel", () => {
     expect(dteChipLabel(-1)).toBe("expired");
     expect(dteChipLabel(null)).toBeNull();
     expect(dteChipLabel(Number.NaN)).toBeNull();
+  });
+});
+
+describe("dteUrgency", () => {
+  it("flags expiring-today/tomorrow as urgent, 2-4 days as soon, longer as normal", () => {
+    expect(dteUrgency(0)).toBe("urgent");
+    expect(dteUrgency(1)).toBe("urgent");
+    expect(dteUrgency(2)).toBe("soon");
+    expect(dteUrgency(4)).toBe("soon");
+    expect(dteUrgency(5)).toBe("normal");
+    expect(dteUrgency(24)).toBe("normal");
+  });
+  it("gives no urgency to an unknown or past value", () => {
+    expect(dteUrgency(null)).toBe("unknown");
+    expect(dteUrgency(-1)).toBe("unknown");
+    expect(dteUrgency(Number.NaN)).toBe("unknown");
+  });
+});
+
+describe("moneynessTone (the colored 'OTM by $x / y%' line)", () => {
+  it("in the money is bad, regardless of distance", () => {
+    expect(moneynessTone({ moneyness: "ITM", percentageDistance: 0.4, bufferPercent: 3 })).toBe("bad");
+  });
+  it("out of the money inside the roll buffer is watch (CTVA: 2.5% away with a 3% buffer)", () => {
+    expect(moneynessTone({ moneyness: "OTM", percentageDistance: 2.5, bufferPercent: 3 })).toBe("watch");
+    expect(moneynessTone({ moneyness: "OTM", percentageDistance: 3, bufferPercent: 3 })).toBe("watch"); // boundary is inside, like the evaluator
+  });
+  it("out of the money beyond the buffer is good", () => {
+    expect(moneynessTone({ moneyness: "OTM", percentageDistance: 3.01, bufferPercent: 3 })).toBe("good");
+    expect(moneynessTone({ moneyness: "OTM", percentageDistance: 11.7, bufferPercent: 3 })).toBe("good");
+  });
+  it("at the strike is watch; unknown inputs give no color", () => {
+    expect(moneynessTone({ moneyness: "ATM", percentageDistance: 0, bufferPercent: 3 })).toBe("watch");
+    expect(moneynessTone({ moneyness: null, percentageDistance: 2, bufferPercent: 3 })).toBeNull();
+    expect(moneynessTone({ moneyness: "OTM", percentageDistance: null, bufferPercent: 3 })).toBeNull();
+  });
+  it("with no buffer known, an out-of-the-money position is simply good (never invented as watch)", () => {
+    expect(moneynessTone({ moneyness: "OTM", percentageDistance: 1, bufferPercent: null })).toBe("good");
   });
 });

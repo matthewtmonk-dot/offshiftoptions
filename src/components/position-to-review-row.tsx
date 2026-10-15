@@ -1,3 +1,4 @@
+import { DteBadge } from "@/components/dte-badge";
 import { Badge } from "@/components/ui";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { CreditKeptMeter } from "@/components/credit-kept-meter";
@@ -42,7 +43,8 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
   const tone = activityTone(activityLabel);
   // An awaiting-settlement leg has no meaningful "days left"/price-vs-strike story - never draw a
   // gauge or a countdown for it (a negative DTE next to "DTE" reads too easily as an active one).
-  const dteLabel = !awaitingSettlement && row.expiration ? dteChipLabel(daysToExpiration(row.expiration, now)) : null;
+  const dteValue = !awaitingSettlement && row.expiration ? daysToExpiration(row.expiration, now) : null;
+  const dteLabel = dteChipLabel(dteValue);
   const showGauge = !awaitingSettlement && row.display !== null;
   // Credit kept only applies to a still-active short put; never shown for a settlement-pending leg.
   const creditKept = !awaitingSettlement ? (row.creditKept ?? null) : null;
@@ -53,7 +55,7 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <span className="text-lg font-bold tracking-tight text-zinc-50">{row.ticker}</span>
           <Badge tone={tone}>{activityLabel}</Badge>
-          {dteLabel ? <span className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-xs font-semibold tabular-nums text-zinc-300">{dteLabel}</span> : null}
+          {dteLabel ? <DteBadge dte={dteValue} short /> : null}
         </div>
         {row.legType ? (
           <div className="mt-1 text-[13px] text-zinc-300 tabular-nums">

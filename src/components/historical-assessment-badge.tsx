@@ -2,7 +2,8 @@ import { Clock } from "lucide-react";
 import { Badge } from "@/components/ui";
 import { classifyLastValidTiming, type StoredLastValidAssessment } from "@/domain/finance/positionReviewAssessment";
 import { formatEtCompactDateTime, formatEtTime, money } from "@/lib/format";
-import { actionLabelFor, ICON_BY_ACTION, moneynessDistanceLabel, TONE_BY_ACTION } from "@/components/position-review-badge";
+import { actionLabelFor, ColoredDistance, ICON_BY_ACTION, moneynessDistanceLabel, TONE_BY_ACTION } from "@/components/position-review-badge";
+import { moneynessTone } from "@/domain/finance/strikeGauge";
 import { useLiveReferenceTime } from "@/components/use-live-reference-time";
 
 /**
@@ -86,7 +87,13 @@ export function HistoricalAssessmentEvidenceLine({ lastValid, now }: { lastValid
 
   return (
     <p className="mt-1 text-[13px] text-zinc-400">
-      {distanceLabel ? `${priceLabel} · ${distanceLabel}` : priceLabel}
+      {priceLabel}
+      {distanceLabel ? (
+        <>
+          {" · "}
+          <ColoredDistance label={distanceLabel} tone={moneynessTone({ ...lastValid, bufferPercent: lastValid.appliedRollBufferPercent })} />
+        </>
+      ) : null}
       <span className="block text-xs text-zinc-500">{lastValidTimingCopy(lastValid.evaluatedAt, liveNow)}</span>
     </p>
   );
