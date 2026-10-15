@@ -723,14 +723,33 @@ export function resultsPredateCurrentSettings(profileUpdatedAt: Date, evaluatedA
   return profileUpdatedAt.getTime() > evaluatedAt.getTime();
 }
 
+/**
+ * Form field names for the Scanner Rules page: `<ruleKey>_<part>` (for example `dte_min`).
+ *
+ * They used to be `<ruleKey>:<part>`. In production, saving the Criteria form was answered with HTTP 403
+ * "Forbidden" by something between the browser and the app (the browser reported "Forbidden"), while the
+ * other forms - whose field names contain no colon - saved fine. A colon in a field name is the one thing
+ * that set the failing form apart, so the names no longer contain one. The server still ACCEPTS the old
+ * colon names (see readScannerField) so a settings page opened before this change keeps working.
+ */
+export type ScannerFieldPart = "enabled" | "min" | "max" | "value";
+
+export function scannerFieldName(ruleKey: string, part: ScannerFieldPart): string {
+  return `${ruleKey}_${part}`;
+}
+
+export function readScannerField(formData: FormData, ruleKey: string, part: ScannerFieldPart): FormDataEntryValue | null {
+  return formData.get(scannerFieldName(ruleKey, part)) ?? formData.get(`${ruleKey}:${part}`);
+}
+
 export function parseScannerDesiredFromForm(definition: ScannerRuleDefinition, formData: FormData) {
   if (definition.input.kind === "boolean") {
     return false;
   }
 
   if (definition.input.kind === "range") {
-    const minValue = parseFiniteNumber(formData.get(`${definition.key}:min`));
-    const maxValue = parseFiniteNumber(formData.get(`${definition.key}:max`));
+    const minValue = parseFiniteNumber(readScannerField(formData, definition.key, "min"));
+    const maxValue = parseFiniteNumber(readScannerField(formData, definition.key, "max"));
     if (minValue === null || maxValue === null || minValue > maxValue) {
       throw new Error(`Enter a valid range for ${definition.name}.`);
     }
@@ -738,7 +757,7 @@ export function parseScannerDesiredFromForm(definition: ScannerRuleDefinition, f
     return [minValue, maxValue] as [number, number];
   }
 
-  const value = parseFiniteNumber(formData.get(`${definition.key}:value`));
+  const value = parseFiniteNumber(readScannerField(formData, definition.key, "value"));
   if (value === null) {
     throw new Error(`Enter a valid value for ${definition.name}.`);
   }

@@ -13,7 +13,7 @@ import type {
   RollFriendliness,
   WouldOwnStatus,
 } from "@/generated/prisma/enums";
-import { evaluateDemoScan, GATING_RULE_KEYS, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
+import { evaluateDemoScan, GATING_RULE_KEYS, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS, readScannerField } from "@/domain/scanner/profile";
 import { classifyReadiness } from "@/domain/scanner/scanner";
 import { sanitizeResearchColumns, isResearchSortKey } from "@/domain/research/columns";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
@@ -2350,7 +2350,7 @@ export async function updateScannerSettingsForUser(userId: string, formData: For
     definition,
     index,
     desired: parseScannerDesiredFromForm(definition, formData),
-    enabled: formData.get(`${definition.key}:enabled`) === "on",
+    enabled: readScannerField(formData, definition.key, "enabled") === "on",
   }));
 
   await replaceScannerRules(

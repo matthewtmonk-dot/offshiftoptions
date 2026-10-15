@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { diffScannerRulesFromLstCore, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "./profile";
+import {
+  diffScannerRulesFromLstCore,
+  parseScannerDesiredFromForm,
+  readScannerField,
+  resultsPredateCurrentSettings,
+  SCANNER_RULE_DEFINITIONS,
+  scannerFieldName,
+  type ScannerFieldPart,
+} from "./profile";
 
 describe("LST Core profile diff", () => {
   it("reports no differences for records matching the LST Core defaults", () => {
@@ -105,5 +113,53 @@ describe("resultsPredateCurrentSettings - Astra follow-up: overlapping save/scan
   it("4. settings saved, then a brand-new scan reads the already-current rules -> no warning", () => {
     const newScanReadsRulesAt = new Date("2026-09-21T14:05:00Z"); // after settingsSavedAt
     expect(resultsPredateCurrentSettings(settingsSavedAt, newScanReadsRulesAt)).toBe(false);
+  });
+});
+
+describe("scanner form field names (no colon - a hosting firewall answered 403 Forbidden to colon names)", () => {
+  const formWith = (name: (key: string, part: ScannerFieldPart) => string) => {
+    const formData = new FormData();
+    for (const definition of SCANNER_RULE_DEFINITIONS) {
+      formData.set(name(definition.key, "enabled"), "on");
+      if (Array.isArray(definition.defaultDesired)) {
+        formData.set(name(definition.key, "min"), String(definition.defaultDesired[0]));
+        formData.set(name(definition.key, "max"), String(definition.defaultDesired[1]));
+      } else if (definition.input.kind === "single") {
+        formData.set(name(definition.key, "value"), String(definition.defaultDesired));
+      }
+    }
+    return formData;
+  };
+
+  it("never contains a colon, for any rule or part", () => {
+    for (const definition of SCANNER_RULE_DEFINITIONS) {
+      for (const part of ["enabled", "min", "max", "value"] as const) {
+        expect(scannerFieldName(definition.key, part)).not.toContain(":");
+      }
+    }
+    expect(scannerFieldName("dte", "min")).toBe("dte_min");
+  });
+
+  it("parses a complete form submitted with the new names", () => {
+    const formData = formWith(scannerFieldName);
+    for (const definition of SCANNER_RULE_DEFINITIONS) {
+      expect(parseScannerDesiredFromForm(definition, formData)).toEqual(definition.input.kind === "boolean" ? false : definition.defaultDesired);
+    }
+  });
+
+  it("still parses a form submitted with the OLD colon names (a page opened before the change)", () => {
+    const formData = formWith((key, part) => `${key}:${part}`);
+    for (const definition of SCANNER_RULE_DEFINITIONS) {
+      expect(parseScannerDesiredFromForm(definition, formData)).toEqual(definition.input.kind === "boolean" ? false : definition.defaultDesired);
+    }
+    expect(readScannerField(formData, "dte", "min")).toBe("3");
+  });
+
+  it("prefers the new name when both are present, and reports a missing field as null", () => {
+    const formData = new FormData();
+    formData.set("dte:min", "1");
+    formData.set("dte_min", "5");
+    expect(readScannerField(formData, "dte", "min")).toBe("5");
+    expect(readScannerField(formData, "dte", "max")).toBeNull();
   });
 });
