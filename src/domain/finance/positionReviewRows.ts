@@ -1,4 +1,5 @@
 import type { CampaignCurrentStage } from "./campaigns";
+import type { CreditKeptSummary } from "./creditKept";
 import { comparePositionReviewPriority } from "./positionReview";
 import { isRoutineCannotAssessReason, underlyingPositionReviewResult, type PositionAssessmentDisplay } from "./positionReviewAssessment";
 import { resolveEffectivePresentation, type EffectivePresentation } from "./presentationFreshness";
@@ -28,6 +29,9 @@ export type PositionToReviewRow = {
   /** Contracts for an option leg, shares held for an assigned-with-no-call row. */
   quantity: number | null;
   quantityUnit: "contracts" | "shares" | null;
+  /** Dashboard "credit kept" (creditKept.ts) - optional presentation enrichment, absent/null when no
+   * trustworthy mark exists. Never read by any status/priority/attention logic. */
+  creditKept?: CreditKeptSummary | null;
 };
 
 /**

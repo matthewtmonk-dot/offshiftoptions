@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
+import { CreditKeptMeter } from "@/components/credit-kept-meter";
 import { PositionStrikeGauge } from "@/components/position-strike-gauge";
 import type { PositionToReviewDisplayRow } from "@/domain/finance/positionReviewRows";
 import { money, shortCalendarDate } from "@/lib/format";
@@ -43,8 +44,11 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
   // gauge or a countdown for it (a negative DTE next to "DTE" reads too easily as an active one).
   const dteLabel = !awaitingSettlement && row.expiration ? dteChipLabel(daysToExpiration(row.expiration, now)) : null;
   const showGauge = !awaitingSettlement && row.display !== null;
+  // Credit kept only applies to a still-active short put; never shown for a settlement-pending leg.
+  const creditKept = !awaitingSettlement ? (row.creditKept ?? null) : null;
+  const showMiddle = showGauge || creditKept !== null;
   return (
-    <div className={`grid items-center gap-x-4 gap-y-2 rounded-lg border border-l-[3px] border-zinc-800 bg-zinc-900 px-3.5 py-2.5 ${RAIL_BY_TONE[tone]} ${showGauge ? "md:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_9.75rem]" : "md:grid-cols-[minmax(0,1fr)_auto]"}`}>
+    <div className={`grid items-center gap-x-4 gap-y-2 rounded-lg border border-l-[3px] border-zinc-800 bg-zinc-900 px-3.5 py-2.5 ${RAIL_BY_TONE[tone]} ${showMiddle ? "md:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_9.75rem]" : "md:grid-cols-[minmax(0,1fr)_auto]"}`}>
       <div className="min-w-0">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <span className="text-lg font-bold tracking-tight text-zinc-50">{row.ticker}</span>
@@ -63,7 +67,12 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
         ) : null}
         {row.display ? <LivePositionAssessmentEvidenceLine display={row.display} now={now} /> : null}
       </div>
-      {showGauge && row.display ? <PositionStrikeGauge display={row.display} now={now} /> : null}
+      {showMiddle ? (
+        <div className="space-y-1.5">
+          {showGauge && row.display ? <PositionStrikeGauge display={row.display} now={now} /> : null}
+          {creditKept ? <CreditKeptMeter summary={creditKept} /> : null}
+        </div>
+      ) : null}
       <div className="flex shrink-0 items-center gap-2 md:justify-end">
         {row.display ? <LivePositionAssessmentBadge display={row.display} now={now} /> : <Badge tone="neutral">{loading ? "Checking…" : "Review needed"}</Badge>}
       </div>
