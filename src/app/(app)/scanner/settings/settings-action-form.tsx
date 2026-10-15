@@ -37,6 +37,12 @@ export function SettingsStatusBanner() {
   return (
     <div ref={ref} role={status.kind === "error" ? "alert" : "status"} aria-live="polite" data-testid="settings-status" className={`rounded-md border px-3 py-2 text-sm ${tone}`}>
       {status.kind === "pending" ? "Saving… this can take a few seconds." : status.message}
+      {status.kind === "error" ? (
+        <>
+          {" "}
+          <a href="/account/diagnostics" target="_blank" rel="noopener" className="underline underline-offset-2">Open diagnostics</a>
+        </>
+      ) : null}
     </div>
   );
 }

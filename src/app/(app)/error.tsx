@@ -32,6 +32,9 @@ export default function AppError({ error, reset }: { error: Error & { digest?: s
         <Link href="/dashboard" className="inline-flex min-h-10 items-center rounded-md border border-zinc-700 px-4 text-sm font-medium text-zinc-200 hover:border-zinc-500">
           Go to Dashboard
         </Link>
+        <Link href="/account/diagnostics" className="inline-flex min-h-10 items-center rounded-md border border-zinc-700 px-4 text-sm font-medium text-zinc-400 hover:border-zinc-500">
+          Diagnostics
+        </Link>
       </div>
     </div>
   );
