@@ -75,7 +75,7 @@ export function contractReasonCodeFromSnapshot(snapshot: unknown): unknown {
 export function notEnrichedScanNote(state: NotEnrichedState, chainBudget: number): string {
   switch (state) {
     case "NOT_ENRICHED_BUDGET":
-      return `Options not checked - this ticker ranked outside the top ${chainBudget} option-chain enrichment budget for this scan.`;
+      return `Options not checked yet - this ticker was beyond the first ${chainBudget} option checks made during this scan. Use Check options to price it.`;
     case "NOT_ENRICHED_STOCK_FILTER":
       return "Options not checked - this stock did not qualify on the stock-level screen.";
     case "NOT_ENRICHED_DATA_UNAVAILABLE":
@@ -109,7 +109,7 @@ export function scannerRowReasons(state: unknown, unknownCriterionReasons: strin
 export function notOptionAssessedLabel(state: unknown, chainBudget: number): string | null {
   switch (state) {
     case "NOT_ENRICHED_BUDGET":
-      return `Options not checked — outside top-${chainBudget} enrichment budget`;
+      return `Options not checked yet — beyond the first ${chainBudget} auto-checked (use Check options)`;
     case "NOT_ENRICHED_STOCK_FILTER":
       return "Options not checked — stock screen did not qualify";
     case "NOT_ENRICHED_DATA_UNAVAILABLE":

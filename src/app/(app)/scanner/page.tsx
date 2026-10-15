@@ -15,17 +15,21 @@ import {
   type ScannerRule,
 } from "@/domain/scanner/scanner";
 import { GATING_RULE_KEYS, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
+import { STOCK_STAGE_RULE_KEYS } from "@/domain/scanner/live-scan";
+import { buildScannerFunnel, describeScannerFunnel, funnelInputOf, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
+import { scannerTimingGuide } from "@/domain/scanner/timingGuide";
 import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
 import { prisma } from "@/lib/prisma";
 import { shortCalendarDate } from "@/lib/format";
 import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
-import { ensureMyLstScannerProfileForUser } from "@/lib/workflows";
+import { ensureMyLstScannerProfileForUser, MAX_DISPLAYED_STOCK_STAGE_RESULTS } from "@/lib/workflows";
 import { getCoveredCallScanForUser } from "@/lib/covered-call-scanner";
 import { runDemoScannerAction } from "../actions";
 import { CoveredCallScannerSection } from "./covered-call-scanner-section";
 import { LiveScanButton } from "./live-scan-button";
+import { OptionCheckButton } from "./option-check-button";
 import { ScannerModeTabs, type ScannerMode } from "./scanner-mode-tabs";
 import { ScannerWorkspace } from "./scanner-workspace";
 
@@ -53,6 +57,11 @@ export type ScannerViewResult = {
    * scanner.ts) - every row badge, one-click filter, and header count must read this field rather
    * than re-deriving its own notion of "near" or "pass". */
   readiness: ScannerReadiness;
+  /** Verdict over ONLY the enabled stock-level rules (price, volume, RSI, %B, earnings...) - lets the
+   * funnel tell "failed the stock screen" apart from "qualified but options not priced yet". */
+  stockScreen: StockScreenVerdict;
+  /** Set when RSI/Bollinger weren't ready (pending/stale/failed technical cache) for this row. */
+  technicalReasonCode: string | null;
   concern: CriterionResult | null;
   researchStatus: ResearchStatus | null;
   values: {
@@ -153,6 +162,11 @@ async function loadScannerPageBundle(userId: string) {
  * client/server boundaries and the constant itself is trivial; keep both in sync if changed. */
 const MATERIAL_TECHNICAL_COVERAGE_THRESHOLD = 0.9;
 
+/** Plain helper outside the component so render stays pure (same reason as loadScannerPageBundle). */
+function currentTimingGuide() {
+  return scannerTimingGuide(new Date());
+}
+
 export default async function ScannerPage({
   searchParams,
 }: {
@@ -206,6 +220,11 @@ export default async function ScannerPage({
   const passCount = allResults.filter((result) => result.readiness === "PASS").length;
   const nearMatchCount = allResults.filter((result) => result.readiness === "NEAR").length;
   const unknownCount = allResults.filter((result) => result.readiness === "NEEDS_DATA").length;
+  const funnel = buildScannerFunnel(allResults.map(funnelInputOf));
+  // The saved list is capped (MAX_DISPLAYED_STOCK_STAGE_RESULTS non-Research rows), so when it's full
+  // the funnel counts are a floor, not an exact total.
+  const funnelTruncated = allResults.filter((result) => !researchByTicker.has(result.record.ticker)).length >= MAX_DISPLAYED_STOCK_STAGE_RESULTS;
+  const timingGuide = currentTimingGuide();
   const averageScore = allResults.length
     ? Math.round(allResults.reduce((sum, result) => sum + result.score, 0) / allResults.length)
     : 0;
@@ -294,6 +313,27 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
+      <div
+        data-testid="scanner-timing-guide"
+        data-phase={timingGuide.phase}
+        className={`rounded-md border px-3 py-2 text-sm ${
+          timingGuide.tone === "caution" ? "border-amber-400/30 bg-amber-400/10 text-amber-100" : "border-sky-400/30 bg-sky-400/5 text-sky-100"
+        }`}
+      >
+        <p className="font-medium">{timingGuide.headline}</p>
+        <p className={`mt-0.5 ${timingGuide.tone === "caution" ? "text-amber-200/90" : "text-sky-200/90"}`}>{timingGuide.detail}</p>
+        <details className="mt-1.5">
+          <summary className="cursor-pointer text-xs underline underline-offset-2 opacity-80 hover:opacity-100">The weekly routine</summary>
+          <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-xs opacity-90">
+            <li><strong>Saturday afternoon or Sunday:</strong> Run Live Scan, then Check options, and save the names you like to Research. This is your shortlist.</li>
+            <li><strong>Monday around 10:30 AM ET:</strong> Run a fresh scan. Weekend option prices were Friday&apos;s close and reset at the open - only names that still PASS are worth acting on.</li>
+            <li><strong>Mon-Thu around 3:00 PM ET:</strong> Check open positions on the Dashboard.</li>
+            <li><strong>Friday around 3:00 PM ET:</strong> Roll call on expiring positions. Fresh research waits for Saturday afternoon.</li>
+          </ol>
+          <p className="mt-1.5 text-xs opacity-80">A timing aid only - not an instruction to place a trade. Execution stays in Schwab/thinkorswim.</p>
+        </details>
+      </div>
+
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300">
         <span>
           <strong className="text-zinc-50">{allResults.length}</strong> candidates
@@ -312,6 +352,18 @@ export default async function ScannerPage({
         </span>
         {run ? <span className="ml-auto text-xs text-zinc-500">Last run: {shortRunTime(run.createdAt)}</span> : null}
       </div>
+
+      {isLiveSchwabRun && allResults.length > 0 ? (
+        <div data-testid="scanner-funnel" className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2">
+          <div className="min-w-0 text-sm text-zinc-300">
+            <p>{describeScannerFunnel(funnel, { truncated: funnelTruncated })}</p>
+            <p className="mt-0.5 text-xs text-zinc-500">
+              The scan auto-prices options for only the first few names. Check options prices the rest of the qualified stocks so nothing worthwhile is missed.
+            </p>
+          </div>
+          {funnel.awaitingOptionCheck > 0 ? <OptionCheckButton awaiting={funnel.awaitingOptionCheck} /> : null}
+        </div>
+      ) : null}
 
       <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} />
     </div>
@@ -334,6 +386,8 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
     score,
     scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
     readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment, contractReasonCode),
+    stockScreen: stockScreenVerdictOf(summary),
+    technicalReasonCode: snapshotString(result.snapshotJson, "technicalReasonCode"),
     concern: primaryConcern(summary.results),
     researchStatus: researchByTicker.get(result.ticker) ?? null,
     values: {
@@ -369,6 +423,14 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
       scanNote: snapshotString(result.snapshotJson, "scanNote"),
     },
   };
+}
+
+/** Verdict over ONLY the stock-level criteria (the same STOCK_STAGE_RULE_KEYS the scan shortlists on). */
+function stockScreenVerdictOf(summary: ScanSummary): StockScreenVerdict {
+  const stock = summary.results.filter((criterion) => STOCK_STAGE_RULE_KEYS.has(criterion.key));
+  if (stock.some((criterion) => criterion.status === "FAIL")) return "FAIL";
+  if (stock.some((criterion) => criterion.status === "UNKNOWN")) return "UNKNOWN";
+  return "PASS";
 }
 
 function toDomainSummary(result: ScannerResult): ScanSummary {
