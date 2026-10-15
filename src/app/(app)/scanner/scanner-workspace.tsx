@@ -25,6 +25,7 @@ import {
   scannerRowReasons,
   NOT_OPTION_ASSESSED_BADGE,
 } from "@/domain/scanner/option-enrichment";
+import { funnelInputOf, isWorthALook } from "@/domain/scanner/scannerFunnel";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
 import { money, percent, shortDate, shortDateTime, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
@@ -46,7 +47,7 @@ type SortKey =
   | "spreadPercent"
   | "earningsDistance";
 
-type QuickKey = "all" | "pass" | "near" | "watchlist" | "strongest" | "premium" | "liquid" | "low-rsi" | "far-earnings";
+type QuickKey = "worth" | "all" | "pass" | "near" | "watchlist" | "strongest" | "premium" | "liquid" | "low-rsi" | "far-earnings";
 type QuickResearchStatus = "LIKE" | "WATCH" | "NEUTRAL" | "AVOID" | "NEVER_TRADE";
 type ScannerStatusOverride = {
   baseResult: ScannerViewResult;
@@ -75,10 +76,11 @@ const sortOptions: { key: SortKey; label: string }[] = [
 ];
 
 const oneClickFilters: { key: QuickKey; label: string }[] = [
-  { key: "all", label: "All" },
+  { key: "worth", label: "Worth a look" },
   { key: "pass", label: "Pass" },
   { key: "near", label: "Near" },
   { key: "watchlist", label: "Watchlist" },
+  { key: "all", label: "All" },
 ];
 
 const advancedFilters: { key: QuickKey; label: string }[] = [
@@ -112,7 +114,10 @@ export function ScannerWorkspace({
   const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, ScannerStatusOverride | undefined>>({});
   const [pendingStatuses, setPendingStatuses] = useState<Record<string, QuickResearchStatus | undefined>>({});
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [quick, setQuick] = useState<QuickKey>("all");
+  // Default to "Worth a look" (PASS/NEAR plus qualified names awaiting an option check) so the page
+  // doesn't open on ~100 rows of stock-screen-only noise. A run that predates option-assessment
+  // tracking (or a demo run) can't be classified that way, so it keeps showing everything.
+  const [quick, setQuick] = useState<QuickKey>(() => (results.some((result) => result.values.optionEnrichment !== null) ? "worth" : "all"));
   const [sort, setSort] = useState<SortKey>("score");
   const [showExcluded, setShowExcluded] = useState(false);
   const [columns, setColumns] = useState<Record<OptionalColumnKey, boolean>>({
@@ -176,6 +181,8 @@ export function ScannerWorkspace({
       pass: actionable.filter((result) => result.readiness === "PASS").length,
       near: actionable.filter((result) => result.readiness === "NEAR").length,
       watchlist: actionable.filter((result) => result.researchStatus !== null).length,
+      worth: actionable.filter((result) => isWorthALook(funnelInputOf(result))).length,
+      all: actionable.length,
     }),
     [actionable],
   );
@@ -274,11 +281,7 @@ export function ScannerWorkspace({
             }`}
           >
             {filter.label}
-            {filter.key !== "all" ? (
-              <span className="text-[10px] text-zinc-500">
-                {filter.key === "pass" ? counts.pass : filter.key === "near" ? counts.near : counts.watchlist}
-              </span>
-            ) : null}
+            <span className="text-[10px] text-zinc-500">{counts[filter.key as "worth" | "pass" | "near" | "watchlist" | "all"]}</span>
           </button>
         ))}
 
@@ -560,7 +563,7 @@ export function ScannerWorkspace({
         </table>
         {!visible.length ? (
           <div className="p-4">
-            <EmptyState>No scanner candidates match this view.</EmptyState>
+            <EmptyState>{emptyViewMessage(quick)}</EmptyState>
           </div>
         ) : null}
       </div>
@@ -575,7 +578,7 @@ export function ScannerWorkspace({
             onResearchStatusChange={changeResearchStatus}
           />
         ))}
-        {!visible.length ? <EmptyState>No scanner candidates match this view.</EmptyState> : null}
+        {!visible.length ? <EmptyState>{emptyViewMessage(quick)}</EmptyState> : null}
       </div>
     </div>
   );
@@ -1068,8 +1071,16 @@ function resultBorder(result: ScannerViewResult) {
   return "border-zinc-800";
 }
 
+function emptyViewMessage(quick: QuickKey): string {
+  return quick === "worth"
+    ? "Nothing in this scan is worth a look right now: no PASS or NEAR candidates, and no qualified stock still waiting for an option check. Choose All to see everything that was screened, or run a fresh scan after the next data update."
+    : "No scanner candidates match this view.";
+}
+
 function applyQuickFilter(results: ScannerViewResult[], quick: QuickKey) {
   switch (quick) {
+    case "worth":
+      return results.filter((result) => isWorthALook(funnelInputOf(result)));
     case "pass":
       return results.filter((result) => result.readiness === "PASS");
     case "near":

@@ -106,10 +106,18 @@ type StockStageCandidate = {
   verifiedFundamentals?: QuoteFundamentals | null;
 };
 
+/** The only parts of a stock-stage candidate contract selection actually reads: its stock-level
+ * values and the current price. Narrow on purpose so a persisted row (no live quote object) can be
+ * option-checked later through the SAME selection code a full scan uses. */
+type OptionStageCandidate = {
+  values: Record<string, number | string | boolean | null | undefined>;
+  quote: { price: number };
+};
+
 export const STARTER_LIVE_SCAN_UNIVERSE = [...new Set(DEMO_SCAN_CANDIDATES.map((candidate) => candidate.ticker))];
 export const OPTION_CHAIN_ENRICHMENT_LIMIT = 8;
 export const WEEKLY_TARGET_DTE = 7;
-const STOCK_STAGE_RULE_KEYS = new Set(["price", "stockVolume", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
+export const STOCK_STAGE_RULE_KEYS = new Set(["price", "stockVolume", "rsi", "bbPercent", "doNotTrade", "debtToEquity", "earningsDistance"]);
 /** Stage 1 of the stock-level funnel: rules answerable from a quote alone, with no history
  * fetch or technical-cache read. Kept as a subset of STOCK_STAGE_RULE_KEYS, never a separate rule
  * vocabulary - see evaluateLiveMarketScan's two-stage stock funnel below. Includes stockVolume
@@ -700,7 +708,7 @@ function compareText(left: string, right: string) {
  * eliminates a contract from being selectable.
  */
 function bestPutValues(
-  candidate: StockStageCandidate,
+  candidate: OptionStageCandidate,
   options: OptionContractSnapshot[],
   rules: ScannerRule[],
   asOf: Date,
@@ -823,7 +831,7 @@ export function passesEnabledGate(values: Record<string, number | string | boole
  *    when that retrieval fell on a day the exchange was closed - a request made Sunday does not
  *    make Friday's last-known quote a live Sunday quote.
  */
-function candidateValues(candidate: StockStageCandidate, option: OptionContractSnapshot, asOf: Date) {
+function candidateValues(candidate: OptionStageCandidate, option: OptionContractSnapshot, asOf: Date) {
   const dte = daysToExpiration(option.expiration, asOf);
   const premium = option.mark || midpoint(option.bid, option.ask);
   const ror = cashSecuredReturnOnRisk(option.bid, option.strike, 1);
@@ -926,6 +934,82 @@ function numericValue(value: unknown) {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Every key that belongs to the OPTION half of a row (the contract OSO selected, or the
+ * "not assessed"/"no contract" bookkeeping). Stripping exactly these from a persisted row recovers
+ * the stock-level values the original scan computed, so the row can be option-checked later
+ * without refetching anything stock-level.
+ */
+const OPTION_STAGE_VALUE_KEYS: readonly string[] = [
+  ...Object.keys(unknownOptionValues()),
+  "optionSymbol",
+  "optionSelectionTargetDte",
+  "optionSelectionReason",
+  "optionSelectionPreferredExpiration",
+  "optionSelectionFallback",
+  "optionEnrichment",
+  "scanNote",
+];
+
+/** Verdict over ONLY the enabled stock-level rules (same STOCK_STAGE_RULE_KEYS the scan shortlists on). */
+export function stockScreenVerdict(
+  rules: ScannerRule[],
+  values: Record<string, number | string | boolean | null | undefined>,
+): "PASS" | "FAIL" | "UNKNOWN" {
+  const status = evaluateCandidate(rules.filter((rule) => STOCK_STAGE_RULE_KEYS.has(rule.key)), values).status;
+  return status === "FAIL" ? "FAIL" : status === "UNKNOWN" ? "UNKNOWN" : "PASS";
+}
+
+function persistedStockValues(values: Record<string, number | string | boolean | null | undefined>) {
+  const stockValues: Record<string, number | string | boolean | null | undefined> = { ...values };
+  for (const key of OPTION_STAGE_VALUE_KEYS) delete stockValues[key];
+  return stockValues;
+}
+
+/** True when a persisted row can be option-checked honestly: it has a usable stored price and still
+ * passes every enabled stock-level rule under the supplied rules. The on-demand checker uses this
+ * to pick WHICH rows to spend a chain request on, so it never fetches a chain it would then discard. */
+export function isPersistedRowOptionCheckable(
+  values: Record<string, number | string | boolean | null | undefined>,
+  rules: ScannerRule[],
+): boolean {
+  const stockValues = persistedStockValues(values);
+  const price = numericValue(stockValues.price);
+  return price !== null && price > 0 && stockScreenVerdict(rules, stockValues) === "PASS";
+}
+
+/**
+ * "Check options" for a row a previous scan stock-screened but never priced (NOT_ENRICHED_BUDGET):
+ * given that row's persisted values and its freshly fetched PUT chain, run the SAME contract
+ * selection (`bestPutValues`) and the SAME criterion evaluation a full scan would have, and return
+ * the new persisted values + summary. Pure - no fetching, no persistence. Returns null when the row
+ * cannot be option-checked honestly (no stored price, or it no longer passes the stock screen under
+ * the supplied rules): the caller must leave such a row untouched rather than guess.
+ */
+export function enrichPersistedStockStageRow({
+  values,
+  options,
+  rules,
+  asOf,
+}: {
+  values: Record<string, number | string | boolean | null | undefined>;
+  options: OptionContractSnapshot[];
+  rules: ScannerRule[];
+  asOf: Date;
+}) {
+  const stockValues = persistedStockValues(values);
+  const price = numericValue(stockValues.price);
+  if (price === null || price <= 0 || stockScreenVerdict(rules, stockValues) !== "PASS") return null;
+
+  // Widened to the persisted-values shape on purpose: bestPutValues returns one of two object
+  // shapes (a selected contract, or a "no contract" blank), and every consumer reads these by key.
+  const enriched: Record<string, number | string | boolean | null | undefined> = {
+    ...bestPutValues({ values: stockValues, quote: { price } }, options, rules, asOf),
+    optionEnrichment: "ENRICHED",
+  };
+  return { values: enriched, summary: evaluateCandidate(rules, enriched) };
 }
 
 /**

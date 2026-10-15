@@ -43,7 +43,7 @@ This is a transport narrowing only: the requested window is the *same* horizon `
 | State | Meaning | Scanner badge |
 |---|---|---|
 | `ENRICHED` | A chain request was spent on this ticker, successful or not (a failed request is still an assessment - see `CHAIN_UNAVAILABLE`) | unchanged PASS/NEAR/FAIL/VERIFY |
-| `NOT_ENRICHED_BUDGET` | Shortlist-eligible but ranked outside the cap | `STOCK SCREEN ONLY` - "outside top-8 enrichment budget" |
+| `NOT_ENRICHED_BUDGET` | Shortlist-eligible but ranked outside the cap | `STOCK SCREEN ONLY` - "beyond the first 8 auto-checked (use Check options)" |
 | `NOT_ENRICHED_STOCK_FILTER` | A known stock-level FAIL excluded it before options were worth pricing; it never competed for the budget | `STOCK SCREEN ONLY` - "stock screen did not qualify" |
 | `NOT_ENRICHED_DATA_UNAVAILABLE` | The quote/history needed to even run the stock screen failed | `STOCK SCREEN ONLY` - "stock data unavailable" |
 
@@ -54,6 +54,16 @@ Engineering diagnostics are stored in the existing `ScanResult.snapshotJson`, wi
 **Separate follow-up:** earnings distance still means days from today, not earnings after expiration. Matt's September 16 NKE observation (16 DTE / earnings in 15 days) requires a separate product decision; this slice does not change that rule.
 
 **Open decision - UNKNOWN score credit (deliberately not changed):** `setupScore` awards 0.45 (45%) for every UNKNOWN criterion, so a stock-clean row whose options were never requested still scores around 79/100 on three option inputs nobody fetched. That inflates the average score and the near-match counts, which therefore partly measure missing data rather than market quality. Changing it alters scoring semantics for every row, so it needs an explicit product decision - the enrichment-disposition work above deliberately left every score, near-match count and label untouched.
+
+### Scanner clarity pass (October 14, 2026)
+
+**Why results looked thin.** A live scan screens ~6,000 optionable stocks down to the (often 100+) that pass price, volume, RSI, Bollinger %B and earnings, but auto-prices options for only the first 8 by `(RSI) + (BB%)/10`. The most-oversold names are not necessarily the ones with liquid weekly options, so the 8 priced rows frequently produced one or two PASSes while strong candidates sat un-priced as `STOCK SCREEN ONLY`.
+
+1. **Default view = "Worth a look".** PASS or NEAR rows, plus stock-qualified rows still awaiting an option check. Failed-stock-screen, data-unavailable and priced-but-not-close rows remain under **All**. Pure logic: `src/domain/scanner/scannerFunnel.ts`. The funnel sentence ("N passed the stock screen - M had options priced - ...") is derived from persisted rows, so counts are a floor when the saved list is full (`MAX_DISPLAYED_STOCK_STAGE_RESULTS`).
+2. **Check options.** `checkMoreScannerOptionsForUser` (`src/lib/scanner-option-check.ts`) prices up to 12 `NOT_ENRICHED_BUDGET` rows per call, most-oversold first, from the user's own latest LIVE scan, via `enrichPersistedStockStageRow` (the same `bestPutValues` contract selection and `evaluateCandidate` a full scan uses). Refuses when the scan is older than 24 h (stored price/RSI/Bollinger are scan-time values) or the user's rules changed after the scan. A failed chain request leaves the row untouched (retryable) - it is never written as "no options".
+3. **Timing guide.** `src/domain/scanner/timingGuide.ts`: weekend research from Saturday noon ET (technical prep's Saturday window ends 12:00 PM ET), Monday ~10:30 AM ET confirmation scan, Mon-Thu 3:00 PM position check, Friday roll call.
+
+**Open product decisions (not changed here):** (a) among strikes that satisfy every enabled gate the selector still prefers the highest annualized ROR - the strike closest to the stock price - rather than the most cushion that still meets the ROR target; (b) delta / spread / DTE / annualized-ROR rules are off by default; (c) the UNKNOWN score credit above.
 
 ## Historical seeded Phase 1 Rules
 

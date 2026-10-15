@@ -67,7 +67,7 @@ describe("option enrichment disposition", () => {
     expect(budgetMisses.map((row) => row.ticker)).toEqual(tickers.slice(OPTION_CHAIN_ENRICHMENT_LIMIT));
     expect(input.chainCalls).toHaveLength(OPTION_CHAIN_ENRICHMENT_LIMIT);
     // The honest reason is machine-readable AND in the note - never "Schwab had no option data".
-    expect(budgetMisses[0].values.scanNote).toContain("outside the top 8");
+    expect(budgetMisses[0].values.scanNote).toContain("beyond the first 8");
     expect(budgetMisses[0].values.strike).toBeNull();
   });
 

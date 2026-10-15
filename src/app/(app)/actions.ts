@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getCurrentSessionTokenHash, requireCurrentUser, signOut } from "@/lib/auth";
 import { changePasswordForUser } from "@/lib/account";
+import { checkMoreScannerOptionsForUser, type OptionCheckOutcome } from "@/lib/scanner-option-check";
 import {
   addAccountLedgerEntryForUser,
   addReactionForUser,
@@ -451,6 +452,21 @@ export async function runLiveSchwabScannerAction(): Promise<RunLiveScanResult> {
     }
     throw error;
   }
+}
+
+/**
+ * "Check options" for the Scanner - prices the next bounded batch of stock-qualified candidates the
+ * last live scan had no option-chain budget for. Owner-scoped (the signed-in user's own latest scan
+ * only) and read-only toward the brokerage; see scanner-option-check.ts for every safety rule.
+ */
+export async function checkMoreScannerOptionsAction(): Promise<OptionCheckOutcome> {
+  const user = await requireCurrentUser();
+  const outcome = await checkMoreScannerOptionsForUser(user.id);
+  if (outcome.ok && outcome.checked > 0) {
+    revalidatePath("/scanner");
+    revalidatePath("/dashboard");
+  }
+  return outcome;
 }
 
 export async function runSchwabTransactionsDiagnosticAction(): Promise<SchwabTransactionsDiagnosticResult> {
