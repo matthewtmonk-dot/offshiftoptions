@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   db: {
     scanRun: { findFirst: vi.fn() },
     scannerRule: { findMany: vi.fn() },
-    scanResult: { update: vi.fn((args: unknown) => ({ op: "update", args })) },
+    scanResult: { update: vi.fn((args: unknown) => ({ op: "update", args })), findMany: vi.fn() },
     scanCriterionResult: {
       deleteMany: vi.fn((args: unknown) => ({ op: "deleteMany", args })),
       createMany: vi.fn((args: unknown) => ({ op: "createMany", args })),
@@ -42,9 +42,9 @@ function put(overrides: Partial<OptionContractSnapshot> = {}): OptionContractSna
 }
 
 /** A real budget-limited row from the real scan engine, shaped exactly as persisted (undefined -> null). */
-async function storedRow(ticker: string, overrides: { rsi?: number } = {}) {
+async function storedRow(ticker: string, overrides: { rsi?: number; volume?: number } = {}) {
   const provider: MarketDataProvider = {
-    async getQuote(symbol) { return { symbol, price: 20, volume: 100_000, asOf: SCAN_TIME }; },
+    async getQuote(symbol) { return { symbol, price: 20, volume: overrides.volume ?? 100_000, asOf: SCAN_TIME }; },
     async getPriceHistory() { throw new Error("n/a"); },
     async getOptionChain() { return []; },
     async getInstrument(symbol) { return { symbol, description: symbol, assetType: "EQUITY" }; },
@@ -60,8 +60,8 @@ async function storedRow(ticker: string, overrides: { rsi?: number } = {}) {
 }
 
 function fakeProvider(chainFor: (ticker: string) => OptionContractSnapshot[] | Error = () => [put()]) {
-  const getOptionChain = vi.fn(async (ticker: string, _request?: unknown) => {
-    const result = chainFor(ticker);
+  const getOptionChain = vi.fn(async (...args: [ticker: string, request?: unknown]) => {
+    const result = chainFor(args[0]);
     if (result instanceof Error) throw result;
     return result;
   });
@@ -76,6 +76,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.ensureProfile.mockResolvedValue({ id: "profile-1", updatedAt: new Date("2026-09-01T00:00:00Z") });
   mocks.db.scannerRule.findMany.mockResolvedValue(ruleRecords);
+  mocks.db.scanResult.findMany.mockResolvedValue([]);
   mocks.db.$transaction.mockImplementation(async (ops: unknown[]) => ops);
 });
 
@@ -135,7 +136,35 @@ describe("checkMoreScannerOptionsForUser", () => {
     expect(ops.filter((op) => op.op === "update").map((op) => op.args.where?.id)).toEqual(["result-AAA"]);
   });
 
-  it("caps a call at the batch size and checks the most oversold names first", async () => {
+  it("prices the most LIQUID names first (shares x price), not merely the most oversold", async () => {
+    // BBB is the most oversold but trades 50k shares; CCC trades 20M. Cap the batch at 2 to see who wins.
+    mockRun([await storedRow("AAA", { rsi: 30, volume: 2_000_000 }), await storedRow("BBB", { rsi: 22, volume: 50_000 }), await storedRow("CCC", { rsi: 35, volume: 20_000_000 })]);
+    const fake = fakeProvider();
+    await checkMoreScannerOptionsForUser("matt-id", { provider: fake.provider, now: NOW, batchSize: 2 });
+    expect(fake.getOptionChain.mock.calls.map((call) => call[0]).sort()).toEqual(["AAA", "CCC"]);
+  });
+
+  it("puts names a recent scan found to have NO weekly options at the back of the queue", async () => {
+    mockRun([await storedRow("AAA", { volume: 30_000_000 }), await storedRow("BBB", { volume: 1_000_000 }), await storedRow("CCC", { volume: 2_000_000 })]);
+    mocks.db.scanResult.findMany.mockResolvedValue([{ ticker: "AAA" }]); // most liquid, but known monthly-only
+    const fake = fakeProvider();
+    await checkMoreScannerOptionsForUser("matt-id", { provider: fake.provider, now: NOW, batchSize: 2 });
+    expect(fake.getOptionChain.mock.calls.map((call) => call[0]).sort()).toEqual(["BBB", "CCC"]);
+    // ...and the lookup is owner-scoped and limited to the three 'no weekly' reasons within two weeks.
+    const query = mocks.db.scanResult.findMany.mock.calls[0][0];
+    expect(query.where.run.ownerId).toBe("matt-id");
+    expect(query.where.OR.map((clause: { snapshotJson: { equals: string } }) => clause.snapshotJson.equals).sort()).toEqual(["NO_EXPIRATIONS_IN_CONFIGURED_RANGE", "NO_PUT_CONTRACTS", "NO_WEEKLY_EXPIRATION"]);
+  });
+
+  it("still prices everything if the 'no weekly' history lookup fails - ordering is only an optimization", async () => {
+    mockRun([await storedRow("AAA"), await storedRow("BBB")]);
+    mocks.db.scanResult.findMany.mockRejectedValue(new Error("db hiccup"));
+    const fake = fakeProvider();
+    const outcome = await checkMoreScannerOptionsForUser("matt-id", { provider: fake.provider, now: NOW });
+    expect(outcome).toMatchObject({ ok: true, checked: 2 });
+  });
+
+  it("caps a call at the batch size and checks the most oversold names first (when equally liquid)", async () => {
     const rows = [];
     for (let index = 0; index < 15; index += 1) rows.push(await storedRow(`T${String(index).padStart(2, "0")}`, { rsi: 20 + index })); // T00 most oversold
     mockRun(rows);

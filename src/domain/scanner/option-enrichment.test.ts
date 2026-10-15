@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  isNotOptionAssessed,
-  notEnrichedScanNote,
-  notOptionAssessedLabel,
-  scannerRowReasons,
-  NOT_OPTION_ASSESSED_BADGE,
-} from "./option-enrichment";
+import { isNotOptionAssessed, notEnrichedScanNote, notOptionAssessedLabel, scannerRowReasons, NOT_OPTION_ASSESSED_BADGE, notOptionAssessedBadge } from "./option-enrichment";
 
 /** The exact per-criterion phrases the Scanner UI shows for a genuinely unknown option input -
  * the wording this slice exists to keep OFF never-assessed rows. */
@@ -34,7 +28,7 @@ describe("option enrichment state", () => {
   );
 
   it("distinguishes a budget loss from a stock-screen disqualification in both UI and persisted wording", () => {
-    expect(notOptionAssessedLabel("NOT_ENRICHED_BUDGET", 8)).toBe("Options not checked yet — beyond the first 8 auto-checked (use Check options)");
+    expect(notOptionAssessedLabel("NOT_ENRICHED_BUDGET", 8)).toBe("Passed the stock screen. Options not priced yet - beyond the first 8 checked automatically. Press Check options.");
     expect(notOptionAssessedLabel("NOT_ENRICHED_STOCK_FILTER", 8)).toBe("Options not checked — stock screen did not qualify");
     // A stock-screen exclusion must never claim it ran out of budget - it never competed at all.
     expect(notOptionAssessedLabel("NOT_ENRICHED_STOCK_FILTER", 8)).not.toContain("budget");
@@ -61,7 +55,7 @@ describe("scanner row reasons", () => {
       for (const phrase of OPTION_UNKNOWN_PHRASES) {
         expect(reasons).not.toContain(phrase);
       }
-      expect(reasons[0]).toContain("Options not checked");
+      expect(reasons[0]).toMatch(/Options not (checked|priced yet)/);
     },
   );
 
@@ -71,5 +65,13 @@ describe("scanner row reasons", () => {
 
   it("keeps existing behavior for a run predating the field", () => {
     expect(scannerRowReasons(null, OPTION_UNKNOWN_PHRASES, 8)).toEqual(OPTION_UNKNOWN_PHRASES);
+  });
+});
+
+describe("notOptionAssessedBadge", () => {
+  it("says 'not checked yet' for a qualified stock waiting on its options, and keeps 'stock screen only' for the rest", () => {
+    expect(notOptionAssessedBadge("NOT_ENRICHED_BUDGET")).toBe("OPTIONS NOT CHECKED YET");
+    expect(notOptionAssessedBadge("NOT_ENRICHED_STOCK_FILTER")).toBe("STOCK SCREEN ONLY");
+    expect(notOptionAssessedBadge("NOT_ENRICHED_DATA_UNAVAILABLE")).toBe("STOCK SCREEN ONLY");
   });
 });

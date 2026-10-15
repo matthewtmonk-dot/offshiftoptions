@@ -76,6 +76,6 @@ describe("Source-level guarantees (no component-render harness in this repo)", (
 
   it("statusInfo's authoritative readiness-derived status word/tone is untouched by this ticket", () => {
     expect(text).toContain('if (result.readiness === "NEEDS_DATA") {');
-    expect(text).toContain("NOT_OPTION_ASSESSED_BADGE");
+    expect(text).toContain("notOptionAssessedBadge(result.values.optionEnrichment)");
   });
 });

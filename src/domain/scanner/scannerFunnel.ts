@@ -143,3 +143,59 @@ export function funnelInputOf(result: {
     contractSelected: result.contractReasonCode === null && result.values.strike !== null,
   };
 }
+
+export type OptionOutcomeRow = {
+  readiness: ScannerReadiness;
+  optionEnrichment: string | null;
+  contractReasonCode: string | null;
+  criteria: readonly { key: string; status: string }[];
+};
+
+/** Why a row whose options WERE priced still didn't PASS - ordered by what a user would act on. */
+const CONTRACT_REASON_LABELS: Record<string, string> = {
+  NO_WEEKLY_EXPIRATION: "no weekly option in your expiration window",
+  NO_EXPIRATIONS_IN_CONFIGURED_RANGE: "no weekly option in your expiration window",
+  NO_PUT_CONTRACTS: "no put options listed",
+  NO_ACCEPTABLE_STRIKE: "no strike below the stock price",
+  NO_CONTRACT_WITH_POSITIVE_BID: "no put with a bid",
+  CHAIN_UNAVAILABLE: "Schwab returned no option data",
+};
+
+/** Hard (gating) option rules first - a FAIL there is the real blocker - then preferences. */
+const BLOCKING_CRITERION_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ["openInterest", "open interest too low"],
+  ["optionBid", "bid below your minimum"],
+  ["spreadPercent", "bid/ask spread too wide"],
+  ["delta", "delta outside your range"],
+  ["earningsDistance", "earnings too close"],
+  ["dte", "outside your expiration window"],
+  ["ror", "return below your target"],
+  ["annualizedRor", "annualized return below target"],
+  ["optionVolume", "option volume too low"],
+];
+
+/**
+ * For priced rows that did NOT pass, the single most important reason each one failed, counted and
+ * sorted - so a thin week reads "5 had no weekly option, 2 returned under your target" instead of a
+ * wall of near-identical rows. Presentation only: it reads the criteria the scanner already stored.
+ */
+export function summarizeOptionOutcomes(rows: readonly OptionOutcomeRow[]): { label: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.optionEnrichment !== "ENRICHED" || row.readiness === "PASS") continue;
+    let label: string | undefined = row.contractReasonCode ? CONTRACT_REASON_LABELS[row.contractReasonCode] : undefined;
+    if (!label && row.contractReasonCode) label = "no usable option contract";
+    if (!label) {
+      const failed = new Set(row.criteria.filter((criterion) => criterion.status === "FAIL").map((criterion) => criterion.key));
+      label = BLOCKING_CRITERION_LABELS.find(([key]) => failed.has(key))?.[1];
+    }
+    if (!label) label = row.readiness === "NEAR" ? "just under one preference" : "missing option data";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([label, count]) => ({ label, count })).sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+}
+
+/** "5 no weekly option in your expiration window · 2 return below your target" */
+export function describeOptionOutcomes(outcomes: readonly { label: string; count: number }[]): string {
+  return outcomes.map((outcome) => `${outcome.count} ${outcome.label}`).join(" · ");
+}

@@ -23,7 +23,7 @@ import { OPTION_CHAIN_ENRICHMENT_LIMIT } from "@/domain/scanner/live-scan";
 import {
   isNotOptionAssessed as isNotOptionAssessedState,
   scannerRowReasons,
-  NOT_OPTION_ASSESSED_BADGE,
+  notOptionAssessedBadge,
 } from "@/domain/scanner/option-enrichment";
 import { funnelInputOf, isBestAvailable, isWorthALook } from "@/domain/scanner/scannerFunnel";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
@@ -100,6 +100,8 @@ const optionalColumns: { key: OptionalColumnKey; label: string }[] = [
 ];
 
 const BASE_COLUMN_COUNT = 11;
+/** In the default view, at most this many not-yet-priced rows are listed; the rest are one summary line. */
+const MAX_UNPRICED_ROWS_SHOWN = 5;
 
 export function ScannerWorkspace({
   results,
@@ -189,7 +191,22 @@ export function ScannerWorkspace({
     [actionable],
   );
 
-  const visible = useMemo(() => sortResults(applyQuickFilter(actionable, quick), sort), [actionable, quick, sort]);
+  const sortedVisible = useMemo(() => sortResults(applyQuickFilter(actionable, quick), sort), [actionable, quick, sort]);
+  // In the default view, show only the first few names that are still waiting for their option lookup
+  // (the rest are summarized in one line) so a hundred un-priced rows can't bury the priced ones.
+  const { visible, hiddenWaiting } = useMemo(() => {
+    if (quick !== "worth") return { visible: sortedVisible, hiddenWaiting: 0 };
+    const rows: ScannerViewResult[] = [];
+    let waiting = 0;
+    for (const result of sortedVisible) {
+      if (result.values.optionEnrichment === "NOT_ENRICHED_BUDGET") {
+        waiting += 1;
+        if (waiting > MAX_UNPRICED_ROWS_SHOWN) continue;
+      }
+      rows.push(result);
+    }
+    return { visible: rows, hiddenWaiting: Math.max(0, waiting - MAX_UNPRICED_ROWS_SHOWN) };
+  }, [sortedVisible, quick]);
   const activeOptionalColumns = optionalColumns.filter((column) => columns[column.key]);
   const columnCount = BASE_COLUMN_COUNT + activeOptionalColumns.length;
 
@@ -582,6 +599,12 @@ export function ScannerWorkspace({
         ))}
         {!visible.length ? <EmptyState>{emptyViewMessage(quick)}</EmptyState> : null}
       </div>
+
+      {hiddenWaiting > 0 ? (
+        <p data-testid="scanner-hidden-waiting" className="text-sm text-zinc-400">
+          +{hiddenWaiting} more stocks passed the stock screen but haven&apos;t had their options priced yet. Press <strong className="text-zinc-200">Check options</strong> above to price them.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -1018,7 +1041,14 @@ function statusInfo(result: ScannerViewResult): { word: string; tone: string } {
     // An assessment-stage label, deliberately NOT an option-quality verdict: a muted outline that
     // reads as "not evaluated yet", never as the emerald/amber/red/VERIFY judgments around it.
     if (isNotOptionAssessed(result)) {
-      return { word: NOT_OPTION_ASSESSED_BADGE, tone: "whitespace-nowrap border-dashed border-zinc-700 bg-transparent text-zinc-400" };
+      return {
+        word: notOptionAssessedBadge(result.values.optionEnrichment),
+        // A qualified stock waiting on its option lookup is "one click away" (sky); the rest stay muted.
+        tone:
+          result.values.optionEnrichment === "NOT_ENRICHED_BUDGET"
+            ? "whitespace-nowrap border-dashed border-sky-400/50 bg-transparent text-sky-200"
+            : "whitespace-nowrap border-dashed border-zinc-700 bg-transparent text-zinc-400",
+      };
     }
     return { word: "VERIFY", tone: "border-zinc-600 bg-zinc-800 text-zinc-300" };
   }
@@ -1136,6 +1166,14 @@ function sortResults(results: ScannerViewResult[], sort: SortKey) {
   // a real, known value compares to another.
   const evaluable = results.filter((result) => !isTechnicallyIncomplete(result)).sort(comparator);
   const incomplete = results.filter(isTechnicallyIncomplete).sort(comparator);
+  // On the default Score sort, names whose options were actually priced come before names still
+  // waiting for their option check - real premiums/returns first, "not looked up yet" after. Other
+  // sorts (ticker, price, ...) keep exactly the order the user asked for.
+  if (sort === "score") {
+    const priced = evaluable.filter((result) => !isNotOptionAssessed(result));
+    const unpriced = evaluable.filter(isNotOptionAssessed);
+    return [...priced, ...unpriced, ...incomplete];
+  }
   return [...evaluable, ...incomplete];
 }
 

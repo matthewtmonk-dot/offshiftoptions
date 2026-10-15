@@ -67,6 +67,8 @@ Engineering diagnostics are stored in the existing `ScanResult.snapshotJson`, wi
 
 **Still open:** the UNKNOWN score credit (0.45) above.
 
+**Auto-pricing and queue order (October 15, 2026).** After a successful Run Live Scan the Scanner immediately runs the Check options loop (up to 60 stocks) so the user sees priced results without a second step. `checkMoreScannerOptionsForUser` orders its queue: names a scan within the last 14 days found to have no weekly put options go last; then highest dollar volume (shares x price); then most oversold; then ticker. A row still awaiting its option lookup is labelled `OPTIONS NOT CHECKED YET`; `STOCK SCREEN ONLY` is reserved for stock-filter and data-unavailable rows. The funnel strip adds a "Why priced names didn't pass" line (`summarizeOptionOutcomes`).
+
 **Best available.** A priced row with a selected contract that clears every hard (gating) rule - price, volume, open interest, bid, spread, delta, earnings, do-not-trade - even if it misses a preference such as RSI, %B or ROR. It exists so a thin week never leaves capital idle without ever overriding a safety blocker; a hard-rule FAIL or UNKNOWN is never promoted.
 
 ## Historical seeded Phase 1 Rules

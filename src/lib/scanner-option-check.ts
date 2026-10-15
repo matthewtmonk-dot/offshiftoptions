@@ -58,6 +58,37 @@ function asValues(snapshot: unknown): Record<string, number | string | boolean |
   return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) ? (snapshot as Record<string, number | string | boolean | null | undefined>) : {};
 }
 
+/** Names a recent scan already found to have NO weekly put options (monthly-only, or none listed).
+ * A weekly-optionable stock always has a weekly inside a 3-11 day window, so these will not suddenly
+ * grow one - they go to the back of the queue rather than waste a chain request ahead of better names. */
+const NO_WEEKLY_REASON_CODES = ["NO_WEEKLY_EXPIRATION", "NO_EXPIRATIONS_IN_CONFIGURED_RANGE", "NO_PUT_CONTRACTS"] as const;
+const NO_WEEKLY_MEMORY_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Shares traded x price: the best cheap signal we hold for "does this stock have liquid weekly
+ * options?" Missing/invalid -> 0 (last). */
+function dollarVolumeOf(values: Record<string, unknown>): number {
+  const volume = Number(values.stockVolume);
+  const price = Number(values.price);
+  return values.stockVolume !== null && values.price !== null && Number.isFinite(volume) && Number.isFinite(price) && volume > 0 && price > 0 ? volume * price : 0;
+}
+
+async function recentlyNoWeeklyTickers(userId: string, now: Date): Promise<Set<string>> {
+  try {
+    const rows = await prisma.scanResult.findMany({
+      where: {
+        run: { ownerId: userId, createdAt: { gte: new Date(now.getTime() - NO_WEEKLY_MEMORY_MS) } },
+        OR: NO_WEEKLY_REASON_CODES.map((code) => ({ snapshotJson: { path: ["contractReasonCode"], equals: code } })),
+      },
+      select: { ticker: true },
+      distinct: ["ticker"],
+    });
+    return new Set(rows.map((row) => row.ticker));
+  } catch {
+    // Ordering is an optimization only - never let a failed lookup block pricing.
+    return new Set();
+  }
+}
+
 function rankOf(values: Record<string, unknown>): number {
   const rsi = Number(values.rsi);
   const bb = Number(values.bbPercent);
@@ -99,8 +130,21 @@ export async function checkMoreScannerOptionsForUser(
   if (awaiting.length === 0) {
     return { ok: true, checked: 0, failedLookups: 0, remaining: 0, newPass: 0, newNear: 0 };
   }
+  // Queue order: names with no known weekly options last; then the MOST LIQUID first (a stock that
+  // trades a few thousand shares a day will never have liquid weekly options, however oversold);
+  // then the most oversold; then ticker for determinism.
+  const noWeekly = await recentlyNoWeeklyTickers(userId, now);
   const batch = [...awaiting]
-    .sort((left, right) => rankOf(asValues(left.snapshotJson)) - rankOf(asValues(right.snapshotJson)) || (left.ticker < right.ticker ? -1 : left.ticker > right.ticker ? 1 : 0))
+    .sort((left, right) => {
+      const leftValues = asValues(left.snapshotJson);
+      const rightValues = asValues(right.snapshotJson);
+      return (
+        Number(noWeekly.has(left.ticker)) - Number(noWeekly.has(right.ticker)) ||
+        dollarVolumeOf(rightValues) - dollarVolumeOf(leftValues) ||
+        rankOf(leftValues) - rankOf(rightValues) ||
+        (left.ticker < right.ticker ? -1 : left.ticker > right.ticker ? 1 : 0)
+      );
+    })
     .slice(0, batchSize);
 
   const provider = options.provider === undefined ? await getSchwabMarketDataProviderForUser(userId) : options.provider;
