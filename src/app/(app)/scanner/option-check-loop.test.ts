@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { STALE_PAGE_MESSAGE } from "@/lib/action-failure-message";
 import { MAX_ROWS_PER_CLICK, runOptionCheckLoop, type OptionCheckBatchResult } from "./option-check-loop";
 
 const batch = (checked: number, remaining: number, extra: Partial<Extract<OptionCheckBatchResult, { ok: true }>> = {}): OptionCheckBatchResult => ({
@@ -70,5 +71,19 @@ describe("runOptionCheckLoop", () => {
     await promise;
     expect(progress[0]).toEqual({ checked: 0, target: 12 });
     expect(progress.at(-1)).toEqual({ checked: 12, target: 12 });
+  });
+});
+
+describe("runOptionCheckLoop when the server action itself throws", () => {
+  const base = { awaiting: 24, sleep: async () => {}, shouldStop: () => false, onProgress: () => {} };
+
+  it("ends with an error instead of leaving the button stuck, keeping the stale-page hint", async () => {
+    const result = await runOptionCheckLoop({ ...base, checkBatch: async () => { throw new Error('Server Action "abc" was not found on the server.'); } });
+    expect(result).toEqual({ status: "error", message: STALE_PAGE_MESSAGE });
+  });
+
+  it("uses a plain message for any other thrown error", async () => {
+    const result = await runOptionCheckLoop({ ...base, checkBatch: async () => { throw new Error("socket hang up"); } });
+    expect(result).toEqual({ status: "error", message: "Checking options failed unexpectedly. Try again in a moment." });
   });
 });

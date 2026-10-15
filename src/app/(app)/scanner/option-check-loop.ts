@@ -11,6 +11,8 @@ export const MAX_ROWS_PER_CLICK = 60;
  * minute - Schwab publishes no hard limit and the provider has no 429 backoff of its own. */
 export const PAUSE_BETWEEN_BATCHES_MS = 3000;
 
+import { describeActionFailure } from "@/lib/action-failure-message";
+
 export type OptionCheckBatchResult =
   | { ok: true; checked: number; failedLookups: number; remaining: number; newPass: number; newNear: number }
   | { ok: false; error: string };
@@ -46,7 +48,14 @@ export async function runOptionCheckLoop({
   onProgress({ checked, target });
 
   while (checked < target && !shouldStop()) {
-    const outcome = await checkBatch();
+    let outcome: OptionCheckBatchResult;
+    try {
+      outcome = await checkBatch();
+    } catch (error) {
+      // A thrown server action (stale page after a deploy, dropped connection) must end the loop with
+      // a message - never leave the button stuck on "Checking options...".
+      return { status: "error", message: describeActionFailure(error, "Checking options failed unexpectedly. Try again in a moment.") };
+    }
     if (!outcome.ok) return { status: "error", message: outcome.error };
     checked += outcome.checked;
     pass += outcome.newPass;

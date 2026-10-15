@@ -2,6 +2,7 @@
 
 import { RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { describeActionFailure } from "@/lib/action-failure-message";
 import { runLiveSchwabScannerAction, type RunLiveScanResult } from "../actions";
 
 type LiveScanButtonState =
@@ -69,12 +70,12 @@ export function LiveScanButton() {
       } else {
         setState({ status: "error", message: result.error });
       }
-    } catch {
+    } catch (error) {
       if (tickRef.current) {
         clearInterval(tickRef.current);
         tickRef.current = null;
       }
-      setState({ status: "error", message: "Live scan failed unexpectedly. Try again in a moment." });
+      setState({ status: "error", message: describeActionFailure(error, "Live scan failed unexpectedly. Try again in a moment.") });
     }
   }
 
