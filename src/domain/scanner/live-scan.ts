@@ -781,7 +781,7 @@ function bestPutValues(
   );
   const scoringPool = gatePassing.length ? gatePassing : contractsAtSelectedExpiration;
 
-  const selected = scoringPool
+  const scored = scoringPool
     .map((values) => ({
       values,
       summary: evaluateCandidate(rules, values),
@@ -794,7 +794,30 @@ function bestPutValues(
       return (numericValue(right.values.annualizedRor) ?? 0) - (numericValue(left.values.annualizedRor) ?? 0)
         || left.values.strike - right.values.strike
         || compareText(left.values.optionSymbol, right.values.optionSymbol);
-    })[0].values;
+    });
+
+  // MOST CUSHION THAT STILL MEETS THE TARGET (Matt, 2026-10-14). The ordering above prefers the highest
+  // annualized ROR among equal scores, which is always the strike CLOSEST to the stock price - the
+  // riskiest one that still clears the target. When the user has a ROR target enabled, among the
+  // top-scoring strikes that actually PASS it, take the LOWEST strike instead (most distance below
+  // the price, least assignment pressure, least collateral). Never applies without a ROR target, and
+  // never prefers a strike that misses it - if none of the top-scoring strikes pass ROR, the
+  // ordering above stands. Score still decides first; this only breaks ties among passers.
+  let selected = scored[0].values;
+  if (rules.some((rule) => rule.key === "ror")) {
+    const topScore = setupScore(scored[0].summary);
+    const passingTarget = scored.filter(
+      (entry) => setupScore(entry.summary) === topScore && entry.summary.results.find((result) => result.key === "ror")?.status === "PASS",
+    );
+    if (passingTarget.length) {
+      selected = [...passingTarget].sort(
+        (left, right) =>
+          left.values.strike - right.values.strike
+          || (numericValue(right.values.annualizedRor) ?? 0) - (numericValue(left.values.annualizedRor) ?? 0)
+          || compareText(left.values.optionSymbol, right.values.optionSymbol),
+      )[0].values;
+    }
+  }
   return {
     ...selected,
     optionSelectionTargetDte: WEEKLY_TARGET_DTE,

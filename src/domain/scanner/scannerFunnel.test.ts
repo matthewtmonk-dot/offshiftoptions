@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildScannerFunnel, describeScannerFunnel, isAwaitingOptionCheck, isStockQualified, isWorthALook, type FunnelRowInput } from "./scannerFunnel";
+import { buildScannerFunnel, describeScannerFunnel, isAwaitingOptionCheck, isBestAvailable, isStockQualified, isWorthALook, type FunnelRowInput } from "./scannerFunnel";
 
 const row = (overrides: Partial<FunnelRowInput> = {}): FunnelRowInput => ({
   readiness: "FAIL",
   optionEnrichment: "ENRICHED",
   stockScreen: "PASS",
   technicalIncomplete: false,
+  gatingClear: true,
+  contractSelected: true,
   ...overrides,
 });
 
@@ -72,5 +74,33 @@ describe("buildScannerFunnel", () => {
 
   it("marks counts as a floor when the saved list was truncated", () => {
     expect(describeScannerFunnel(buildScannerFunnel(rows), { truncated: true })).toContain("8+ passed the stock screen");
+  });
+});
+
+describe("isBestAvailable (never overrides a hard-rule blocker)", () => {
+  it("includes a priced row with a real contract that clears every hard rule, even if it misses a preference", () => {
+    expect(isBestAvailable(row({ readiness: "FAIL" }))).toBe(true); // e.g. ROR just under target - a soft miss
+    expect(isBestAvailable(row({ readiness: "PASS" }))).toBe(true);
+    expect(isBestAvailable(row({ readiness: "NEAR" }))).toBe(true);
+  });
+
+  it("excludes any row with a hard-rule FAIL or UNKNOWN, no matter how good the rest looks", () => {
+    expect(isBestAvailable(row({ gatingClear: false }))).toBe(false);
+  });
+
+  it("excludes rows that were never priced or have no selected contract", () => {
+    expect(isBestAvailable(row({ optionEnrichment: "NOT_ENRICHED_BUDGET" }))).toBe(false);
+    expect(isBestAvailable(row({ optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" }))).toBe(false);
+    expect(isBestAvailable(row({ contractSelected: false }))).toBe(false);
+    expect(isBestAvailable(row({ optionEnrichment: null }))).toBe(false);
+  });
+
+  it("is counted in the funnel and mentioned only when nothing outright passes", () => {
+    const thinWeek = [row({ readiness: "FAIL" }), row({ readiness: "FAIL" }), row({ readiness: "FAIL", gatingClear: false })];
+    const funnel = buildScannerFunnel(thinWeek);
+    expect(funnel.bestAvailable).toBe(2);
+    expect(describeScannerFunnel(funnel)).toContain("2 clear every hard rule (see Best available)");
+    const goodWeek = buildScannerFunnel([row({ readiness: "PASS" }), row({ readiness: "FAIL" })]);
+    expect(describeScannerFunnel(goodWeek)).not.toContain("Best available");
   });
 });

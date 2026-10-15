@@ -178,6 +178,6 @@ describe("checkMoreScannerOptionsForUser", () => {
     const request = fake.getOptionChain.mock.calls[0][1] as unknown as { contractType: string; fromDate: Date; toDate: Date };
     expect(request.contractType).toBe("PUT");
     const days = (request.toDate.getTime() - request.fromDate.getTime()) / 86_400_000;
-    expect(days).toBe(12); // default horizon 1-13 DTE
+    expect(days).toBe(8); // default hard DTE range 3-11
   });
 });

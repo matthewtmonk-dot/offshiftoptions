@@ -17,7 +17,7 @@ import {
 import { GATING_RULE_KEYS, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { STOCK_STAGE_RULE_KEYS } from "@/domain/scanner/live-scan";
 import { buildScannerFunnel, describeScannerFunnel, funnelInputOf, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
-import { scannerTimingGuide } from "@/domain/scanner/timingGuide";
+import { scannerTimingGuide, technicalReadyHint } from "@/domain/scanner/timingGuide";
 import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
@@ -60,6 +60,10 @@ export type ScannerViewResult = {
   /** Verdict over ONLY the enabled stock-level rules (price, volume, RSI, %B, earnings...) - lets the
    * funnel tell "failed the stock screen" apart from "qualified but options not priced yet". */
   stockScreen: StockScreenVerdict;
+  /** Every enabled hard (gating) rule is a definite PASS - see isBestAvailable in scannerFunnel.ts. */
+  gatingClear: boolean;
+  /** Why no option contract was selected for this row, if none was (see live-scan.ts). */
+  contractReasonCode: string | null;
   /** Set when RSI/Bollinger weren't ready (pending/stale/failed technical cache) for this row. */
   technicalReasonCode: string | null;
   concern: CriterionResult | null;
@@ -165,6 +169,10 @@ const MATERIAL_TECHNICAL_COVERAGE_THRESHOLD = 0.9;
 /** Plain helper outside the component so render stays pure (same reason as loadScannerPageBundle). */
 function currentTimingGuide() {
   return scannerTimingGuide(new Date());
+}
+
+function currentTechnicalReadyHint() {
+  return technicalReadyHint(new Date());
 }
 
 export default async function ScannerPage({
@@ -310,6 +318,7 @@ export default async function ScannerPage({
             {technicalFreshness.freshUsableCount.toLocaleString()} / {technicalFreshness.eligibleCount.toLocaleString()}
           </p>
           <p className="mt-0.5 text-amber-200/90">Scanner results are incomplete.</p>
+          <p className="mt-0.5 text-amber-100" data-testid="technical-ready-hint">{currentTechnicalReadyHint()}</p>
         </div>
       ) : null}
 
@@ -387,6 +396,8 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
     scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
     readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment, contractReasonCode),
     stockScreen: stockScreenVerdictOf(summary),
+    gatingClear: !summary.results.some((criterion) => GATING_RULE_KEYS.has(criterion.key) && criterion.status !== "PASS"),
+    contractReasonCode,
     technicalReasonCode: snapshotString(result.snapshotJson, "technicalReasonCode"),
     concern: primaryConcern(summary.results),
     researchStatus: researchByTicker.get(result.ticker) ?? null,

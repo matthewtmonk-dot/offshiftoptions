@@ -36,14 +36,14 @@ describe("LST Core profile diff", () => {
     const records = SCANNER_RULE_DEFINITIONS.map((definition) => ({
       key: definition.key,
       valueJson: { desired: definition.defaultDesired },
-      enabled: definition.key === "delta" ? true : definition.defaultEnabled,
+      enabled: definition.key === "optionVolume" ? true : definition.defaultEnabled,
     }));
 
     const diff = diffScannerRulesFromLstCore(records);
-    const delta = diff.find((entry) => entry.key === "delta");
-    expect(delta?.changed).toBe(true);
-    expect(delta?.coreEnabled).toBe(false);
-    expect(delta?.currentEnabled).toBe(true);
+    const optionVolume = diff.find((entry) => entry.key === "optionVolume");
+    expect(optionVolume?.changed).toBe(true);
+    expect(optionVolume?.coreEnabled).toBe(false);
+    expect(optionVolume?.currentEnabled).toBe(true);
   });
 
   it("treats a missing record as still matching LST Core defaults", () => {

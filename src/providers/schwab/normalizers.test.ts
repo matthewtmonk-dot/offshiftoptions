@@ -171,6 +171,28 @@ describe("Schwab market-data normalizers", () => {
     ).toEqual([{ accountNumberLast4: "6789", hashValue: "hash-value" }]);
   });
 
+  it("treats Schwab's placeholder Greeks (-999, NaN, out of range) as a MISSING delta, never a real one", () => {
+    const contract = (strike: number, delta: unknown) => ({ symbol: `T  261016P${strike}`, strikePrice: strike, bid: 0.2, ask: 0.25, mark: 0.22, delta, openInterest: 100 });
+    const parsed = normalizeSchwabOptionChainResponse({
+      symbol: "T",
+      putExpDateMap: {
+        "2026-10-16:3": {
+          "10.0": [contract(10, -999)],
+          "11.0": [contract(11, "NaN")],
+          "12.0": [contract(12, -0.22)],
+          "13.0": [contract(13, 0)],
+          "14.0": [contract(14, 1.7)],
+        },
+      },
+    });
+    const byStrike = new Map(parsed.map((option) => [option.strike, option.delta]));
+    expect(byStrike.get(10)).toBeUndefined();
+    expect(byStrike.get(11)).toBeUndefined();
+    expect(byStrike.get(12)).toBe(-0.22);
+    expect(byStrike.get(13)).toBe(0); // a genuine zero delta is real data
+    expect(byStrike.get(14)).toBeUndefined();
+  });
+
   it("normalizes reference/fundamental fields using real verified production values (APLD, 2026-09)", () => {
     // Real values from Matt's production Schwab Trader API connection (read-only fundamentals
     // diagnostic, after-hours run) - see PROJECT_HANDOFF.md Research section. peRatio/eps are

@@ -5,7 +5,9 @@ import { SCANNER_RULE_DEFINITIONS } from "./profile";
 import type { ScannerRule } from "./scanner";
 
 const asOf = new Date("2026-09-16T14:00:00Z");
-const rules: ScannerRule[] = SCANNER_RULE_DEFINITIONS.filter((rule) => rule.defaultEnabled).map((rule) => ({
+// The hard `dte` rule is ON by default (3-11 days) since 2026-10-14. These tests are about the path where it is
+// OFF (the default 1-13 day weekly horizon), so it is excluded here explicitly.
+const rules: ScannerRule[] = SCANNER_RULE_DEFINITIONS.filter((rule) => rule.defaultEnabled && rule.key !== "dte").map((rule) => ({
   key: rule.key, name: rule.name, operator: rule.operator, desired: rule.defaultDesired,
 }));
 /** price 20 against these bands puts BB at 20% - comfortably inside the <=33% rule. */
