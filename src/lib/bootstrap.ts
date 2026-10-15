@@ -91,9 +91,15 @@ export async function runProductionBootstrap(
   options: { users?: [BootstrapUserSpec, BootstrapUserSpec]; password?: string } = {},
 ): Promise<BootstrapSummary> {
   const [userASpec, userBSpec] = options.users ?? PRODUCTION_USERS;
-  const getPasswordHash = lazyPasswordHash(
-    options.password ?? process.env.DEV_SEED_PASSWORD ?? "lstbuddy-dev-only",
-  );
+  // The old built-in fallback ("lstbuddy-dev-only") is written in this public repository, so a
+  // production bootstrap must never use it - an explicit password is required every time.
+  const password = options.password ?? process.env.DEV_SEED_PASSWORD;
+  if (!password || password === "lstbuddy-dev-only") {
+    throw new Error(
+      "Refusing to create production users with a missing or publicly-known default password. Set DEV_SEED_PASSWORD to a strong, unique value for this one run (then remove it).",
+    );
+  }
+  const getPasswordHash = lazyPasswordHash(password);
 
   const userA = await ensureBootstrapUser(prisma, userASpec, getPasswordHash);
   const userB = await ensureBootstrapUser(prisma, userBSpec, getPasswordHash);

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { compare } from "bcryptjs";
+import { compare, hash } from "bcryptjs";
 import { randomBytes, createHmac } from "node:crypto";
 import { cache } from "react";
 import { cookies } from "next/headers";
@@ -10,8 +10,19 @@ import { prisma } from "./prisma";
 export const SESSION_COOKIE = "lst_buddy_session";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
+/** Exported for tests. Fails closed: the repository is public, so the development fallback is
+ * publicly known - in production a missing secret must stop sign-in/session checks, never silently
+ * use it. */
+export function resolveSessionSecret(secret: string | undefined, nodeEnv: string | undefined): string {
+  if (secret) return secret;
+  if (nodeEnv === "production") {
+    throw new Error("LST_SESSION_SECRET is required in production.");
+  }
+  return "local-development-session-secret";
+}
+
 function getSessionSecret() {
-  return process.env.LST_SESSION_SECRET ?? "local-development-session-secret";
+  return resolveSessionSecret(process.env.LST_SESSION_SECRET, process.env.NODE_ENV);
 }
 
 function hashSessionToken(token: string) {
@@ -22,6 +33,15 @@ function sessionExpiresAt() {
   return new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
 }
 
+// A real bcrypt hash of a random value, computed once. Comparing against it when the email is unknown
+// makes "no such user" cost the same as "wrong password", so response time can't reveal which
+// emails exist.
+let dummyHashPromise: Promise<string> | null = null;
+function getDummyHash() {
+  dummyHashPromise ??= hash(randomBytes(16).toString("hex"), 10);
+  return dummyHashPromise;
+}
+
 export async function signInWithPassword(email: string, password: string) {
   const normalizedEmail = email.trim().toLowerCase();
   const user = await prisma.user.findUnique({
@@ -29,6 +49,7 @@ export async function signInWithPassword(email: string, password: string) {
   });
 
   if (!user) {
+    await compare(password, await getDummyHash());
     return null;
   }
 

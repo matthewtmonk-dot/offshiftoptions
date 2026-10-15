@@ -61,9 +61,13 @@ export default async function LoginPage({
             />
           </div>
 
-          {params.error ? (
-            <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-200">
-              Email or password did not match a seeded development user.
+          {params.error === "throttled" ? (
+            <div role="alert" className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-200">
+              Too many sign-in attempts. Wait about 15 minutes and try again.
+            </div>
+          ) : params.error ? (
+            <div role="alert" className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-200">
+              Email or password is incorrect.
             </div>
           ) : null}
 
@@ -100,9 +104,11 @@ export default async function LoginPage({
           </div>
         ) : null}
 
-        <div className="mt-6 rounded-md border border-zinc-800 bg-zinc-900/70 p-3 text-sm text-zinc-400">
-          Seed users are Matt and Eric. The password comes from DEV_SEED_PASSWORD.
-        </div>
+        {showDevLogin ? (
+          <div className="mt-6 rounded-md border border-zinc-800 bg-zinc-900/70 p-3 text-sm text-zinc-400">
+            Seed users are Matt and Eric. The password comes from DEV_SEED_PASSWORD.
+          </div>
+        ) : null}
       </section>
     </main>
   );

@@ -149,7 +149,7 @@ Fix the earnings feed, cap scores on hard failures, widen the universe, and ship
 - The "why so few results" per-rule exclusion diagnostic is genuinely uncommon and exactly right — it just belongs below the results, not above.
 - The near-match concept is the right idea; it only needs distances attached.
 - Send-to-buddy from inside the inspector is the correct interaction — keep the shortcut, change where it posts.
-- Account number masking (`1 (…5106)`) is handled correctly.
+- Account number masking (`1 (…XXXX)`) is handled correctly.
 - The mobile card fallback for the scanner is the right call — it just needs a collapsed default.
 - Pro/Con notes on watchlist items are a good, opinionated idea worth keeping.
 - The visual language (dark ground, restrained green accent, consistent chips/badges) is fine — the problem is spacing and hierarchy, not the palette.
