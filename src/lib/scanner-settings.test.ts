@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Ticket 7: saving/resetting Scanner settings must never run a scan (demo or live), must persist
-// atomically (all rules or none), and must never leak across owners. Mocked Prisma lets this run
+// atomically (all rules or none), and must never leak across owners. Since 2026-10-15 the rule set is
+// written as deleteMany + createMany + profile touch (3 statements, replaceScannerRules in
+// workflows.ts) instead of 15 sequential upserts - which approached the interactive-transaction time
+// limit over the remote production database - so these tests assert that shape. Mocked Prisma lets this run
 // without a real database - see valuation-query-boundaries.test.ts for the same pattern.
 const db = vi.hoisted(() => ({
   scannerProfile: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
-  scannerRule: { upsert: vi.fn(), findMany: vi.fn() },
+  scannerRule: { deleteMany: vi.fn(), createMany: vi.fn(), findMany: vi.fn() },
   scanRun: { create: vi.fn(), findFirst: vi.fn() },
   scanResult: { create: vi.fn() },
   $transaction: vi.fn(),
@@ -42,6 +45,14 @@ function buildValidScannerFormData(overrides: Record<string, string> = {}): Form
   return formData;
 }
 
+/** Every profile id any rule delete/create in the current test touched. */
+function ruleWriteProfileIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const [args] of db.scannerRule.deleteMany.mock.calls) ids.add((args.where as { profileId: string }).profileId);
+  for (const [args] of db.scannerRule.createMany.mock.calls) for (const row of args.data as Array<{ profileId: string }>) ids.add(row.profileId);
+  return ids;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   // The real prisma.$transaction(async (tx) => {...}) runs its callback inside a single DB
@@ -55,27 +66,53 @@ describe("updateScannerSettingsForUser (Ticket 7: settings save must not run a s
     db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
     await updateScannerSettingsForUser("matt", buildValidScannerFormData({ "price:min": "12", "price:max": "60" }));
 
-    expect(db.scannerRule.upsert).toHaveBeenCalledTimes(SCANNER_RULE_DEFINITIONS.length);
-    const priceCall = db.scannerRule.upsert.mock.calls.find(([args]) => args.where.profileId_key.key === "price")![0];
-    expect(priceCall.update.valueJson).toEqual({ desired: [12, 60] });
-    expect(priceCall.where.profileId_key.profileId).toBe("profile-matt");
+    expect(db.scannerRule.createMany).toHaveBeenCalledTimes(1);
+    const created = db.scannerRule.createMany.mock.calls[0][0].data as Array<{ key: string; profileId: string; valueJson: unknown; enabled: boolean }>;
+    expect(created).toHaveLength(SCANNER_RULE_DEFINITIONS.length);
+    expect(new Set(created.map((rule) => rule.key)).size).toBe(SCANNER_RULE_DEFINITIONS.length);
+    const price = created.find((rule) => rule.key === "price")!;
+    expect(price.valueJson).toEqual({ desired: [12, 60] });
+    expect(price.profileId).toBe("profile-matt");
 
     // No scan (demo or live) was ever triggered by a settings save - this is the exact bug fix.
     expect(db.scanRun.create).not.toHaveBeenCalled();
     expect(db.scanResult.create).not.toHaveBeenCalled();
   });
 
-  it("persists atomically: every rule upsert and the profile touch happen inside one $transaction", async () => {
+  it("persists atomically: the rule replacement and the profile touch happen inside one $transaction", async () => {
     db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
     await updateScannerSettingsForUser("matt", buildValidScannerFormData());
 
     expect(db.$transaction).toHaveBeenCalledTimes(1);
-    // Every upsert/update call happened through the tx stand-in (the same db object here), which
-    // only happens if they were issued from inside the $transaction callback.
-    expect(db.scannerRule.upsert).toHaveBeenCalledTimes(SCANNER_RULE_DEFINITIONS.length);
+    // Every write call happened through the tx stand-in (the same db object here), which only
+    // happens if they were issued from inside the $transaction callback.
+    expect(db.scannerRule.deleteMany).toHaveBeenCalledTimes(1);
+    expect(db.scannerRule.createMany).toHaveBeenCalledTimes(1);
     expect(db.scannerProfile.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "profile-matt" } }),
     );
+  });
+
+  it("uses THREE statements, not one per rule, and gives the transaction a real time limit (the production crash)", async () => {
+    // Against the remote production database a round trip is hundreds of milliseconds; 15 sequential
+    // upserts plus the touch approached Prisma's default 5-second interactive-transaction limit and
+    // failed the save there while being instant locally.
+    db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
+    await updateScannerSettingsForUser("matt", buildValidScannerFormData());
+
+    const statements = db.scannerRule.deleteMany.mock.calls.length + db.scannerRule.createMany.mock.calls.length + db.scannerProfile.update.mock.calls.length;
+    expect(statements).toBe(3);
+    const options = db.$transaction.mock.calls[0][1] as { timeout?: number; maxWait?: number } | undefined;
+    expect(options?.timeout).toBeGreaterThanOrEqual(20_000);
+    expect(options?.maxWait).toBeGreaterThanOrEqual(5_000);
+  });
+
+  it("only replaces the rules this app defines - a rule outside the definitions is never deleted", async () => {
+    db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
+    await updateScannerSettingsForUser("matt", buildValidScannerFormData());
+    const where = db.scannerRule.deleteMany.mock.calls[0][0].where as { profileId: string; key: { in: string[] } };
+    expect(where.profileId).toBe("profile-matt");
+    expect(where.key.in.sort()).toEqual(SCANNER_RULE_DEFINITIONS.map((definition) => definition.key).sort());
   });
 
   it("4. rejects the entire save on an invalid field, before any database write is attempted", async () => {
@@ -88,35 +125,35 @@ describe("updateScannerSettingsForUser (Ticket 7: settings save must not run a s
     // Validation runs entirely before the transaction opens - nothing was persisted, not even
     // the rules that were parsed successfully before "price" was reached.
     expect(db.$transaction).not.toHaveBeenCalled();
-    expect(db.scannerRule.upsert).not.toHaveBeenCalled();
+    expect(db.scannerRule.deleteMany).not.toHaveBeenCalled();
+    expect(db.scannerRule.createMany).not.toHaveBeenCalled();
     expect(db.scannerProfile.update).not.toHaveBeenCalled();
   });
 
   it("5. a mid-transaction persistence failure never reaches the profile touch, and the thrown error propagates", async () => {
     db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
-    db.scannerRule.upsert.mockRejectedValueOnce(new Error("connection lost"));
+    db.scannerRule.createMany.mockRejectedValueOnce(new Error("connection lost"));
 
     await expect(updateScannerSettingsForUser("matt", buildValidScannerFormData())).rejects.toThrow("connection lost");
 
-    // The transaction callback aborted at the failing upsert - the profile-touch step after the
-    // loop never ran. (True atomic rollback of the rule upserts already issued is Postgres's own
-    // guarantee for a real $transaction, which a mock cannot itself prove - see the receipt.)
+    // The transaction callback aborted at the failing create - the profile-touch step after it
+    // never ran. (True atomic rollback of the earlier delete is Postgres's own guarantee for a real
+    // $transaction, which a mock cannot itself prove - scanner-settings-replace.integration.test.ts
+    // proves it against a real database.)
     expect(db.scannerProfile.update).not.toHaveBeenCalled();
   });
 
   it("6 & 7. Matt's save never touches Eric's profile or rules, and vice versa", async () => {
     db.scannerProfile.findFirst.mockResolvedValueOnce(mattProfile());
     await updateScannerSettingsForUser("matt", buildValidScannerFormData({ "price:min": "12", "price:max": "60" }));
-    const mattProfileIds = new Set(db.scannerRule.upsert.mock.calls.map(([args]) => args.where.profileId_key.profileId));
-    expect(mattProfileIds).toEqual(new Set(["profile-matt"]));
+    expect(ruleWriteProfileIds()).toEqual(new Set(["profile-matt"]));
     expect(db.scannerProfile.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ ownerId: "matt" }) }));
 
     vi.clearAllMocks();
     db.$transaction.mockImplementation((callback: (tx: typeof db) => unknown) => callback(db));
     db.scannerProfile.findFirst.mockResolvedValueOnce(ericProfile());
     await updateScannerSettingsForUser("eric", buildValidScannerFormData({ "price:min": "15", "price:max": "45" }));
-    const ericProfileIds = new Set(db.scannerRule.upsert.mock.calls.map(([args]) => args.where.profileId_key.profileId));
-    expect(ericProfileIds).toEqual(new Set(["profile-eric"]));
+    expect(ruleWriteProfileIds()).toEqual(new Set(["profile-eric"]));
     expect(db.scannerProfile.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ ownerId: "eric" }) }));
   });
 
@@ -139,10 +176,14 @@ describe("resetScannerSettingsToLstCoreForUser (Ticket 7: reset must not run a s
     db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
     await resetScannerSettingsToLstCoreForUser("matt");
 
-    expect(db.scannerRule.upsert).toHaveBeenCalledTimes(SCANNER_RULE_DEFINITIONS.length);
-    for (const [args] of db.scannerRule.upsert.mock.calls) {
-      expect(args.where.profileId_key.profileId).toBe("profile-matt");
+    const created = db.scannerRule.createMany.mock.calls[0][0].data as Array<{ key: string; enabled: boolean; valueJson: { desired: unknown } }>;
+    expect(created).toHaveLength(SCANNER_RULE_DEFINITIONS.length);
+    for (const definition of SCANNER_RULE_DEFINITIONS) {
+      const row = created.find((rule) => rule.key === definition.key)!;
+      expect(row.enabled).toBe(definition.defaultEnabled);
+      expect(row.valueJson).toEqual({ desired: definition.defaultDesired });
     }
+    expect(ruleWriteProfileIds()).toEqual(new Set(["profile-matt"]));
     expect(db.scanRun.create).not.toHaveBeenCalled();
     expect(db.scanResult.create).not.toHaveBeenCalled();
   });
@@ -159,17 +200,13 @@ describe("resetScannerSettingsToLstCoreForUser (Ticket 7: reset must not run a s
   it("6 & 7. resetting Matt's profile never touches Eric's, and vice versa", async () => {
     db.scannerProfile.findFirst.mockResolvedValueOnce(mattProfile());
     await resetScannerSettingsToLstCoreForUser("matt");
-    for (const [args] of db.scannerRule.upsert.mock.calls) {
-      expect(args.where.profileId_key.profileId).toBe("profile-matt");
-    }
+    expect(ruleWriteProfileIds()).toEqual(new Set(["profile-matt"]));
 
     vi.clearAllMocks();
     db.$transaction.mockImplementation((callback: (tx: typeof db) => unknown) => callback(db));
     db.scannerProfile.findFirst.mockResolvedValueOnce(ericProfile());
     await resetScannerSettingsToLstCoreForUser("eric");
-    for (const [args] of db.scannerRule.upsert.mock.calls) {
-      expect(args.where.profileId_key.profileId).toBe("profile-eric");
-    }
+    expect(ruleWriteProfileIds()).toEqual(new Set(["profile-eric"]));
   });
 });
 
