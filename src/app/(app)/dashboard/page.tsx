@@ -7,6 +7,7 @@ import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } fro
 import { requireCurrentUser } from "@/lib/auth";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { resolvePositionAssessmentDisplaysForUser } from "@/lib/positionAssessmentOrchestration";
+import { getOpenPutCreditKeptForUser } from "@/lib/open-put-credit-kept";
 import { summarizeAccountReporting } from "@/domain/finance/reporting";
 import { getCampaignIdsWithUnknownFees } from "@/lib/campaign-reconciliation";
 import { summarizeCampaignExposure, type CampaignExposureInput } from "@/domain/finance/brokerPositions";
@@ -127,9 +128,17 @@ export default async function DashboardPage() {
   // resolvePositionAssessmentDisplaysForUser's own retrieval completes, never reused from before
   // this page even started fetching.
   const reviewAccounts = data.ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
-  const resolvedDisplays = allReviewRows.length === 0 ? [] : await resolvePositionAssessmentDisplaysForUser(user.id, data.openCampaigns, reviewAccounts, rollBufferPercent, asOf, () => new Date());
+  // "Credit kept" is read-only enrichment from already-stored broker/mark data (no Schwab call) and
+  // runs alongside the assessment resolution; it never feeds status, priority, or attention logic.
+  const [resolvedDisplays, creditKeptByCampaignId] = await Promise.all([
+    allReviewRows.length === 0 ? Promise.resolve([]) : resolvePositionAssessmentDisplaysForUser(user.id, data.openCampaigns, reviewAccounts, rollBufferPercent, asOf, () => new Date()),
+    getOpenPutCreditKeptForUser(user.id, data.openCampaigns, asOf),
+  ]);
   const displaysByCampaignId = new Map(resolvedDisplays.map((entry) => [entry.campaignId, entry.display]));
-  const sortedReviewRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(allReviewRows, displaysByCampaignId));
+  const sortedReviewRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(allReviewRows, displaysByCampaignId)).map((row) => ({
+    ...row,
+    creditKept: creditKeptByCampaignId.get(row.campaignId) ?? null,
+  }));
   const reviewEntries: DisplayEntry[] = sortedReviewRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
 
   const exposureSummary = activeSettlementBreakdown(sortedReviewRows, asOf);

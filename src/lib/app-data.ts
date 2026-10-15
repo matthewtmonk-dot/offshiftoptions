@@ -511,7 +511,7 @@ type CampaignWithEventsForMarks = {
   }>;
 };
 
-async function loadLatestOptionMarksForCampaigns(campaigns: CampaignWithEventsForMarks[]) {
+export async function loadLatestOptionMarksForCampaigns(campaigns: CampaignWithEventsForMarks[]) {
   const underlyings = [
     ...new Set(campaigns.map((campaign) => campaign.ticker.toUpperCase())),
   ];
