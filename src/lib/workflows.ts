@@ -2353,71 +2353,58 @@ export async function updateScannerSettingsForUser(userId: string, formData: For
     enabled: formData.get(`${definition.key}:enabled`) === "on",
   }));
 
-  await prisma.$transaction(async (tx) => {
-    for (const { definition, index, desired, enabled } of parsedRules) {
-      await tx.scannerRule.upsert({
-        where: {
-          profileId_key: {
-            profileId: profile.id,
-            key: definition.key,
-          },
-        },
-        update: {
-          name: definition.name,
-          operator: definition.operator,
-          valueJson: { desired },
-          enabled,
-          sortOrder: index,
-        },
-        create: {
-          profileId: profile.id,
+  await replaceScannerRules(
+    profile.id,
+    parsedRules.map(({ definition, index, desired, enabled }) => ({ definition, desired, enabled, sortOrder: index })),
+  );
+
+  return profile;
+}
+
+/**
+ * Writes the whole rule set in THREE statements (delete the defined rules, create them again, touch the
+ * profile) inside one atomic transaction - never partial, same all-or-nothing guarantee as before.
+ * It used to do 15 sequential upserts; against the remote production database (hundreds of
+ * milliseconds per round trip) that approached the interactive-transaction limit and could fail the
+ * save with a timeout, while being instant locally. Nothing references individual rule rows (they are
+ * only read, by key), so replacing them is safe; rules outside SCANNER_RULE_DEFINITIONS are left alone.
+ */
+async function replaceScannerRules(
+  profileId: string,
+  rules: { definition: (typeof SCANNER_RULE_DEFINITIONS)[number]; desired: unknown; enabled: boolean; sortOrder: number }[],
+) {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.scannerRule.deleteMany({ where: { profileId, key: { in: rules.map((rule) => rule.definition.key) } } });
+      await tx.scannerRule.createMany({
+        data: rules.map(({ definition, desired, enabled, sortOrder }) => ({
+          profileId,
           key: definition.key,
           name: definition.name,
           operator: definition.operator,
-          valueJson: { desired },
+          valueJson: { desired } as never,
           enabled,
-          sortOrder: index,
-        },
+          sortOrder,
+        })),
       });
-    }
-    await tx.scannerProfile.update({ where: { id: profile.id }, data: { updatedAt: new Date() } });
-  });
-
-  return profile;
+      await tx.scannerProfile.update({ where: { id: profileId }, data: { updatedAt: new Date() } });
+    },
+    { timeout: 30_000, maxWait: 10_000 },
+  );
 }
 
 export async function resetScannerSettingsToLstCoreForUser(userId: string) {
   const profile = await ensureMyLstScannerProfileForUser(userId);
 
-  await prisma.$transaction(async (tx) => {
-    for (const [index, definition] of SCANNER_RULE_DEFINITIONS.entries()) {
-      await tx.scannerRule.upsert({
-        where: {
-          profileId_key: {
-            profileId: profile.id,
-            key: definition.key,
-          },
-        },
-        update: {
-          name: definition.name,
-          operator: definition.operator,
-          valueJson: { desired: definition.defaultDesired },
-          enabled: definition.defaultEnabled,
-          sortOrder: index,
-        },
-        create: {
-          profileId: profile.id,
-          key: definition.key,
-          name: definition.name,
-          operator: definition.operator,
-          valueJson: { desired: definition.defaultDesired },
-          enabled: definition.defaultEnabled,
-          sortOrder: index,
-        },
-      });
-    }
-    await tx.scannerProfile.update({ where: { id: profile.id }, data: { updatedAt: new Date() } });
-  });
+  await replaceScannerRules(
+    profile.id,
+    SCANNER_RULE_DEFINITIONS.map((definition, index) => ({
+      definition,
+      desired: definition.defaultDesired,
+      enabled: definition.defaultEnabled,
+      sortOrder: index,
+    })),
+  );
 
   return profile;
 }
