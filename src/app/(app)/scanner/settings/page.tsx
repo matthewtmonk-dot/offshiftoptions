@@ -5,6 +5,7 @@ import {
   diffScannerRulesFromLstCore,
   formatRuleDesired,
   getRuleDesired,
+  scannerFieldName,
   SCANNER_RULE_DEFINITIONS,
   type ScannerRuleDefinition,
 } from "@/domain/scanner/profile";
@@ -190,7 +191,7 @@ function RuleEditor({
         <label className="flex min-h-10 shrink-0 items-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300">
           <input
             type="checkbox"
-            name={`${definition.key}:enabled`}
+            name={scannerFieldName(definition.key, "enabled")}
             defaultChecked={enabled}
             className="size-4 accent-emerald-400"
           />
@@ -201,7 +202,7 @@ function RuleEditor({
       {definition.input.kind === "range" && Array.isArray(desired) ? (
         <div className="grid gap-3 sm:grid-cols-2">
           <NumberField
-            name={`${definition.key}:min`}
+            name={scannerFieldName(definition.key, "min")}
             label={definition.input.minLabel}
             defaultValue={desired[0]}
             min={definition.input.min}
@@ -209,7 +210,7 @@ function RuleEditor({
             step={definition.input.step}
           />
           <NumberField
-            name={`${definition.key}:max`}
+            name={scannerFieldName(definition.key, "max")}
             label={definition.input.maxLabel}
             defaultValue={desired[1]}
             min={definition.input.min}
@@ -221,7 +222,7 @@ function RuleEditor({
 
       {definition.input.kind === "single" && !Array.isArray(desired) ? (
         <NumberField
-          name={`${definition.key}:value`}
+          name={scannerFieldName(definition.key, "value")}
           label={definition.input.label}
           defaultValue={Number(desired)}
           min={definition.input.min}
