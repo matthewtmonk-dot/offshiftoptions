@@ -89,6 +89,14 @@ export function notEnrichedScanNote(state: NotEnrichedState, chainBudget: number
  */
 export const NOT_OPTION_ASSESSED_BADGE = "STOCK SCREEN ONLY";
 
+/** A stock that PASSED the screen but whose options simply haven't been looked up yet. Said plainly,
+ * because "STOCK SCREEN ONLY" read as "no information exists" when the truth is "one click away". */
+export const OPTIONS_NOT_CHECKED_YET_BADGE = "OPTIONS NOT CHECKED YET";
+
+export function notOptionAssessedBadge(state: unknown): string {
+  return state === "NOT_ENRICHED_BUDGET" ? OPTIONS_NOT_CHECKED_YET_BADGE : NOT_OPTION_ASSESSED_BADGE;
+}
+
 /**
  * What a scanner row should actually list as the reason its option columns are blank.
  *
@@ -109,7 +117,7 @@ export function scannerRowReasons(state: unknown, unknownCriterionReasons: strin
 export function notOptionAssessedLabel(state: unknown, chainBudget: number): string | null {
   switch (state) {
     case "NOT_ENRICHED_BUDGET":
-      return `Options not checked yet — beyond the first ${chainBudget} auto-checked (use Check options)`;
+      return `Passed the stock screen. Options not priced yet - beyond the first ${chainBudget} checked automatically. Press Check options.`;
     case "NOT_ENRICHED_STOCK_FILTER":
       return "Options not checked — stock screen did not qualify";
     case "NOT_ENRICHED_DATA_UNAVAILABLE":

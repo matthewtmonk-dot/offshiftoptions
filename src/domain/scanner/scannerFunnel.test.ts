@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScannerFunnel, describeScannerFunnel, isAwaitingOptionCheck, isBestAvailable, isStockQualified, isWorthALook, type FunnelRowInput } from "./scannerFunnel";
+import { buildScannerFunnel, describeScannerFunnel, isAwaitingOptionCheck, isBestAvailable, isStockQualified, isWorthALook, summarizeOptionOutcomes, describeOptionOutcomes, type FunnelRowInput } from "./scannerFunnel";
 
 const row = (overrides: Partial<FunnelRowInput> = {}): FunnelRowInput => ({
   readiness: "FAIL",
@@ -102,5 +102,42 @@ describe("isBestAvailable (never overrides a hard-rule blocker)", () => {
     expect(describeScannerFunnel(funnel)).toContain("2 clear every hard rule (see Best available)");
     const goodWeek = buildScannerFunnel([row({ readiness: "PASS" }), row({ readiness: "FAIL" })]);
     expect(describeScannerFunnel(goodWeek)).not.toContain("Best available");
+  });
+});
+
+describe("summarizeOptionOutcomes (why priced names didn't pass)", () => {
+  const priced = (overrides: Partial<Parameters<typeof summarizeOptionOutcomes>[0][number]> = {}) => ({
+    readiness: "FAIL" as const, optionEnrichment: "ENRICHED", contractReasonCode: null, criteria: [], ...overrides,
+  });
+
+  it("counts the single main reason per priced row, biggest first", () => {
+    const outcomes = summarizeOptionOutcomes([
+      priced({ contractReasonCode: "NO_EXPIRATIONS_IN_CONFIGURED_RANGE" }),
+      priced({ contractReasonCode: "NO_WEEKLY_EXPIRATION" }),
+      priced({ contractReasonCode: "NO_EXPIRATIONS_IN_CONFIGURED_RANGE" }),
+      priced({ criteria: [{ key: "ror", status: "FAIL" }] }),
+      priced({ criteria: [{ key: "openInterest", status: "FAIL" }, { key: "ror", status: "FAIL" }] }), // the hard rule is the blocker
+    ]);
+    expect(outcomes).toEqual([
+      { label: "no weekly option in your expiration window", count: 3 },
+      { label: "open interest too low", count: 1 },
+      { label: "return below your target", count: 1 },
+    ]);
+    expect(describeOptionOutcomes(outcomes)).toBe("3 no weekly option in your expiration window · 1 open interest too low · 1 return below your target");
+  });
+
+  it("ignores passes, unpriced rows and stock-screen rejects", () => {
+    expect(
+      summarizeOptionOutcomes([
+        priced({ readiness: "PASS" }),
+        priced({ optionEnrichment: "NOT_ENRICHED_BUDGET" }),
+        priced({ optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" }),
+        priced({ optionEnrichment: null }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("labels a NEAR row with no failed rule, and unknown-only rows, honestly", () => {
+    expect(summarizeOptionOutcomes([priced({ readiness: "NEAR" }), priced({ readiness: "NEEDS_DATA" })]).map((o) => o.label).sort()).toEqual(["just under one preference", "missing option data"]);
   });
 });

@@ -16,7 +16,7 @@ import {
 } from "@/domain/scanner/scanner";
 import { GATING_RULE_KEYS, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { STOCK_STAGE_RULE_KEYS } from "@/domain/scanner/live-scan";
-import { buildScannerFunnel, describeScannerFunnel, funnelInputOf, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
+import { buildScannerFunnel, describeOptionOutcomes, describeScannerFunnel, funnelInputOf, summarizeOptionOutcomes, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
 import { scannerTimingGuide, technicalReadyHint } from "@/domain/scanner/timingGuide";
 import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
@@ -232,6 +232,14 @@ export default async function ScannerPage({
   // The saved list is capped (MAX_DISPLAYED_STOCK_STAGE_RESULTS non-Research rows), so when it's full
   // the funnel counts are a floor, not an exact total.
   const funnelTruncated = allResults.filter((result) => !researchByTicker.has(result.record.ticker)).length >= MAX_DISPLAYED_STOCK_STAGE_RESULTS;
+  const optionOutcomes = summarizeOptionOutcomes(
+    allResults.map((result) => ({
+      readiness: result.readiness,
+      optionEnrichment: result.values.optionEnrichment,
+      contractReasonCode: result.contractReasonCode,
+      criteria: result.summary.results,
+    })),
+  );
   const timingGuide = currentTimingGuide();
   const averageScore = allResults.length
     ? Math.round(allResults.reduce((sum, result) => sum + result.score, 0) / allResults.length)
@@ -367,8 +375,13 @@ export default async function ScannerPage({
           <div className="min-w-0 text-sm text-zinc-300">
             <p>{describeScannerFunnel(funnel, { truncated: funnelTruncated })}</p>
             <p className="mt-0.5 text-xs text-zinc-500">
-              The scan auto-prices options for only the first few names. Check options prices the rest of the qualified stocks so nothing worthwhile is missed.
+              A stock that passes the screen still needs its weekly option prices looked up (premium, return, strikes). That step is called Check options - it runs by itself after each scan, or press the button.
             </p>
+            {optionOutcomes.length > 0 ? (
+              <p className="mt-0.5 text-xs text-zinc-400" data-testid="scanner-option-outcomes">
+                Why priced names didn&apos;t pass: {describeOptionOutcomes(optionOutcomes)}
+              </p>
+            ) : null}
           </div>
           {funnel.awaitingOptionCheck > 0 ? <OptionCheckButton awaiting={funnel.awaitingOptionCheck} /> : null}
         </div>
