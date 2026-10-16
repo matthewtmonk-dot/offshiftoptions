@@ -2,7 +2,7 @@ import "server-only";
 
 import { randomUUID, createHash } from "node:crypto";
 import { bollingerBands, wilderRsi } from "@/domain/finance/calculations";
-import { previousNyseMarketDay } from "@/domain/finance/marketCalendar";
+import { marketDate, previousNyseMarketDay } from "@/domain/finance/marketCalendar";
 import { mapWithConcurrency } from "./concurrency";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
 import { prisma } from "./prisma";
@@ -1007,8 +1007,14 @@ export function dateOnlyUtc(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
 
+/**
+ * The latest trading day whose close the technical data must cover. Computed from the America/New_York
+ * calendar date of `now`, NOT the UTC date: the UTC date rolls over at 8 PM ET, and using it made every
+ * evening (8 PM ET until the next morning's preparation run) require a candle that cannot exist yet, so
+ * the whole scan read "technical cache not current - 0 / 2,543 fresh" and every row was UNKNOWN.
+ */
 export function requiredTechnicalMarketDateUtc(now: Date): Date {
-  return dateOnlyUtc(previousNyseMarketDay(now));
+  return dateOnlyUtc(previousNyseMarketDay(marketDate(now)));
 }
 
 // ---------------------------------------------------------------------------------------------

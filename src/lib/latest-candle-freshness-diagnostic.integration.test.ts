@@ -66,9 +66,9 @@ maybeDescribe("Latest candle freshness diagnostic - read-only, bounded to a hand
   }
 
   it("reports fresh: true for a current candle and fresh: false for a lagged one, using the same freshness rule as the live scan", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     const now = new Date();
-    const requiredMarketDate = previousNyseMarketDay(now);
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now));
     const laggedDate = previousNyseMarketDay(requiredMarketDate);
 
     await seedSymbols(["LCFDA", "LCFDB"]);
@@ -93,9 +93,9 @@ maybeDescribe("Latest candle freshness diagnostic - read-only, bounded to a hand
   it("a single symbol's fetch failure is reported honestly (null/false), never aborting the rest of the diagnostic", async () => {
     const now = new Date();
     await seedSymbols(["LCFDFAIL", "LCFDOK"]);
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     const provider = fakeProvider({
-      candlesByTicker: { LCFDOK: syntheticCandlesEndingOn("LCFDOK", previousNyseMarketDay(now)) },
+      candlesByTicker: { LCFDOK: syntheticCandlesEndingOn("LCFDOK", previousNyseMarketDay(marketDate(now))) },
       failTickers: new Set(["LCFDFAIL"]),
     });
 

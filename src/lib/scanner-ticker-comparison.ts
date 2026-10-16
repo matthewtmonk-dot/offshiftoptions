@@ -1,11 +1,10 @@
 import "server-only";
 
 import { bollingerPositionPercent } from "@/domain/finance/calculations";
-import { previousNyseMarketDay } from "@/domain/finance/marketCalendar";
 import { scannerRulesFromRecords } from "@/domain/scanner/profile";
 import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
 import { prisma } from "./prisma";
-import { dateOnlyUtc, getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
+import { getTechnicalIndicatorSnapshotsForUser, requiredTechnicalMarketDateUtc } from "./technical-indicator-cache";
 import { ensureMyLstScannerProfileForUser, getResearchUniverseTickersForUser } from "./workflows";
 import type { MarketDataProvider } from "@/providers/market-data/types";
 
@@ -109,7 +108,7 @@ export async function compareScannerTickersForUser(
   now: Date = new Date(),
 ): Promise<TickerComparisonResult> {
   const tickers = [...new Set(rawTickers.map((t) => t.trim().toUpperCase()).filter(Boolean))].slice(0, TICKER_COMPARISON_MAX_TICKERS);
-  const requiredMarketDate = dateOnlyUtc(previousNyseMarketDay(now));
+  const requiredMarketDate = requiredTechnicalMarketDateUtc(now);
 
   const [occRows, researchTickers, profile, technicalMap, earningsLookup, lastRun] = await Promise.all([
     tickers.length ? prisma.optionableUniverseSymbol.findMany({ where: { ticker: { in: tickers } }, select: { ticker: true } }) : [],

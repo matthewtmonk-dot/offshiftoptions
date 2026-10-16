@@ -228,7 +228,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   const GATE_CONTROL_TICKER_SET = new Set(GATE_CONTROL_TICKERS);
 
   /** Wraps a test's own provider so the 5 gate-control tickers always return candles ending
-   * EXACTLY at `now` (guaranteed fresh relative to previousNyseMarketDay(now), for whatever `now`
+   * EXACTLY at `now` (guaranteed fresh relative to previousNyseMarketDay(marketDate(now)), for whatever `now`
    * this specific call uses - including a test's own far-future/far-past synthetic `now`) -
    * delegating every other ticker to the real provider completely unchanged. Needed because a
    * plain default (e.g. always "real current time") would appear stale to a test that advances
@@ -625,11 +625,11 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("getTechnicalCacheFreshnessBreakdownForUser: after the immediate-stale-candle fix, a lagged candle never becomes workflow-READY in the first place - it's DEFERRED, and freshUsableCount/workflowReadyCount agree", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
 
     const now = new Date("2026-09-09T14:00:00Z");
-    const requiredMarketDate = previousNyseMarketDay(now);
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now));
     const laggedDate = previousNyseMarketDay(requiredMarketDate); // one trading day short - stale by construction
 
     await seedUniverse(["TECHFR1", "TECHFR2"]);
@@ -671,7 +671,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
   it("getTechnicalCacheFreshnessBreakdownForUser still catches a READY-but-stale item as a defense-in-depth safety net, even though the fixed worker itself should never produce one", async () => {
     const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
 
     const ticker = "TECHFRSAFETY1";
     await seedUniverse([ticker]);
@@ -682,7 +682,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     // Manually force an item to READY with a real stale asOfDate - simulating a hypothetical
     // future regression, never something the fixed worker itself would do.
     await prisma.technicalPreparationItem.updateMany({ where: { runId, ticker }, data: { status: "READY", processedAt: now } });
-    const staleDate = previousNyseMarketDay(previousNyseMarketDay(now));
+    const staleDate = previousNyseMarketDay(previousNyseMarketDay(marketDate(now)));
     await prisma.technicalIndicatorSnapshot.upsert({
       where: { userId_ticker: { userId: matt.id, ticker } },
       create: { userId: matt.id, ticker, status: "READY", asOfDate: staleDate, rsi: 15, bbLower: 15, bbMiddle: 20, bbUpper: 45 },
@@ -874,10 +874,10 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("a current-enough candle marks the item READY on the very first attempt (deferredAttempts stays 0)", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     await seedUniverse(["TECHOK1"]);
     const now = new Date();
-    const requiredMarketDate = previousNyseMarketDay(now);
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now));
     const provider = fakeProvider({
       quotes: { TECHOK1: { price: 20, volume: 1_000_000 } },
       candlesByTicker: { TECHOK1: syntheticCandles("TECHOK1", 80, requiredMarketDate) },
@@ -894,10 +894,10 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("a DEFERRED item cannot be reclaimed before its retryAfter - a second invocation immediately afterward claims nothing for it", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     await seedUniverse(["TECHDEF1"]);
     const now = new Date();
-    const requiredMarketDate = previousNyseMarketDay(now);
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now));
     const laggedDate = previousNyseMarketDay(requiredMarketDate);
     const provider = fakeProvider({
       quotes: { TECHDEF1: { price: 20, volume: 1_000_000 } },
@@ -915,11 +915,11 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("a DEFERRED item becomes reclaimable once its retryAfter has passed, and can succeed on retry with a now-current candle", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     const { DEFERRED_RETRY_INTERVAL_MS } = await import("./technical-indicator-cache");
     await seedUniverse(["TECHRETRY1"]);
     const now = new Date("2026-09-09T14:00:00Z");
-    const requiredMarketDate = previousNyseMarketDay(now);
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now));
     const laggedDate = previousNyseMarketDay(requiredMarketDate);
 
     const laggedProvider = fakeProvider({
@@ -934,7 +934,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
     const retryNow = new Date(now.getTime() + DEFERRED_RETRY_INTERVAL_MS + 1000);
     const caughtUpProvider = fakeProvider({
       quotes: { TECHRETRY1: { price: 20, volume: 1_000_000 } },
-      candlesByTicker: { TECHRETRY1: syntheticCandles("TECHRETRY1", 80, previousNyseMarketDay(retryNow)) },
+      candlesByTicker: { TECHRETRY1: syntheticCandles("TECHRETRY1", 80, previousNyseMarketDay(marketDate(retryNow))) },
     });
     const second = await refreshTechnicalIndicatorCacheBatchForUser(matt.id, caughtUpProvider, { batchSize: 1, now: retryNow });
     expect(second.processedCount).toBe(1);
@@ -946,10 +946,10 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("a DEFERRED item never starves an unrelated genuinely-PENDING item - the claim query skips a not-yet-retryable row and moves on", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     await seedUniverse(["TECHSTARVEA", "TECHSTARVEB"]); // alphabetically A sorts before B
     const now = new Date("2026-09-09T14:00:00Z");
-    const requiredMarketDate = previousNyseMarketDay(now);
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now));
     const laggedDate = previousNyseMarketDay(requiredMarketDate);
     const provider = fakeProvider({
       quotes: { TECHSTARVEA: { price: 20, volume: 1_000_000 }, TECHSTARVEB: { price: 20, volume: 1_000_000 } },
@@ -973,10 +973,10 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("a run cannot become COMPLETE while a DEFERRED item still has a real retry attempt left", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     await seedUniverse(["TECHNOCOMPLETE1"]);
     const now = new Date();
-    const laggedDate = previousNyseMarketDay(previousNyseMarketDay(now));
+    const laggedDate = previousNyseMarketDay(previousNyseMarketDay(marketDate(now)));
     const provider = fakeProvider({
       quotes: { TECHNOCOMPLETE1: { price: 20, volume: 1_000_000 } },
       candlesByTicker: { TECHNOCOMPLETE1: syntheticCandles("TECHNOCOMPLETE1", 80, laggedDate) },
@@ -991,12 +991,12 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("bounded retry: a candle that never catches up becomes FAILED after MAX_DEFERRED_ATTEMPTS, and the run can then COMPLETE", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     const { DEFERRED_RETRY_INTERVAL_MS, MAX_DEFERRED_ATTEMPTS } = await import("./technical-indicator-cache");
     await seedUniverse(["TECHBOUNDED1"]);
 
     let now = new Date("2026-09-09T14:00:00Z");
-    const laggedDate = previousNyseMarketDay(previousNyseMarketDay(now));
+    const laggedDate = previousNyseMarketDay(previousNyseMarketDay(marketDate(now)));
     // A provider whose candle NEVER catches up, no matter how many times it's asked - simulating a
     // provider outage/persistent lag, never resolved within this run/generation.
     const provider = fakeProvider({
@@ -1022,11 +1022,11 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
   });
 
   it("a lagged refetch never regresses an existing, already-fresher TechnicalIndicatorSnapshot to an older asOfDate", async () => {
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
     const ticker = "TECHNOREGRESS1";
     await seedUniverse([ticker]);
     const now = new Date();
-    const requiredMarketDate = previousNyseMarketDay(now);
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now));
     const laggedDate = previousNyseMarketDay(requiredMarketDate);
 
     // A real, already-good snapshot exists - fresher than what this fetch is about to return.
@@ -1064,7 +1064,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
   it("getTechnicalCacheFreshnessBreakdownForUser({mostRecentRun: true}) does not hide a genuinely stale carried-over cache on a day with no NEW run yet - the Scanner page's own staleness banner depends on this", async () => {
     const { getTechnicalCacheFreshnessBreakdownForUser } = await import("./technical-indicator-cache");
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
 
     // Friday Sep 11 2026, 6:00 AM ET - a real preparation run created that morning, requiring
     // Thursday Sep 10's candle (Friday hadn't closed yet). Successful: 3/3 READY, asOfDate = Sep 10.
@@ -1081,7 +1081,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
         userId: matt.id,
         ticker,
         status: "READY",
-        asOfDate: previousNyseMarketDay(fridayMorning), // Thu Sep 10 - correct/fresh as of Friday morning
+        asOfDate: previousNyseMarketDay(marketDate(fridayMorning)), // Thu Sep 10 - correct/fresh as of Friday morning
         rsi: 50,
         historyFetchedAt: fridayMorning,
       })),
@@ -1429,9 +1429,10 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
      * never have to think about the gate) - they need full, explicit control over exactly which
      * tickers get probed and what the gate itself decides, including the NOT_READY shape. */
     let previousNyseMarketDayFn: typeof import("@/domain/finance/marketCalendar").previousNyseMarketDay;
+    let marketDateFn: typeof import("@/domain/finance/marketCalendar").marketDate;
 
     beforeAll(async () => {
-      ({ previousNyseMarketDay: previousNyseMarketDayFn } = await import("@/domain/finance/marketCalendar"));
+      ({ previousNyseMarketDay: previousNyseMarketDayFn, marketDate: marketDateFn } = await import("@/domain/finance/marketCalendar"));
     });
 
     it("never issues more than LATEST_CANDLE_FRESHNESS_DIAGNOSTIC_SYMBOL_COUNT (5) history requests, regardless of how large the universe is", async () => {
@@ -1522,7 +1523,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
         data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
       });
       const now = new Date();
-      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(marketDateFn(now)));
       const provider = fakeProvider({
         quotes: {},
         failTickers: new Set(unavailableTickers),
@@ -1544,7 +1545,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
         data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
       });
       const now = new Date();
-      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(marketDateFn(now)));
       let getQuotesCallCount = 0;
       const provider = fakeProvider({
         quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
@@ -1571,7 +1572,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
         data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
       });
       const now = new Date();
-      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(marketDateFn(now)));
       let historyCallCount = 0;
       const provider = fakeProvider({
         quotes: Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),
@@ -1589,7 +1590,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
     it("an existing legacy IN_PROGRESS generation is repaired and gated before any bulk history work", async () => {
       const now = new Date("2026-09-09T10:00:00Z");
-      const requiredMarketDate = previousNyseMarketDayFn(now);
+      const requiredMarketDate = previousNyseMarketDayFn(marketDateFn(now));
       const staleDate = new Date("2026-09-04T20:00:00Z");
       const probeTickers = ["TECHLEGACYGATE0", "TECHLEGACYGATE1", "TECHLEGACYGATE2", "TECHLEGACYGATE3", "TECHLEGACYGATE4"];
       const workTickers = ["ZZTECHLEGACYSTALE", "ZZTECHLEGACYFAILED", "ZZTECHLEGACYMISSING", "ZZTECHLEGACYPENDING"];
@@ -1676,7 +1677,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
 
     it("an existing generation with enough genuinely-fresh READY items skips repeated gate probes on later work", async () => {
       const now = new Date("2026-09-09T10:00:00Z");
-      const requiredMarketDate = previousNyseMarketDayFn(now);
+      const requiredMarketDate = previousNyseMarketDayFn(marketDateFn(now));
       const laggedDate = previousNyseMarketDayFn(requiredMarketDate);
       const probeTickers = ["TECHSKIPGATE0", "TECHSKIPGATE1", "TECHSKIPGATE2", "TECHSKIPGATE3", "TECHSKIPGATE4"];
       const readyTickers = ["ZZTECHSKIPREADY0", "ZZTECHSKIPREADY1", "ZZTECHSKIPREADY2"];
@@ -1768,7 +1769,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
         data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
       });
       const now = new Date();
-      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(marketDateFn(now)));
       const mattProvider = fakeProvider({
         quotes: {},
         candlesByTicker: Object.fromEntries(tickers.map((t) => [t, syntheticCandles(t, 80, laggedDate)])), // all stale
@@ -1811,7 +1812,7 @@ maybeDescribe("Technical indicator cache - user-scoped, never shared, reproduces
         data: tickers.map((ticker) => ({ ticker, name: `${ticker} Corp`, source: TEST_SOURCE, lastSeenAt: new Date() })),
       });
       const now = new Date();
-      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(now));
+      const laggedDate = previousNyseMarketDayFn(previousNyseMarketDayFn(marketDateFn(now)));
       // A deliberate mix - some fresh, some stale - so the two call paths have something real to agree on.
       const provider = fakeProvider({
         quotes: {},
