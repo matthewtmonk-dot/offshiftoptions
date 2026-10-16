@@ -19,7 +19,7 @@ The overall result is derived from criterion results:
 
 ## Current live selection (September 16, 2026 - expiration-before-quality-gates fix)
 
-Contract selection is separate from criterion scoring. The confirmed LST Core thresholds remain price $10–$50, RSI <=40, BB <=33%, Put ROR >=1%, earnings >=10 days, stock volume >=40,000, OI >=100, and option bid >=$0.10. No calculation or PASS/FAIL/UNKNOWN/NEAR/VERIFY semantics changed.
+Contract selection is separate from criterion scoring. The confirmed LST Core thresholds remain price $10–$50, RSI <=40, BB <=33%, Put ROR >=1%, earnings >=10 days, stock volume >=1,000,000 (raised from 40,000 on 2026-10-15 at Matt's direction - 40,000 admitted thinly traded names; a rule Matt already saved keeps its saved value until he edits it or presses Reset), OI >=100, and option bid >=$0.10. No calculation or PASS/FAIL/UNKNOWN/NEAR/VERIFY semantics changed.
 
 **Audit finding (fixed this slice):** the prior implementation applied enabled bid/OI/spread/delta gates *before* choosing which expiration to assess. That let a bad-liquidity or low-ROR weekly contract lose every candidate at its own date, so a 93/121/156-DTE contract that happened to PASS became "the closest surviving expiration" by default - a monthly/LEAPS contract silently standing in for a weekly one. The fix separates **structural existence** (decides which expirations exist) from **strategy quality** (decides which strike is preferred, never whether the expiration exists):
 

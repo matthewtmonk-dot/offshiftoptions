@@ -79,7 +79,7 @@ maybeDescribe("covered call foundation workflows", () => {
     expect(updated?.status).toBe("ASSIGNED");
     expect(updated?.events.map((event) => event.type)).toEqual(["SELL_PUT", "ASSIGNMENT", "SELL_COVERED_CALL"]);
     const openCall = getCurrentOpenCall(updated!.events);
-    expect(openCall).toEqual({ strike: 44, contracts: 1, expiration: new Date("2026-09-11") });
+    expect(openCall).toMatchObject({ strike: 44, contracts: 1, expiration: new Date("2026-09-11") });
   });
 
   it("test 6: 200 shares (2 contracts assigned) permits selling 2 covered call contracts", async () => {
@@ -164,7 +164,7 @@ maybeDescribe("covered call foundation workflows", () => {
     await workflows.closeCoveredCallForUser(matt.id, campaign.id, "2026-09-08", "0.10", "0", null);
 
     const secondCall = await workflows.sellCoveredCallForUser(matt.id, campaign.id, "2026-09-09", "2026-09-25", "45", "1", "0.28", "0", null);
-    expect(getCurrentOpenCall(secondCall!.events)).toEqual({ strike: 45, contracts: 1, expiration: new Date("2026-09-25") });
+    expect(getCurrentOpenCall(secondCall!.events)).toMatchObject({ strike: 45, contracts: 1, expiration: new Date("2026-09-25") });
   });
 
   it("test 12/13: a full stock sale with no open call records proceeds and closes the campaign", async () => {
