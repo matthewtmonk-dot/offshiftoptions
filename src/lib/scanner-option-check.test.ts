@@ -44,7 +44,7 @@ function put(overrides: Partial<OptionContractSnapshot> = {}): OptionContractSna
 /** A real budget-limited row from the real scan engine, shaped exactly as persisted (undefined -> null). */
 async function storedRow(ticker: string, overrides: { rsi?: number; volume?: number } = {}) {
   const provider: MarketDataProvider = {
-    async getQuote(symbol) { return { symbol, price: 20, volume: overrides.volume ?? 100_000, asOf: SCAN_TIME }; },
+    async getQuote(symbol) { return { symbol, price: 20, volume: overrides.volume ?? 2_000_000, asOf: SCAN_TIME }; },
     async getPriceHistory() { throw new Error("n/a"); },
     async getOptionChain() { return []; },
     async getInstrument(symbol) { return { symbol, description: symbol, assetType: "EQUITY" }; },

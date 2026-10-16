@@ -26,7 +26,7 @@ function fixture(options: OptionContractSnapshot[], tickers = ["TEST"]) {
   const calls: string[] = [];
   const history = vi.fn(async () => { throw new Error("Unexpected live history fetch"); });
   const provider: MarketDataProvider = {
-    async getQuote(symbol) { return { symbol, price: 20, volume: 100_000, asOf }; },
+    async getQuote(symbol) { return { symbol, price: 20, volume: 2_000_000, asOf }; },
     getPriceHistory: history,
     async getOptionChain(symbol) { calls.push(symbol); return options; },
     async getInstrument(symbol) { return { symbol, description: symbol, assetType: "EQUITY" }; },

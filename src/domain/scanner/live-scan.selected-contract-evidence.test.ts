@@ -31,7 +31,7 @@ function fixture(
 ) {
   const chainCalls: string[] = [];
   const provider: MarketDataProvider = {
-    async getQuote(symbol) { return { symbol, price: 20, volume: 100_000, asOf: opts.asOf ?? asOf }; },
+    async getQuote(symbol) { return { symbol, price: 20, volume: 2_000_000, asOf: opts.asOf ?? asOf }; },
     async getPriceHistory() { throw new Error("Unexpected live history fetch"); },
     async getOptionChain(symbol) {
       chainCalls.push(symbol);

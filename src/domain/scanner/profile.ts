@@ -84,7 +84,7 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     key: "stockVolume",
     name: "Underlying volume",
     operator: "GTE",
-    defaultDesired: 40_000,
+    defaultDesired: 1_000_000,
     defaultEnabled: true,
     explanation: "Minimum stock-share volume for basic liquidity. Missing volume remains UNKNOWN.",
     input: { kind: "single", label: "Minimum underlying share volume", step: "1000", min: 0 },

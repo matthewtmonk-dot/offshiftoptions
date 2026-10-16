@@ -22,7 +22,7 @@ function put(dte: number, overrides: Partial<OptionContractSnapshot> = {}): Opti
 
 function scanInput(options: OptionContractSnapshot[], tickers = ["TEST"]) {
   const provider: MarketDataProvider = {
-    async getQuote(symbol) { return { symbol, price: 20, volume: 100_000, asOf }; },
+    async getQuote(symbol) { return { symbol, price: 20, volume: 2_000_000, asOf }; },
     async getPriceHistory() { throw new Error("no live history in this mode"); },
     async getOptionChain() { return options; },
     async getInstrument(symbol) { return { symbol, description: symbol, assetType: "EQUITY" }; },
@@ -94,7 +94,7 @@ describe("enrichPersistedStockStageRow (the on-demand 'Check options' path)", ()
 
 describe("stockScreenVerdict", () => {
   it("only looks at stock-level rules, ignoring option rules that are still unknown", () => {
-    const values = { price: 20, stockVolume: 100_000, rsi: 30, bbPercent: 20, earningsDistance: 36, doNotTrade: false };
+    const values = { price: 20, stockVolume: 2_000_000, rsi: 30, bbPercent: 20, earningsDistance: 36, doNotTrade: false };
     expect(stockScreenVerdict(rules, values)).toBe("PASS");
     expect(stockScreenVerdict(rules, { ...values, rsi: 55 })).toBe("FAIL");
     expect(stockScreenVerdict(rules, { ...values, rsi: null })).toBe("UNKNOWN");

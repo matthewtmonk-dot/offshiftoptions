@@ -32,7 +32,7 @@ function fixture(
 ) {
   const chainCalls: ChainCall[] = [];
   const provider: MarketDataProvider = {
-    async getQuote(symbol) { return { symbol, price: 20, volume: 100_000, asOf }; },
+    async getQuote(symbol) { return { symbol, price: 20, volume: 2_000_000, asOf }; },
     async getPriceHistory() { throw new Error("Unexpected live history fetch"); },
     async getOptionChain(symbol, request) {
       chainCalls.push({ symbol, request });
@@ -131,7 +131,7 @@ describe("option enrichment disposition", () => {
       ...input.provider,
       async getQuote(symbol) {
         if (symbol === "NOQUOTE") throw new Error("unavailable");
-        return { symbol, price: 20, volume: 100_000, asOf };
+        return { symbol, price: 20, volume: 2_000_000, asOf };
       },
     };
 
