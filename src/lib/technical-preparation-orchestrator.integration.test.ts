@@ -536,8 +536,8 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
       await createConnectedBrokerRow(matt.id, "matt-saturday-not-ready");
       const tickers = ["ORCHSATSTALE0", "ORCHSATSTALE1", "ORCHSATSTALE2"];
       await seedUniverse(tickers);
-      const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
-      const requiredMarketDate = previousNyseMarketDay(SATURDAY_WINDOW_NOW); // Friday Sep 11
+      const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
+      const requiredMarketDate = previousNyseMarketDay(marketDate(SATURDAY_WINDOW_NOW)); // Friday Sep 11
       expect(requiredMarketDate.toISOString().slice(0, 10)).toBe("2026-09-11");
       const laggedDate = previousNyseMarketDay(requiredMarketDate); // Thursday Sep 10 - one trading day short
 
@@ -560,8 +560,8 @@ maybeDescribe("Technical preparation orchestrator - bounded, fair, per-user isol
       await createConnectedBrokerRow(matt.id, "matt-saturday-ready");
       const tickers = ["ORCHSATOK0", "ORCHSATOK1", "ORCHSATOK2"];
       await seedUniverse(tickers);
-      const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
-      const requiredMarketDate = previousNyseMarketDay(SATURDAY_WINDOW_NOW); // Friday Sep 11
+      const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
+      const requiredMarketDate = previousNyseMarketDay(marketDate(SATURDAY_WINDOW_NOW)); // Friday Sep 11
 
       const provider = providerWithHistoryEndingOn(
         Object.fromEntries(tickers.map((t) => [t, { price: 20, volume: 1_000_000 }])),

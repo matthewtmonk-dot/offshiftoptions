@@ -141,7 +141,7 @@ const GATE_CONTROL_TICKERS = ["0GATECTRLBS0", "0GATECTRLBS1", "0GATECTRLBS2", "0
 const GATE_CONTROL_TICKER_SET = new Set(GATE_CONTROL_TICKERS);
 
 /** Wraps a test's own provider so the 5 gate-control tickers always return candles ending EXACTLY
- * at `now` (guaranteed fresh relative to previousNyseMarketDay(now), for whatever `now` this call
+ * at `now` (guaranteed fresh relative to previousNyseMarketDay(marketDate(now)), for whatever `now` this call
  * uses) - delegating every other ticker to the real provider unchanged. */
 function withGateControlTickers(provider: MarketDataProvider, now: Date): MarketDataProvider {
   return {
@@ -510,7 +510,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
       rsi: ticker === known ? 30 : 10, bbLower: 15, bbMiddle: 20, bbUpper: 45,
     })));
     const provider = fakeProvider(
-      Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 100_000 }])),
+      Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 2_000_000 }])),
       { [known]: defaultPut(known, 18) },
     );
     const getQuotes = provider.getQuotes!;
@@ -596,7 +596,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
   it("the readiness diagnostic and the live scanner's own technicalReadyCount agree, when checked at the same moment via the REAL preparation pipeline (not a hand-authored technicalCache map)", async () => {
     const { getOrCreateActiveTechnicalPreparationRun, refreshTechnicalIndicatorCacheBatchForUser, getTechnicalCacheReadinessForUser, getTechnicalIndicatorSnapshotsForUser } =
       await import("./technical-indicator-cache");
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
 
     const tickers = Array.from({ length: 12 }, (_, index) => `RMIS${String(index).padStart(6, "0")}`);
     await seedOccUniverse(tickers);
@@ -605,7 +605,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     // The realistic shape of a real worker run's own last-available candle - the most recently
     // COMPLETED trading day, never a day that hasn't closed yet (matches how Schwab's own
     // price-history endpoint behaves - see technical-indicator-cache.ts's own TECHNICAL_REFRESH_HISTORY_DAYS note).
-    const lastCloseDate = previousNyseMarketDay(now);
+    const lastCloseDate = previousNyseMarketDay(marketDate(now));
     const quotes = Object.fromEntries(tickers.map((ticker) => [ticker, { price: 20, volume: 1_000_000 }]));
     const candlesByTicker = Object.fromEntries(tickers.map((ticker) => [ticker, syntheticCandlesEndingOn(ticker, lastCloseDate)]));
     const prepProvider = fakeProviderWithHistory(quotes, candlesByTicker);
@@ -713,7 +713,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
   it("PART E - immediate-stale-worker: a candle one trading day short of what freshness requires is DEFERRED (retryable), never marked READY, and the live scan still correctly treats the honestly-written snapshot as stale - with zero elapsed real time between prep and scan", async () => {
     const { getOrCreateActiveTechnicalPreparationRun, refreshTechnicalIndicatorCacheBatchForUser, getTechnicalCacheReadinessForUser } =
       await import("./technical-indicator-cache");
-    const { previousNyseMarketDay } = await import("@/domain/finance/marketCalendar");
+    const { previousNyseMarketDay, marketDate } = await import("@/domain/finance/marketCalendar");
 
     const ticker = "RMISLAG01";
     await seedOccUniverse([ticker]);
@@ -724,7 +724,7 @@ maybeDescribe("broad scanner activation - rerunLiveSchwabScannerForUser", () => 
     // freshness check is keyed on `now` too - a synthetic run-identity `now` far from real time
     // would silently compute a different required market date than intended).
     const now = new Date();
-    const requiredMarketDate = previousNyseMarketDay(now); // what live-scan freshness demands right now (the scan below always reads real time)
+    const requiredMarketDate = previousNyseMarketDay(marketDate(now)); // what live-scan freshness demands right now (the scan below always reads real time)
     const laggedCandleDate = previousNyseMarketDay(requiredMarketDate); // one trading day SHORT of that - simulates Schwab not yet exposing the just-closed session's own daily candle
     const quotes = { [ticker]: { price: 20, volume: 1_000_000 } };
     const prepProvider = fakeProviderWithHistory(quotes, { [ticker]: syntheticCandlesEndingOn(ticker, laggedCandleDate) });

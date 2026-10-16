@@ -21,6 +21,7 @@ import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { DteBadge } from "@/components/dte-badge";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
+import { NextStepLine } from "@/components/next-step-line";
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { CoveredCallOutcomePlanner } from "@/components/covered-call-outcome-planner";
 import { isCoveredCallOutcomePlannerEligible } from "@/domain/finance/coveredCallOutcome";
@@ -820,6 +821,12 @@ function CampaignCard({
   // campaign, regardless of CURRENT/LAST_VALID/UNAVAILABLE state - daysToExpiration lives on the
   // live evaluator result in every state (currentUnavailable is still a genuine live evaluation).
   const dte = display ? underlyingPositionReviewResult(display).explanation.daysToExpiration : null;
+  // The very first put sale of this campaign - the "original trade" the lifecycle below keeps rolling forward.
+  const firstPutSale =
+    [...campaign.events]
+      .filter((event) => event.type === "SELL_PUT")
+      .sort((a, b) => new Date(a.occurredAt).getTime() - new Date(b.occurredAt).getTime())[0] ?? null;
+  const rollCount = campaign.events.filter((event) => event.type === "ROLL_PUT_OPEN").length;
   // Attention-First Freshness Phase 1 - a presentation-only relabel of the campaign's own
   // already-authoritative currentStage (see positionActivity.ts): an ASSIGNED campaign with an
   // open covered call shows "COVERED CALL OPEN" rather than leaving "ASSIGNED" as the primary
@@ -904,6 +911,9 @@ function CampaignCard({
               <LivePositionAssessmentBadge display={display} now={asOf} />
               <LivePositionAssessmentEvidenceLine display={display} now={asOf} />
             </div>
+          ) : null}
+          {openView && (openPut || openCall) ? (
+            <NextStepLine display={display ?? null} dte={awaitingSettlement ? null : dte} settlementPending={awaitingSettlement} />
           ) : null}
           {/* Provenance/context - deliberately the smallest, most muted text in the card. The
               visibility affordance (compact position UX) now lives ONLY here, next to the account
@@ -1017,6 +1027,28 @@ function CampaignCard({
                 <Flag className="size-4 text-sky-300" aria-hidden />
                 Result So Far
               </div>
+              {firstPutSale ? (
+                <div className="mb-3 rounded-md border border-sky-400/25 bg-sky-400/5 p-3 text-sm" data-testid="original-trade">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-sky-300">Original trade</div>
+                  <p className="mt-1 text-zinc-100">
+                    Sold {toNumber(firstPutSale.contracts)} x {money(toNumber(firstPutSale.strike))} put
+                    {firstPutSale.expiration ? ` (expiring ${shortCalendarDate(firstPutSale.expiration)})` : ""} on{" "}
+                    {shortCalendarDate(firstPutSale.occurredAt)} for{" "}
+                    <span className="font-semibold text-emerald-300">{money(optionLegValue(firstPutSale) ?? 0)}</span>
+                    {firstPutSale.premium !== null && firstPutSale.premium !== undefined ? ` (${money(toNumber(firstPutSale.premium))} per share)` : ""}.
+                  </p>
+                  {openPut || openCall ? (
+                    <p className="mt-1 text-xs text-zinc-400">
+                      Now: {money((openPut ?? openCall)!.strike)} {openPut ? "put" : "call"} expiring {shortCalendarDate((openPut ?? openCall)!.expiration)}
+                      {rollCount > 0 ? ` - rolled ${rollCount} ${rollCount === 1 ? "time" : "times"} since` : ""}. Cash collected so far:{" "}
+                      <span className={toneClass(summary.netOptionPremium)}>{signedMoney(summary.netOptionPremium)}</span>.
+                    </p>
+                  ) : null}
+                  {campaign.status === "ASSIGNED" && latestAssignmentEvent ? (
+                    <p className="mt-1 text-xs text-zinc-400">Shares assigned at {money(toNumber(latestAssignmentEvent.strike))} each.</p>
+                  ) : null}
+                </div>
+              ) : null}
               <dl className="grid gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
                 <ResultItem label="Opened" value={summary.openedAt ? shortCalendarDate(summary.openedAt) : "UNKNOWN"} />
                 <ResultItem label="Closed" value={summary.closedAt ? shortCalendarDate(summary.closedAt) : "Not closed"} />
@@ -1142,9 +1174,19 @@ function CampaignCard({
                     </button>
                   </form>
                 </div>
-                {campaign.status === "OPEN" ? <CampaignActionForms campaignId={campaign.id} /> : null}
-                {campaign.status === "ASSIGNED" ? (
-                  <AssignedStockActionForms campaignId={campaign.id} ticker={campaign.ticker} sharesHeld={summary.sharesHeld} openCall={openCall} asOf={asOf} />
+                {campaign.status === "OPEN" || campaign.status === "ASSIGNED" ? (
+                  <details className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3" data-testid="manual-trade-entry">
+                    <summary className="cursor-pointer text-sm font-medium text-zinc-300">
+                      Record a trade by hand{" "}
+                      <span className="text-xs font-normal text-zinc-500">- only needed if Brokerage Sync didn&apos;t pick it up</span>
+                    </summary>
+                    <div className="mt-3">
+                      {campaign.status === "OPEN" ? <CampaignActionForms campaignId={campaign.id} /> : null}
+                      {campaign.status === "ASSIGNED" ? (
+                        <AssignedStockActionForms campaignId={campaign.id} ticker={campaign.ticker} sharesHeld={summary.sharesHeld} openCall={openCall} asOf={asOf} />
+                      ) : null}
+                    </div>
+                  </details>
                 ) : null}
               </div>
             ) : null}

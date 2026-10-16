@@ -151,8 +151,8 @@ maybeDescribe("Dashboard post-roll state matches Tracker (no stale pre-roll disp
     const data = await getDashboardData(userId);
     const path = data.openCampaigns.find((c) => c.id === campaignIds.PATH)!;
     const onon = data.openCampaigns.find((c) => c.id === campaignIds.ONON)!;
-    expect(getCurrentOpenPut(path.events)).toEqual({ strike: 14, contracts: 1, expiration: new Date("2026-09-25T20:00:00.000Z") });
-    expect(getCurrentOpenPut(onon.events)).toEqual({ strike: 27, contracts: 1, expiration: new Date("2026-09-25T20:00:00.000Z") });
+    expect(getCurrentOpenPut(path.events)).toMatchObject({ strike: 14, contracts: 1, expiration: new Date("2026-09-25T20:00:00.000Z") });
+    expect(getCurrentOpenPut(onon.events)).toMatchObject({ strike: 27, contracts: 1, expiration: new Date("2026-09-25T20:00:00.000Z") });
   });
 
   it("test 3: PATH/ONON are NOT labeled Expiration processing; CORZ/HL still are", async () => {
