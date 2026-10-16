@@ -23,6 +23,8 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { NextStepLine } from "@/components/next-step-line";
 import { WeeklyPaceRow } from "@/components/weekly-pace-row";
+import { PerformanceScorecardPanel } from "@/components/performance-scorecard-panel";
+import { buildPerformanceScorecard } from "@/lib/performance-scorecard";
 import { campaignWeeklyPaceDisplay } from "@/lib/weekly-pace-display";
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { CoveredCallOutcomePlanner } from "@/components/covered-call-outcome-planner";
@@ -587,6 +589,21 @@ export default async function PositionsPage({
 
       {view === "performance" ? (
         <PerformanceSection
+          scorecard={buildPerformanceScorecard({
+            report: ownReport,
+            campaigns: ownPerformanceRows.map((row) => ({
+              status: row.campaign.status,
+              events: row.campaign.events,
+              netOptionPremium: row.summary.netOptionPremium,
+              collateralCommitted: row.summary.collateralCommitted,
+              daysActive: row.summary.daysActive,
+              hasUnknownCashFlow: row.summary.unknowns.length > 0,
+              realizedPL: row.progress.realizedPLStatus === "CONFIRMED" ? row.progress.realizedPL : null,
+            })),
+            thisWeek: ownThisWeek,
+            winLoss: ownWinLoss,
+            asOf: new Date(),
+          })}
           thisWeek={ownThisWeek}
           winLoss={ownWinLoss}
           report={ownReport}
@@ -1958,6 +1975,7 @@ function BrokerActivityAwaitingReviewPanel({
 }
 
 function PerformanceSection({
+  scorecard,
   thisWeek,
   winLoss,
   report,
@@ -1968,12 +1986,13 @@ function PerformanceSection({
   projectedOtmPartial,
   lastSessionCount,
 }: {
+  scorecard: ReturnType<typeof buildPerformanceScorecard>;
   thisWeek: ReturnType<typeof summarizeThisWeek>;
   winLoss: ReturnType<typeof summarizeWinLoss>;
   /** Reporting Phase, Ticket 3: the same authoritative summary Dashboard uses - this section reads
    * its Confirmed Trading P/L / Trade Return / Capital Committed fields directly rather than
-   * recomputing them. Whole-account figures (account value, whole-account gain, total return) are
-   * deliberately NOT read from this - they live on Dashboard/Account, not Tracker. */
+   * recomputing them. The Account Scorecard at the top of this tab also shows account value and the
+   * whole-account average per week (built by lib/performance-scorecard.ts from the same report). */
   report: AccountReportingSummary;
   campaignRows: PerformanceCampaignViewRow[];
   currentCampaignPLTotal: number | null;
@@ -1998,6 +2017,7 @@ function PerformanceSection({
 
   return (
     <section className="space-y-4" data-testid="performance-cockpit">
+      <PerformanceScorecardPanel scorecard={scorecard} />
       <div
         className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20"
         data-testid="this-week-summary"
@@ -2075,7 +2095,7 @@ function PerformanceSection({
             />
           </dl>
           <p className="mt-3 text-xs text-zinc-500">
-            Account value, whole-account gain, and total return live on{" "}
+            The whole-account gain card lives on{" "}
             <IntentPrefetchLink href="/dashboard" className="text-sky-300 hover:text-sky-200">
               Dashboard
             </IntentPrefetchLink>
