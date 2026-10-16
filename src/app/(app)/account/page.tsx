@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronDown, Download, KeyRound, Link2, Plus, RefreshCw, Save, SearchCheck, ShieldCheck, Unplug } from "lucide-react";
+import { ChevronDown, Download, Link2, Plus, RefreshCw, Save, SearchCheck, ShieldCheck, Unplug } from "lucide-react";
 import { Badge, FieldLabel, Panel } from "@/components/ui";
 import { AppearanceControl } from "@/components/appearance-control";
 import { requireCurrentUser } from "@/lib/auth";
@@ -102,32 +102,6 @@ export default async function AccountPage({
         </div>
       ) : null}
       {schwabMessage(params.schwab)}
-
-      <Panel title="Preferences">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="text-sm font-medium text-zinc-200">Appearance</div>
-            <p className="mt-1 text-xs text-zinc-500">
-              System follows your device&apos;s light/dark setting automatically. Light and Dark stay fixed until
-              you change this again.
-            </p>
-          </div>
-          <AppearanceControl current={user.settings?.appearance ?? "SYSTEM"} />
-        </div>
-        <div className="mt-4 flex flex-col gap-3 border-t border-zinc-800 pt-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="text-sm font-medium text-zinc-200">Install app</div>
-            <p className="mt-1 text-xs text-zinc-500">Add Off Shift Options to your home screen for a standalone, app-like view.</p>
-          </div>
-          <Link
-            href="/install"
-            className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300 hover:border-emerald-400/60"
-          >
-            <Download className="size-4" aria-hidden />
-            Install
-          </Link>
-        </div>
-      </Panel>
 
       <Panel title="Your Accounts">
         <div className="space-y-4">
@@ -648,36 +622,6 @@ export default async function AccountPage({
                   ) : (
                     <span className="text-xs text-zinc-500">Connect after developer app setup</span>
                   )}
-                  {schwabConnection?.connected ? (
-                    <Link
-                      href="/account/schwab-fundamentals"
-                      prefetch={false}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
-                    >
-                      <SearchCheck className="size-3" aria-hidden />
-                      Verify Schwab Fundamental Fields
-                    </Link>
-                  ) : null}
-                  {schwabConnection?.connected ? (
-                    <Link
-                      href="/account/schwab-transactions-diagnostic"
-                      prefetch={false}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
-                    >
-                      <SearchCheck className="size-3" aria-hidden />
-                      Diagnose Schwab Transactions &amp; Orders
-                    </Link>
-                  ) : null}
-                  {schwabConnection?.connected ? (
-                    <Link
-                      href="/account/schwab-quote-batch-diagnostic"
-                      prefetch={false}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200"
-                    >
-                      <SearchCheck className="size-3" aria-hidden />
-                      Scanner Engineering Diagnostics
-                    </Link>
-                  ) : null}
                 </div>
               </details>
 
@@ -686,7 +630,106 @@ export default async function AccountPage({
         </div>
       </Panel>
 
-      <Panel title="Fundamentals Data Providers">
+      <Panel title="Preferences">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-sm font-medium text-zinc-200">Appearance</div>
+            <p className="mt-1 text-xs text-zinc-500">
+              System follows your device&apos;s light/dark setting automatically. Light and Dark stay fixed until
+              you change this again.
+            </p>
+          </div>
+          <AppearanceControl current={user.settings?.appearance ?? "SYSTEM"} />
+        </div>
+        <div className="mt-4 flex flex-col gap-3 border-t border-zinc-800 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-sm font-medium text-zinc-200">Install app</div>
+            <p className="mt-1 text-xs text-zinc-500">Add Off Shift Options to your home screen for a standalone, app-like view.</p>
+          </div>
+          <Link
+            href="/install"
+            className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-zinc-700 px-3 text-sm text-zinc-300 hover:border-emerald-400/60"
+          >
+            <Download className="size-4" aria-hidden />
+            Install
+          </Link>
+        </div>
+      </Panel>
+
+      <Panel title="Change Password">
+        <p className="mb-4 text-sm text-zinc-400">Signed in as <span className="font-medium text-zinc-200">{user.email}</span>. Changing your password signs out your other browsers and devices.</p>
+        <form action={changePasswordAction} className="max-w-sm space-y-4">
+          <div className="space-y-2">
+            <FieldLabel>Current password</FieldLabel>
+            <input
+              name="currentPassword"
+              type="password"
+              autoComplete="current-password"
+              required
+              className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+            />
+          </div>
+          <div className="space-y-2">
+            <FieldLabel>New password</FieldLabel>
+            <input
+              name="newPassword"
+              type="password"
+              autoComplete="new-password"
+              minLength={10}
+              required
+              className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+            />
+            <p className="text-xs text-zinc-500">At least 10 characters, with both letters and numbers.</p>
+          </div>
+          <div className="space-y-2">
+            <FieldLabel>Confirm new password</FieldLabel>
+            <input
+              name="confirmPassword"
+              type="password"
+              autoComplete="new-password"
+              minLength={10}
+              required
+              className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+            />
+          </div>
+          <button
+            type="submit"
+            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300"
+          >
+            <Save className="size-4" aria-hidden />
+            Update Password
+          </button>
+        </form>
+      </Panel>
+
+      <Panel title="Advanced tools">
+        <details className="group">
+          <summary className="cursor-pointer list-none text-sm text-zinc-400 hover:text-zinc-200">
+            Diagnostics and data providers <span className="text-zinc-500">- rarely needed, mainly for troubleshooting. Click to show.</span>
+          </summary>
+          <div className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2" data-testid="advanced-tool-links">
+            {schwabConnection?.connected ? (
+              <>
+                <Link href="/account/schwab-fundamentals" prefetch={false} className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200">
+                  <SearchCheck className="size-3" aria-hidden />
+                  Verify Schwab Fundamental Fields
+                </Link>
+                <Link href="/account/schwab-transactions-diagnostic" prefetch={false} className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200">
+                  <SearchCheck className="size-3" aria-hidden />
+                  Diagnose Schwab Transactions &amp; Orders
+                </Link>
+                <Link href="/account/schwab-quote-batch-diagnostic" prefetch={false} className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200">
+                  <SearchCheck className="size-3" aria-hidden />
+                  Scanner Engineering Diagnostics
+                </Link>
+              </>
+            ) : null}
+            <Link href="/account/diagnostics" prefetch={false} className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200">
+              <SearchCheck className="size-3" aria-hidden />
+              Server diagnostics
+            </Link>
+          </div>
         <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -736,64 +779,8 @@ export default async function AccountPage({
             </div>
           ) : null}
         </div>
-      </Panel>
-
-      <Panel title="Change Password">
-        <form action={changePasswordAction} className="max-w-sm space-y-4">
-          <div className="space-y-2">
-            <FieldLabel>Current password</FieldLabel>
-            <input
-              name="currentPassword"
-              type="password"
-              autoComplete="current-password"
-              required
-              className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
-            />
           </div>
-          <div className="space-y-2">
-            <FieldLabel>New password</FieldLabel>
-            <input
-              name="newPassword"
-              type="password"
-              autoComplete="new-password"
-              minLength={10}
-              required
-              className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
-            />
-            <p className="text-xs text-zinc-500">At least 10 characters, with both letters and numbers.</p>
-          </div>
-          <div className="space-y-2">
-            <FieldLabel>Confirm new password</FieldLabel>
-            <input
-              name="confirmPassword"
-              type="password"
-              autoComplete="new-password"
-              minLength={10}
-              required
-              className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
-            />
-          </div>
-          <button
-            type="submit"
-            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300"
-          >
-            <Save className="size-4" aria-hidden />
-            Update Password
-          </button>
-        </form>
-      </Panel>
-
-      <Panel title="Session">
-        <div className="flex items-start gap-3">
-          <KeyRound className="mt-0.5 size-5 text-emerald-300" aria-hidden />
-          <div className="space-y-2 text-sm text-zinc-400">
-            <p>
-              Signed in as <span className="font-medium text-zinc-200">{user.email}</span>.
-            </p>
-            <p>Changing your password signs out any other browsers or devices currently signed in as you.</p>
-            <Badge tone="neutral">This account is private to Off Shift Options — no public signup exists.</Badge>
-          </div>
-        </div>
+        </details>
       </Panel>
     </div>
   );
