@@ -2,6 +2,8 @@ import { Briefcase, Landmark, LineChart, Wallet, type LucideIcon } from "lucide-
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
+import { WeeklyPaceRow } from "@/components/weekly-pace-row";
+import { accountWeeklyPaceDisplay } from "@/lib/weekly-pace-display";
 import { ClientPresentationProvider, FreshnessStrip, DashboardPositionSections, type DisplayEntry } from "@/components/client-freshness";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { requireCurrentUser } from "@/lib/auth";
@@ -101,6 +103,7 @@ export default async function DashboardPage() {
 
   const accountValue = accountValueCard(report);
   const wholeAccountGain = wholeAccountGainCard(report);
+  const accountPace = accountWeeklyPaceDisplay(report);
   const confirmedTradingPL = confirmedTradingPLCard(report, winLoss);
   const openCampaigns = openCampaignsCard(data.openCampaigns);
   const capitalPanel = capitalPanelViewModel(report, exposure);
@@ -187,6 +190,7 @@ export default async function DashboardPage() {
           tone={wholeAccountGain.tone}
           detail={wholeAccountGain.detail}
           reason={wholeAccountGain.unavailableReason ?? wholeAccountGain.returnUnavailableReason}
+          footer={accountPace ? <WeeklyPaceRow pace={accountPace} label="Average per week" compact /> : null}
         />
         <SummaryCard
           label="Confirmed Trading P/L"
@@ -359,6 +363,7 @@ function SummaryCard({
   tone,
   detail,
   reason,
+  footer,
 }: {
   label: string;
   icon: LucideIcon;
@@ -367,6 +372,7 @@ function SummaryCard({
   tone?: number;
   detail?: string | null;
   reason?: string | null;
+  footer?: React.ReactNode;
 }) {
   // Semantic financial color only when a real tone was computed upstream (dashboard-view.ts) -
   // never applied decoratively, and never for every card (undefined/neutral stays near-white).
@@ -383,6 +389,7 @@ function SummaryCard({
       <div className={`mt-1.5 text-[28px] font-bold leading-tight tabular-nums ${toneClass}`}>{value}</div>
       {detail ? <div className="mt-1 text-[13px] text-zinc-400">{detail}</div> : null}
       {reason ? <div className="mt-1 text-[13px] text-amber-300">{reason}</div> : null}
+      {footer ? <div className="mt-1.5 border-t border-zinc-800 pt-1.5">{footer}</div> : null}
     </IntentPrefetchLink>
   );
 }

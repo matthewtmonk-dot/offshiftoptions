@@ -22,6 +22,8 @@ import { DteBadge } from "@/components/dte-badge";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { NextStepLine } from "@/components/next-step-line";
+import { WeeklyPaceRow } from "@/components/weekly-pace-row";
+import { campaignWeeklyPaceDisplay } from "@/lib/weekly-pace-display";
 import { LastValidNotice } from "@/components/last-valid-notice";
 import { CoveredCallOutcomePlanner } from "@/components/covered-call-outcome-planner";
 import { isCoveredCallOutcomePlannerEligible } from "@/domain/finance/coveredCallOutcome";
@@ -827,6 +829,15 @@ function CampaignCard({
       .filter((event) => event.type === "SELL_PUT")
       .sort((a, b) => new Date(a.occurredAt).getTime() - new Date(b.occurredAt).getTime())[0] ?? null;
   const rollCount = campaign.events.filter((event) => event.type === "ROLL_PUT_OPEN").length;
+  const weeklyPace = campaignWeeklyPaceDisplay({
+    closed: campaign.status === "CLOSED",
+    realizedPL: progress.realizedPLStatus === "CONFIRMED" ? progress.realizedPL : null,
+    netOptionPremium: summary.netOptionPremium,
+    collateralCommitted: summary.collateralCommitted,
+    daysActive: summary.daysActive,
+    hasUnknownCashFlow: summary.unknowns.length > 0,
+    assigned: campaign.status === "ASSIGNED",
+  });
   // Attention-First Freshness Phase 1 - a presentation-only relabel of the campaign's own
   // already-authoritative currentStage (see positionActivity.ts): an ASSIGNED campaign with an
   // open covered call shows "COVERED CALL OPEN" rather than leaving "ASSIGNED" as the primary
@@ -963,6 +974,7 @@ function CampaignCard({
               <SummaryCell label="Option Cash Flow" value={signedMoney(summary.netOptionPremium)} tone={summary.netOptionPremium}
                 help={HELP.netPremium} helpTestId={`help-summary-premium-${campaign.ticker}`} />
               <p className="mt-0.5 text-xs text-zinc-500">Cash flow · not realized profit{!netPLExact ? " · fees pending" : ""}</p>
+              {weeklyPace ? <p className="mt-0.5"><WeeklyPaceRow pace={weeklyPace} label="Avg" compact /></p> : null}
             </div>
             <SummaryCell label="Days open" value={summary.daysActive ?? "UNKNOWN"} help="Campaign age since the first opening. DTE counts calendar days until the active put expires." />
             <ChevronDown className="absolute right-3 top-3 size-5 justify-self-end text-zinc-500 transition group-open:rotate-180 sm:static" aria-hidden />
@@ -1047,6 +1059,11 @@ function CampaignCard({
                   {campaign.status === "ASSIGNED" && latestAssignmentEvent ? (
                     <p className="mt-1 text-xs text-zinc-400">Shares assigned at {money(toNumber(latestAssignmentEvent.strike))} each.</p>
                   ) : null}
+                </div>
+              ) : null}
+              {weeklyPace ? (
+                <div className="mb-3 rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+                  <WeeklyPaceRow pace={weeklyPace} label="Average per week" />
                 </div>
               ) : null}
               <dl className="grid gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
