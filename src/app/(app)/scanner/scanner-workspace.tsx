@@ -6,6 +6,7 @@ import { InfoTip } from "@/components/info-tip";
 import {
   ArrowDownUp,
   ChevronDown,
+  Check,
   ChevronRight,
   CircleHelp,
   EyeOff,
@@ -15,7 +16,7 @@ import {
   Star,
   Table2,
 } from "lucide-react";
-import { EmptyState, FieldLabel } from "@/components/ui";
+import { EmptyState } from "@/components/ui";
 import { AiAdvisorReviewPanel } from "@/components/ai-advisor-review-panel";
 import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
 import { formatCriterionValue, type CriterionResult, type ExclusionDiagnostic, type ScannerReadiness } from "@/domain/scanner/scanner";
@@ -697,9 +698,14 @@ function CandidateInspector({
   pendingStatus?: QuickResearchStatus;
   onResearchStatusChange: ScannerResearchStatusChange;
 }) {
+  const v = result.values;
+  const hasContract = v.strike !== null && Boolean(v.expiration);
+  const attention = result.summary.results.filter((criterion) => criterion.status !== "PASS");
+  const passing = result.summary.results.filter((criterion) => criterion.status === "PASS");
+
   return (
-    <div className="grid gap-5 rounded-md border border-zinc-800 bg-zinc-950 p-4 xl:grid-cols-[1fr_1fr_0.8fr]">
-      <div className="flex flex-wrap items-center gap-1.5 xl:col-span-3">
+    <div className="space-y-4 rounded-md border border-zinc-800 bg-zinc-950 p-3 sm:p-4">
+      <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Research</span>
         {quickResearchChoices.map((choice) => {
           const isActive = result.researchStatus === choice.key;
@@ -728,113 +734,189 @@ function CandidateInspector({
           Open in Research
         </IntentPrefetchLink>
       </div>
-      <section>
-        <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Stock</h3>
-        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-          <Datum label="Ticker" value={result.record.ticker} />
-          <Datum label="Current price" value={coloredCell(result.values.price, money, ruleSeverityTone(criterionFor(result, "price")))} />
-          <Datum label="Change" value={signedPercent(result.values.priceChangePercent)} />
-          <Datum label="RSI" value={coloredCell(result.values.rsi, (v) => toNumber(v).toFixed(1), ruleSeverityTone(criterionFor(result, "rsi")))} />
-          <Datum label="BB position" value={coloredCell(result.values.bbPercent, percent, ruleSeverityTone(criterionFor(result, "bbPercent")))} />
-          <Datum label="Volume" value={cell(result.values.stockVolume, formatCount)} />
-          <Datum label="Earnings" value={result.values.earningsDate ? shortDate(result.values.earningsDate) : dash()} />
-          <Datum
-            label="Days to earnings"
-            value={coloredCell(result.values.earningsDistance, formatCount, ruleSeverityTone(criterionFor(result, "earningsDistance")))}
-          />
-          <Datum
-            label="Earnings vs. this contract"
-            value={
-              result.values.earningsWithinHoldingPeriod === null
-                ? dash()
-                : result.values.earningsWithinHoldingPeriod
-                  ? <span className="text-amber-300">Falls within the holding period</span>
-                  : "After expiration"
-            }
-          />
-        </dl>
-      </section>
-      <section>
-        <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-400">
-          Option
-          <InfoTip label="DTE filtering" testId="help-scanner-dte">
-            DTE is colored against your Scanner Rules only when the DTE rule is enabled. It&apos;s shown for reference even when
-            disabled, so a wide-ranging value isn&apos;t a bug.
-          </InfoTip>
-        </h3>
-        {result.values.scanNote ? <p className="mt-2 text-xs text-zinc-500">{result.values.scanNote}</p> : null}
-        {result.values.retrievedAt ? (
-          <p className="mt-1 text-xs text-zinc-500">
-            Retrieved {shortDateTime(result.values.retrievedAt)}. Schwab does not provide a verified option-quote pricing
-            timestamp{" "}
-            {result.values.retrievedOnNonTradingDay
-              ? "- and this was fetched on a day the market was closed, so it reflects the last available quote, not a live one."
-              : "- this is the retrieval time, not proof of when the quote itself was priced."}
+
+      {hasContract ? (
+        <section aria-label="Trade summary" className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+          <p className="text-sm text-zinc-300">
+            Sell the <span className="font-semibold text-zinc-50">{shortDate(v.expiration as string)}</span>{" "}
+            <span className="font-semibold text-zinc-50">{money(v.strike as number)}</span> put
+            {v.bidProceedsPerContract !== null ? (
+              <>
+                {" "}
+                to collect about <span className="font-semibold text-emerald-300">{money(v.bidProceedsPerContract)}</span> per contract at the bid
+              </>
+            ) : null}
+            .
           </p>
-        ) : null}
-        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-          <Datum label="Expiration" value={result.values.expiration ? shortDate(result.values.expiration) : dash()} />
-          <Datum label="DTE" value={coloredCell(result.values.dte, formatCount, ruleSeverityTone(criterionFor(result, "dte")))} />
-          <Datum label="Strike" value={cell(result.values.strike, money)} />
-          <Datum label="Distance OTM" value={cell(result.values.distanceOtmPercent, percent)} />
-          <Datum label="Bid" value={coloredCell(result.values.optionBid, money, ruleSeverityTone(criterionFor(result, "optionBid")))} />
-          <Datum label="Ask" value={cell(result.values.optionAsk, money)} />
-          <Datum label="Midpoint" value={cell(result.values.midpoint, money)} />
-          <Datum
-            label="Premium at bid"
-            value={
-              result.values.bidProceedsPerContract === null
-                ? dash()
-                : <span title="The bid-based dollar amount ROR is actually calculated from - not the mark/midpoint premium above.">
-                    {money(result.values.bidProceedsPerContract)}/contract
-                  </span>
-            }
-          />
-          <Datum label="Delta" value={cell(result.values.delta, (v) => toNumber(v).toFixed(2))} />
-          <Datum
-            label="Open interest"
-            value={coloredCell(result.values.openInterest, formatCount, ruleSeverityTone(criterionFor(result, "openInterest")))}
-          />
-          <Datum
-            label="Option volume"
-            value={coloredCell(result.values.optionVolume, formatCount, ruleSeverityTone(criterionFor(result, "optionVolume")))}
-          />
-          <Datum label="Spread" value={cell(result.values.spreadPercent, percent)} />
-          <Datum label="ROR" value={coloredCell(result.values.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))} />
-          <Datum label="Annualized ROR" value={cell(result.values.annualizedRor, percent)} />
-        </dl>
-      </section>
-      <section>
-        <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Criteria</h3>
-        <div className="mt-3 space-y-2">
-          {result.summary.results.map((criterion) => (
-            <details key={criterion.name} className="rounded-md border border-zinc-800 bg-zinc-900/70 p-3 text-sm">
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-                <span className="font-medium text-zinc-100">{criterion.name}</span>
-                <span
-                  className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${
-                    criterion.status === "PASS"
-                      ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-100"
-                      : criterion.status === "FAIL"
+          <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
+            <Datum label="Strike" value={cell(v.strike, money)} />
+            <Datum label="Expires in" value={coloredCell(v.dte, (d) => `${formatCount(d)} days`, ruleSeverityTone(criterionFor(result, "dte")))} />
+            <Datum label="Below price" value={cell(v.distanceOtmPercent, percent)} />
+            <Datum label="Weekly return" value={coloredCell(v.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))} />
+            <Datum label="Annualized" value={cell(v.annualizedRor, percent)} />
+            <Datum label="Delta" value={cell(v.delta, (d) => toNumber(d).toFixed(2))} />
+          </dl>
+          {v.scanNote ? <p className="mt-2 text-xs text-zinc-500">{v.scanNote}</p> : null}
+        </section>
+      ) : (
+        <p className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
+          {isNotOptionAssessed(result)
+            ? "No option contract has been priced for this stock yet. Press Check options above."
+            : "No qualifying put contract was found for this stock."}
+          {v.scanNote ? <span className="mt-1 block text-xs text-zinc-500">{v.scanNote}</span> : null}
+        </p>
+      )}
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section>
+          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Stock</h3>
+          <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
+            <Datum
+              label="Price"
+              value={
+                <>
+                  {coloredCell(v.price, money, ruleSeverityTone(criterionFor(result, "price")))}
+                  {v.priceChangePercent !== null ? <span className="ml-1 text-xs text-zinc-500">{signedPercent(v.priceChangePercent)}</span> : null}
+                </>
+              }
+            />
+            <Datum label="RSI" value={coloredCell(v.rsi, (r) => toNumber(r).toFixed(1), ruleSeverityTone(criterionFor(result, "rsi")))} />
+            <Datum label="Bollinger %B" value={coloredCell(v.bbPercent, percent, ruleSeverityTone(criterionFor(result, "bbPercent")))} />
+            <Datum label="Volume" value={cell(v.stockVolume, formatCount)} />
+            <Datum
+              label="Next earnings"
+              value={
+                v.earningsDate ? (
+                  <>
+                    {shortDate(v.earningsDate)}
+                    {v.earningsDistance !== null ? (
+                      <span className={`ml-1 text-xs ${severityTextClass(ruleSeverityTone(criterionFor(result, "earningsDistance")))}`}>
+                        ({formatCount(v.earningsDistance)}d)
+                      </span>
+                    ) : null}
+                  </>
+                ) : (
+                  dash()
+                )
+              }
+            />
+            <Datum
+              label="Earnings vs trade"
+              value={
+                v.earningsWithinHoldingPeriod === null ? (
+                  dash()
+                ) : v.earningsWithinHoldingPeriod ? (
+                  <span className="text-amber-300">Before expiry</span>
+                ) : (
+                  "After expiry"
+                )
+              }
+            />
+          </dl>
+        </section>
+        <section>
+          <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-400">
+            Option quote
+            <InfoTip label="DTE filtering" testId="help-scanner-dte">
+              DTE is colored against your Scanner Rules only when the DTE rule is enabled. It&apos;s shown for reference even when
+              disabled, so a wide-ranging value isn&apos;t a bug.
+            </InfoTip>
+          </h3>
+          <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
+            <Datum label="Bid" value={coloredCell(v.optionBid, money, ruleSeverityTone(criterionFor(result, "optionBid")))} />
+            <Datum label="Ask" value={cell(v.optionAsk, money)} />
+            <Datum label="Spread" value={cell(v.spreadPercent, percent)} />
+            <Datum
+              label="Open interest"
+              value={coloredCell(v.openInterest, formatCount, ruleSeverityTone(criterionFor(result, "openInterest")))}
+            />
+            <Datum
+              label="Option volume"
+              value={coloredCell(v.optionVolume, formatCount, ruleSeverityTone(criterionFor(result, "optionVolume")))}
+            />
+            <Datum label="Midpoint" value={cell(v.midpoint, money)} />
+          </dl>
+          {v.retrievedAt ? (
+            <p
+              className={`mt-2 text-xs ${v.retrievedOnNonTradingDay ? "text-amber-300/80" : "text-zinc-500"}`}
+              title="Schwab does not provide a verified option-quote pricing timestamp, so this is when OSO retrieved the quote - not proof of when the quote itself was priced."
+            >
+              {v.retrievedOnNonTradingDay
+                ? `Fetched ${shortDateTime(v.retrievedAt)} while the market was closed - last available quote, not live.`
+                : `Retrieved ${shortDateTime(v.retrievedAt)}.`}
+            </p>
+          ) : null}
+        </section>
+      </div>
+
+      <section aria-label="Criteria">
+        <h3 className="flex flex-wrap items-baseline gap-x-2 text-xs font-semibold uppercase tracking-normal text-zinc-400">
+          Criteria
+          <span className="font-normal normal-case text-zinc-500">
+            {passing.length} passing
+            {attention.length > 0 ? ` · ${attention.length} need attention` : ""}
+          </span>
+        </h3>
+        {attention.length > 0 ? (
+          <ul className="mt-2 grid gap-1.5 lg:grid-cols-2">
+            {attention.map((criterion) => (
+              <li
+                key={criterion.name}
+                className={`rounded-md border px-2.5 py-2 text-sm ${
+                  criterion.status === "FAIL" ? "border-red-400/30 bg-red-400/10" : "border-zinc-700 bg-zinc-900/70"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium text-zinc-100">{criterion.name}</span>
+                  <span
+                    className={`inline-flex shrink-0 items-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${
+                      criterion.status === "FAIL"
                         ? "border-red-400/40 bg-red-400/15 text-red-100"
                         : "border-zinc-600 bg-zinc-800 text-zinc-300"
-                  }`}
-                >
-                  {criterion.status}
-                </span>
-              </summary>
-              <dl className="mt-3 grid gap-2 text-sm">
-                <Datum label="Actual" value={formatCriterionValue(criterion.actualValue)} />
-                <Datum label="Rule" value={criterion.explanation} />
-              </dl>
-            </details>
-          ))}
-        </div>
-        <div className="mt-4 flex flex-col gap-3">
-          <RecommendMiniForm ticker={result.record.ticker} buddies={buddies} returnTo="/scanner" />
+                    }`}
+                  >
+                    {criterion.status === "FAIL" ? "FAIL" : "UNKNOWN"}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-xs text-zinc-400">
+                  <span className="text-zinc-300">{formatCriterionValue(criterion.actualValue)}</span> · {criterion.explanation}
+                </p>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {passing.length > 0 ? (
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {passing.map((criterion) => (
+              <li
+                key={criterion.name}
+                title={`${formatCriterionValue(criterion.actualValue)} - ${criterion.explanation}`}
+                className="inline-flex items-center gap-1 rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2 py-0.5 text-xs text-emerald-100"
+              >
+                <Check className="size-3" aria-hidden />
+                {criterion.name}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
+
+      <div className="flex flex-wrap items-start gap-3 border-t border-zinc-800 pt-3">
+        <div className="min-w-0 flex-1 basis-72">
           <AiAdvisorReviewPanel scanResultId={result.record.id} />
         </div>
-      </section>
+        {buddies.length > 0 ? (
+          <details className="group min-w-0 max-w-sm flex-1">
+            <summary className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 text-xs font-medium text-zinc-300 hover:border-emerald-400/60 hover:text-emerald-200">
+              <Send className="size-3.5" aria-hidden />
+              Send to a buddy
+            </summary>
+            <div className="mt-2">
+              <RecommendMiniForm ticker={result.record.ticker} buddies={buddies} returnTo="/scanner" />
+            </div>
+          </details>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -844,7 +926,6 @@ function RecommendMiniForm({ ticker, buddies, returnTo }: { ticker: string; budd
     <form action={recommendStockAction} className="space-y-2">
       <input type="hidden" name="ticker" value={ticker} />
       <input type="hidden" name="returnTo" value={returnTo} />
-      <FieldLabel>Send to buddy</FieldLabel>
       <select
         name="recipientId"
         className="min-h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100"

@@ -152,10 +152,8 @@ export default async function DashboardPage() {
         <span>
           <span className="font-semibold text-zinc-100">Hey {user.name}</span> -{" "}
           <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "SCHWAB SCAN" : "DEMO SCANNER"}</Badge>{" "}
-          {/* Weekend / Settlement Clarity - "N campaigns open" read as N currently-exposed market
-              positions even when most are just awaiting ordinary post-expiration settlement; this
-              quick exposure summary now says how many are genuinely active vs. settling instead. */}
-          {exposureSummary.label} - win rate {winLoss.winRate === null ? "N/A" : `${winLoss.winRate}%`}
+          {/* The open-campaign exposure summary and win rate live in the cards directly below; repeating
+              them here only added noise. */}
         </span>
         <span className="flex flex-col items-end gap-0.5 text-right">
           <span className="text-xs font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
