@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
 import { CreditKeptMeter } from "@/components/credit-kept-meter";
 import { PositionStrikeGauge } from "@/components/position-strike-gauge";
+import { NextStepLine } from "@/components/next-step-line";
 import type { PositionToReviewDisplayRow } from "@/domain/finance/positionReviewRows";
 import { money, shortCalendarDate } from "@/lib/format";
 import { activityTone, currentActivityLabel } from "@/domain/finance/positionActivity";
@@ -68,6 +69,7 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
           </div>
         ) : null}
         {row.display ? <LivePositionAssessmentEvidenceLine display={row.display} now={now} /> : null}
+        {row.legType ? <NextStepLine display={row.display} dte={dteValue} settlementPending={awaitingSettlement} /> : null}
       </div>
       {showMiddle ? (
         <div className="space-y-1.5">
