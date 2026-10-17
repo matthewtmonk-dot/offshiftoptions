@@ -22,10 +22,13 @@ export function NextStepLine({
   display,
   dte,
   settlementPending,
+  daysPastExpiration = null,
 }: {
   display: PositionAssessmentDisplay | null;
   dte: number | null;
   settlementPending: boolean;
+  /** Calendar days since the open leg expired; only used while settlement is pending. */
+  daysPastExpiration?: number | null;
 }) {
   const expired = useActiveGuidanceExpired(
     display?.state === "CURRENT" ? display.current.explanation.activeGuidanceDeadline : null,
@@ -44,7 +47,7 @@ export function NextStepLine({
     historical = true;
   }
 
-  const step = nextStepFor({ settlementPending, action, dte, historical });
+  const step = nextStepFor({ settlementPending, action, dte, historical, daysPastExpiration });
   return (
     <p className={`mt-1 flex items-start gap-1 text-xs ${TONE_CLASS[step.tone]}`} data-testid="next-step">
       <ArrowRight className="mt-0.5 size-3 shrink-0" aria-hidden />

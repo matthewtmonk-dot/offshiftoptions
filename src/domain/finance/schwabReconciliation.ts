@@ -1,4 +1,4 @@
-import { classifyBrokerTransactionAction } from "./brokerTransactionActions";
+import { classifyBrokerTransactionAction, classifyBrokerTransactionActivity } from "./brokerTransactionActions";
 import { nextNyseMarketDay } from "./marketCalendar";
 import { isSameOccContract, occContractKey, parseOccOptionSymbol } from "./occOption";
 
@@ -350,6 +350,16 @@ export function evaluateWorthlessExpiration(input: {
   underlying: string;
   evidence: SchwabReconciliationEvidence;
   hasClosingEvidence: boolean;
+  /**
+   * True when Schwab itself reported an explicit "Removed due to Expiration"/"Expired" record for this exact
+   * contract and quantity (see findExplicitExpirationRecord). That is stronger, contract-specific proof than
+   * the "no acquired shares" inference below, so it settles the assigned-vs-worthless question - which
+   * matters because a later, unrelated assignment in the same ticker (very common in the LST wheel) would
+   * otherwise keep every older, genuinely expired put in that ticker "pending" forever. Every other safety
+   * check (complete evidence, next business day, option absent from live positions, no close/assignment
+   * evidence) still applies in full.
+   */
+  hasExplicitExpirationRecord?: boolean;
   asOf: Date;
 }): ExpirationDecision {
   if (input.hasClosingEvidence) {
@@ -374,10 +384,67 @@ export function evaluateWorthlessExpiration(input: {
   if (positions.data.some((position) => isSameOccContract(position.symbol, input.symbol))) {
     return { status: "PENDING", reason: "OPTION_STILL_PRESENT" };
   }
+  if (input.hasExplicitExpirationRecord === true) {
+    return { status: "CONFIRMED" };
+  }
   const acquiredStock = positions.data.some(
     (position) => position.assetType === "EQUITY" && position.symbol.trim().toUpperCase() === input.underlying.toUpperCase() && position.quantity > 0,
   );
   return acquiredStock ? { status: "PENDING", reason: "ACQUIRED_SHARES_PRESENT" } : { status: "CONFIRMED" };
+}
+
+/**
+ * An unlinked, confirmed broker transaction in which Schwab says THIS contract expired - same OCC
+ * contract, and a quantity at least as large as the open leg. Only the explicit expiration vocabulary
+ * counts ("Removed - Expiration" / "Expired"); an assignment, a close, or an unrecognized action never does.
+ */
+export function findExplicitExpirationRecord(
+  symbol: string,
+  contracts: number,
+  candidates: ReconciliationTransaction[],
+): ReconciliationTransaction | null {
+  return (
+    candidates.find(
+      (transaction) =>
+        classifyBrokerTransactionAction(transaction.action) === "OPTION_REMOVED_EXPIRATION" &&
+        isSameOccContract(transaction.symbol, symbol) &&
+        Math.abs(transaction.quantity ?? 0) >= contracts,
+    ) ?? null
+  );
+}
+
+/** How many days late an expiry can be confirmed before it is recorded on its real expiration date. */
+export const LATE_EXPIRATION_CATCH_UP_DAYS = 7;
+
+/**
+ * The calendar date (YYYY-MM-DD) to record a confirmed expired-worthless outcome on. A normal confirmation
+ * (the next business day or within a week) keeps the long-standing behavior - the sync date - so nothing
+ * about this week's closed-campaign figures changes. When the app is catching up on an expiry more than a
+ * week old (for example after reconnecting Schwab), it records the REAL expiration date instead, so a batch
+ * of old expiries does not all land in "closed this week".
+ */
+export function expirationRecordingDate(expiration: Date, asOf: Date): string {
+  const expirationDay = Date.UTC(expiration.getUTCFullYear(), expiration.getUTCMonth(), expiration.getUTCDate());
+  const asOfDay = Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate());
+  const daysLate = Math.floor((asOfDay - expirationDay) / 86_400_000);
+  return daysLate > LATE_EXPIRATION_CATCH_UP_DAYS ? new Date(expirationDay).toISOString().slice(0, 10) : asOf.toISOString().slice(0, 10);
+}
+
+/**
+ * True for an unresolved (needs-review) record that cannot be evidence that a PUT was closed or assigned: an
+ * expiration notice, a non-option transfer/dividend, or any activity on a CALL contract (a put's close or
+ * assignment is always recorded on the put contract itself). Used so housekeeping rows Schwab sends alongside
+ * real activity (e.g. "System transfer" of shares in, or a covered-call sale the sync does not auto-process)
+ * stop blocking put-expiration confirmation for every put in that ticker. Activity on a PUT contract that is
+ * not an expiration notice is never treated as benign.
+ */
+export function isBenignUnresolvedRecord(record: { symbol: string | null; action: string | null; description: string | null }): boolean {
+  const option = record.symbol ? parseOccOptionSymbol(record.symbol) : null;
+  if (option?.optionType === "CALL") return true;
+  const kind = classifyBrokerTransactionActivity({ action: record.action, description: record.description });
+  if (kind === "OPTION_REMOVED_EXPIRATION") return true;
+  if (kind === "TRANSFER" || kind === "DIVIDEND") return occContractKey(record.symbol) === null;
+  return false;
 }
 
 export function isConfirmedExpiredWorthless(input: Parameters<typeof evaluateWorthlessExpiration>[0]): boolean {

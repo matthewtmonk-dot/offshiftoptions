@@ -18,6 +18,7 @@ import { classifyReadiness } from "@/domain/scanner/scanner";
 import { sanitizeResearchColumns, isResearchSortKey } from "@/domain/research/columns";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
 import { mapWithConcurrency } from "./concurrency";
+import { recordDiagnostic } from "./diagnostics";
 import {
   assertCanMutateRecord,
   assertCanReadInheritedRecord,
@@ -661,6 +662,7 @@ export async function refreshPositionEvidenceForUser(userId: string, signal: Abo
     const positions = await getSchwabOpenPositionsForUser(userId, { signal });
     signal.throwIfAborted();
     if (positions === null) {
+      recordDiagnostic({ kind: "error", source: "refresh-status", message: "Schwab positions could not be read (accounts/positions request failed or returned nothing)." });
       return { ok: false, reason: "BROKER_REFRESH_FAILED" };
     }
 
@@ -683,13 +685,27 @@ export async function refreshPositionEvidenceForUser(userId: string, signal: Abo
       const quotesOk = tickers.every((ticker) => quoteEvidenceByTicker.get(ticker)?.status === "AVAILABLE");
       const sessionOk = sessionEvidence.status === "AVAILABLE";
       if (!quotesOk || !sessionOk) {
+        // Self-service explanation (shown on /account/diagnostics): which half failed and the provider's own
+        // short reason - counts and sanitized text only, never prices or tokens.
+        const badQuotes = tickers.filter((ticker) => quoteEvidenceByTicker.get(ticker)?.status !== "AVAILABLE");
+        const firstBad = badQuotes.length ? quoteEvidenceByTicker.get(badQuotes[0]!) : undefined;
+        const quoteReason = firstBad && firstBad.status !== "AVAILABLE" ? firstBad.reason : "";
+        const sessionReason = sessionEvidence.status !== "AVAILABLE" ? sessionEvidence.reason : "";
+        recordDiagnostic({
+          kind: "error",
+          source: "refresh-status",
+          message: `Market data check failed - quotes unavailable ${badQuotes.length}/${tickers.length}${quoteReason ? ` (${quoteReason})` : ""}; market session ${sessionOk ? "ok" : `unavailable${sessionReason ? ` (${sessionReason})` : ""}`}.`,
+        });
         return { ok: false, reason: "MARKET_DATA_REFRESH_FAILED" };
       }
     }
 
     signal.throwIfAborted();
     return { ok: true, refreshedAt: new Date().toISOString() };
-  } catch {
+  } catch (error) {
+    if (!signal.aborted) {
+      recordDiagnostic({ kind: "error", source: "refresh-status", message: error instanceof Error ? `Unexpected error during refresh: ${error.name}: ${error.message}` : "Unexpected error during refresh." });
+    }
     // Defensive only - every call above already fails closed internally (getSchwabOpenPositionsForUser
     // never throws; getQuoteReviewEvidenceForUser/getEquityMarketSessionEvidenceForUser never throw).
     // An unexpected exception (e.g. a DB error resolving campaigns/accounts, or one of this

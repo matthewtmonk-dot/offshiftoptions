@@ -61,7 +61,7 @@ export function PerformanceScorecardPanel({ scorecard }: { scorecard: Performanc
             <Gauge className="size-4 text-zinc-400" aria-hidden />
             Money put to work
             <InfoTip label="Money put to work" align="start">
-              Cash set aside to secure your open puts, plus the cost of any shares you were assigned. The rest of the account is idle cash.
+              Cash set aside to secure your open puts, plus the cost of any shares you were assigned. The rest of the account is cash plus any holdings outside these tracked campaigns - the app only counts what it tracks as campaigns, so this is not necessarily idle cash.
             </InfoTip>
           </dt>
           <dd className="mt-2 text-xl font-semibold text-zinc-50">{scorecard.moneyInUse.value}</dd>
@@ -93,7 +93,7 @@ export function PerformanceScorecardPanel({ scorecard }: { scorecard: Performanc
         {(
           [
             { title: "On the money put to work", subtitle: "Is the working money earning its keep?", data: scorecard.onMoneyInUse },
-            { title: "On the whole account", subtitle: "Idle cash counts against it", data: scorecard.onWholeAccount },
+            { title: "On the whole account", subtitle: "Everything else in the account counts against it", data: scorecard.onWholeAccount },
           ] as const
         ).map((row) => (
           <div key={row.title} className="grid gap-3 border-b border-zinc-800 px-3 py-3 last:border-b-0 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] md:gap-4">

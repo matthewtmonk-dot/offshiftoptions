@@ -29,4 +29,13 @@ describe("nextStepFor", () => {
   it("marks a historical reading as older", () => {
     expect(nextStepFor({ ...base, action: "REVIEW_ROLL", historical: true }).text).toContain("last valid reading");
   });
+  it("a freshly expired leg says to sync tomorrow; one unconfirmed for days says to sync now", () => {
+    expect(nextStepFor({ ...base, settlementPending: true, action: null, daysPastExpiration: 1 }).text).toContain("tomorrow");
+    expect(nextStepFor({ ...base, settlementPending: true, action: null, daysPastExpiration: null }).text).toContain("tomorrow");
+    const stale = nextStepFor({ ...base, settlementPending: true, action: null, daysPastExpiration: 85 });
+    expect(stale.text).toContain("Expired 85 days ago");
+    expect(stale.text).toContain("run Brokerage Sync");
+    expect(stale.text).not.toContain("tomorrow");
+    expect(stale.tone).toBe("watch");
+  });
 });

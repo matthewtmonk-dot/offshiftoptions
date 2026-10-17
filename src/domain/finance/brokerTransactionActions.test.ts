@@ -43,3 +43,17 @@ describe("classifyBrokerTransactionActivity", () => {
     expect(classifyBrokerTransactionActivity({ action: null, description: "Some new Schwab bookkeeping row" })).toBe("UNKNOWN");
   });
 });
+
+describe("Schwab wording observed live in October 2026", () => {
+  it("recognizes the separate 'Expired' notice as expiration evidence, never as assignment", () => {
+    expect(classifyBrokerTransactionAction("Expired")).toBe("OPTION_REMOVED_EXPIRATION");
+    expect(classifyBrokerTransactionAction("EXPIRED")).toBe("OPTION_REMOVED_EXPIRATION");
+  });
+  it("keeps 'Assigned' unrecognized - contrary evidence must stay flagged, not be silently reclassified", () => {
+    expect(classifyBrokerTransactionAction("Assigned")).toBe("UNKNOWN");
+  });
+  it("recognizes a system transfer of shares and a qualified-dividend reinvestment", () => {
+    expect(classifyBrokerTransactionActivity({ action: null, description: "System transfer" })).toBe("TRANSFER");
+    expect(classifyBrokerTransactionAction("Qual Div Reinvest")).toBe("DIVIDEND");
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capitalWeightedWeeklyReturn, netOptionCashFlowBetween } from "./weeklyScorecard";
+import { capitalDaysAtWork, capitalWeightedWeeklyReturn, netOptionCashFlowBetween } from "./weeklyScorecard";
 import type { CampaignEventInput } from "./campaigns";
 
 const ev = (type: CampaignEventInput["type"], day: string, premium: number, extra: Partial<CampaignEventInput> = {}): CampaignEventInput => ({
@@ -46,5 +46,34 @@ describe("capitalWeightedWeeklyReturn", () => {
   });
   it("a losing position pulls the average down", () => {
     expect(capitalWeightedWeeklyReturn([{ gain: -20, capital: 1000, days: 14 }])?.weeklyPercent).toBe(-1);
+  });
+});
+
+describe("capitalDaysAtWork", () => {
+  const openedAt = new Date("2026-07-01T00:00:00Z");
+  const expiration = new Date("2026-07-24T00:00:00Z");
+  const asOf = new Date("2026-10-17T12:00:00Z");
+  const base = { status: "OPEN", daysActive: 108, openedAt, openPutExpiration: expiration, asOf } as const;
+
+  it("stops the clock at the expiration of an OPEN campaign whose put already expired", () => {
+    // Jul 1 -> Jul 24 = 23 days at work, not the 108 days to today.
+    expect(capitalDaysAtWork(base)).toBe(23);
+  });
+  it("keeps the normal age while the put is still live, including on its expiration day", () => {
+    expect(capitalDaysAtWork({ ...base, daysActive: 10, asOf: new Date("2026-07-11T12:00:00Z") })).toBe(10);
+    expect(capitalDaysAtWork({ ...base, daysActive: 23, asOf: new Date("2026-07-24T20:00:00Z") })).toBe(23);
+  });
+  it("never lengthens a campaign and never drops below one day", () => {
+    expect(capitalDaysAtWork({ ...base, daysActive: 5 })).toBe(5);
+    expect(capitalDaysAtWork({ ...base, openedAt: new Date("2026-07-24T00:00:00Z"), daysActive: 108 })).toBe(1);
+  });
+  it("leaves assigned and closed campaigns alone - the money kept working as shares / the age is final", () => {
+    expect(capitalDaysAtWork({ ...base, status: "ASSIGNED" })).toBe(108);
+    expect(capitalDaysAtWork({ ...base, status: "CLOSED" })).toBe(108);
+  });
+  it("passes through unknowns instead of guessing", () => {
+    expect(capitalDaysAtWork({ ...base, daysActive: null })).toBeNull();
+    expect(capitalDaysAtWork({ ...base, openPutExpiration: null })).toBe(108);
+    expect(capitalDaysAtWork({ ...base, openedAt: null })).toBe(108);
   });
 });
