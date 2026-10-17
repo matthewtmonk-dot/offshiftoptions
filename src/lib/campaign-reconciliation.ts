@@ -1,9 +1,11 @@
 import "server-only";
 
 import { getCurrentOpenPut } from "@/domain/finance/campaigns";
+import { recordDiagnostic } from "./diagnostics";
 import { classifyBrokerTransactionActivity } from "@/domain/finance/brokerTransactionActions";
 import { isSameOccContract, occContractKey } from "@/domain/finance/occOption";
 import {
+  describeExpirationEvidenceGap,
   expirationRecordingDate,
   findClosingEvidence,
   findExplicitExpirationRecord,
@@ -229,6 +231,17 @@ export async function reconcileSchwabActivityForUser(
     } else if (expiration.reason === "EXPIRATION_EVIDENCE_INCOMPLETE") {
       summary.expirationsDeferred += 1;
       summary.expirationDeferralReason = expiration.reason;
+      // Say WHY, per put, in the self-service diagnostics log (/account/diagnostics) - only the ticker,
+      // the expiration date and a fixed phrase, never an account number or amount.
+      const gap = describeExpirationEvidenceGap({ expiration: openPut.expiration, symbol, evidence });
+      const reasons = [gap, hasUnresolvedActivity ? "unreviewed Schwab activity in this ticker" : null].filter(Boolean).join("; ");
+      if (summary.expirationsDeferred <= 30) {
+        recordDiagnostic({
+          kind: "action",
+          source: "expiration deferred",
+          message: `${campaign.ticker} put expiring ${openPut.expiration.toISOString().slice(0, 10)}: ${reasons || "evidence incomplete"}`,
+        });
+      }
     }
   }
 
