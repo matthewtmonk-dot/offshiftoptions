@@ -45,6 +45,8 @@ import {
 import { underlyingPositionReviewResult, type PositionAssessmentDisplay } from "@/domain/finance/positionReviewAssessment";
 import { resolveCurrentCostToClose, type CurrentCostToCloseSource } from "@/domain/finance/currentPositionMark";
 import { distanceToStrikeDollars } from "@/domain/finance/calculations";
+import { daysToExpiration } from "@/domain/finance/marketSession";
+import { capitalDaysAtWork } from "@/domain/finance/weeklyScorecard";
 import { matchTrackedPut, resolveTrackerPositionMatchState, type TrackedPut } from "@/domain/finance/trackerPositionMatch";
 import type { PositionReviewCampaignInput } from "@/lib/position-review";
 import { resolvePositionAssessmentDisplaysForUser } from "@/lib/positionAssessmentOrchestration";
@@ -170,6 +172,55 @@ type PerformanceCampaignViewRow = {
   progress: CampaignProgressSummary;
   currentCostSource: CurrentCostToCloseSource | null;
 };
+
+/**
+ * Feeds the Performance scorecard. Two things the raw campaign summaries don't say on their own:
+ *  - an OPEN campaign whose put already expired only stops accruing "weeks at work" at its expiration
+ *    (see capitalDaysAtWork) - otherwise a put that expired in July keeps diluting the weekly return;
+ *  - how much of the money counted as "put to work" belongs to puts that already expired but that Schwab
+ *    has not confirmed yet (they may have expired worthless or been assigned as shares) - shown, not hidden.
+ */
+function buildScorecardForPage(input: {
+  report: AccountReportingSummary;
+  rows: PerformanceCampaignViewRow[];
+  thisWeek: Parameters<typeof buildPerformanceScorecard>[0]["thisWeek"];
+  winLoss: Parameters<typeof buildPerformanceScorecard>[0]["winLoss"];
+  asOf: Date;
+}) {
+  const { report, rows, thisWeek, winLoss, asOf } = input;
+  let awaitingAmount = 0;
+  let awaitingCount = 0;
+  const campaigns = rows.map((row) => {
+    const openPut = row.campaign.status === "OPEN" ? getCurrentOpenPut(row.campaign.events) : null;
+    if (openPut && isPastExpiration(openPut.expiration, asOf) && row.summary.currentCollateralCommitted !== null) {
+      awaitingAmount += row.summary.currentCollateralCommitted;
+      awaitingCount += 1;
+    }
+    return {
+      status: row.campaign.status,
+      events: row.campaign.events,
+      netOptionPremium: row.summary.netOptionPremium,
+      collateralCommitted: row.summary.collateralCommitted,
+      daysActive: capitalDaysAtWork({
+        status: row.campaign.status,
+        daysActive: row.summary.daysActive,
+        openedAt: row.summary.openedAt,
+        openPutExpiration: openPut?.expiration ?? null,
+        asOf,
+      }),
+      hasUnknownCashFlow: row.summary.unknowns.length > 0,
+      realizedPL: row.progress.realizedPLStatus === "CONFIRMED" ? row.progress.realizedPL : null,
+    };
+  });
+  return buildPerformanceScorecard({
+    report,
+    campaigns,
+    thisWeek,
+    winLoss,
+    awaitingSettlement: { amount: Math.round(awaitingAmount * 100) / 100, count: awaitingCount },
+    asOf,
+  });
+}
 
 export default async function PositionsPage({
   searchParams,
@@ -589,21 +640,7 @@ export default async function PositionsPage({
 
       {view === "performance" ? (
         <PerformanceSection
-          scorecard={buildPerformanceScorecard({
-            report: ownReport,
-            campaigns: ownPerformanceRows.map((row) => ({
-              status: row.campaign.status,
-              events: row.campaign.events,
-              netOptionPremium: row.summary.netOptionPremium,
-              collateralCommitted: row.summary.collateralCommitted,
-              daysActive: row.summary.daysActive,
-              hasUnknownCashFlow: row.summary.unknowns.length > 0,
-              realizedPL: row.progress.realizedPLStatus === "CONFIRMED" ? row.progress.realizedPL : null,
-            })),
-            thisWeek: ownThisWeek,
-            winLoss: ownWinLoss,
-            asOf: new Date(),
-          })}
+          scorecard={buildScorecardForPage({ report: ownReport, rows: ownPerformanceRows, thisWeek: ownThisWeek, winLoss: ownWinLoss, asOf: new Date() })}
           thisWeek={ownThisWeek}
           winLoss={ownWinLoss}
           report={ownReport}
@@ -851,7 +888,8 @@ function CampaignCard({
     realizedPL: progress.realizedPLStatus === "CONFIRMED" ? progress.realizedPL : null,
     netOptionPremium: summary.netOptionPremium,
     collateralCommitted: summary.collateralCommitted,
-    daysActive: summary.daysActive,
+    // Stops the clock at an expired-but-unconfirmed put's expiration (see capitalDaysAtWork).
+    daysActive: capitalDaysAtWork({ status: campaign.status, daysActive: summary.daysActive, openedAt: summary.openedAt, openPutExpiration: openPut?.expiration ?? null, asOf }),
     hasUnknownCashFlow: summary.unknowns.length > 0,
     assigned: campaign.status === "ASSIGNED",
   });
@@ -941,7 +979,12 @@ function CampaignCard({
             </div>
           ) : null}
           {openView && (openPut || openCall) ? (
-            <NextStepLine display={display ?? null} dte={awaitingSettlement ? null : dte} settlementPending={awaitingSettlement} />
+            <NextStepLine
+              display={display ?? null}
+              dte={awaitingSettlement ? null : dte}
+              settlementPending={awaitingSettlement}
+              daysPastExpiration={awaitingSettlement && openLegExpiration ? -daysToExpiration(openLegExpiration, asOf) : null}
+            />
           ) : null}
           {/* Provenance/context - deliberately the smallest, most muted text in the card. The
               visibility affordance (compact position UX) now lives ONLY here, next to the account

@@ -4,9 +4,12 @@ import { getCurrentOpenPut } from "@/domain/finance/campaigns";
 import { classifyBrokerTransactionActivity } from "@/domain/finance/brokerTransactionActions";
 import { isSameOccContract, occContractKey } from "@/domain/finance/occOption";
 import {
+  expirationRecordingDate,
   findClosingEvidence,
+  findExplicitExpirationRecord,
   findRollPairedOpeningTransactionIds,
   evaluateWorthlessExpiration,
+  isBenignUnresolvedRecord,
   parseOpeningPutTransaction,
   type ReconciliationTransaction,
   type SchwabReconciliationEvidence,
@@ -89,10 +92,14 @@ export async function reconcileSchwabActivityForUser(
   });
   const candidates: ReconciliationTransaction[] = unlinked.map(toReconciliationTransaction);
   const rollPairedIds = findRollPairedOpeningTransactionIds(candidates);
-  const unresolvedRecords = await prisma.brokerRecord.findMany({
+  const unresolvedRecordsRaw = await prisma.brokerRecord.findMany({
     where: { userId, accountId, provider: "SCHWAB", kind: "TRANSACTION", status: { not: "CONFIRMED" } },
-    select: { symbol: true, underlyingSymbol: true },
+    select: { symbol: true, underlyingSymbol: true, action: true, description: true },
   });
+  // Records stored as "needs review" before the app learned their wording (e.g. Schwab's "Expired" notice or a
+  // "System transfer" of shares) are re-judged against today's vocabulary here, so they stop blocking
+  // expiration confirmation without any stored record being rewritten.
+  const unresolvedRecords = unresolvedRecordsRaw.filter((record) => !isBenignUnresolvedRecord(record));
 
   // 1. Open new campaigns from unlinked "Sell to Open" put transactions (or link to an
   // already-tracked campaign for the exact same contract, e.g. one a CSV import created).
@@ -212,10 +219,12 @@ export async function reconcileSchwabActivityForUser(
         ? { ...evidence, transactions: { ...evidence.transactions, status: "PARTIAL" } }
         : evidence,
       hasClosingEvidence: false, // All actionable explicit evidence took precedence above.
+      hasExplicitExpirationRecord: findExplicitExpirationRecord(symbol, openPut.contracts, candidates) !== null,
       asOf,
     });
     if (expiration.status === "CONFIRMED") {
-      const expired = await expireCampaignPutForUser(userId, campaign.id, asOf.toISOString().slice(0, 10), 0, null);
+      // Same-week confirmations keep today's date as always; a late catch-up uses the real expiration date.
+      const expired = await expireCampaignPutForUser(userId, campaign.id, expirationRecordingDate(openPut.expiration, asOf), 0, null);
       if (expired) summary.campaignsExpired += 1;
     } else if (expiration.reason === "EXPIRATION_EVIDENCE_INCOMPLETE") {
       summary.expirationsDeferred += 1;

@@ -175,5 +175,11 @@ function refreshFailureMessage(reason: "NO_CONNECTION" | "BROKER_REFRESH_FAILED"
   if (reason === "TIMEOUT") {
     return "Refresh timed out";
   }
+  if (reason === "BROKER_REFRESH_FAILED") {
+    return "Couldn't read your Schwab positions";
+  }
+  if (reason === "MARKET_DATA_REFRESH_FAILED") {
+    return "Couldn't confirm stock prices or market hours";
+  }
   return "Current status could not be refreshed";
 }

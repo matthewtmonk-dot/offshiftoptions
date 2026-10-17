@@ -69,7 +69,14 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
           </div>
         ) : null}
         {row.display ? <LivePositionAssessmentEvidenceLine display={row.display} now={now} /> : null}
-        {row.legType ? <NextStepLine display={row.display} dte={dteValue} settlementPending={awaitingSettlement} /> : null}
+        {row.legType ? (
+          <NextStepLine
+            display={row.display}
+            dte={dteValue}
+            settlementPending={awaitingSettlement}
+            daysPastExpiration={awaitingSettlement && row.expiration ? -daysToExpiration(row.expiration, now) : null}
+          />
+        ) : null}
       </div>
       {showMiddle ? (
         <div className="space-y-1.5">

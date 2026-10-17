@@ -55,6 +55,14 @@ const EXACT_ACTION_MAP: Record<string, BrokerTransactionActivityKind> = {
   // recognized evidence that an option reached expiration/removal, never a guess about the
   // final outcome (assignment vs. worthless still requires the existing confirmation rule).
   "removed - expiration": "OPTION_REMOVED_EXPIRATION",
+  // Observed live (Eric's account, Oct 2026): Schwab ALSO sends a separate "Expired" row for the same
+  // contract ("Expired  PUT COEUR MNG INC $13.5 EXP 07/24/26") next to the "Removed due to Expiration"
+  // row above. Same meaning - evidence the contract reached expiration, never a statement about
+  // assignment (Schwab says "Assigned" for that, which deliberately stays unrecognized/flagged).
+  expired: "OPTION_REMOVED_EXPIRATION",
+  // Stock moved into the account (not a trade) and a dividend-reinvestment label, both observed live.
+  "system transfer": "TRANSFER",
+  "qual div reinvest": "DIVIDEND",
 };
 
 export function classifyBrokerTransactionAction(action: string | null | undefined): BrokerTransactionActivityKind {

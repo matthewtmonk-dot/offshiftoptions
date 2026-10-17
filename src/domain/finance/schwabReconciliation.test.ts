@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   evaluateWorthlessExpiration,
+  expirationRecordingDate,
+  findExplicitExpirationRecord,
+  isBenignUnresolvedRecord,
   type SchwabReconciliationEvidence,
   type ReconciliationPosition,
   findClosingEvidence,
@@ -443,3 +446,73 @@ describe("findCoveredCallCloseEvidence", () => {
     expect(findCoveredCallCloseEvidence(leg, [noPrice])).toEqual({ kind: "NONE" });
   });
 });
+
+describe("explicit expiration evidence", () => {
+  const expiration = new Date("2026-07-24");
+  const symbol = "CDE   260724P00013500";
+  const base = { expiration, symbol, underlying: "CDE", hasClosingEvidence: false, asOf: new Date("2026-10-19T18:00:00Z") };
+  const evidenceWithShares = () => completeEvidence([{ symbol: "CDE", assetType: "EQUITY", quantity: 100 }]);
+  const tx = (overrides: Partial<ReconciliationTransaction> = {}): ReconciliationTransaction => ({
+    id: "t1", symbol, occurredAt: new Date("2026-07-24"), action: "Removed - Expiration", quantity: 1, price: 0, fees: 0, ...overrides,
+  });
+
+  it("without explicit evidence, later-acquired shares in the same ticker still hold the put pending (unchanged)", () => {
+    expect(evaluateWorthlessExpiration({ ...base, evidence: evidenceWithShares() })).toEqual({ status: "PENDING", reason: "ACQUIRED_SHARES_PRESENT" });
+  });
+  it("with Schwab's explicit expiration record for that exact contract, held shares no longer block it", () => {
+    expect(evaluateWorthlessExpiration({ ...base, evidence: evidenceWithShares(), hasExplicitExpirationRecord: true })).toEqual({ status: "CONFIRMED" });
+  });
+  it("explicit evidence never overrides the other safeguards", () => {
+    const flag = { hasExplicitExpirationRecord: true };
+    expect(evaluateWorthlessExpiration({ ...base, ...flag, evidence: completeEvidence([{ symbol, quantity: -1 }]) })).toEqual({ status: "PENDING", reason: "OPTION_STILL_PRESENT" });
+    const partial = completeEvidence([]);
+    partial.transactions.status = "PARTIAL";
+    expect(evaluateWorthlessExpiration({ ...base, ...flag, evidence: partial })).toEqual({ status: "PENDING", reason: "EXPIRATION_EVIDENCE_INCOMPLETE" });
+    expect(evaluateWorthlessExpiration({ ...base, ...flag, evidence: completeEvidence([]), hasClosingEvidence: true })).toEqual({ status: "PENDING", reason: "EXPLICIT_ACTIVITY" });
+    expect(evaluateWorthlessExpiration({ ...base, ...flag, evidence: completeEvidence([]), asOf: new Date("2026-07-25T18:00:00Z") })).toEqual({ status: "PENDING", reason: "AWAITING_PROCESSING_DATE" });
+  });
+
+  it("findExplicitExpirationRecord needs the same contract, an expiration action, and enough quantity", () => {
+    expect(findExplicitExpirationRecord(symbol, 1, [tx()])?.id).toBe("t1");
+    expect(findExplicitExpirationRecord(symbol, 1, [tx({ action: "Expired" })])?.id).toBe("t1");
+    expect(findExplicitExpirationRecord(symbol, 1, [tx({ symbol: "CDE   260724P00014000" })])).toBeNull();
+    expect(findExplicitExpirationRecord(symbol, 1, [tx({ action: "Assignment" })])).toBeNull();
+    expect(findExplicitExpirationRecord(symbol, 1, [tx({ action: "Assigned" })])).toBeNull();
+    expect(findExplicitExpirationRecord(symbol, 2, [tx({ quantity: 1 })])).toBeNull();
+    expect(findExplicitExpirationRecord(symbol, 2, [tx({ quantity: 2 })])?.id).toBe("t1");
+  });
+});
+
+describe("expirationRecordingDate", () => {
+  const expiration = new Date("2026-07-24");
+  it("keeps the sync date for a normal, same-week confirmation (today's behavior)", () => {
+    expect(expirationRecordingDate(expiration, new Date("2026-07-27T14:00:00Z"))).toBe("2026-07-27");
+    expect(expirationRecordingDate(expiration, new Date("2026-07-31T14:00:00Z"))).toBe("2026-07-31");
+  });
+  it("uses the real expiration date when catching up on an expiry more than a week old", () => {
+    expect(expirationRecordingDate(expiration, new Date("2026-08-01T14:00:00Z"))).toBe("2026-07-24");
+    expect(expirationRecordingDate(expiration, new Date("2026-10-19T14:00:00Z"))).toBe("2026-07-24");
+  });
+});
+
+describe("isBenignUnresolvedRecord", () => {
+  const rec = (symbol: string | null, action: string | null, description: string | null = null) => ({ symbol, action, description });
+  it("treats Schwab's 'Expired' notice, share transfers and dividend reinvestments as benign", () => {
+    expect(isBenignUnresolvedRecord(rec(null, "Expired", "PUT COEUR MNG INC $13.5 EXP 07/24/26"))).toBe(true);
+    expect(isBenignUnresolvedRecord(rec("MPLX", null, "System transfer"))).toBe(true);
+    expect(isBenignUnresolvedRecord(rec("VNOM", "Qual Div Reinvest", "VIPER ENERGY INC NEW CLASS A"))).toBe(true);
+  });
+  it("treats activity on a CALL contract as irrelevant to a put", () => {
+    expect(isBenignUnresolvedRecord(rec("HL    261023C00019000", "Sell to Open", "TRADE"))).toBe(true);
+  });
+  it("never treats unexplained activity, an 'Assigned' notice, or anything on a PUT contract as benign", () => {
+    expect(isBenignUnresolvedRecord(rec(null, "Assigned", "PUT SIGMA LITHIUM CORP $11 EXP 07/24/26"))).toBe(false);
+    expect(isBenignUnresolvedRecord(rec("HL    261016P00018000", "Sell to Open", "TRADE"))).toBe(false);
+    expect(isBenignUnresolvedRecord(rec("CDE", null, "Something new Schwab invented"))).toBe(false);
+    expect(isBenignUnresolvedRecord(rec(null, null, null))).toBe(false);
+  });
+  it("does not let a transfer on an option contract hide a possible assignment", () => {
+    expect(isBenignUnresolvedRecord(rec("CDE   261023P00018500", "Security Transfer"))).toBe(false);
+  });
+});
+

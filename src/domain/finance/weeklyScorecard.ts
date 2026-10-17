@@ -41,6 +41,37 @@ export function netOptionCashFlowBetween(events: CampaignEventInput[], start: Da
   return round2(total);
 }
 
+const MS_PER_DAY = 86_400_000;
+
+function utcDay(value: Date): number {
+  return Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+}
+
+/**
+ * How many days a position's money was actually set aside, for the weekly-return math.
+ *
+ * An OPEN campaign whose current put has already expired is only "settlement pending" - Schwab hasn't confirmed
+ * whether it expired worthless or was assigned. Counting the days AFTER expiration would keep diluting the
+ * weekly return with time the put was no longer working (e.g. a put that expired in July would still be
+ * accruing weeks in October). So the clock stops at the put's expiration date. Once the outcome is recorded
+ * (assignment, covered call, close) the campaign is no longer OPEN-with-an-expired-put and its normal age applies.
+ */
+export function capitalDaysAtWork(input: {
+  status: "OPEN" | "ASSIGNED" | "CLOSED";
+  daysActive: number | null;
+  openedAt: Date | null;
+  /** Expiration of the currently open put, if there is one. */
+  openPutExpiration: Date | null;
+  asOf: Date;
+}): number | null {
+  const { status, daysActive, openedAt, openPutExpiration, asOf } = input;
+  if (daysActive === null) return null;
+  if (status !== "OPEN" || openPutExpiration === null || openedAt === null) return daysActive;
+  if (utcDay(asOf) <= utcDay(openPutExpiration)) return daysActive;
+  const throughExpiration = Math.max(1, Math.ceil((utcDay(openPutExpiration) - utcDay(openedAt)) / MS_PER_DAY));
+  return Math.min(daysActive, throughExpiration);
+}
+
 export type CapitalWeightedReturn = {
   /** Average return per week on the money set aside, in percent. */
   weeklyPercent: number;

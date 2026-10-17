@@ -19,12 +19,22 @@ export function nextStepFor(input: {
   dte: number | null;
   /** True when `action` comes from the last valid (older) reading rather than a live one. */
   historical: boolean;
+  /** Calendar days since the leg expired (only meaningful while settlement is pending); null when unknown. */
+  daysPastExpiration?: number | null;
 }): NextStep {
-  const { settlementPending, action, dte, historical } = input;
+  const { settlementPending, action, dte, historical, daysPastExpiration = null } = input;
   const older = historical ? " (from the last valid reading - press Refresh status to update)" : "";
   const when = dte === 0 ? "today" : dte === 1 ? "tomorrow" : null;
 
   if (settlementPending) {
+    // A just-expired leg normally settles by the next sync. One that is still unconfirmed days later almost
+    // always means Brokerage Sync hasn't run since it expired - "tomorrow" would be the wrong advice.
+    if (daysPastExpiration !== null && daysPastExpiration >= 4) {
+      return {
+        tone: "watch",
+        text: `Expired ${daysPastExpiration} days ago and still unconfirmed - run Brokerage Sync (Account page) to find out whether it expired or was assigned.`,
+      };
+    }
     return { tone: "wait", text: "Nothing to do - waiting for Schwab to settle this. Run Brokerage Sync tomorrow to confirm." };
   }
   if (action === null || action === "CANNOT_ASSESS") {
