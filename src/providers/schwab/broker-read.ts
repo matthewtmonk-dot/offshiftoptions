@@ -170,7 +170,7 @@ export class SchwabBrokerReadProvider implements BrokerReadProvider {
       if (outcome.status === "fulfilled") {
         try {
           const parsed = this.mapTransactionsPayload(outcome.value, accountId);
-          transactions.push(...parsed);
+          transactions.push(...parsed.map((transaction) => ({ ...transaction, fetchedAs: category })));
           categories[category] = { status: "OK", count: parsed.length };
         } catch {
           // A malformed/skipped response is not proof that this category contained no activity.

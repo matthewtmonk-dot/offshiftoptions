@@ -278,6 +278,53 @@ describe("buildSchwabRecordsToPersist", () => {
   });
 });
 
+describe("buildSchwabRecordsToPersist - look-alike trades", () => {
+  const sameFill = {
+    accountId: "acct-1",
+    occurredAt: new Date("2026-09-04T14:00:00Z"),
+    symbol: "HL 260918P00018000",
+    description: "Sell to Open",
+    amount: 45,
+    action: "Sell to Open",
+  };
+
+  it("keeps two different activities from the SAME category apart, even though they fingerprint identically", () => {
+    const first: BrokerTransaction = { id: "1001", ...sameFill, fetchedAs: "TRADE" };
+    const second: BrokerTransaction = { id: "1002", ...sameFill, fetchedAs: "TRADE" };
+
+    const records = buildSchwabRecordsToPersist([], [second, first], new Date("2026-09-05"));
+
+    expect(records).toHaveLength(2);
+    const plain = records.find((record) => record.sourceIds.includes("schwab-api-transaction:1001"))!;
+    const suffixed = records.find((record) => record.sourceIds.includes("schwab-api-transaction:1002"))!;
+    expect(suffixed.fingerprint).toBe(`${plain.fingerprint}#2`);
+    expect(suffixed.identityKey).not.toBe(plain.identityKey);
+    expect(plain.sourceIds).toEqual(["schwab-api-transaction:1001"]);
+  });
+
+  it("is stable: the lower id keeps the plain fingerprint regardless of the order Schwab returned them in", () => {
+    const first: BrokerTransaction = { id: "1001", ...sameFill, fetchedAs: "TRADE" };
+    const second: BrokerTransaction = { id: "1002", ...sameFill, fetchedAs: "TRADE" };
+    const a = buildSchwabRecordsToPersist([], [first, second], new Date("2026-09-05")).map((r) => r.fingerprint).sort();
+    const b = buildSchwabRecordsToPersist([], [second, first], new Date("2026-09-05")).map((r) => r.fingerprint).sort();
+    expect(a).toEqual(b);
+  });
+
+  it("still merges one activity echoed under two DIFFERENT categories", () => {
+    const records = buildSchwabRecordsToPersist(
+      [],
+      [{ id: "2001", ...sameFill, fetchedAs: "TRADE" }, { id: "2001-echo", ...sameFill, fetchedAs: "RECEIVE_AND_DELIVER" }],
+      new Date("2026-09-05"),
+    );
+    expect(records).toHaveLength(1);
+  });
+
+  it("never separates the same activity id seen twice, and never separates untagged records", () => {
+    expect(buildSchwabRecordsToPersist([], [{ id: "3001", ...sameFill, fetchedAs: "TRADE" }, { id: "3001", ...sameFill, fetchedAs: "TRADE" }], new Date("2026-09-05"))).toHaveLength(1);
+    expect(buildSchwabRecordsToPersist([], [{ id: "4001", ...sameFill }, { id: "4002", ...sameFill }], new Date("2026-09-05"))).toHaveLength(1);
+  });
+});
+
 describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEvidenceForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();

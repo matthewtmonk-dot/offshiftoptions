@@ -274,10 +274,49 @@ export async function fetchSchwabAccountActivity(provider: BrokerReadProvider, a
  * inflating that count past the number of rows actually inserted.
  */
 export function buildSchwabRecordsToPersist(positions: BrokerPosition[], transactions: BrokerTransaction[], syncedAt: Date) {
+  const slots = lookalikeTransactionSlots(transactions);
   return mergeBrokerRecords([
     ...positions.map((position) => normalizeSchwabApiPosition(position, syncedAt)),
-    ...transactions.map((transaction) => normalizeSchwabApiTransaction(transaction)),
+    ...transactions.map((transaction) => {
+      const record = normalizeSchwabApiTransaction(transaction);
+      const slot = slots.get(`${transaction.fetchedAs}|${record.fingerprint}|${transaction.id}`) ?? 0;
+      // Both keys get the suffix: an older stored row (a collapsed pair) may carry this id's identity key, and a
+      // matching identity with a different fingerprint would otherwise be filed as a CONFLICT instead of stored.
+      return slot > 0
+        ? { ...record, fingerprint: `${record.fingerprint}#${slot + 1}`, identityKey: `${record.identityKey}#${slot + 1}` }
+        : record;
+    }),
   ]);
+}
+
+/**
+ * Two genuinely separate Schwab trades can look identical to the dedupe fingerprint (same account, day,
+ * contract, description and amount - for example the same roll done twice on the same day for two lots).
+ * Merged, one of them silently disappears and the sync can no longer prove its records were fully saved.
+ *
+ * Inside ONE category response, two transactions with DIFFERENT activity ids are two separate trades (an
+ * activity appears once per category response). Only then does the later one (in id order) get a "#n" suffix on
+ * its fingerprint; the first keeps the plain fingerprint, so rows stored before this change and CSV imports
+ * still match it. One activity echoed under two different categories is still merged exactly as before, and a
+ * transaction with no category tag (CSV / tests) is never separated.
+ *
+ * Returns "<category>|<fingerprint>|<activity id>" -> slot (0 = keeps the plain fingerprint).
+ */
+export function lookalikeTransactionSlots(transactions: BrokerTransaction[]): Map<string, number> {
+  const idsByCategoryAndFingerprint = new Map<string, Set<string>>();
+  for (const transaction of transactions) {
+    if (!transaction.fetchedAs) continue;
+    const key = `${transaction.fetchedAs}|${normalizeSchwabApiTransaction(transaction).fingerprint}`;
+    idsByCategoryAndFingerprint.set(key, (idsByCategoryAndFingerprint.get(key) ?? new Set()).add(transaction.id));
+  }
+  const slots = new Map<string, number>();
+  for (const [key, ids] of idsByCategoryAndFingerprint) {
+    if (ids.size < 2) continue;
+    [...ids]
+      .sort((a, b) => a.length - b.length || a.localeCompare(b))
+      .forEach((id, index) => slots.set(`${key}|${id}`, index));
+  }
+  return slots;
 }
 
 /**
@@ -507,8 +546,10 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         const persistedIds = persistedSourceIdsByFingerprint.get(record.fingerprint);
         const expectedIds = providerIds(record.sourceIds);
         const expectedId = [...expectedIds][0];
+        // The stored row must carry THIS transaction's own id. It may carry others too: rows stored before
+        // look-alike trades were kept apart legitimately hold both ids of a collapsed pair.
         return expectedIds.size === 1 && expectedId !== providerIdPrefix &&
-          persistedIds?.size === 1 && persistedIds.has(expectedId);
+          persistedIds !== undefined && persistedIds.has(expectedId);
       });
       const persistenceComplete = activity.evidence.persistenceStatus === "COMPLETE" &&
         !hasIdentityCollision && persistedRecords.length === fingerprints.length &&
@@ -519,7 +560,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         const mismatched = transactionRecords.filter((record) => {
           const persistedIds = persistedSourceIdsByFingerprint.get(record.fingerprint);
           const expectedId = [...providerIds(record.sourceIds)][0];
-          return persistedIds !== undefined && (providerIds(record.sourceIds).size !== 1 || persistedIds.size !== 1 || !persistedIds.has(expectedId));
+          return persistedIds !== undefined && (providerIds(record.sourceIds).size !== 1 || !persistedIds.has(expectedId));
         });
         const problemRecords = [...colliding, ...notStored, ...mismatched];
         const problemTickers = [...new Set(problemRecords.map((record) => record.underlyingSymbol?.trim().toUpperCase() ?? ""))];

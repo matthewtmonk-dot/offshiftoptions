@@ -107,6 +107,13 @@ export type BrokerTransaction = {
    * (e.g. a CSV-sourced record, which never has this concept at all). Never used to drive any
    * reconciliation decision yet - purely preserved evidence for a later phase. */
   transferLegs?: BrokerTransferLeg[];
+  /**
+   * Which of the independent category requests returned this transaction (TRADE / RECEIVE_AND_DELIVER /
+   * DIVIDEND_OR_INTEREST). Set only by the live Schwab provider. Lets the persistence step tell "two real,
+   * identical-looking fills inside ONE category" (separate trades) apart from "one activity echoed under two
+   * categories" (a single trade).
+   */
+  fetchedAs?: BrokerTransactionCategory;
 };
 
 export type BrokerObservedOrder = {
