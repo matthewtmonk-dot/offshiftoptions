@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { endOfNyCalendarDateUtc, selectEffectiveBaseline, type AccountLedgerEntryInput } from "@/domain/finance/accountLedger";
 import { getCurrentOpenCall, isPastExpiration, summarizeCampaign } from "@/domain/finance/campaigns";
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
+import { marketDate, refreshSessionRequirementMet } from "@/domain/finance/marketCalendar";
 import type { SchwabReconciliationEvidence, TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
 import { compareStockStageCandidates, evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
 import type {
@@ -702,7 +703,8 @@ export async function refreshPositionEvidenceForUser(userId: string, signal: Abo
       signal.throwIfAborted();
 
       const quotesOk = tickers.every((ticker) => quoteEvidenceByTicker.get(ticker)?.status === "AVAILABLE");
-      const sessionOk = sessionEvidence.status === "AVAILABLE";
+      // No session entry on a weekend/holiday is simply "market closed" - see refreshSessionRequirementMet.
+      const sessionOk = refreshSessionRequirementMet(sessionEvidence.status === "AVAILABLE", marketDate(now));
       if (!quotesOk || !sessionOk) {
         // Self-service explanation (shown on /account/diagnostics): which half failed and the provider's own
         // short reason - counts and sanitized text only, never prices or tokens.

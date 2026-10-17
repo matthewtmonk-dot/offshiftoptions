@@ -483,17 +483,42 @@ describe("Post-Phase-2 UX follow-up (correctness repair) - refreshPositionEviden
       expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
     });
 
-    it("a session failure prevents a false success where session evidence is required", async () => {
-      const m = await mocks();
-      m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
-      m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
-      m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
-      m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
-      m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "UNAVAILABLE", reason: "Schwab market-session request failed." } as never);
+    it("a session failure prevents a false success where session evidence is required (a trading day)", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-15T15:00:00Z")); // a Thursday - the market-hours answer is required
+      try {
+        const m = await mocks();
+        m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+        m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+        m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+        m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+        m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "UNAVAILABLE", reason: "Schwab market-session request failed." } as never);
 
-      const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
+        const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
 
-      expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
+        expect(result).toEqual({ ok: false, reason: "MARKET_DATA_REFRESH_FAILED" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a missing market session on a weekend is just 'market closed' - the refresh still succeeds", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-17T20:50:00Z")); // a Saturday - Schwab sends no equity session entry
+      try {
+        const m = await mocks();
+        m.getSchwabConnectionSummaryForUser.mockResolvedValue(connectedSummary() as never);
+        m.getSchwabBrokerReadProviderForUser.mockResolvedValue(fakeReadProvider());
+        m.campaignFindMany.mockResolvedValue([openPutCampaign()] as never);
+        m.getQuoteReviewEvidenceForUser.mockResolvedValue(new Map([["UPST", { status: "AVAILABLE" }]]) as never);
+        m.getEquityMarketSessionEvidenceForUser.mockResolvedValue({ status: "UNAVAILABLE", reason: "Schwab market-hours payload did not include equity.EQ." } as never);
+
+        const result = await refreshPositionEvidenceForUser("matt", new AbortController().signal);
+
+        expect(result).toMatchObject({ ok: true });
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
