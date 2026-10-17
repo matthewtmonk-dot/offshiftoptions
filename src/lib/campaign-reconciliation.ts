@@ -102,6 +102,8 @@ export async function reconcileSchwabActivityForUser(
   // "System transfer" of shares) are re-judged against today's vocabulary here, so they stop blocking
   // expiration confirmation without any stored record being rewritten.
   const unresolvedRecords = unresolvedRecordsRaw.filter((record) => !isBenignUnresolvedRecord(record));
+  // Tickers whose transactions the sync could not prove stored one-to-one (see SchwabReconciliationEvidence).
+  const unverifiedTickers = new Set((evidence.unverifiedUnderlyings ?? []).map((ticker) => ticker.toUpperCase()));
 
   // 1. Open new campaigns from unlinked "Sell to Open" put transactions (or link to an
   // already-tracked campaign for the exact same contract, e.g. one a CSV import created).
@@ -209,7 +211,7 @@ export async function reconcileSchwabActivityForUser(
       return !occContractKey(transaction.symbol) &&
         ["BUY_TO_CLOSE", "ASSIGNMENT", "EXERCISE", "UNKNOWN"].includes(action) &&
         (!transaction.underlyingSymbol || transaction.underlyingSymbol.toUpperCase() === campaign.ticker.toUpperCase());
-    }) || unresolvedRecords.some((record) =>
+    }) || unverifiedTickers.has(campaign.ticker.toUpperCase()) || unresolvedRecords.some((record) =>
       isSameOccContract(record.symbol, symbol) || record.underlyingSymbol?.toUpperCase() === campaign.ticker.toUpperCase() ||
       (!record.symbol && !record.underlyingSymbol),
     );
@@ -234,7 +236,11 @@ export async function reconcileSchwabActivityForUser(
       // Say WHY, per put, in the self-service diagnostics log (/account/diagnostics) - only the ticker,
       // the expiration date and a fixed phrase, never an account number or amount.
       const gap = describeExpirationEvidenceGap({ expiration: openPut.expiration, symbol, evidence });
-      const reasons = [gap, hasUnresolvedActivity ? "unreviewed Schwab activity in this ticker" : null].filter(Boolean).join("; ");
+      const reasons = [
+        gap,
+        unverifiedTickers.has(campaign.ticker.toUpperCase()) ? "two identical-looking Schwab trades in this ticker couldn't be told apart" : null,
+        hasUnresolvedActivity && !unverifiedTickers.has(campaign.ticker.toUpperCase()) ? "unreviewed Schwab activity in this ticker" : null,
+      ].filter(Boolean).join("; ");
       if (summary.expirationsDeferred <= 30) {
         recordDiagnostic({
           kind: "action",

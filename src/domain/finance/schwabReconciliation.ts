@@ -315,6 +315,12 @@ export type SchwabReconciliationEvidence = {
   positions: { status: "COMPLETE" | "FAILED"; data: ReconciliationPosition[] };
   transactions: { status: TransactionEvidenceStatus; from: Date; to: Date };
   persistenceStatus: "COMPLETE" | "FAILED";
+  /**
+   * Tickers whose transactions could not be proven stored one-to-one this sync (for example two distinct
+   * Schwab fills with identical-looking details that collapse into one stored row). Only those tickers lose
+   * expiration confirmation; every other ticker is unaffected. Empty/absent when nothing is unverified.
+   */
+  unverifiedUnderlyings?: string[];
 };
 
 export type ExpirationDecision =

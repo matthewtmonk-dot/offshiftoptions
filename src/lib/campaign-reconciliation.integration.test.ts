@@ -104,6 +104,30 @@ maybeDescribe("Schwab campaign auto-reconciliation", () => {
     expect(campaign?.status).toBe("OPEN");
   });
 
+  it("a ticker whose trades could not be verified is held back, while another ticker's expired put is still confirmed", async () => {
+    const account = await createTradingAccountForUser(userA.id, "Recon Account Scoped", "Manual", "10000", "10000", "PRIVATE");
+    for (const ticker of ["SCPA", "SCPB"]) {
+      await createTransaction(userA.id, account.id, {
+        symbol: `${ticker} 260904P00010000`,
+        underlyingSymbol: ticker,
+        action: "Sell to Open",
+        occurredAt: new Date("2026-08-28T14:00:00Z"),
+        price: 0.2,
+        fees: 0.65,
+      });
+    }
+
+    const evidence: SchwabReconciliationEvidence = { ...completeEvidence([]), unverifiedUnderlyings: ["SCPA"] };
+    const tuesday = await reconcileSchwabActivityForUser(userA.id, account.id, evidence, new Date("2026-09-08T18:00:00Z"));
+
+    expect(tuesday.campaignsExpired).toBe(1);
+    expect(tuesday.expirationsDeferred).toBe(1);
+    const held = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "SCPA" } });
+    const confirmed = await prisma.campaign.findFirst({ where: { ownerId: userA.id, accountId: account.id, ticker: "SCPB" } });
+    expect(held?.status).toBe("OPEN");
+    expect(confirmed?.status).toBe("CLOSED");
+  });
+
   it("confirms PUT_EXPIRED once the next NY business day's sync still shows the option gone with no evidence, and keeps opening premium/fees separate", async () => {
     const account = await createTradingAccountForUser(userA.id, "Recon Account APLD", "Manual", "10000", "10000", "PRIVATE");
     await createTransaction(userA.id, account.id, {

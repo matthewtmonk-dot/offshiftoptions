@@ -514,9 +514,6 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         !hasIdentityCollision && persistedRecords.length === fingerprints.length &&
         everyIdentityPersisted && !!account && !!snapshot;
       if (!persistenceComplete) {
-        activity.evidence.persistenceStatus = "FAILED";
-        // Say WHICH check failed (self-service diagnostics only; counts, tickers and Schwab's own action
-        // words - no ids, amounts or account numbers) so "synced records weren't fully saved" can be traced.
         const colliding = transactionRecords.filter((record) => providerIds(record.sourceIds).size !== 1);
         const notStored = transactionRecords.filter((record) => !persistedSourceIdsByFingerprint.has(record.fingerprint));
         const mismatched = transactionRecords.filter((record) => {
@@ -524,13 +521,24 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
           const expectedId = [...providerIds(record.sourceIds)][0];
           return persistedIds !== undefined && (providerIds(record.sourceIds).size !== 1 || persistedIds.size !== 1 || !persistedIds.has(expectedId));
         });
-        const sample = [...colliding, ...notStored, ...mismatched];
-        const tickers = [...new Set(sample.map((record) => record.underlyingSymbol).filter(Boolean))].slice(0, 8).join(", ");
-        const actions = [...new Set(sample.map((record) => record.action).filter(Boolean))].slice(0, 5).join(", ");
+        const problemRecords = [...colliding, ...notStored, ...mismatched];
+        const problemTickers = [...new Set(problemRecords.map((record) => record.underlyingSymbol?.trim().toUpperCase() ?? ""))];
+        // A record-level problem confined to identifiable tickers only makes THOSE tickers unverifiable: a trade
+        // in HL says nothing about whether a CDE put expired. Anything else (the save step threw, the account or
+        // balance snapshot is missing, a problem record with no ticker) stays a whole-account failure, as before.
+        const confinedToTickers =
+          activity.evidence.persistenceStatus === "COMPLETE" && !!account && !!snapshot &&
+          problemRecords.length > 0 && problemTickers.every((ticker) => ticker !== "");
+        if (confinedToTickers) {
+          activity.evidence.unverifiedUnderlyings = problemTickers;
+        } else {
+          activity.evidence.persistenceStatus = "FAILED";
+        }
+        const actions = [...new Set(problemRecords.map((record) => record.action).filter(Boolean))].slice(0, 5).join(", ");
         recordDiagnostic({
           kind: "error",
           source: "sync persistence check",
-          message: `of ${transactionRecords.length} transactions: ${colliding.length} share an id/fingerprint, ${notStored.length} not stored, ${mismatched.length} stored under a different id${diagnostics.persistenceStatus === "ERROR" ? "; the save step threw an error" : ""}${account ? "" : "; account row missing"}${snapshot ? "" : "; balance snapshot missing"}. Tickers: ${tickers || "none"}. Actions: ${actions || "none"}`,
+          message: `of ${transactionRecords.length} transactions: ${colliding.length} share an id/fingerprint, ${notStored.length} not stored, ${mismatched.length} stored under a different id${diagnostics.persistenceStatus === "ERROR" ? "; the save step threw an error" : ""}${account ? "" : "; account row missing"}${snapshot ? "" : "; balance snapshot missing"}. Tickers: ${problemTickers.filter(Boolean).slice(0, 8).join(", ") || "none"}. Actions: ${actions || "none"}. ${confinedToTickers ? "Only these tickers are held back." : "Whole account held back."}`,
         });
       }
       const step = (category: "TRADE" | "RECEIVE_AND_DELIVER" | "DIVIDEND_OR_INTEREST") =>
