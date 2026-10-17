@@ -197,3 +197,13 @@ function easterSunday(year: number): Date {
   const day = ((h + l - 7 * m + 114) % 31) + 1;
   return new Date(Date.UTC(year, month - 1, day));
 }
+
+/**
+ * Whether the "equity market session" half of a position refresh is satisfied. Schwab's market-hours
+ * response has no regular-session entry at all on a weekend or exchange holiday, so a missing session on a
+ * non-trading day is the expected "market is closed" answer - not a failed refresh. On a trading day an
+ * unavailable session still counts as a failure (the app must not guess whether the market is open).
+ */
+export function refreshSessionRequirementMet(sessionAvailable: boolean, instantsNyDate: Date): boolean {
+  return sessionAvailable || !isNyseMarketDay(instantsNyDate);
+}

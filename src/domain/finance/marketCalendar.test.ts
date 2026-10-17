@@ -266,3 +266,20 @@ describe("isRecentRetrieval (broker-snapshot retrieval recency, separate from pr
     expect(typeof isRecentRetrieval(now, now)).toBe("boolean");
   });
 });
+
+import { refreshSessionRequirementMet } from "./marketCalendar";
+
+describe("refreshSessionRequirementMet", () => {
+  const saturday = new Date("2026-10-17T00:00:00Z");
+  const thursday = new Date("2026-10-15T00:00:00Z");
+  it("a missing session on a weekend is the expected 'market closed', not a failure", () => {
+    expect(refreshSessionRequirementMet(false, saturday)).toBe(true);
+  });
+  it("a missing session on a trading day is still a failure", () => {
+    expect(refreshSessionRequirementMet(false, thursday)).toBe(false);
+  });
+  it("an available session always satisfies it", () => {
+    expect(refreshSessionRequirementMet(true, thursday)).toBe(true);
+    expect(refreshSessionRequirementMet(true, saturday)).toBe(true);
+  });
+});
