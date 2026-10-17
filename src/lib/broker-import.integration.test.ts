@@ -133,7 +133,7 @@ maybeDescribe("Schwab broker import (preview/confirm/dedupe/conflict/privacy)", 
   });
 
   it("a collapsed look-alike pair stored by an older build gains its missing second row, without a duplicate or a conflict", async () => {
-    const { buildSchwabRecordsToPersist } = await import("./workflows");
+    const { buildSchwabRecordsToPersist, repairCollapsedLookalikeRows } = await import("./workflows");
     const { mergeBrokerRecords } = await import("../providers/schwab/csv");
     const account = await createTradingAccountForUser(userA.id, "Lookalike Pair Account", "Manual", "10000", "10000", "PRIVATE");
     const fill = (id: string) => ({
@@ -155,8 +155,15 @@ maybeDescribe("Schwab broker import (preview/confirm/dedupe/conflict/privacy)", 
     expect(legacy).toHaveLength(1);
     await persistNormalizedBrokerRecordsForUser(userA.id, account.id, legacy);
 
-    // What the NEW build produces for the same two fills.
-    const records = buildSchwabRecordsToPersist([], [fill("9001"), fill("9002")], new Date("2026-09-05"));
+    // What the NEW build does for the same two fills: take the later id back out of the collapsed row, then store
+    // the second fill as its own row.
+    const transactions = [fill("9001"), fill("9002")];
+    expect(await repairCollapsedLookalikeRows(userA.id, account.id, transactions)).toBe(1);
+    expect(await repairCollapsedLookalikeRows(userA.id, account.id, transactions)).toBe(0);
+    const collapsedRow = await prisma.brokerRecord.findFirst({ where: { userId: userA.id, accountId: account.id, kind: "TRANSACTION" } });
+    expect(collapsedRow?.sourceIds).toEqual(["schwab-api-transaction:9001"]);
+
+    const records = buildSchwabRecordsToPersist([], transactions, new Date("2026-09-05"));
     expect(records).toHaveLength(2);
     const first = await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
     expect(first.inserted).toBe(1);
@@ -165,6 +172,7 @@ maybeDescribe("Schwab broker import (preview/confirm/dedupe/conflict/privacy)", 
     const stored = await prisma.brokerRecord.findMany({ where: { userId: userA.id, accountId: account.id, kind: "TRANSACTION" } });
     expect(stored).toHaveLength(2);
     expect(stored.every((row) => row.status === "CONFIRMED")).toBe(true);
+    expect(stored.every((row) => row.sourceIds.length === 1)).toBe(true);
 
     const second = await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
     expect(second.inserted).toBe(0);

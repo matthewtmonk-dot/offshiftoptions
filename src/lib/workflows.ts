@@ -320,6 +320,38 @@ export function lookalikeTransactionSlots(transactions: BrokerTransaction[]): Ma
 }
 
 /**
+ * Rows stored before look-alike trades were kept apart hold TWO provider ids in one row (the collapsed pair).
+ * The sync's end-of-run proof (rightly) refuses a stored row that carries more than the incoming record's own
+ * id, so those rows would block their ticker forever. This repair takes the later fill's id back out of the
+ * collapsed row (the lower id stays, matching the plain fingerprint) just before the new, separately-suffixed
+ * record for that fill is inserted - the second fill then exists as its own row and every row maps to exactly
+ * one provider transaction again. Idempotent, scoped to this user's own account, and a no-op when nothing was
+ * ever collapsed.
+ */
+export async function repairCollapsedLookalikeRows(userId: string, accountId: string, transactions: BrokerTransaction[]): Promise<number> {
+  const slots = lookalikeTransactionSlots(transactions);
+  let repaired = 0;
+  const seen = new Set<string>();
+  for (const transaction of transactions) {
+    if (!transaction.fetchedAs) continue;
+    const baseFingerprint = normalizeSchwabApiTransaction(transaction).fingerprint;
+    const slot = slots.get(`${transaction.fetchedAs}|${baseFingerprint}|${transaction.id}`) ?? 0;
+    const providerId = `schwab-api-transaction:${transaction.id}`;
+    if (slot === 0 || seen.has(`${baseFingerprint}|${providerId}`)) continue;
+    seen.add(`${baseFingerprint}|${providerId}`);
+    const row = await prisma.brokerRecord.findFirst({
+      where: { userId, accountId, provider: "SCHWAB", kind: "TRANSACTION", fingerprint: baseFingerprint },
+      select: { id: true, sourceIds: true },
+    });
+    if (row && row.sourceIds.includes(providerId) && row.sourceIds.length > 1) {
+      await prisma.brokerRecord.update({ where: { id: row.id }, data: { sourceIds: row.sourceIds.filter((id) => id !== providerId) } });
+      repaired += 1;
+    }
+  }
+  return repaired;
+}
+
+/**
  * Pulls real account value/cash from Schwab for the authenticated user only and records it as
  * a BROKER_SNAPSHOT ledger entry per linked account. Also pulls that account's current
  * positions and recent transactions and persists them as BrokerRecords (reusing the exact CSV
@@ -482,6 +514,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
     const records = buildSchwabRecordsToPersist(activity.positions, activity.transactions, syncedAt);
     if (records.length > 0) {
       try {
+        await repairCollapsedLookalikeRows(userId, tradingAccount.id, activity.transactions);
         const persisted = await persistNormalizedBrokerRecordsForUser(userId, tradingAccount.id, records);
         diagnostics.brokerRecordsInserted += persisted.inserted;
         diagnostics.duplicatesSkipped += persisted.duplicatesSkipped;
@@ -546,10 +579,8 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         const persistedIds = persistedSourceIdsByFingerprint.get(record.fingerprint);
         const expectedIds = providerIds(record.sourceIds);
         const expectedId = [...expectedIds][0];
-        // The stored row must carry THIS transaction's own id. It may carry others too: rows stored before
-        // look-alike trades were kept apart legitimately hold both ids of a collapsed pair.
         return expectedIds.size === 1 && expectedId !== providerIdPrefix &&
-          persistedIds !== undefined && persistedIds.has(expectedId);
+          persistedIds?.size === 1 && persistedIds.has(expectedId);
       });
       const persistenceComplete = activity.evidence.persistenceStatus === "COMPLETE" &&
         !hasIdentityCollision && persistedRecords.length === fingerprints.length &&
@@ -560,7 +591,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
         const mismatched = transactionRecords.filter((record) => {
           const persistedIds = persistedSourceIdsByFingerprint.get(record.fingerprint);
           const expectedId = [...providerIds(record.sourceIds)][0];
-          return persistedIds !== undefined && (providerIds(record.sourceIds).size !== 1 || !persistedIds.has(expectedId));
+          return persistedIds !== undefined && (providerIds(record.sourceIds).size !== 1 || persistedIds.size !== 1 || !persistedIds.has(expectedId));
         });
         const problemRecords = [...colliding, ...notStored, ...mismatched];
         const problemTickers = [...new Set(problemRecords.map((record) => record.underlyingSymbol?.trim().toUpperCase() ?? ""))];
