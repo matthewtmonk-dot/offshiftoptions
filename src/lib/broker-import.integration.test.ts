@@ -132,6 +132,53 @@ maybeDescribe("Schwab broker import (preview/confirm/dedupe/conflict/privacy)", 
     expect(feesStored.some((fee) => fee !== null && Number(fee) === 0.65)).toBe(true);
   });
 
+  it("a collapsed look-alike pair stored by an older build gains its missing second row, without a duplicate or a conflict", async () => {
+    const { buildSchwabRecordsToPersist, repairCollapsedLookalikeRows } = await import("./workflows");
+    const { mergeBrokerRecords } = await import("../providers/schwab/csv");
+    const account = await createTradingAccountForUser(userA.id, "Lookalike Pair Account", "Manual", "10000", "10000", "PRIVATE");
+    const fill = (id: string) => ({
+      id,
+      accountId: account.id,
+      symbol: "LKPR 260918P00018000",
+      amount: 45,
+      occurredAt: new Date("2026-09-04T14:00:00Z"),
+      description: "Sell to Open",
+      action: "Sell to Open",
+      quantity: 1,
+      price: 0.46,
+      fees: 0.66,
+      fetchedAs: "TRADE" as const,
+    });
+
+    // What the OLD build stored: both fills collapsed into one row carrying both provider ids.
+    const legacy = mergeBrokerRecords([normalizeSchwabApiTransaction(fill("9002")), normalizeSchwabApiTransaction(fill("9001"))]);
+    expect(legacy).toHaveLength(1);
+    await persistNormalizedBrokerRecordsForUser(userA.id, account.id, legacy);
+
+    // What the NEW build does for the same two fills: take the later id back out of the collapsed row, then store
+    // the second fill as its own row.
+    const transactions = [fill("9001"), fill("9002")];
+    expect(await repairCollapsedLookalikeRows(userA.id, account.id, transactions)).toBe(1);
+    expect(await repairCollapsedLookalikeRows(userA.id, account.id, transactions)).toBe(0);
+    const collapsedRow = await prisma.brokerRecord.findFirst({ where: { userId: userA.id, accountId: account.id, kind: "TRANSACTION" } });
+    expect(collapsedRow?.sourceIds).toEqual(["schwab-api-transaction:9001"]);
+
+    const records = buildSchwabRecordsToPersist([], transactions, new Date("2026-09-05"));
+    expect(records).toHaveLength(2);
+    const first = await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
+    expect(first.inserted).toBe(1);
+    expect(first.duplicatesSkipped).toBe(1);
+
+    const stored = await prisma.brokerRecord.findMany({ where: { userId: userA.id, accountId: account.id, kind: "TRANSACTION" } });
+    expect(stored).toHaveLength(2);
+    expect(stored.every((row) => row.status === "CONFIRMED")).toBe(true);
+    expect(stored.every((row) => row.sourceIds.length === 1)).toBe(true);
+
+    const second = await persistNormalizedBrokerRecordsForUser(userA.id, account.id, records);
+    expect(second.inserted).toBe(0);
+    expect(second.duplicatesSkipped).toBe(2);
+  });
+
   it("discarding a preview batch never creates BrokerRecords", async () => {
     const preview = await previewBrokerImportForUser(userA.id, csvFile("gainloss.csv", fixture("gainloss-realized.csv")), null);
     await discardBrokerImportForUser(userA.id, preview.batchId);

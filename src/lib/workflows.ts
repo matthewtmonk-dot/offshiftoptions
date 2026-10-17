@@ -274,10 +274,81 @@ export async function fetchSchwabAccountActivity(provider: BrokerReadProvider, a
  * inflating that count past the number of rows actually inserted.
  */
 export function buildSchwabRecordsToPersist(positions: BrokerPosition[], transactions: BrokerTransaction[], syncedAt: Date) {
+  const slots = lookalikeTransactionSlots(transactions);
   return mergeBrokerRecords([
     ...positions.map((position) => normalizeSchwabApiPosition(position, syncedAt)),
-    ...transactions.map((transaction) => normalizeSchwabApiTransaction(transaction)),
+    ...transactions.map((transaction) => {
+      const record = normalizeSchwabApiTransaction(transaction);
+      const slot = slots.get(`${transaction.fetchedAs}|${record.fingerprint}|${transaction.id}`) ?? 0;
+      // Both keys get the suffix: an older stored row (a collapsed pair) may carry this id's identity key, and a
+      // matching identity with a different fingerprint would otherwise be filed as a CONFLICT instead of stored.
+      return slot > 0
+        ? { ...record, fingerprint: `${record.fingerprint}#${slot + 1}`, identityKey: `${record.identityKey}#${slot + 1}` }
+        : record;
+    }),
   ]);
+}
+
+/**
+ * Two genuinely separate Schwab trades can look identical to the dedupe fingerprint (same account, day,
+ * contract, description and amount - for example the same roll done twice on the same day for two lots).
+ * Merged, one of them silently disappears and the sync can no longer prove its records were fully saved.
+ *
+ * Inside ONE category response, two transactions with DIFFERENT activity ids are two separate trades (an
+ * activity appears once per category response). Only then does the later one (in id order) get a "#n" suffix on
+ * its fingerprint; the first keeps the plain fingerprint, so rows stored before this change and CSV imports
+ * still match it. One activity echoed under two different categories is still merged exactly as before, and a
+ * transaction with no category tag (CSV / tests) is never separated.
+ *
+ * Returns "<category>|<fingerprint>|<activity id>" -> slot (0 = keeps the plain fingerprint).
+ */
+export function lookalikeTransactionSlots(transactions: BrokerTransaction[]): Map<string, number> {
+  const idsByCategoryAndFingerprint = new Map<string, Set<string>>();
+  for (const transaction of transactions) {
+    if (!transaction.fetchedAs) continue;
+    const key = `${transaction.fetchedAs}|${normalizeSchwabApiTransaction(transaction).fingerprint}`;
+    idsByCategoryAndFingerprint.set(key, (idsByCategoryAndFingerprint.get(key) ?? new Set()).add(transaction.id));
+  }
+  const slots = new Map<string, number>();
+  for (const [key, ids] of idsByCategoryAndFingerprint) {
+    if (ids.size < 2) continue;
+    [...ids]
+      .sort((a, b) => a.length - b.length || a.localeCompare(b))
+      .forEach((id, index) => slots.set(`${key}|${id}`, index));
+  }
+  return slots;
+}
+
+/**
+ * Rows stored before look-alike trades were kept apart hold TWO provider ids in one row (the collapsed pair).
+ * The sync's end-of-run proof (rightly) refuses a stored row that carries more than the incoming record's own
+ * id, so those rows would block their ticker forever. This repair takes the later fill's id back out of the
+ * collapsed row (the lower id stays, matching the plain fingerprint) just before the new, separately-suffixed
+ * record for that fill is inserted - the second fill then exists as its own row and every row maps to exactly
+ * one provider transaction again. Idempotent, scoped to this user's own account, and a no-op when nothing was
+ * ever collapsed.
+ */
+export async function repairCollapsedLookalikeRows(userId: string, accountId: string, transactions: BrokerTransaction[]): Promise<number> {
+  const slots = lookalikeTransactionSlots(transactions);
+  let repaired = 0;
+  const seen = new Set<string>();
+  for (const transaction of transactions) {
+    if (!transaction.fetchedAs) continue;
+    const baseFingerprint = normalizeSchwabApiTransaction(transaction).fingerprint;
+    const slot = slots.get(`${transaction.fetchedAs}|${baseFingerprint}|${transaction.id}`) ?? 0;
+    const providerId = `schwab-api-transaction:${transaction.id}`;
+    if (slot === 0 || seen.has(`${baseFingerprint}|${providerId}`)) continue;
+    seen.add(`${baseFingerprint}|${providerId}`);
+    const row = await prisma.brokerRecord.findFirst({
+      where: { userId, accountId, provider: "SCHWAB", kind: "TRANSACTION", fingerprint: baseFingerprint },
+      select: { id: true, sourceIds: true },
+    });
+    if (row && row.sourceIds.includes(providerId) && row.sourceIds.length > 1) {
+      await prisma.brokerRecord.update({ where: { id: row.id }, data: { sourceIds: row.sourceIds.filter((id) => id !== providerId) } });
+      repaired += 1;
+    }
+  }
+  return repaired;
 }
 
 /**
@@ -443,6 +514,7 @@ export async function syncSchwabAccountForUser(userId: string): Promise<SchwabAc
     const records = buildSchwabRecordsToPersist(activity.positions, activity.transactions, syncedAt);
     if (records.length > 0) {
       try {
+        await repairCollapsedLookalikeRows(userId, tradingAccount.id, activity.transactions);
         const persisted = await persistNormalizedBrokerRecordsForUser(userId, tradingAccount.id, records);
         diagnostics.brokerRecordsInserted += persisted.inserted;
         diagnostics.duplicatesSkipped += persisted.duplicatesSkipped;
