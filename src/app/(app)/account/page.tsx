@@ -26,7 +26,7 @@ import {
   wholeAccountGainStatusBadge,
 } from "@/lib/account-evidence-display";
 import { getSanitizedBrokerRecordClassificationForUser } from "@/lib/broker-record-classification-diagnostic";
-import { formatEtDateTime, money, shortDate, shortDateTime } from "@/lib/format";
+import { formatEtDateTime, money, shortDate } from "@/lib/format";
 import { getSchwabConfigStatus, SCHWAB_PRODUCTION_CALLBACK_URL } from "@/providers/schwab/config";
 import { getAlphaVantageConfigStatus } from "@/providers/alpha-vantage/config";
 import { getAlphaVantageUsageToday, ALPHA_VANTAGE_AUTO_DAILY_LIMIT, ALPHA_VANTAGE_TOTAL_DAILY_LIMIT, ALPHA_VANTAGE_MANUAL_RESERVE } from "@/lib/alpha-vantage-budget";
@@ -193,7 +193,7 @@ export default async function AccountPage({
                   </div>
                   <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
                     <span>Measurement start: {report.wholeAccountGainPeriodStart ? shortDate(report.wholeAccountGainPeriodStart) : "Unavailable"}</span>
-                    <span>Measurement end: {report.wholeAccountGainPeriodEnd ? shortDateTime(report.wholeAccountGainPeriodEnd) : "Unavailable"}</span>
+                    <span>Measurement end: {report.wholeAccountGainPeriodEnd ? formatEtDateTime(report.wholeAccountGainPeriodEnd) : "Unavailable"}</span>
                   </div>
                 </div>
 
@@ -275,7 +275,7 @@ export default async function AccountPage({
                                 <div className={isCurrent ? "font-medium text-zinc-200" : "text-zinc-400"}>
                                   {money(Number(entry.amount))} as of {shortDate(entry.occurredAt)}
                                 </div>
-                                <div className="text-zinc-500">recorded {shortDateTime(entry.createdAt)}</div>
+                                <div className="text-zinc-500">recorded {formatEtDateTime(entry.createdAt)}</div>
                                 {note ? <div className="mt-0.5 text-zinc-500">{note}</div> : null}
                               </div>
                               <Badge tone={isCurrent ? "good" : "neutral"}>{isCurrent ? "Current" : "Superseded"}</Badge>
@@ -443,13 +443,13 @@ export default async function AccountPage({
                   <p className="text-sm text-zinc-300">
                     Connected · {linkedAccountLabel(schwabConnection)} ·{" "}
                     {schwabConnection.lastAccountSyncAt
-                      ? `last synced ${shortDateTime(schwabConnection.lastAccountSyncAt)}`
+                      ? `last synced ${formatEtDateTime(schwabConnection.lastAccountSyncAt)}`
                       : "not yet synced"}
                   </p>
                   {schwabConnection.lastAccountSyncFailureAt ? (
                     <p className="text-xs text-amber-200">
                       Last sync attempt failed ({schwabConnection.lastAccountSyncFailureReason ?? "unknown reason"}) at{" "}
-                      {shortDateTime(schwabConnection.lastAccountSyncFailureAt)}.
+                      {formatEtDateTime(schwabConnection.lastAccountSyncFailureAt)}.
                     </p>
                   ) : null}
                   {syncWarning ? (
@@ -526,7 +526,7 @@ export default async function AccountPage({
                       <span>
                         Last validated:{" "}
                         {schwabDeveloperCredential.lastValidatedAt
-                          ? shortDateTime(schwabDeveloperCredential.lastValidatedAt)
+                          ? formatEtDateTime(schwabDeveloperCredential.lastValidatedAt)
                           : "not yet"}
                       </span>
                     </div>
@@ -591,15 +591,15 @@ export default async function AccountPage({
                 <summary className="cursor-pointer font-medium text-zinc-300">Connection details</summary>
                 {schwabConnection ? (
                   <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-                    <ConnectionDatum label="Last token update" value={shortDateTime(schwabConnection.updatedAt)} />
+                    <ConnectionDatum label="Last token update" value={formatEtDateTime(schwabConnection.updatedAt)} />
                     <ConnectionDatum
                       label="Access token"
-                      value={schwabConnection.expiresAt ? `Expires ${shortDateTime(schwabConnection.expiresAt)}` : "Not active"}
+                      value={schwabConnection.expiresAt ? `Expires ${formatEtDateTime(schwabConnection.expiresAt)}` : "Not active"}
                     />
                     <ConnectionDatum label="Linked accounts" value={linkedAccountLabel(schwabConnection)} />
                     <ConnectionDatum
                       label="Token last refreshed"
-                      value={schwabConnection.lastSuccessfulRefreshAt ? shortDateTime(schwabConnection.lastSuccessfulRefreshAt) : "Not yet"}
+                      value={schwabConnection.lastSuccessfulRefreshAt ? formatEtDateTime(schwabConnection.lastSuccessfulRefreshAt) : "Not yet"}
                     />
                   </dl>
                 ) : null}
@@ -904,19 +904,19 @@ function ConnectionHealthDetails({ health }: { health: SchwabConnectionHealth })
         <ConnectionDatum label="Account discovery" value={accountDiscoveryValue} />
         <ConnectionDatum
           label="Last successful token refresh"
-          value={health.lastSuccessfulRefreshAt ? shortDateTime(health.lastSuccessfulRefreshAt) : "Not yet"}
+          value={health.lastSuccessfulRefreshAt ? formatEtDateTime(health.lastSuccessfulRefreshAt) : "Not yet"}
         />
         {health.lastRefreshFailureAt ? (
           <ConnectionDatum
             label="Last refresh failure"
-            value={`${health.lastRefreshFailureReason ?? "unknown reason"} at ${shortDateTime(health.lastRefreshFailureAt)}`}
+            value={`${health.lastRefreshFailureReason ?? "unknown reason"} at ${formatEtDateTime(health.lastRefreshFailureAt)}`}
           />
         ) : null}
-        <ConnectionDatum label="Last sync" value={health.lastSyncAt ? shortDateTime(health.lastSyncAt) : "Not yet"} />
+        <ConnectionDatum label="Last sync" value={health.lastSyncAt ? formatEtDateTime(health.lastSyncAt) : "Not yet"} />
         {health.lastSyncFailureAt ? (
           <ConnectionDatum
             label="Last sync failure"
-            value={`${health.lastSyncFailureReason ?? "unknown reason"} at ${shortDateTime(health.lastSyncFailureAt)}`}
+            value={`${health.lastSyncFailureReason ?? "unknown reason"} at ${formatEtDateTime(health.lastSyncFailureAt)}`}
           />
         ) : null}
       </dl>

@@ -28,7 +28,7 @@ import {
 } from "@/domain/scanner/option-enrichment";
 import { funnelInputOf, isBestAvailable, isWorthALook } from "@/domain/scanner/scannerFunnel";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
-import { money, percent, shortDate, shortDateTime, toNumber } from "@/lib/format";
+import { formatEtDateTime, money, percent, shortDate, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
 import type { ScannerBuddy, ScannerViewResult } from "./page";
 
@@ -842,8 +842,8 @@ function CandidateInspector({
               title="Schwab does not provide a verified option-quote pricing timestamp, so this is when OSO retrieved the quote - not proof of when the quote itself was priced."
             >
               {v.retrievedOnNonTradingDay
-                ? `Fetched ${shortDateTime(v.retrievedAt)} while the market was closed - last available quote, not live.`
-                : `Retrieved ${shortDateTime(v.retrievedAt)}.`}
+                ? `Fetched ${formatEtDateTime(v.retrievedAt)} while the market was closed - last available quote, not live.`
+                : `Retrieved ${formatEtDateTime(v.retrievedAt)}.`}
             </p>
           ) : null}
         </section>

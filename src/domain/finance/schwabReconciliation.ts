@@ -394,6 +394,37 @@ export function evaluateWorthlessExpiration(input: {
 }
 
 /**
+ * Plain-English reason an expired put's evidence is "incomplete" - mirrors the conditions in
+ * evaluateWorthlessExpiration's EXPIRATION_EVIDENCE_INCOMPLETE branch in the same order, so a deferred
+ * expiration can be explained (it is written to the self-service diagnostics log) instead of just counted.
+ * Returns null when none of those conditions fail. Pure; never changes a decision.
+ */
+export function describeExpirationEvidenceGap(input: {
+  expiration: Date;
+  symbol: string;
+  evidence: SchwabReconciliationEvidence;
+}): string | null {
+  const { positions, transactions, persistenceStatus } = input.evidence;
+  if (positions.status !== "COMPLETE") return "Schwab positions weren't fully received";
+  if (transactions.status !== "COMPLETE") return "Schwab transactions weren't fully received";
+  if (persistenceStatus !== "COMPLETE") return "synced records weren't fully saved";
+  if (!Number.isFinite(transactions.from.getTime()) || !Number.isFinite(transactions.to.getTime())) return "transaction date range unknown";
+  if (transactions.from > input.expiration) return "synced history starts after this put expired (only the last 90 days are fetched)";
+  if (!isOnOrAfterNextBusinessDay(input.expiration, transactions.to)) return "synced history ends before the next business day after expiry";
+  if (!occContractKey(input.symbol)) return "contract symbol couldn't be read";
+  if (
+    positions.data.some(
+      (position) =>
+        !Number.isFinite(position.quantity) ||
+        ((position.assetType === "OPTION" || !position.assetType) && !occContractKey(position.symbol)),
+    )
+  ) {
+    return "a Schwab position couldn't be read";
+  }
+  return null;
+}
+
+/**
  * An unlinked, confirmed broker transaction in which Schwab says THIS contract expired - same OCC
  * contract, and a quantity at least as large as the open leg. Only the explicit expiration vocabulary
  * counts ("Removed - Expiration" / "Expired"); an assignment, a close, or an unrecognized action never does.
