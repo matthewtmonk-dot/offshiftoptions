@@ -61,7 +61,11 @@ export const ORCHESTRATOR_WALL_CLOCK_BUDGET_MS = 20_000;
  * automatic window now starts at 5:45 AM ET with headroom while still finishing before the open.
  */
 const PREPARATION_WINDOW_START_MINUTE_OF_DAY_ET = 5 * 60 + 45; // 5:45 AM ET
-const PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET = 9 * 60 + 15; // 9:15 AM ET (inclusive)
+// Was 9:15 AM ET. On Tue Oct 20 2026 the morning cycles all answered "success" yet prepared nothing for the
+// user (no run was even created) while Schwab's candle for Monday was fresh by the afternoon - a late
+// publish that a window closing at 9:15 could never catch. A not-yet-published candle costs only the
+// 5 probe requests per cycle, so the window now stays open until 11:30 AM ET (inclusive).
+const PREPARATION_WINDOW_END_MINUTE_OF_DAY_ET = 11 * 60 + 30; // 11:30 AM ET (inclusive)
 
 /**
  * Saturday catch-up window - see PROJECT_HANDOFF.md's weekend-coverage investigation. Real
