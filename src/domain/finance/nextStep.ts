@@ -23,38 +23,33 @@ export function nextStepFor(input: {
   daysPastExpiration?: number | null;
 }): NextStep {
   const { settlementPending, action, dte, historical, daysPastExpiration = null } = input;
-  const older = historical ? " (from the last valid reading - press Refresh status to update)" : "";
+  // Kept deliberately terse - one short phrase per state; the badge beside it already says why.
+  const sentence = (core: string) => `${core}${historical ? " (last reading)" : ""}.`;
   const when = dte === 0 ? "today" : dte === 1 ? "tomorrow" : null;
 
   if (settlementPending) {
     // A just-expired leg normally settles by the next sync. One that is still unconfirmed days later almost
     // always means Brokerage Sync hasn't run since it expired - "tomorrow" would be the wrong advice.
     if (daysPastExpiration !== null && daysPastExpiration >= 4) {
-      return {
-        tone: "watch",
-        text: `Expired ${daysPastExpiration} days ago and still unconfirmed - run Brokerage Sync (Account page) to find out whether it expired or was assigned.`,
-      };
+      return { tone: "watch", text: `Expired ${daysPastExpiration} days ago - run Brokerage Sync.` };
     }
-    return { tone: "wait", text: "Nothing to do - waiting for Schwab to settle this. Run Brokerage Sync tomorrow to confirm." };
+    return { tone: "wait", text: "Waiting on Schwab - sync tomorrow." };
   }
   if (action === null || action === "CANNOT_ASSESS") {
-    return { tone: "wait", text: "No current reading yet - press Refresh status (or run Brokerage Sync if the position isn't confirmed)." };
+    return { tone: "wait", text: "No reading yet - press Refresh status." };
   }
   if (action === "COMFORTABLE") {
-    return { tone: "ok", text: `No action needed${when ? ` - expires ${when}` : ""}.${older}` };
+    return { tone: "ok", text: sentence(`No action${when ? ` - expires ${when}` : ""}`) };
   }
   if (action === "WATCH") {
     if (dte !== null && dte <= 1) {
-      return { tone: "watch", text: `Expires ${when}, close to the strike - decide at the 3:00 PM ET check whether to roll or let it expire.${older}` };
+      return { tone: "watch", text: sentence(`Expires ${when} - roll or let it expire (3 PM check)`) };
     }
-    return { tone: "watch", text: `Re-check at the next 3:00 PM ET position check.${older}` };
+    return { tone: "watch", text: sentence("Check again at 3 PM") };
   }
   if (action === "REVIEW_CALL") {
-    return { tone: "act", text: `Decide on this covered call - the stock is at or above the strike: roll it, close it, or let the shares be called away.${older}` };
+    return { tone: "act", text: sentence("Roll, close, or let it be called away") };
   }
   // REVIEW_ROLL
-  if (dte !== null && dte <= 1) {
-    return { tone: "act", text: `Decide ${when}: the stock is past the strike and this expires ${when} - roll it, close it, or take assignment.${older}` };
-  }
-  return { tone: "act", text: `Decide whether to roll: the stock is past the strike. Compare roll options in Schwab.${older}` };
+  return { tone: "act", text: sentence(`Roll${when ? ` - expires ${when}` : ""}`) };
 }
