@@ -141,13 +141,14 @@ export function scannerTimingGuide(now: Date = new Date()): ScannerTimingGuide {
 }
 
 const PREP_START_MINUTES = 5 * 60 + 45;
-const PREP_WEEKDAY_END_MINUTES = 9 * 60 + 15;
+const PREP_WEEKDAY_USUAL_END_MINUTES = 9 * 60 + 15;
+const PREP_WEEKDAY_END_MINUTES = 11 * 60 + 30;
 const PREP_SATURDAY_END_MINUTES = 12 * 60;
 
 /**
  * One plain sentence for the "technical data is not current" warning: WHEN fresh RSI / Bollinger
  * values will be ready, matching the scheduled preparation job's real windows (weekday mornings
- * 5:45-9:15 AM ET, Saturday 5:45 AM-12:00 PM ET). If the window has already passed and the data is
+ * 5:45 AM-11:30 AM ET - usually finished by about 9:15 - Saturday 5:45 AM-12:00 PM ET). If the window has already passed and the data is
  * still stale, it says so plainly instead of promising it will arrive.
  */
 export function technicalReadyHint(now: Date = new Date()): string {
@@ -159,7 +160,8 @@ export function technicalReadyHint(now: Date = new Date()): string {
     if (minutes <= PREP_SATURDAY_END_MINUTES) return "Friday's data is being prepared right now and finishes by about noon ET. Run the scan again then.";
   } else if (marketDay) {
     if (minutes < PREP_START_MINUTES) return "Yesterday's close is prepared starting at 5:45 AM ET and is usually done by about 9:15 AM ET. Run the scan again after that.";
-    if (minutes <= PREP_WEEKDAY_END_MINUTES) return "Yesterday's close is being prepared right now and is usually done by about 9:15 AM ET. Run the scan again then.";
+    if (minutes <= PREP_WEEKDAY_USUAL_END_MINUTES) return "Yesterday's close is being prepared right now and is usually done by about 9:15 AM ET. Run the scan again then.";
+    if (minutes <= PREP_WEEKDAY_END_MINUTES) return "Yesterday's close is still being prepared (it can run until about 11:30 AM ET if the data was published late). Run the scan again in a few minutes.";
   }
   return "The scheduled preparation window for this data has already passed, so it should be ready. If this still says not current, the scheduled job may have failed - let Claude know.";
 }
