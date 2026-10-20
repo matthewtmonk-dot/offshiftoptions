@@ -3,6 +3,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { extractProvidedCronSecret, isValidCronSecret } from "@/lib/cron-auth";
 import { runTechnicalPreparationOrchestratorCycle } from "@/lib/technical-preparation-orchestrator";
+import { recordDiagnostic } from "@/lib/diagnostics";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -34,9 +35,33 @@ export async function POST(request: Request) {
 
   try {
     const result = await runTechnicalPreparationOrchestratorCycle();
+    recordCycleOutcome(result as unknown as Record<string, unknown>);
     return NextResponse.json(result);
   } catch {
+    recordDiagnostic({ kind: "error", source: "technical prep", message: "A preparation cycle failed unexpectedly (the request itself threw)." });
     // Sanitized - never echoes a raw provider/database error, payload, or ticker-level detail.
     return NextResponse.json({ error: "Technical preparation cycle failed unexpectedly." }, { status: 500 });
   }
+}
+
+const globalState = globalThis as typeof globalThis & { __osoLastPrepOutcome?: string };
+
+/**
+ * The cron call always answers HTTP 200 even when it did nothing (the gate said "not ready", no eligible
+ * user, ...), so GitHub shows a green run either way and the reason was invisible. Write a one-line,
+ * counts-only summary to the self-service diagnostics log (/account/diagnostics) - but only when the
+ * outcome CHANGES, so a morning of identical cycles doesn't flood it. Never a symbol, token or account detail.
+ */
+function recordCycleOutcome(result: Record<string, unknown>) {
+  const status = String(result.status ?? "unknown");
+  if (status === "OUTSIDE_WINDOW") return;
+  const parts = [`status ${status}`];
+  for (const key of ["requiredMarketDate", "freshProbeCount", "staleProbeCount", "unavailableProbeCount", "generationStatus", "historySymbolsProcessed", "succeededCount", "failedCount", "remainingEligibleCount"]) {
+    if (result[key] !== undefined) parts.push(`${key} ${String(result[key])}`);
+  }
+  const message = parts.join(", ");
+  const signature = status === "OK" ? `OK:${String(result.generationStatus)}` : message;
+  if (globalState.__osoLastPrepOutcome === signature) return;
+  globalState.__osoLastPrepOutcome = signature;
+  recordDiagnostic({ kind: "action", source: "technical prep", message });
 }
