@@ -10,6 +10,7 @@ import {
   ChevronRight,
   CircleHelp,
   EyeOff,
+  LineChart,
   ListFilter,
   Search,
   Send,
@@ -28,6 +29,7 @@ import {
 } from "@/domain/scanner/option-enrichment";
 import { funnelInputOf, isBestAvailable, isWorthALook } from "@/domain/scanner/scannerFunnel";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
+import { TRADINGVIEW_CHART_LINKS, tradingViewChartUrl } from "@/lib/tradingview";
 import { formatEtDateTime, money, percent, shortDate, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
 import type { ScannerBuddy, ScannerViewResult } from "./page";
@@ -508,6 +510,7 @@ export function ScannerWorkspace({
                         <span className="text-sm font-semibold text-zinc-50">{result.record.ticker}</span>
                         <ResearchBadge status={result.researchStatus} />
                       </button>
+                      <ChartIconLink ticker={result.record.ticker} />
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
                       <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.readiness, result.scoreLabel)}`}>
@@ -733,6 +736,25 @@ function CandidateInspector({
           <Search className="size-3.5" aria-hidden />
           Open in Research
         </IntentPrefetchLink>
+        <span className="ml-1 inline-flex flex-wrap items-center gap-1.5">
+          <span className="text-xs font-semibold uppercase tracking-normal text-zinc-500">TradingView</span>
+          {TRADINGVIEW_CHART_LINKS.map((link) => {
+            const href = tradingViewChartUrl(result.record.ticker, link.interval);
+            return href ? (
+              <a
+                key={link.interval}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={link.title}
+                className="inline-flex min-h-8 items-center gap-1 rounded-md border border-zinc-700 px-2.5 text-xs font-medium text-zinc-300 hover:border-sky-400/60 hover:text-sky-200"
+              >
+                <LineChart className="size-3.5" aria-hidden />
+                {link.label}
+              </a>
+            ) : null;
+          })}
+        </span>
       </div>
 
       {hasContract ? (
@@ -918,6 +940,26 @@ function CandidateInspector({
         ) : null}
       </div>
     </div>
+  );
+}
+
+/** A one-click "open this ticker's chart" icon for the collapsed table row - opens TradingView in a new tab. */
+function ChartIconLink({ ticker }: { ticker: string }) {
+  const href = tradingViewChartUrl(ticker, "D");
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(event) => event.stopPropagation()}
+      title={`Open ${ticker} on TradingView (daily chart)`}
+      aria-label={`Open ${ticker} chart on TradingView`}
+      className="ml-5 mt-0.5 inline-flex items-center gap-1 text-[11px] text-zinc-500 hover:text-sky-300"
+    >
+      <LineChart className="size-3" aria-hidden />
+      Chart
+    </a>
   );
 }
 
