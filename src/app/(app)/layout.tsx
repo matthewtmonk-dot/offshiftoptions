@@ -2,11 +2,18 @@ import { cookies } from "next/headers";
 import { requireCurrentUser } from "@/lib/auth";
 import { getUnreadChatCount, getUnreadNotificationCount } from "@/lib/app-data";
 import { RefreshStatusControl } from "@/components/refresh-status-control";
+import { SchwabConnectionBanner } from "@/components/schwab-connection-banner";
+import { getSchwabConnectionNoticeForUser } from "@/lib/broker-connections";
 import { AppSidebar } from "./app-sidebar";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireCurrentUser();
-  const [unread, unreadChat] = await Promise.all([getUnreadNotificationCount(user.id), getUnreadChatCount(user.id)]);
+  const [unread, unreadChat, schwabNotice] = await Promise.all([
+    getUnreadNotificationCount(user.id),
+    getUnreadChatCount(user.id),
+    // A failed lookup must never take the whole app down - the banner is a courtesy.
+    getSchwabConnectionNoticeForUser(user.id).catch(() => null),
+  ]);
   const sidebarCookie = (await cookies()).get("oso-sidebar-collapsed")?.value;
 
   return (
@@ -28,6 +35,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <div className="flex justify-end border-b border-zinc-800 bg-zinc-950/60 px-4 py-1.5 md:px-6 lg:px-8">
             <RefreshStatusControl />
           </div>
+          <SchwabConnectionBanner notice={schwabNotice} />
           <main className="min-w-0 flex-1 px-4 py-4 md:px-6 lg:px-8">{children}</main>
         </div>
       </div>
