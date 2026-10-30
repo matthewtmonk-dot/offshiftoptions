@@ -163,5 +163,5 @@ export function technicalReadyHint(now: Date = new Date()): string {
     if (minutes <= PREP_WEEKDAY_USUAL_END_MINUTES) return "Yesterday's close is being prepared right now and is usually done by about 9:15 AM ET. Run the scan again then.";
     if (minutes <= PREP_WEEKDAY_END_MINUTES) return "Yesterday's close is still being prepared (it can run until about 11:30 AM ET if the data was published late). Run the scan again in a few minutes.";
   }
-  return "The scheduled preparation window for this data has already passed, so it should be ready. If this still says not current, the scheduled job may have failed - let Claude know.";
+  return "The scheduled preparation window for this data has already passed. Press Prepare data now to fill it in yourself.";
 }

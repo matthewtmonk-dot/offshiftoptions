@@ -30,6 +30,7 @@ import { runDemoScannerAction } from "../actions";
 import { CoveredCallScannerSection } from "./covered-call-scanner-section";
 import { LiveScanButton } from "./live-scan-button";
 import { OptionCheckButton } from "./option-check-button";
+import { PrepareDataButton } from "./prepare-data-button";
 import { ScannerModeTabs, type ScannerMode } from "./scanner-mode-tabs";
 import { ScannerWorkspace } from "./scanner-workspace";
 
@@ -327,6 +328,7 @@ export default async function ScannerPage({
           </p>
           <p className="mt-0.5 text-amber-200/90">Scanner results are incomplete.</p>
           <p className="mt-0.5 text-amber-100" data-testid="technical-ready-hint">{currentTechnicalReadyHint()}</p>
+          <PrepareDataButton />
         </div>
       ) : null}
 
