@@ -42,7 +42,9 @@ jobs:
           set -euo pipefail
 
           ENDPOINT="https://offshiftoptions.com/api/internal/scanner-technical/process"
-          CONNECT_TIMEOUT_SECONDS=20
+          CONNECT_TIMEOUT_SECONDS=30
+          RETRY_DELAY_SECONDS=30
+          MAX_ATTEMPTS=3
           TOTAL_TIMEOUT_SECONDS=90
           MAX_RESPONSE_BODY_BYTES=4096
 
@@ -68,6 +70,7 @@ jobs:
             curl_exit=$?
             set -e
 
+            LAST_HTTP_STATUS="${http_status:-000}"
             echo "HTTP_STATUS=${http_status:-000}"
             echo "CURL_EXIT=${curl_exit}"
             echo "RESPONSE_BODY_BEGIN"
@@ -138,9 +141,44 @@ jobs:
           PY
           }
 
-          run_cycle 1
+          # The Hostinger app restarts itself every so often (SIGTERM, then a cold start), and a request that
+          # lands in that gap times out (curl exit 28) or gets a proxy 502/503/504. That is a transient blip, not
+          # an outage - the next scheduled run is minutes away - yet each one used to fail the run and send a
+          # "workflow failed" email. Retry only those transient errors (never a 401, 4xx or an application
+          # error), a few times with a pause; a sustained outage still fails the run after the last attempt.
+          is_transient() {
+            local rc="$1" status="$2"
+            case "${rc}" in
+              6|7|28|35|52|56) return 0 ;;
+              22) case "${status}" in 502|503|504) return 0 ;; esac ;;
+            esac
+            return 1
+          }
+
+          run_cycle_with_retry() {
+            local cycle="$1"
+            local attempt=1
+            local rc
+            while true; do
+              set +e
+              run_cycle "${cycle}"
+              rc=$?
+              set -e
+              if [ "${rc}" -eq 0 ]; then
+                return 0
+              fi
+              if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ] || ! is_transient "${rc}" "${LAST_HTTP_STATUS:-000}"; then
+                return "${rc}"
+              fi
+              echo "Transient failure (curl exit ${rc}, HTTP ${LAST_HTTP_STATUS:-000}); retrying in ${RETRY_DELAY_SECONDS}s (attempt ${attempt} of ${MAX_ATTEMPTS})."
+              attempt=$((attempt + 1))
+              sleep "${RETRY_DELAY_SECONDS}"
+            done
+          }
+
+          run_cycle_with_retry 1
           if [ "$(should_run_second_cycle)" = "yes" ]; then
-            run_cycle 2
+            run_cycle_with_retry 2
           else
             echo "No second technical preparation cycle needed."
           fi

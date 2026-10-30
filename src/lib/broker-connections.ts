@@ -16,6 +16,7 @@ import {
 } from "@/providers/schwab/tokens";
 import { getUserSchwabDeveloperCredentialSummary } from "@/providers/schwab/developer-credentials";
 import { prisma } from "./prisma";
+import { schwabConnectionNotice, type SchwabConnectionNotice } from "./schwab-connection-notice";
 
 export type SchwabConnectionSummary = {
   id: string;
@@ -154,6 +155,20 @@ export type SchwabConnectionHealth = {
   lastSyncFailureAt: string | null;
   lastSyncFailureReason: string | null;
 };
+
+/** The "reconnect Schwab" banner's input for the signed-in user - one tiny read, no Schwab call. */
+export async function getSchwabConnectionNoticeForUser(userId: string, now: Date = new Date()): Promise<SchwabConnectionNotice> {
+  const connection = await prisma.brokerConnection.findFirst({
+    where: { userId, provider: "SCHWAB" },
+    orderBy: { updatedAt: "desc" },
+    select: { status: true, metadata: true },
+  });
+  return schwabConnectionNotice({
+    status: connection?.status ?? null,
+    connectedAt: stringValue(objectValue(connection?.metadata)?.connectedAt),
+    now,
+  });
+}
 
 export async function getSchwabConnectionHealthForUser(userId: string): Promise<SchwabConnectionHealth> {
   const connection = await prisma.brokerConnection.findFirst({
