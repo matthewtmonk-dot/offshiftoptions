@@ -42,6 +42,12 @@ describe("parseEthicsImport", () => {
     expect(parseEthicsImport(doc([company({ researchedAt: "10/31/2026" })])).ok).toBe(false);
   });
 
+  it("accepts a GENERAL business-overview source but rejects unknown evidence categories", () => {
+    const withEvidenceCategory = (category: string) => parseEthicsImport(doc([company({ evidence: [{ ...company().evidence[0], category }] })]));
+    expect(withEvidenceCategory("GENERAL").ok).toBe(true);
+    expect(withEvidenceCategory("EXPORT_CONTROLS").ok).toBe(false);
+  });
+
   it("requires at least one assessment per company", () => {
     expect(parseEthicsImport(doc([company({ assessments: [] })])).ok).toBe(false);
   });

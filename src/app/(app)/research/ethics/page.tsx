@@ -128,7 +128,7 @@ export default async function EthicsPage({ searchParams }: { searchParams: Promi
                       <ul className="mt-1 space-y-1 text-xs">
                         {detail.evidence.map((item, index) => (
                           <li key={`${item.sourceUrl}-${index}`} className="text-zinc-400">
-                            <span className="text-zinc-300">{ETHICS_CATEGORY_LABELS[item.category as keyof typeof ETHICS_CATEGORY_LABELS] ?? item.category}:</span> {item.claim}{" "}
+                            <span className="text-zinc-300">{item.category === "GENERAL" ? "Business overview" : (ETHICS_CATEGORY_LABELS[item.category as keyof typeof ETHICS_CATEGORY_LABELS] ?? item.category)}:</span> {item.claim}{" "}
                             <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline underline-offset-2 hover:text-sky-200">
                               {SOURCE_LABELS[item.sourceType] ?? item.sourceType}
                             </a>{" "}

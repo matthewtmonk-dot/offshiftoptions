@@ -39,8 +39,11 @@ const assessmentSchema = z.object({
   revenueSharePercent: z.number().min(0).max(100).nullable().optional(),
 });
 
+// "GENERAL" is for a source that describes the business as a whole (e.g. a 10-K business section) rather than one category.
+export const EVIDENCE_CATEGORIES = [...ETHICS_CATEGORIES, "GENERAL"] as const;
+
 const evidenceSchema = z.object({
-  category: z.enum(ETHICS_CATEGORIES),
+  category: z.enum(EVIDENCE_CATEGORIES),
   claim: text(400),
   sourceUrl: httpsUrl,
   sourceType: z.enum(SOURCE_TYPES),
