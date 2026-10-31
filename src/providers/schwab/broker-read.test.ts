@@ -348,6 +348,57 @@ describe("SchwabBrokerReadProvider.getTransactions", () => {
     expect(b[0]).toMatchObject({ symbol: "APLD 260904P00023500", action: "Sell to Open", price: 0.28 });
   });
 
+  it("reads a STOCK sale correctly even when cash and fee legs are listed before the equity leg (real SOFI shape)", async () => {
+    const fee = (amount: number) => ({ amount, feeType: "COMMISSION", instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" } });
+    const cashFirst = transactionsProvider([
+      {
+        activityId: "txn-sofi-sale",
+        type: "TRADE",
+        netAmount: 1697.5,
+        time: "2026-10-30T19:30:00Z",
+        description: "SELL TRADE",
+        transferItems: [
+          fee(0),
+          fee(0.03),
+          fee(0),
+          fee(0),
+          { amount: -100, price: 16.975, positionEffect: "CLOSING", instrument: { symbol: "SOFI", assetType: "EQUITY", instrumentId: 1 } },
+        ],
+      },
+    ]);
+    const equityFirst = transactionsProvider([
+      {
+        activityId: "txn-path-sale",
+        type: "TRADE",
+        netAmount: 1400,
+        time: "2026-10-24T14:30:00Z",
+        transferItems: [{ amount: -100, price: 14, positionEffect: "CLOSING", instrument: { symbol: "PATH", assetType: "EQUITY" } }, fee(0.03)],
+      },
+    ]);
+    const [{ transactions: a }, { transactions: b }] = await Promise.all([
+      cashFirst.getTransactions("acct-hash-1", new Date("2026-10-01"), new Date("2026-11-01")),
+      equityFirst.getTransactions("acct-hash-1", new Date("2026-10-01"), new Date("2026-11-01")),
+    ]);
+    const sofi = a.find((t) => t.id === "txn-sofi-sale");
+    expect(sofi).toMatchObject({ symbol: "SOFI", quantity: -100, price: 16.975, action: "Sell to Close" });
+    expect(b.find((t) => t.id === "txn-path-sale")).toMatchObject({ symbol: "PATH", quantity: -100, price: 14, action: "Sell to Close" });
+  });
+
+  it("still reads a currency-only DIVIDEND_OR_INTEREST transaction from its first leg (unchanged)", async () => {
+    const provider = transactionsProvider([
+      {
+        activityId: "txn-int-1",
+        type: "DIVIDEND_OR_INTEREST",
+        netAmount: 0.07,
+        time: "2026-10-16T12:00:00Z",
+        description: "BANK INT 091626-101526 SCHWAB BANK",
+        transferItems: [{ amount: 0.07, instrument: { symbol: "CURRENCY_USD", assetType: "CURRENCY" } }],
+      },
+    ]);
+    const { transactions } = await provider.getTransactions("acct-hash-1", new Date("2026-10-01"), new Date("2026-11-01"));
+    expect(transactions.find((t) => t.id === "txn-int-1")).toMatchObject({ symbol: "CURRENCY_USD", action: "Bank Interest" });
+  });
+
   it("never sends the invalid CASH_IN_OR_CASH_OUT value; fetches TRADE, RECEIVE_AND_DELIVER, and DIVIDEND_OR_INTEREST as three independent requests", async () => {
     const requestedTypes: string[] = [];
     const fetchFn = async (input: URL | string) => {
