@@ -1,0 +1,108 @@
+name: Database migrations
+
+# Manual only. Hostinger's build cannot run Prisma migrations (see docs/ARCHITECTURE.md), so schema changes are
+# checked and applied to the production database from here, BEFORE the code that needs them is merged.
+#
+# One-time setup (Matt): GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret named
+# MIGRATION_DATABASE_URL. Value = the Supabase **Session pooler** connection string (Supabase -> Connect -> "Session
+# pooler", port 5432, user postgres.<project-ref>). NOT "Direct connection" (IPv6-only; GitHub's runners are IPv4-only)
+# and NOT "Transaction pooler" (port 6543; breaks migrations). The secret is only readable by workflows in this
+# repository and never appears in code, logs or pull requests from forks.
+#
+# Modes (Actions -> "Database migrations" -> Run workflow):
+#   status               READ-ONLY, the default. Tests the connection, lists which migrations the database says it has
+#                        applied and which files are not applied yet, and checks the newest tables exist. Changes nothing.
+#   apply-ethics-only    Runs ONLY the company-ethics migration, as one all-or-nothing transaction, then records it in
+#                        Prisma's history. Older pending migrations are NOT applied. Needs confirm = APPLY.
+#   apply-all-pending    `prisma migrate deploy`: applies every pending migration in order. Needs confirm = APPLY.
+# Nothing here ever resets, drops or rewrites existing data.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to do"
+        type: choice
+        default: status
+        options:
+          - status
+          - apply-ethics-only
+          - apply-all-pending
+      confirm:
+        description: "Type APPLY (required for the two apply modes; ignored for status)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: database-migrations
+  cancel-in-progress: false
+
+env:
+  ETHICS_MIGRATION: 20261031160000_company_ethics_profile
+
+jobs:
+  migrate:
+    if: ${{ github.repository == 'matthewtmonk-dot/offshiftoptions' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Guard - apply modes need confirmation
+        if: ${{ inputs.mode != 'status' && inputs.confirm != 'APPLY' }}
+        run: |
+          echo "Mode ${{ inputs.mode }} changes the database. Re-run and type APPLY in the confirm box."
+          exit 1
+
+      - name: Check out the selected branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (no scripts)
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Test the connection (read-only)
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then echo "MIGRATION_DATABASE_URL secret is not set."; exit 1; fi
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -At -c "select 'connected to database ' || current_database() || ' as ' || current_user, 'server ' || split_part(version(), ' on ', 1)"
+
+      - name: Migrations the database says are applied (read-only)
+        run: |
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "select migration_name, finished_at is not null as finished, rolled_back_at is not null as rolled_back from _prisma_migrations order by migration_name"
+
+      - name: Which migration files are not applied yet (read-only)
+        run: corepack pnpm prisma migrate status --config prisma7.config.ts || true
+
+      - name: Do the newest tables actually exist (read-only)
+        run: |
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "select t.name, to_regclass('public.\"' || t.name || '\"') is not null as exists from (values ('AccountFundingSync'),('AccountValuationObservation'),('PositionReviewAssessment'),('ScheduledCaptureRun'),('CompanyEthicsProfile')) as t(name)"
+
+      - name: Apply ONLY the ethics migration (one transaction)
+        if: ${{ inputs.mode == 'apply-ethics-only' && inputs.confirm == 'APPLY' }}
+        run: |
+          set -e
+          test -f "prisma/migrations/${ETHICS_MIGRATION}/migration.sql"
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 --single-transaction -f "prisma/migrations/${ETHICS_MIGRATION}/migration.sql"
+          corepack pnpm prisma migrate resolve --applied "${ETHICS_MIGRATION}" --config prisma7.config.ts
+
+      - name: Apply every pending migration
+        if: ${{ inputs.mode == 'apply-all-pending' && inputs.confirm == 'APPLY' }}
+        run: corepack pnpm prisma migrate deploy --config prisma7.config.ts
+
+      - name: Status after
+        if: ${{ inputs.mode != 'status' }}
+        run: |
+          corepack pnpm prisma migrate status --config prisma7.config.ts || true
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "select to_regclass('public.\"CompanyEthicsProfile\"') is not null as ethics_tables_exist"

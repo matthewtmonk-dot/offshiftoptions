@@ -3,6 +3,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { InfoTip } from "@/components/info-tip";
+import { EthicsBadge } from "@/components/ethics-badge";
+import type { EthicsSummary } from "@/lib/ethics";
 import {
   ArrowDownUp,
   ChevronDown,
@@ -109,11 +111,14 @@ export function ScannerWorkspace({
   buddies,
   diagnostics,
   modeLabel,
+  ethics = {},
 }: {
   results: ScannerViewResult[];
   buddies: ScannerBuddy[];
   diagnostics: ExclusionDiagnostic;
   modeLabel: string;
+  /** Ethical-compatibility research by ticker (only researched companies appear; the rest show "?"). */
+  ethics?: Record<string, EthicsSummary>;
 }) {
   const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, ScannerStatusOverride | undefined>>({});
   const [pendingStatuses, setPendingStatuses] = useState<Record<string, QuickResearchStatus | undefined>>({});
@@ -490,6 +495,7 @@ export function ScannerWorkspace({
                 <Fragment key={result.record.id}>
                   <tr onClick={() => toggleExpanded(result.record.id)} className="cursor-pointer transition hover:bg-zinc-900/55">
                     <td className="border-b border-zinc-900 px-3 py-2">
+                      <div className="flex items-center gap-1.5">
                       <button
                         type="button"
                         aria-expanded={isOpen}
@@ -498,7 +504,7 @@ export function ScannerWorkspace({
                           event.stopPropagation();
                           toggleExpanded(result.record.id);
                         }}
-                        className="flex w-full items-center gap-1.5 rounded text-left"
+                        className="flex min-w-0 flex-1 items-center gap-1.5 rounded text-left"
                       >
                         {isOpen ? (
                           <ChevronDown className="size-3.5 shrink-0 text-zinc-500" aria-hidden />
@@ -508,6 +514,8 @@ export function ScannerWorkspace({
                         <span className="text-sm font-semibold text-zinc-50">{result.record.ticker}</span>
                         <ResearchBadge status={result.researchStatus} />
                       </button>
+                      <EthicsBadge ticker={result.record.ticker} summary={ethics[result.record.ticker]} />
+                      </div>
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
                       <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.readiness, result.scoreLabel)}`}>
