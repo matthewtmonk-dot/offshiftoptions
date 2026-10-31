@@ -34,6 +34,31 @@ describe("classifyRow", () => {
     expect(result.reconciliationEligible).toBe(true);
   });
 
+  it("a well-formed covered-call Sell to Open (the PATH weekly calls) is CAMPAIGN_READY, not 'could not be parsed'", () => {
+    const result = classifyRow(
+      row({
+        symbol: "PATH  261023C00014000",
+        underlyingSymbol: "PATH",
+        action: "Sell to Open",
+        quantity: -1,
+        price: 0.22,
+        metadata: { optionType: "CALL", strikePrice: 14, expiration: "2026-10-23T00:00:00.000Z" },
+      }),
+    );
+
+    expect(result.category).toBe("CAMPAIGN_READY");
+    expect(result.reason).toBeNull();
+  });
+
+  it("a Sell to Open call with an unreadable symbol or no price still needs review", () => {
+    const unreadable = classifyRow(row({ symbol: "PATH", underlyingSymbol: "PATH", action: "Sell to Open", quantity: -1, price: 0.22, metadata: { optionType: "CALL" } }));
+    const noPrice = classifyRow(row({ symbol: "PATH  261023C00014000", underlyingSymbol: "PATH", action: "Sell to Open", quantity: -1, price: null, metadata: { optionType: "CALL" } }));
+
+    expect(unreadable.category).toBe("NEEDS_REVIEW");
+    expect(noPrice.category).toBe("NEEDS_REVIEW");
+    expect(noPrice.reason).toMatch(/could not be parsed/i);
+  });
+
   it("classifies the real pre-fix shape (CURRENCY_USD symbol, null action) as NEEDS_REVIEW", () => {
     const result = classifyRow(row({ symbol: "CURRENCY_USD", action: null, quantity: 0.65, price: null }));
 

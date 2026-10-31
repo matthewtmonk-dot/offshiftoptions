@@ -1518,6 +1518,12 @@ export async function expireCoveredCallForUser(
   occurredAtInput: unknown,
   feesInput: unknown,
   notesInput: unknown,
+  /**
+   * Set only by Schwab reconciliation, which holds Schwab's own "Removed due to Expiration" notice for this exact
+   * contract: the event may then be dated ON the real expiration date (a manual entry must still be dated after
+   * it), but never before it.
+   */
+  options: { brokerConfirmed?: boolean } = {},
 ) {
   const campaign = await getOwnMutableCampaign(userId, campaignId);
   if (!campaign) {
@@ -1533,7 +1539,10 @@ export async function expireCoveredCallForUser(
   }
 
   const occurredAt = parseDateInput(occurredAtInput, "expiration date");
-  if (!isPastExpiration(openCall.expiration, occurredAt)) {
+  const reachedExpiration = options.brokerConfirmed
+    ? occurredAt.getTime() >= openCall.expiration.getTime()
+    : isPastExpiration(openCall.expiration, occurredAt);
+  if (!reachedExpiration) {
     throw new ValidationError("This covered call has not reached its expiration date yet.");
   }
   const fees = parseOptionalMoney(feesInput, "fees") ?? 0;
@@ -1554,6 +1563,80 @@ export async function expireCoveredCallForUser(
       notes: notes || null,
     },
   });
+
+  return prisma.campaign.findUnique({ where: { id: campaign.id }, include: campaignDetailInclude });
+}
+
+/**
+ * Records that an open covered call was ASSIGNED and the shares were called away (Schwab reconciliation only:
+ * it needs both the call's assignment notice and the stock sale at the strike). One atomic step: the call
+ * obligation ends (kept premium, no debit - recorded as a COVERED_CALL_EXPIRED event whose note says it was an
+ * assignment, since the schema has no separate event type), the shares are sold at the strike, and the campaign
+ * closes. The existing STOCK_SALE accounting then yields the true realized P/L (premiums kept + sale proceeds -
+ * assignment cost - fees). Refuses anything but the full open call: exactly contracts x 100 shares, held.
+ */
+export async function recordCoveredCallCalledAwayForUser(
+  userId: string,
+  campaignId: string,
+  input: { assignedOn: unknown; soldOn: unknown; shares: unknown; price: unknown; assignmentFees: unknown; saleFees: unknown },
+) {
+  const campaign = await getOwnMutableCampaign(userId, campaignId);
+  if (!campaign) {
+    return null;
+  }
+  if (campaign.status !== "ASSIGNED") {
+    throw new ValidationError("Only an assigned-stock campaign can be called away.");
+  }
+
+  const openCall = getCurrentOpenCall(campaign.events);
+  if (!openCall) {
+    throw new ValidationError("No open covered call was found for this campaign.");
+  }
+  const summary = summarizeCampaign({ status: campaign.status, events: campaign.events });
+  const shares = parsePositiveInteger(input.shares, "shares");
+  if (shares !== openCall.contracts * 100 || shares > summary.sharesHeld) {
+    throw new ValidationError("The shares called away must match the assigned call and the shares held.");
+  }
+
+  const assignedOn = parseDateInput(input.assignedOn, "assignment date");
+  const soldOn = parseDateInput(input.soldOn, "sale date");
+  const price = parsePositiveNumber(input.price, "sale price");
+  const assignmentFees = parseOptionalMoney(input.assignmentFees, "fees") ?? 0;
+  const saleFees = parseOptionalMoney(input.saleFees, "fees") ?? 0;
+  const sortOrder = nextSortOrder(campaign.events);
+
+  await prisma.$transaction([
+    prisma.campaignEvent.create({
+      data: {
+        campaignId: campaign.id,
+        type: "COVERED_CALL_EXPIRED",
+        occurredAt: assignedOn,
+        sortOrder,
+        optionType: "CALL",
+        contracts: openCall.contracts,
+        strike: openCall.strike,
+        expiration: openCall.expiration,
+        premium: 0,
+        fees: assignmentFees,
+        notes: "Call assigned - shares called away (Schwab). The premium you collected stays yours.",
+      },
+    }),
+    prisma.campaignEvent.create({
+      data: {
+        campaignId: campaign.id,
+        type: "STOCK_SALE",
+        occurredAt: soldOn,
+        sortOrder: sortOrder + 1,
+        shares,
+        underlyingPrice: price,
+        fees: saleFees,
+        notes: "Called away at the strike (Schwab).",
+      },
+    }),
+    ...(shares === summary.sharesHeld
+      ? [prisma.campaign.update({ where: { id: campaign.id }, data: { status: "CLOSED", closedAt: soldOn } })]
+      : []),
+  ]);
 
   return prisma.campaign.findUnique({ where: { id: campaign.id }, include: campaignDetailInclude });
 }

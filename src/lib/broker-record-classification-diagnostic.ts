@@ -2,7 +2,7 @@ import "server-only";
 
 import { prisma } from "./prisma";
 import { classifyBrokerTransactionActivity, type BrokerTransactionActivityKind } from "@/domain/finance/brokerTransactionActions";
-import { parseOpeningPutTransaction } from "@/domain/finance/schwabReconciliation";
+import { parseOpeningCallTransaction, parseOpeningPutTransaction } from "@/domain/finance/schwabReconciliation";
 
 export type BrokerRecordCategory =
   | "ALREADY_LINKED"
@@ -120,16 +120,19 @@ export function classifyRow(row: {
   const expiration = typeof metadata?.expiration === "string" ? metadata.expiration : null;
 
   const activityKind = classifyBrokerTransactionActivity({ action: row.action, description: row.description });
-  const eligible =
-    parseOpeningPutTransaction({
-      id: "diagnostic",
-      symbol: row.symbol,
-      occurredAt: row.occurredAt,
-      action: row.action,
-      quantity,
-      price,
-      fees,
-    }) !== null;
+  const parseInput = {
+    id: "diagnostic",
+    symbol: row.symbol,
+    occurredAt: row.occurredAt,
+    action: row.action,
+    quantity,
+    price,
+    fees,
+  };
+  const eligible = parseOpeningPutTransaction(parseInput) !== null;
+  // A well-formed covered-call opening is NOT a parse failure - it simply attaches to an assigned campaign (or is
+  // waiting for an earlier call in the chain to be closed out), so it must not read as "could not be parsed".
+  const coveredCallOpening = !eligible && parseOpeningCallTransaction(parseInput) !== null;
 
   let category: BrokerRecordCategory;
   let reason: string | null = null;
@@ -143,7 +146,7 @@ export function classifyRow(row: {
     // makes it safely campaign-relevant. A generic/unknown action on an option instrument is a
     // real ambiguity, never silently bucketed as ordinary non-campaign activity just because
     // the raw action string happened to look like a plain stock buy/sell.
-    if (OPENING_OR_CLOSING_KINDS.includes(activityKind) && (activityKind !== "SELL_TO_OPEN" || eligible)) {
+    if (OPENING_OR_CLOSING_KINDS.includes(activityKind) && (activityKind !== "SELL_TO_OPEN" || eligible || coveredCallOpening)) {
       category = "CAMPAIGN_READY";
     } else {
       category = "NEEDS_REVIEW";

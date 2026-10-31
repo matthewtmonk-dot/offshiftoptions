@@ -1,186 +1,195 @@
 import "server-only";
 
-import { getCurrentOpenCall, summarizeCampaign } from "@/domain/finance/campaigns";
-import { formatOccSymbol } from "@/domain/finance/occOption";
 import {
-  findCoveredCallCloseEvidence,
-  parseOpeningCallTransaction,
-  type ReconciliationTransaction,
-} from "@/domain/finance/schwabReconciliation";
+  planCoveredCallStep,
+  stepTransactionIds,
+  type ClosureTransaction,
+  type CoveredCallStep,
+} from "@/domain/finance/shareClosureReconciliation";
+import { recordDiagnostic } from "./diagnostics";
 import { prisma } from "./prisma";
-import { closeCoveredCallForUser, sellCoveredCallForUser } from "./workflows";
+import {
+  closeCoveredCallForUser,
+  expireCoveredCallForUser,
+  recordCoveredCallCalledAwayForUser,
+  sellCoveredCallForUser,
+  sellStockForUser,
+} from "./workflows";
 
 export type SchwabCoveredCallReconciliationSummary = {
   coveredCallsOpened: number;
   coveredCallsClosed: number;
+  /** Calls Schwab reported as expired worthless (the shares stay held). */
+  coveredCallsExpired: number;
+  /** Positions closed because a call was assigned and the shares were called away. */
+  sharesCalledAway: number;
+  /** Positions closed by a stock sale of all the assigned shares. */
+  sharesSold: number;
+  /** Share-delivery records from a put assignment matched to the campaign (no new event). */
+  deliveryRecordsLinked: number;
 };
 
+/** More than any real backlog (a few weeks of weekly calls) needs; only a guard against a runaway loop. */
+const MAX_STEPS_PER_SYNC = 60;
+
 /**
- * Covered Call Phase 3B (see PROJECT_HANDOFF.md's Phase 3A audit): automates ONLY covered-call
- * Sell to Open and Buy to Close. This is a deliberately separate path from
- * reconcileSchwabActivityForUser (put reconciliation) rather than a generalization of it - the
- * two share only genuinely common low-level primitives (formatOccSymbol, isSameOccContract via
- * findCoveredCallCloseEvidence, classifyBrokerTransactionAction), never the put-specific roll,
- * assignment, or expiration logic, none of which is safe to reuse for calls yet:
+ * Reconciles the covered-call and share side of every ASSIGNED campaign on one account, one verified step at a
+ * time (see src/domain/finance/shareClosureReconciliation.ts for the pure rules and their tests):
  *
- *   - Call expiration is NOT automated - evaluateWorthlessExpiration's anti-false-positive guard
- *     only checks for newly ACQUIRED shares (the put failure mode); it has no equivalent check
- *     for shares being REMOVED (the call failure mode, i.e. being called away), so applying it to
- *     calls could misread a called-away assignment as a worthless expiration.
- *   - Call assignment / called-away is NOT automated - the equity transferItem of an assignment
- *     transaction is currently discarded during Schwab normalization (see
- *     src/providers/schwab/broker-read.ts's selectTradedSecurityTransferItem), so there is no
- *     trustworthy evidence yet for exactly which/how many shares left the account.
- *   - Manual and partial stock sales are NOT automated - a plain stock Sell is structurally
- *     indistinguishable from a called-away removal in the current normalized data.
+ *   - Sell to Open / Buy to Close of covered calls (as before);
+ *   - a call that reached expiration - closed out as expired on Schwab's own "Removed due to Expiration" notice
+ *     (this was the missing piece: an expired call used to stay "open" forever, which blocked every later
+ *     call in the chain from linking and left the Tracker saying "settlement pending");
+ *   - a call that was ASSIGNED, matched to the stock sale at the strike, = shares called away, campaign closed;
+ *   - the whole assigned position sold in one plain stock sale;
+ *   - linking the share-delivery record a put assignment produced.
  *
- * Every mutation is server-authoritative: userId/accountId always come from the authenticated
- * caller (see syncSchwabAccountAction), never from client input, and every campaign id used here
- * is one this function itself just queried scoped to that exact user+account - never a
- * client-supplied id. Ambiguous evidence (no compatible campaign, more than one compatible
- * campaign, a close whose quantity doesn't match the full open leg) always leaves the
- * BrokerRecord unlinked for manual review rather than guessing - it is never linked without a
- * CampaignEvent actually having been created from it.
+ * Each pass re-reads the account's unlinked records and campaigns, asks the planner for the next step, applies
+ * it through the same validated workflows the manual buttons use, links exactly the records it consumed, and
+ * asks again - so a backlog resolves in order within one sync and a second sync finds nothing left to do
+ * (idempotent: a consumed record is linked, and every workflow refuses to act on a campaign in the wrong state).
+ *
+ * Every query is scoped to the authenticated userId + accountId (never a client-supplied id). Anything
+ * ambiguous (no match, more than one match, two campaigns in the same ticker, a partial sale, both an
+ * expiration and an assignment, a sale at a different price) is left unlinked for manual review - and a step
+ * that fails validation is skipped for the rest of this sync instead of retried.
  */
 export async function reconcileSchwabCoveredCallActivityForUser(
   userId: string,
   accountId: string,
+  asOf: Date = new Date(),
 ): Promise<SchwabCoveredCallReconciliationSummary> {
-  const summary: SchwabCoveredCallReconciliationSummary = { coveredCallsOpened: 0, coveredCallsClosed: 0 };
+  const summary: SchwabCoveredCallReconciliationSummary = {
+    coveredCallsOpened: 0,
+    coveredCallsClosed: 0,
+    coveredCallsExpired: 0,
+    sharesCalledAway: 0,
+    sharesSold: 0,
+    deliveryRecordsLinked: 0,
+  };
+  const skipped = new Set<string>();
 
-  const unlinked = await prisma.brokerRecord.findMany({
-    where: { userId, accountId, provider: "SCHWAB", kind: "TRANSACTION", status: "CONFIRMED", linkedCampaignId: null },
-    orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
-  });
-  const candidates: ReconciliationTransaction[] = unlinked.map(toReconciliationTransaction);
-
-  // 1. Close evidence first, against campaigns as they stand BEFORE this sync's opens - closing
-  // an existing call is always resolved before a same-sync new call is considered, so a same-day
-  // close+reopen on the same campaign correctly frees that campaign's "no open call" slot for
-  // step 2 rather than rejecting the new open as "already covered."
-  const assignedBeforeCloses = await prisma.campaign.findMany({
-    where: { ownerId: userId, accountId, status: "ASSIGNED" },
-    include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
-  });
-
-  // Precomputed once so the ambiguity check below never has to re-derive it per candidate.
-  const openCallsByCampaign = assignedBeforeCloses
-    .map((campaign) => ({ campaign, openCall: getCurrentOpenCall(campaign.events) }))
-    .filter((entry): entry is { campaign: (typeof assignedBeforeCloses)[number]; openCall: NonNullable<ReturnType<typeof getCurrentOpenCall>> } =>
-      entry.openCall !== null,
-    );
-
-  for (const { campaign, openCall } of openCallsByCampaign) {
-    // Two different ASSIGNED campaigns (same account, same underlying) could in principle each
-    // independently hold the exact same open call contract - a real Schwab Buy to Close on that
-    // contract would then be equally "compatible" with both, and nothing about the transaction
-    // itself says which campaign it actually belongs to. Never guess: only auto-close when this
-    // is the campaign's UNIQUE holder of that exact contract.
-    const holdersOfThisContract = openCallsByCampaign.filter(
-      (entry) =>
-        entry.campaign.ticker.toUpperCase() === campaign.ticker.toUpperCase() &&
-        entry.openCall.strike === openCall.strike &&
-        entry.openCall.expiration.getTime() === openCall.expiration.getTime(),
-    );
-    if (holdersOfThisContract.length !== 1) {
-      continue;
-    }
-
-    const symbol = formatOccSymbol(campaign.ticker, openCall.expiration, openCall.strike, "CALL");
-    const closing = findCoveredCallCloseEvidence({ symbol, contracts: openCall.contracts }, candidates);
-    if (closing.kind !== "CLOSE") {
-      continue;
-    }
-
-    try {
-      const updated = await closeCoveredCallForUser(
-        userId,
-        campaign.id,
-        closing.occurredAt.toISOString().slice(0, 10),
-        closing.premium,
-        closing.fees,
-        null,
-      );
-      if (!updated) {
-        continue;
-      }
-      await prisma.brokerRecord.update({ where: { id: closing.transactionId }, data: { linkedCampaignId: campaign.id } });
-      summary.coveredCallsClosed += 1;
-    } catch {
-      // Leave unlinked for manual review rather than let one unexpected validation failure
-      // abort reconciliation for every other campaign/transaction in this sync.
-      continue;
-    }
-  }
-
-  // 2. Open evidence - re-reads ASSIGNED campaigns fresh so any close just applied in step 1 is
-  // reflected (a campaign whose call closed above is now eligible to receive a new one here).
-  const assignedForOpens = await prisma.campaign.findMany({
-    where: { ownerId: userId, accountId, status: "ASSIGNED" },
-    include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
-  });
-
-  for (const transaction of unlinked) {
-    const opening = parseOpeningCallTransaction(toReconciliationTransaction(transaction));
-    if (!opening) {
-      continue;
-    }
-
-    const compatible = assignedForOpens.filter((campaign) => {
-      if (campaign.ticker.toUpperCase() !== opening.underlying.toUpperCase()) {
-        return false;
-      }
-      if (getCurrentOpenCall(campaign.events)) {
-        return false; // already covered by another open call - never stack a second one
-      }
-      const campaignSummary = summarizeCampaign({ status: campaign.status, events: campaign.events });
-      return campaignSummary.sharesHeld >= opening.contracts * 100;
+  for (let pass = 0; pass < MAX_STEPS_PER_SYNC; pass += 1) {
+    const unlinked = await prisma.brokerRecord.findMany({
+      where: { userId, accountId, provider: "SCHWAB", kind: "TRANSACTION", status: "CONFIRMED", linkedCampaignId: null },
+      orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+    });
+    const campaigns = await prisma.campaign.findMany({
+      where: { ownerId: userId, accountId, status: "ASSIGNED" },
+      include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
 
-    if (compatible.length !== 1) {
-      // None, or more than one, compatible ASSIGNED campaign - never guess which one this
-      // covered call belongs to. The BrokerRecord stays unlinked for manual review.
-      continue;
+    const step = planCoveredCallStep({
+      campaigns: campaigns.map((campaign) => ({ id: campaign.id, ticker: campaign.ticker, events: campaign.events })),
+      candidates: unlinked.filter((record) => !skipped.has(record.id)).map(toClosureTransaction),
+      asOf,
+    });
+    if (!step) {
+      break;
     }
 
-    const campaign = compatible[0];
+    const ticker = campaigns.find((campaign) => campaign.id === step.campaignId)?.ticker ?? "";
+    let applied = false;
     try {
-      const updated = await sellCoveredCallForUser(
-        userId,
-        campaign.id,
-        opening.occurredAt.toISOString().slice(0, 10),
-        opening.expiration.toISOString().slice(0, 10),
-        opening.strike,
-        opening.contracts,
-        opening.premium,
-        opening.fees,
-        null,
-      );
-      if (!updated) {
-        continue;
-      }
-      await prisma.brokerRecord.update({ where: { id: transaction.id }, data: { linkedCampaignId: campaign.id } });
-      summary.coveredCallsOpened += 1;
+      applied = await applyStep(userId, accountId, step, ticker, summary);
     } catch {
-      continue;
+      // One unexpected validation failure must not abort reconciliation for everything else.
+      applied = false;
+    }
+    if (!applied) {
+      for (const id of stepTransactionIds(step)) skipped.add(id);
     }
   }
 
   return summary;
 }
 
-function toReconciliationTransaction(record: {
+async function linkRecords(userId: string, accountId: string, campaignId: string, ids: string[]) {
+  // Scoped again by user + account (defense in depth) and only ever fills an empty link.
+  await prisma.brokerRecord.updateMany({
+    where: { id: { in: ids }, userId, accountId, linkedCampaignId: null },
+    data: { linkedCampaignId: campaignId },
+  });
+}
+
+async function applyStep(
+  userId: string,
+  accountId: string,
+  step: CoveredCallStep,
+  ticker: string,
+  summary: SchwabCoveredCallReconciliationSummary,
+): Promise<boolean> {
+  const link = (ids: string[]) => linkRecords(userId, accountId, step.campaignId, ids);
+
+  switch (step.kind) {
+    case "CLOSE_CALL": {
+      const updated = await closeCoveredCallForUser(userId, step.campaignId, step.occurredOn, step.premium, step.fees, null);
+      if (!updated) return false;
+      await link([step.transactionId]);
+      summary.coveredCallsClosed += 1;
+      return true;
+    }
+    case "OPEN_CALL": {
+      const updated = await sellCoveredCallForUser(userId, step.campaignId, step.occurredOn, step.expiration, step.strike, step.contracts, step.premium, step.fees, null);
+      if (!updated) return false;
+      await link([step.transactionId]);
+      summary.coveredCallsOpened += 1;
+      return true;
+    }
+    case "EXPIRE_CALL": {
+      const updated = await expireCoveredCallForUser(userId, step.campaignId, step.occurredOn, 0, "Expired worthless - Schwab reported the call removed due to expiration.", { brokerConfirmed: true });
+      if (!updated) return false;
+      await link([step.transactionId]);
+      summary.coveredCallsExpired += 1;
+      recordDiagnostic({ kind: "action", source: "covered call reconciled", message: `${ticker} covered call expired worthless (${step.occurredOn})` });
+      return true;
+    }
+    case "CALLED_AWAY": {
+      const updated = await recordCoveredCallCalledAwayForUser(userId, step.campaignId, {
+        assignedOn: step.assignedOn,
+        soldOn: step.soldOn,
+        shares: step.shares,
+        price: step.price,
+        assignmentFees: step.assignmentFees,
+        saleFees: step.saleFees,
+      });
+      if (!updated) return false;
+      await link([step.assignmentTransactionId, step.saleTransactionId]);
+      summary.sharesCalledAway += 1;
+      recordDiagnostic({ kind: "action", source: "covered call reconciled", message: `${ticker} covered call assigned - ${step.shares} shares called away at ${step.price} (${step.soldOn})` });
+      return true;
+    }
+    case "SELL_SHARES": {
+      const updated = await sellStockForUser(userId, step.campaignId, step.soldOn, step.shares, step.price, step.fees, "Sold at Schwab (matched from your Schwab transaction).");
+      if (!updated) return false;
+      await link([step.transactionId]);
+      summary.sharesSold += 1;
+      recordDiagnostic({ kind: "action", source: "share sale reconciled", message: `${ticker} ${step.shares} shares sold at ${step.price} (${step.soldOn})` });
+      return true;
+    }
+    case "LINK_DELIVERY": {
+      await link(step.transactionIds);
+      summary.deliveryRecordsLinked += step.transactionIds.length;
+      return true;
+    }
+  }
+}
+
+function toClosureTransaction(record: {
   id: string;
   symbol: string | null;
+  underlyingSymbol: string | null;
   occurredAt: Date | null;
   action: string | null;
   quantity: unknown;
   price: unknown;
   fees: unknown;
-}): ReconciliationTransaction {
+}): ClosureTransaction {
   return {
     id: record.id,
     symbol: record.symbol,
+    underlyingSymbol: record.underlyingSymbol,
     occurredAt: record.occurredAt,
     action: record.action,
     quantity: numericOrNull(record.quantity),
