@@ -296,6 +296,7 @@ model User {
   trades                      Trade[]
   watchlists                  Watchlist[]
   watchlistItems              WatchlistItem[]
+  ethicsProfiles              CompanyEthicsProfile[]
   notes                       StockNote[]
   comments                    Comment[]
   recommendationsSent         Recommendation[]             @relation("SentRecommendations")
@@ -1688,4 +1689,80 @@ model ScheduledCaptureRun {
   @@index([ownerId, sessionDate])
   @@index([status])
   @@index([ownerId, status])
+}
+
+enum EthicsDecision {
+  APPROVED
+  EXCLUDED
+  UNDER_REVIEW
+}
+
+/// One user's ethical-compatibility research for one company (see src/domain/ethics/ethicalCompatibility.ts).
+/// Company-level and cached: researched once, re-checked on a review date or on material new evidence, never
+/// recomputed per option contract. Per-user because the standards and the final decision are the user's own.
+/// `assessments` is the compact per-category list (level / confidence / short summary / revenue share ONLY when a
+/// source states one); `score`, `rating`, `confidence`, `needsReview` are derived from it and stored for sorting.
+/// `decision*` is the user's own call (Approved / Excluded / Under review) and is never overwritten by new research.
+model CompanyEthicsProfile {
+  id             String          @id @default(cuid())
+  userId         String
+  ticker         String
+  companyName    String?
+  assessments    Json
+  score          Int?
+  rating         String
+  confidence     String?
+  needsReview    Boolean         @default(false)
+  incomplete     Boolean         @default(false)
+  summary        String?
+  researchedAt   DateTime
+  reviewAfter    DateTime?
+  recheckNeeded  Boolean         @default(false)
+  recheckReason  String?
+  decision       EthicsDecision?
+  decisionNote   String?
+  decidedAt      DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  user     User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  evidence CompanyEthicsEvidence[]
+  history  CompanyEthicsHistory[]
+
+  @@unique([userId, ticker])
+  @@index([userId, rating])
+  @@index([userId, decision])
+}
+
+/// A source that supports (or complicates) one category finding. The claim is a short paraphrase, never a long quote.
+model CompanyEthicsEvidence {
+  id          String   @id @default(cuid())
+  profileId   String
+  category    String
+  claim       String
+  sourceUrl   String
+  sourceType  String
+  supports    String
+  publishedAt DateTime?
+  retrievedAt DateTime @default(now())
+
+  profile CompanyEthicsProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+/// Append-only log of research runs and the user's decisions, so past classifications are remembered and a
+/// changed rating or a reversed decision can always be explained.
+model CompanyEthicsHistory {
+  id         String   @id @default(cuid())
+  profileId  String
+  at         DateTime @default(now())
+  kind       String
+  fromRating String?
+  toRating   String?
+  note       String?
+
+  profile CompanyEthicsProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId, at])
 }

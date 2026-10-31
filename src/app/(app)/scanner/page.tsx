@@ -21,6 +21,7 @@ import { scannerTimingGuide, technicalReadyHint } from "@/domain/scanner/timingG
 import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
+import { getEthicsSummariesForUser } from "@/lib/ethics";
 import { prisma } from "@/lib/prisma";
 import { shortCalendarDate } from "@/lib/format";
 import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
@@ -220,6 +221,8 @@ export default async function ScannerPage({
   const researchByTicker = new Map(researchItems.map((item) => [item.ticker, item.researchStatus]));
   const allResults = (run?.results ?? []).map((result) => toViewResult(result, researchByTicker));
   const isLiveSchwabRun = run?.source === "LIVE:SCHWAB";
+  // Ethics research for just the tickers on screen; Record (not Map) because it crosses to a client component.
+  const ethics = Object.fromEntries(await getEthicsSummariesForUser(user.id, allResults.map((result) => result.record.ticker)));
   const diagnostics = buildExclusionDiagnostics(
     allResults.map((result) => ({ ticker: result.record.ticker, summary: result.summary })),
   );
@@ -389,7 +392,7 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
-      <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} />
+      <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} ethics={ethics} />
     </div>
   );
 }

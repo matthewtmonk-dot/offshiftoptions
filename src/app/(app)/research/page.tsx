@@ -15,6 +15,7 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { requireCurrentUser } from "@/lib/auth";
 import { getResearchPageData, normalizeTrackerScope, type TrackerScope } from "@/lib/app-data";
 import { getTickerFundamentalsMap } from "@/lib/alpha-vantage-fundamentals";
+import { getEthicsSummariesForUser } from "@/lib/ethics";
 import type { TickerFundamentals } from "@/generated/prisma/client";
 import { ResearchWorkspace } from "./research-workspace";
 
@@ -109,12 +110,16 @@ export default async function ResearchPage({
   // are ever shown from it.
   const researchTickers = [...(ownWatchlist?.items ?? []), ...visibleItems].map((item) => item.ticker);
   const avFundamentalsByTicker = await getTickerFundamentalsMap(researchTickers);
+  const ethicsByTicker = await getEthicsSummariesForUser(user.id, researchTickers);
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold text-zinc-50">Research</h1>
         <div className="flex flex-wrap gap-2">
+          <IntentPrefetchLink href="/research/ethics" className="rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition hover:border-sky-400/50 hover:text-sky-200">
+            Ethics
+          </IntentPrefetchLink>
           {(["mine", "buddy", "both"] as TrackerScope[]).map((option) => (
             <IntentPrefetchLink key={option} href={researchHref(option)} className={scopeSegmentClass(scope === option)}>
               {option === "mine" ? "Mine" : option === "buddy" ? buddyName : "Both"}
@@ -132,6 +137,7 @@ export default async function ResearchPage({
         scanByTicker={Object.fromEntries(scanByTicker)}
         campaignByTicker={Object.fromEntries(campaignByTicker)}
         avFundamentalsByTicker={Object.fromEntries(avFundamentalsByTicker)}
+        ethicsByTicker={Object.fromEntries(ethicsByTicker)}
         initialColumns={columns}
         initialSortKey={sortKey}
         error={params.error}
