@@ -1149,6 +1149,7 @@ export async function syncSchwabAccountAction() {
   let expirationDeferralReason: "EXPIRATION_EVIDENCE_INCOMPLETE" | null = null;
   let coveredCallsOpened = 0;
   let coveredCallsClosed = 0;
+  let shareClosuresReconciled = 0;
   let reconciliationStatus: "OK" | "ERROR" = "OK";
   let reconciliationErrorCode: string | null = null;
   for (const account of result.accounts) {
@@ -1165,6 +1166,7 @@ export async function syncSchwabAccountAction() {
       const coveredCallSummary = await reconcileSchwabCoveredCallActivityForUser(user.id, account.id);
       coveredCallsOpened += coveredCallSummary.coveredCallsOpened;
       coveredCallsClosed += coveredCallSummary.coveredCallsClosed;
+      shareClosuresReconciled += coveredCallSummary.coveredCallsExpired + coveredCallSummary.sharesCalledAway + coveredCallSummary.sharesSold;
     } catch (error) {
       // Balance sync above already succeeded and is durable - a reconciliation hiccup for one
       // account just means it catches up on the next successful sync, not a failed sync.
@@ -1197,7 +1199,8 @@ export async function syncSchwabAccountAction() {
     campaignTotals.campaignsAssigned +
     campaignTotals.campaignsExpired +
     coveredCallsOpened +
-    coveredCallsClosed;
+    coveredCallsClosed +
+    shareClosuresReconciled;
 
   revalidatePath("/account");
   revalidatePath("/dashboard");

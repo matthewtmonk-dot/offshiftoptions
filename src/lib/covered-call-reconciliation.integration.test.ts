@@ -557,60 +557,82 @@ maybeDescribe("Schwab covered-call auto-reconciliation", () => {
     expect(putSummary.campaignsClosed).toBe(1);
   });
 
-  // --- NON-SCOPE (must never auto-create these) ---
+  // --- EXPIRY, CALLED AWAY AND SHARE SALES (reconciled only on Schwab's own matching records) ---
 
-  it("test 24: a CALL expiration-style transaction never auto-creates COVERED_CALL_EXPIRED", async () => {
-    const account = await createTradingAccountForUser(userA.id, `CC NonScope Expiry ${Date.now()}`, "Manual", "10000", "10000", "PRIVATE");
+  it("test 24: Schwab's 'Removed - Expiration' notice for the open call, after expiry, records COVERED_CALL_EXPIRED and links it; shares stay held", async () => {
+    const account = await createTradingAccountForUser(userA.id, `CC Expiry ${Date.now()}`, "Manual", "10000", "10000", "PRIVATE");
     const campaign = await createAssignedCampaign(userA.id, account.id, "CCAT", 1);
-    await createTransaction(userA.id, account.id, {
-      symbol: "CCAT 260911C00044000",
-      underlyingSymbol: "CCAT",
-      action: "Sell to Open",
-      occurredAt: new Date("2026-09-01T14:00:00Z"),
-      price: 0.35,
-    });
-    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id);
+    await createTransaction(userA.id, account.id, { symbol: "CCAT 260911C00044000", underlyingSymbol: "CCAT", action: "Sell to Open", occurredAt: new Date("2026-09-01T14:00:00Z"), price: 0.35 });
+    // No expiration notice yet: the call stays open (never inferred from the date alone).
+    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
+    let current = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
+    expect(current.events.some((e) => e.type === "COVERED_CALL_EXPIRED")).toBe(false);
 
-    await createTransaction(userA.id, account.id, {
-      symbol: "CCAT 260911C00044000",
-      underlyingSymbol: "CCAT",
-      action: "Removed - Expiration",
-      occurredAt: new Date("2026-09-12T14:00:00Z"),
-      price: 0,
-    });
+    const notice = await createTransaction(userA.id, account.id, { symbol: "CCAT 260911C00044000", underlyingSymbol: "CCAT", action: "Removed - Expiration", occurredAt: new Date("2026-09-11T14:00:00Z"), price: 0 });
+    const summary = await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
+    expect(summary.coveredCallsExpired).toBe(1);
+    current = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
+    expect(current.events.filter((e) => e.type === "COVERED_CALL_EXPIRED")).toHaveLength(1);
+    expect(current.status).toBe("ASSIGNED");
+    expect((await prisma.brokerRecord.findUniqueOrThrow({ where: { id: notice.id } })).linkedCampaignId).toBe(campaign.id);
 
-    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id);
-    const updated = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
-    expect(updated.events.some((e) => e.type === "COVERED_CALL_EXPIRED")).toBe(false);
+    // Idempotent: a second sync adds nothing.
+    const again = await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
+    expect(again.coveredCallsExpired).toBe(0);
   });
 
-  it("test 25: a CALL assignment/removal transaction never auto-creates STOCK_SALE or an assignment-style event", async () => {
-    const account = await createTradingAccountForUser(userA.id, `CC NonScope CalledAway ${Date.now()}`, "Manual", "10000", "10000", "PRIVATE");
+  it("test 25: a CALL assignment with NO matching stock sale yet changes nothing (never guessed)", async () => {
+    const account = await createTradingAccountForUser(userA.id, `CC CalledAway Wait ${Date.now()}`, "Manual", "10000", "10000", "PRIVATE");
     const campaign = await createAssignedCampaign(userA.id, account.id, "CCAU", 1);
-    await createTransaction(userA.id, account.id, {
-      symbol: "CCAU 260911C00044000",
-      underlyingSymbol: "CCAU",
-      action: "Sell to Open",
-      occurredAt: new Date("2026-09-01T14:00:00Z"),
-      price: 0.35,
-    });
-    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id);
+    await createTransaction(userA.id, account.id, { symbol: "CCAU 260911C00044000", underlyingSymbol: "CCAU", action: "Sell to Open", occurredAt: new Date("2026-09-01T14:00:00Z"), price: 0.35 });
+    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
+    await createTransaction(userA.id, account.id, { symbol: "CCAU 260911C00044000", underlyingSymbol: "CCAU", action: "Assignment", occurredAt: new Date("2026-09-11T20:00:00Z"), price: 0 });
 
-    await createTransaction(userA.id, account.id, {
-      symbol: "CCAU 260911C00044000",
-      underlyingSymbol: "CCAU",
-      action: "Assignment",
-      occurredAt: new Date("2026-09-11T20:00:00Z"),
-      price: 0,
-    });
-
-    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id);
+    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
     const updated = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
     expect(updated.events.some((e) => e.type === "STOCK_SALE")).toBe(false);
     expect(updated.status).toBe("ASSIGNED");
   });
 
-  it("test 26/27: a generic or partial stock sale transaction never auto-creates STOCK_SALE", async () => {
+  it("test 25b: call assignment + the stock sale at the strike = shares called away; the campaign closes with the real sale", async () => {
+    const account = await createTradingAccountForUser(userA.id, `CC CalledAway ${Date.now()}`, "Manual", "10000", "10000", "PRIVATE");
+    const campaign = await createAssignedCampaign(userA.id, account.id, "CCBA", 1);
+    await createTransaction(userA.id, account.id, { symbol: "CCBA 260911C00044000", underlyingSymbol: "CCBA", action: "Sell to Open", occurredAt: new Date("2026-09-01T14:00:00Z"), price: 0.35 });
+    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
+    await createTransaction(userA.id, account.id, { symbol: "CCBA 260911C00044000", underlyingSymbol: "CCBA", action: "Assignment", occurredAt: new Date("2026-09-11T20:00:00Z"), price: 0 });
+    // A sale at a DIFFERENT price than the strike is not the called-away shares.
+    await createTransaction(userA.id, account.id, { symbol: "CCBA", underlyingSymbol: "CCBA", action: "Sell to Close", occurredAt: new Date("2026-09-11T20:00:00Z"), quantity: -100, price: 43 });
+    await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
+    expect((await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id } })).status).toBe("ASSIGNED");
+
+    await prisma.brokerRecord.deleteMany({ where: { userId: userA.id, accountId: account.id, symbol: "CCBA", price: 43 } });
+    const strikeSale = await createTransaction(userA.id, account.id, { symbol: "CCBA", underlyingSymbol: "CCBA", action: "Sell to Close", occurredAt: new Date("2026-09-11T20:00:01Z"), quantity: -100, price: 44 });
+    const summary = await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-12T14:00:00Z"));
+    expect(summary.sharesCalledAway).toBe(1);
+    const closed = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
+    expect(closed.status).toBe("CLOSED");
+    expect(closed.events.filter((e) => e.type === "STOCK_SALE")).toHaveLength(1);
+    expect(Number(closed.events.find((e) => e.type === "STOCK_SALE")!.underlyingPrice)).toBe(44);
+    expect((await prisma.brokerRecord.findUniqueOrThrow({ where: { id: strikeSale.id } })).linkedCampaignId).toBe(campaign.id);
+  });
+
+  it("test 26b: selling ALL the assigned shares in one sale closes the campaign (the SOFI case) and links the delivery record", async () => {
+    const account = await createTradingAccountForUser(userA.id, `CC FullSale ${Date.now()}`, "Manual", "10000", "10000", "PRIVATE");
+    const campaign = await createAssignedCampaign(userA.id, account.id, "CCBB", 1);
+    const delivery = await createTransaction(userA.id, account.id, { symbol: "CCBB", underlyingSymbol: "CCBB", action: "Buy to Open", occurredAt: new Date("2026-08-28T14:00:00Z"), quantity: 100, price: 40 });
+    const sale = await createTransaction(userA.id, account.id, { symbol: "CCBB", underlyingSymbol: "CCBB", action: "Sell to Close", occurredAt: new Date("2026-09-05T14:00:00Z"), quantity: -100, price: 43.5, fees: 0.03 });
+
+    const summary = await reconcileSchwabCoveredCallActivityForUser(userA.id, account.id, new Date("2026-09-06T14:00:00Z"));
+    expect(summary.sharesSold).toBe(1);
+    expect(summary.deliveryRecordsLinked).toBe(1);
+    const closed = await prisma.campaign.findUniqueOrThrow({ where: { id: campaign.id }, include: { events: true } });
+    expect(closed.status).toBe("CLOSED");
+    expect(closed.events.filter((e) => e.type === "STOCK_SALE")).toHaveLength(1);
+    expect((await prisma.brokerRecord.findUniqueOrThrow({ where: { id: sale.id } })).linkedCampaignId).toBe(campaign.id);
+    expect((await prisma.brokerRecord.findUniqueOrThrow({ where: { id: delivery.id } })).linkedCampaignId).toBe(campaign.id);
+  });
+
+  it("test 26/27: a partial stock sale transaction never auto-creates STOCK_SALE", async () => {
     const account = await createTradingAccountForUser(userA.id, `CC NonScope StockSale ${Date.now()}`, "Manual", "10000", "10000", "PRIVATE");
     const campaign = await createAssignedCampaign(userA.id, account.id, "CCAV", 2); // 200 shares
     await createTransaction(userA.id, account.id, {

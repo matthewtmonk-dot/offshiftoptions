@@ -171,10 +171,10 @@ export type CoveredCallClosingEvidence =
 /**
  * Looks for a Buy to Close on an open covered call's exact OCC contract, matching the FULL open
  * quantity only - deliberately much simpler than findClosingEvidence (no roll pairing, no
- * assignment fallback): covered-call rolls and call assignment/called-away detection are both
- * out of scope for this phase (see PROJECT_HANDOFF.md's Covered Call Phase 3A audit - the equity
- * transferItem of an assignment is currently discarded during normalization, so that evidence
- * cannot be trusted yet). closeCoveredCallForUser only supports closing the full open leg (see
+ * assignment fallback). Call expiry, call assignment / called-away and share sales are handled
+ * separately, on their own matching evidence, in shareClosureReconciliation.ts. A covered-call roll
+ * is simply a Buy to Close followed by a Sell to Open, applied in order.
+ * closeCoveredCallForUser only supports closing the full open leg (see
  * workflows.ts), so a Buy to Close for a different quantity than the open leg is deliberately
  * treated as NONE - left unlinked for manual review - rather than guessing at a partial close.
  */
