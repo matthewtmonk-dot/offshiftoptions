@@ -61,6 +61,9 @@ export const GATING_RULE_KEYS = new Set([
   "spreadPercent",
   "delta",
   "earningsDistance",
+  // New puts only: earnings must clear expiration by the buffer AND leave a full trading session to exit.
+  "earningsFreeDaysAfterExpiry",
+  "earningsExitSessions",
   "doNotTrade",
 ]);
 
@@ -201,6 +204,36 @@ export const SCANNER_RULE_DEFINITIONS: ScannerRuleDefinition[] = [
     defaultEnabled: true,
     explanation: "Minimum days until earnings. If earnings timing is unavailable, the criterion remains UNKNOWN.",
     input: { kind: "single", label: "Minimum days until earnings", step: "1", min: 0 },
+  },
+  {
+    key: "earningsFreeDaysAfterExpiry",
+    name: "Earnings buffer after expiration",
+    operator: "GTE",
+    defaultDesired: 3,
+    defaultEnabled: true,
+    explanation:
+      "New puts only. Earnings-free calendar days required AFTER the option expires (3 means earnings no sooner than the 4th day after expiration). Earnings on or before expiration always fail. A missing, out-of-date or conflicting earnings date stays UNKNOWN - verify it, it is never treated as clear.",
+    input: { kind: "single", label: "Earnings-free days after expiration", step: "1", min: 0 },
+  },
+  {
+    key: "earningsExitSessions",
+    name: "Trading sessions to exit before earnings",
+    operator: "GTE",
+    defaultDesired: 1,
+    defaultEnabled: true,
+    explanation:
+      "New puts only. Full NYSE trading sessions required between expiration and earnings, so shares assigned at expiration could be sold first (weekends and market holidays do not count). The announcement time is unknown, so earnings are assumed to hit at the open of the report date.",
+    input: { kind: "single", label: "Full trading sessions to exit", step: "1", min: 0 },
+  },
+  {
+    key: "coveredCallEarningsDistance",
+    name: "Covered calls: earnings notice",
+    operator: "GTE",
+    defaultDesired: 10,
+    defaultEnabled: false,
+    explanation:
+      "Covered calls on shares you already own may deliberately go through earnings, so earnings never block them. The earnings date and whether it falls before the call's expiry are always shown; turn this on to also flag a date inside the window below.",
+    input: { kind: "single", label: "Flag earnings within this many days", step: "1", min: 0 },
   },
   {
     key: "doNotTrade",
@@ -602,8 +635,14 @@ export const DEMO_SCAN_CANDIDATES: DemoScannerCandidate[] = [
   },
 ];
 
+/**
+ * Rules that only the Covered Call scan reads. A put scan must never evaluate them: their value does not exist for a put
+ * candidate, so an enabled one would turn every put UNKNOWN. scannerRulesFromRecords leaves them out unless asked.
+ */
+export const COVERED_CALL_ONLY_RULE_KEYS: ReadonlySet<string> = new Set(["coveredCallEarningsDistance"]);
+
 export function defaultScannerRules(): EngineScannerRule[] {
-  return SCANNER_RULE_DEFINITIONS.map((definition) => ({
+  return SCANNER_RULE_DEFINITIONS.filter((definition) => !COVERED_CALL_ONLY_RULE_KEYS.has(definition.key)).map((definition) => ({
     key: definition.key,
     name: definition.name,
     operator: definition.operator,
@@ -664,12 +703,17 @@ export function diffScannerRulesFromLstCore(
 
 export function scannerRulesFromRecords(
   records: { key: string; name: string; operator: ScannerOperator; valueJson: unknown; enabled: boolean }[],
+  options: { includeCoveredCallRules?: boolean } = {},
 ) {
   const recordsByKey = new Map(records.map((record) => [record.key, record]));
 
   return SCANNER_RULE_DEFINITIONS.flatMap((definition) => {
+    if (!options.includeCoveredCallRules && COVERED_CALL_ONLY_RULE_KEYS.has(definition.key)) {
+      return [];
+    }
     const record = recordsByKey.get(definition.key);
-    if (record && !record.enabled) {
+    // A rule with no stored row yet (added after this profile was created) follows its default: on or off.
+    if (record ? !record.enabled : !definition.defaultEnabled) {
       return [];
     }
 
@@ -682,12 +726,27 @@ export function scannerRulesFromRecords(
   });
 }
 
+/** Rule definitions that have no stored row for this profile yet (rules added after the profile was created). */
+export function missingScannerRuleDefinitions(existingKeys: Iterable<string>): { definition: ScannerRuleDefinition; sortOrder: number }[] {
+  const have = new Set(existingKeys);
+  return SCANNER_RULE_DEFINITIONS.flatMap((definition, sortOrder) => (have.has(definition.key) ? [] : [{ definition, sortOrder }]));
+}
+
 export function evaluateDemoScan(rules: EngineScannerRule[]) {
-  return DEMO_SCAN_CANDIDATES.map((candidate) => ({
-    ticker: candidate.ticker,
-    values: candidate.values,
-    summary: evaluateCandidate(rules, candidate.values),
-  }));
+  return DEMO_SCAN_CANDIDATES.map((candidate) => {
+    // The fixed demo rows are synthetic (their earnings dates do not line up with their own "days away" figures), so the
+    // put-earnings numbers come from those same figures: days from today to earnings minus days to expiration. Demo only -
+    // the live scan derives them from the real expiration and report dates (see putEarningsValues).
+    const distance = candidate.values.earningsDistance;
+    const dte = candidate.values.dte;
+    const freeDays = typeof distance === "number" && typeof dte === "number" ? distance - dte - 1 : null;
+    const values = {
+      ...candidate.values,
+      earningsFreeDaysAfterExpiry: freeDays,
+      earningsExitSessions: freeDays === null ? null : freeDays >= 3 ? 1 : 0,
+    };
+    return { ticker: candidate.ticker, values, summary: evaluateCandidate(rules, values) };
+  });
 }
 
 export function formatRuleDesired(operator: ScannerOperator, desired: EngineScannerRule["desired"]) {

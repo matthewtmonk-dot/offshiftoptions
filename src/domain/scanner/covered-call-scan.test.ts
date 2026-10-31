@@ -524,9 +524,9 @@ describe("evaluateCoveredCallCampaign - liquidity rule reuse", () => {
   });
 });
 
-describe("evaluateCoveredCallCampaign - earnings reuse", () => {
-  it("reuses the earningsDistance rule when enabled, evaluating the real reported distance", () => {
-    const rules: ScannerRule[] = [{ key: "earningsDistance", name: "Earnings Distance", operator: "GTE", desired: 10 }];
+describe("evaluateCoveredCallCampaign - earnings (its own setting, never the put buffer)", () => {
+  it("uses its own covered-call earnings-notice rule when enabled, evaluating the real reported distance", () => {
+    const rules: ScannerRule[] = [{ key: "coveredCallEarningsDistance", name: "Covered calls: earnings notice", operator: "GTE", desired: 10 }];
     const scan = evaluateCoveredCallCampaign({
       campaignId: "c26",
       ticker: "SYN",
@@ -544,7 +544,7 @@ describe("evaluateCoveredCallCampaign - earnings reuse", () => {
   });
 
   it("shows UNKNOWN (never a fabricated PASS) when earnings data is unavailable but the rule is enabled", () => {
-    const rules: ScannerRule[] = [{ key: "earningsDistance", name: "Earnings Distance", operator: "GTE", desired: 10 }];
+    const rules: ScannerRule[] = [{ key: "coveredCallEarningsDistance", name: "Covered calls: earnings notice", operator: "GTE", desired: 10 }];
     const scan = evaluateCoveredCallCampaign({
       campaignId: "c27",
       ticker: "SYN",
@@ -561,7 +561,65 @@ describe("evaluateCoveredCallCampaign - earnings reuse", () => {
     expect(scan.earningsCriterion?.status).toBe("UNKNOWN");
   });
 
-  it("is null (not UNKNOWN) when the earningsDistance rule itself is disabled", () => {
+  it("the put earnings-buffer and earnings-distance rules never block or flag a covered call", () => {
+    const putRules: ScannerRule[] = [
+      { key: "earningsDistance", name: "Earnings distance", operator: "GTE", desired: 10 },
+      { key: "earningsFreeDaysAfterExpiry", name: "Earnings buffer after expiration", operator: "GTE", desired: 3 },
+      { key: "earningsExitSessions", name: "Trading sessions to exit before earnings", operator: "GTE", desired: 1 },
+    ];
+    const scan = evaluateCoveredCallCampaign({
+      campaignId: "c28a",
+      ticker: "SYN",
+      events: assignedEvents(100, 40),
+      status: "ASSIGNED",
+      currentPrice: 41,
+      options: [callOption({ strike: 42, expiration: daysFrom(ASOF, 7) })],
+      rules: putRules,
+      earnings: { daysUntilReport: 3, reportDate: "2026-09-04" },
+      rollBufferPercent: ROLL_BUFFER,
+      asOf: ASOF,
+    });
+    expect(scan.earningsCriterion).toBeNull();
+    expect(scan.reasonCode).toBeNull();
+    expect(scan.basisSafeCandidates.length).toBeGreaterThan(0);
+  });
+
+  it("always reports the earnings date and whether it falls before the call's expiry (informational)", () => {
+    const base = {
+      campaignId: "c28b",
+      ticker: "SYN",
+      events: assignedEvents(100, 40),
+      status: "ASSIGNED" as const,
+      currentPrice: 41,
+      options: [callOption({ strike: 42, expiration: daysFrom(ASOF, 7) })],
+      rules: NO_RULES,
+      rollBufferPercent: ROLL_BUFFER,
+      asOf: ASOF,
+    };
+    const before = evaluateCoveredCallCampaign({ ...base, earnings: { daysUntilReport: 3, reportDate: "2026-09-04" } });
+    expect(before.earningsNote).toMatchObject({ reportDate: "2026-09-04", daysAway: 3, beforeExpiry: true, verifyReason: null });
+    const after = evaluateCoveredCallCampaign({ ...base, earnings: { daysUntilReport: 40, reportDate: "2026-12-01" } });
+    expect(after.earningsNote.beforeExpiry).toBe(false);
+  });
+
+  it("an unknown, stale or conflicting date is flagged to verify, not assumed safe", () => {
+    const base = {
+      campaignId: "c28c",
+      ticker: "SYN",
+      events: assignedEvents(100, 40),
+      status: "ASSIGNED" as const,
+      currentPrice: 41,
+      options: [callOption({ strike: 42, expiration: daysFrom(ASOF, 7) })],
+      rules: NO_RULES,
+      rollBufferPercent: ROLL_BUFFER,
+      asOf: ASOF,
+    };
+    expect(evaluateCoveredCallCampaign({ ...base, earnings: null }).earningsNote.verifyReason).toContain("not proof");
+    expect(evaluateCoveredCallCampaign({ ...base, earnings: null, earningsEvidence: "AMBIGUOUS" }).earningsNote.verifyReason).toContain("Conflicting");
+    expect(evaluateCoveredCallCampaign({ ...base, earnings: { daysUntilReport: 20, reportDate: "2026-12-01", evidence: "STALE" } }).earningsNote.verifyReason).toContain("out of date");
+  });
+
+  it("is null (not UNKNOWN) when the covered-call earnings-notice rule itself is off", () => {
     const scan = evaluateCoveredCallCampaign({
       campaignId: "c28",
       ticker: "SYN",

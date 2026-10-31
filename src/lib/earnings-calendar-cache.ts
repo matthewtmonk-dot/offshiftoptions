@@ -24,6 +24,14 @@ import { marketDate } from "@/domain/finance/marketCalendar";
  */
 export const EARNINGS_CALENDAR_REFRESH_INTERVAL_MS = 20 * 60 * 60 * 1000;
 
+/**
+ * How old the calendar cache may be before the Scanner stops trusting an earnings DATE and asks for it to be verified.
+ * Deliberately wider than the 20-hour refresh cadence above: the refresh runs once a day in the evening (ET), so a 20-hour
+ * trust window would flag every ticker as stale each afternoon. Report dates rarely move, so three days (a missed refresh
+ * or a weekend) is the point at which "unverified" is the honest answer.
+ */
+export const EARNINGS_SCANNER_TRUST_WINDOW_MS = 72 * 60 * 60 * 1000;
+
 export type EarningsCalendarCacheStatus = {
   lastSuccessfulRefreshAt: Date | null;
   entryCount: number;

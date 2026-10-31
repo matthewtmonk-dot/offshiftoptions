@@ -168,6 +168,8 @@ const BLOCKING_CRITERION_LABELS: ReadonlyArray<readonly [string, string]> = [
   ["spreadPercent", "bid/ask spread too wide"],
   ["delta", "delta outside your range"],
   ["earningsDistance", "earnings too close"],
+  ["earningsFreeDaysAfterExpiry", "earnings too soon after expiration"],
+  ["earningsExitSessions", "no trading session to exit before earnings"],
   ["dte", "outside your expiration window"],
   ["ror", "return below your target"],
   ["annualizedRor", "annualized return below target"],

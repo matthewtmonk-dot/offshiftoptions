@@ -16,7 +16,7 @@ const db = vi.hoisted(() => ({
 vi.mock("./prisma", () => ({ prisma: db }));
 
 import { SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
-import { rerunDemoScannerForUser, resetScannerSettingsToLstCoreForUser, updateScannerSettingsForUser } from "./workflows";
+import { ensureMyLstScannerProfileForUser, rerunDemoScannerForUser, resetScannerSettingsToLstCoreForUser, updateScannerSettingsForUser } from "./workflows";
 
 function mattProfile(overrides: Partial<{ updatedAt: Date }> = {}) {
   return { id: "profile-matt", ownerId: "matt", name: "My LST", updatedAt: new Date("2026-09-21T14:00:00Z"), ...overrides };
@@ -59,6 +59,37 @@ beforeEach(() => {
   // transaction; the mock stands in for `tx` with the same `db` object so calls made via `tx.*`
   // are observable on the same mocks as a direct `prisma.*` call would be.
   db.$transaction.mockImplementation((callback: (tx: typeof db) => unknown) => callback(db));
+  // A profile that already has a row for every defined rule (the normal case): nothing is missing.
+  db.scannerRule.findMany.mockResolvedValue(SCANNER_RULE_DEFINITIONS.map((definition) => ({ key: definition.key })));
+});
+
+describe("ensureMyLstScannerProfileForUser - rules added after the profile was created", () => {
+  it("inserts only the missing rule keys, with defaults, and never touches the profile or any existing row", async () => {
+    db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
+    db.scannerRule.findMany.mockResolvedValue(
+      SCANNER_RULE_DEFINITIONS.filter((definition) => !["earningsFreeDaysAfterExpiry", "earningsExitSessions", "coveredCallEarningsDistance"].includes(definition.key)).map((definition) => ({ key: definition.key })),
+    );
+    await ensureMyLstScannerProfileForUser("matt");
+
+    expect(db.scannerRule.createMany).toHaveBeenCalledTimes(1);
+    const args = db.scannerRule.createMany.mock.calls[0][0] as { data: Array<{ key: string; profileId: string; enabled: boolean; valueJson: unknown }>; skipDuplicates: boolean };
+    expect(args.skipDuplicates).toBe(true);
+    expect(args.data.map((row) => row.key).sort()).toEqual(["coveredCallEarningsDistance", "earningsExitSessions", "earningsFreeDaysAfterExpiry"]);
+    expect(args.data.every((row) => row.profileId === "profile-matt")).toBe(true);
+    expect(args.data.find((row) => row.key === "earningsFreeDaysAfterExpiry")).toMatchObject({ enabled: true, valueJson: { desired: 3 } });
+    expect(args.data.find((row) => row.key === "coveredCallEarningsDistance")).toMatchObject({ enabled: false });
+    // No overwrite of existing rows, and the profile's updatedAt is not bumped (old results must not read "earlier settings").
+    expect(db.scannerRule.deleteMany).not.toHaveBeenCalled();
+    expect(db.scannerProfile.update).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when every rule already has a row (idempotent)", async () => {
+    db.scannerProfile.findFirst.mockResolvedValue(mattProfile());
+    await ensureMyLstScannerProfileForUser("matt");
+    await ensureMyLstScannerProfileForUser("matt");
+    expect(db.scannerRule.createMany).not.toHaveBeenCalled();
+    expect(db.scannerProfile.update).not.toHaveBeenCalled();
+  });
 });
 
 describe("updateScannerSettingsForUser (Ticket 7: settings save must not run a scan)", () => {

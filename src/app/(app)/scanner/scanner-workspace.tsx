@@ -553,7 +553,13 @@ export function ScannerWorkspace({
                       {coloredCell(result.values.optionVolume, formatCount, ruleSeverityTone(criterionFor(result, "optionVolume")))}
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
-                      {coloredCell(result.values.earningsDistance, (value) => `${value}d`, ruleSeverityTone(criterionFor(result, "earningsDistance")))}
+                      {result.values.earningsVerifyReason ? (
+                        <span className="text-amber-300" title={result.values.earningsVerifyReason} data-testid="verify-earnings-cell">
+                          {result.values.earningsDistance !== null ? `${result.values.earningsDistance}d?` : "Verify"}
+                        </span>
+                      ) : (
+                        coloredCell(result.values.earningsDistance, (value) => `${value}d`, ruleSeverityTone(criterionFor(result, "earningsDistance")))
+                      )}
                     </td>
                     {activeOptionalColumns.map((column) => (
                       <td key={column.key} className="border-b border-zinc-900 px-3 py-2">
@@ -803,15 +809,31 @@ function CandidateInspector({
             <Datum
               label="Earnings vs trade"
               value={
-                v.earningsWithinHoldingPeriod === null ? (
-                  dash()
-                ) : v.earningsWithinHoldingPeriod ? (
-                  <span className="text-amber-300">Before expiry</span>
+                v.earningsVerifyReason ? (
+                  <span className="text-amber-300" title={v.earningsVerifyReason} data-testid="verify-earnings">
+                    Verify earnings date
+                  </span>
+                ) : v.earningsFreeDaysAfterExpiry === null || v.earningsExitSessions === null ? (
+                  v.earningsWithinHoldingPeriod === null ? (
+                    dash()
+                  ) : v.earningsWithinHoldingPeriod ? (
+                    <span className="text-amber-300">Before expiry</span>
+                  ) : (
+                    "After expiry"
+                  )
+                ) : v.earningsFreeDaysAfterExpiry < 0 ? (
+                  <span className="text-red-300">On or before expiry</span>
                 ) : (
-                  "After expiry"
+                  <span
+                    className={v.earningsExitSessions < 1 || v.earningsFreeDaysAfterExpiry < 3 ? "text-amber-300" : undefined}
+                    title="Earnings-free calendar days after expiration, and full trading sessions to sell assigned shares before earnings"
+                  >
+                    {v.earningsFreeDaysAfterExpiry + 1}d after · {v.earningsExitSessions} {v.earningsExitSessions === 1 ? "session" : "sessions"} to exit
+                  </span>
                 )
               }
             />
+
           </dl>
         </section>
         <section>
