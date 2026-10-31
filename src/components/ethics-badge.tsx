@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useId, useRef, useState } from "react";
-import { ETHICS_CATEGORY_LABELS, ETHICS_RATING_LABELS, type EthicsRating } from "@/domain/ethics/ethicalCompatibility";
+import { ETHICS_CATEGORY_LABELS, ethicsRatingLabel, type EthicsRating } from "@/domain/ethics/ethicalCompatibility";
 import type { EthicsSummary } from "@/lib/ethics";
 
 const RATING_CHIP: Record<EthicsRating, string> = {
@@ -18,7 +18,9 @@ const RATING_CHIP: Record<EthicsRating, string> = {
 function chipText(summary: EthicsSummary | undefined): string {
   if (!summary) return "?";
   if (summary.gate === "BLOCKED") return "EX";
-  return summary.score === null ? "?" : String(summary.score);
+  if (summary.score === null) return "?";
+  // A leading ~ marks a score that rests on unverified evidence ("no concerns found yet", not "verified acceptable").
+  return summary.verified ? String(summary.score) : `~${summary.score}`;
 }
 
 /**
@@ -49,7 +51,7 @@ export function EthicsBadge({ ticker, summary }: { ticker: string; summary: Ethi
   }, [open]);
 
   const rating: EthicsRating = summary?.gate === "BLOCKED" ? "EXCLUDED" : (summary?.rating ?? "UNREVIEWED");
-  const label = summary ? `${ETHICS_RATING_LABELS[rating]}${summary.decision === "APPROVED" ? " (approved by you)" : ""}` : "Not yet reviewed";
+  const label = summary ? `${ethicsRatingLabel(rating, summary)}${summary.decision === "APPROVED" ? " (approved by you)" : ""}` : "Not yet reviewed";
 
   return (
     <span ref={rootRef} className="relative inline-flex" onClick={(event) => event.stopPropagation()}>
@@ -79,7 +81,7 @@ export function EthicsBadge({ ticker, summary }: { ticker: string; summary: Ethi
             <>
               <p className="mt-1 text-zinc-400">
                 Score {summary.score ?? "n/a"} / 100 · evidence confidence <strong className="text-zinc-200">{summary.confidence?.toLowerCase() ?? "n/a"}</strong>
-                {summary.incomplete ? " · not every category reviewed" : ""}
+                {summary.incomplete ? " · not every category reviewed" : summary.verified ? " · verified from primary sources" : " · not independently verified"}
               </p>
               {summary.summary ? <p className="mt-1 text-zinc-300">{summary.summary}</p> : null}
               {summary.recheckNeeded ? <p className="mt-1 text-amber-300">{summary.recheckReason ?? "Needs a second look."}</p> : null}

@@ -48,6 +48,15 @@ describe("parseEthicsImport", () => {
     expect(withEvidenceCategory("EXPORT_CONTROLS").ok).toBe(false);
   });
 
+  it("HIGH confidence is only accepted with a primary-source link for that category (or a general primary description)", () => {
+    const high = (evidence: unknown[]) => parseEthicsImport(doc([company({ assessments: [{ ...company().assessments[0], confidence: "HIGH" }], evidence })]));
+    expect(high([]).ok).toBe(false);
+    expect(high([{ ...company().evidence[0], sourceType: "NEWS" }]).ok).toBe(false);
+    expect(high([{ ...company().evidence[0], category: "GAMBLING" }]).ok).toBe(false);
+    expect(high([company().evidence[0]]).ok).toBe(true);
+    expect(high([{ ...company().evidence[0], category: "GENERAL" }]).ok).toBe(true);
+  });
+
   it("requires at least one assessment per company", () => {
     expect(parseEthicsImport(doc([company({ assessments: [] })])).ok).toBe(false);
   });

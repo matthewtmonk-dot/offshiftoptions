@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ethicsGate,
+  ethicsRatingLabel,
   ethicsReviewDue,
   evaluateEthicalCompatibility,
   gamblingLevelFromRevenueShare,
@@ -80,10 +81,41 @@ describe("evaluateEthicalCompatibility", () => {
     expect(minor.concerns[0]).toContain("~3% of business");
   });
 
-  it("confidence is the weakest assessed confidence, kept separate from the score", () => {
+  it("confidence is the weakest assessed confidence, reported separately from the score", () => {
     const result = evaluateEthicalCompatibility([...cleanCore("HIGH").slice(0, 3), a("PREDATORY_LENDING", "NONE", "LOW")]);
     expect(result.confidence).toBe("LOW");
-    expect(result.score).toBe(100);
+    expect(result.verified).toBe(false);
+  });
+
+  it("no concerns found is NOT the same as verified: unverified clean tops out below green, verified clean is green", () => {
+    const unverified = evaluateEthicalCompatibility([...cleanCore("MEDIUM"), a("SUBSTANCES", "NONE", "MEDIUM"), a("ASSOCIATIONS", "NONE", "MEDIUM")]);
+    expect(unverified).toMatchObject({ rating: "LIGHT_GREEN", verified: false, noConcernsFound: true });
+    expect(unverified.score!).toBeLessThan(90);
+    expect(ethicsRatingLabel(unverified.rating, unverified)).toBe("No concerns found - not verified");
+
+    const verified = evaluateEthicalCompatibility(cleanCore("HIGH"));
+    expect(verified).toMatchObject({ rating: "GREEN", score: 100, verified: true });
+    expect(ethicsRatingLabel(verified.rating, verified)).toBe("Verified compatible");
+  });
+
+  it("weaker evidence scores lower than stronger evidence for the same clean result", () => {
+    const high = evaluateEthicalCompatibility(cleanCore("HIGH")).score!;
+    const medium = evaluateEthicalCompatibility(cleanCore("MEDIUM")).score!;
+    const low = evaluateEthicalCompatibility(cleanCore("LOW")).score!;
+    expect(high).toBeGreaterThan(medium);
+    expect(medium).toBeGreaterThan(low);
+  });
+
+  it("insufficient research (core categories not assessed) never reads as a perfect score, even when what exists is verified", () => {
+    const result = evaluateEthicalCompatibility([a("ABORTION", "NONE", "HIGH"), a("GAMBLING", "NONE", "HIGH")]);
+    expect(result).toMatchObject({ incomplete: true, verified: false });
+    expect(result.rating).not.toBe("GREEN");
+    expect(result.score!).toBeLessThan(90);
+  });
+
+  it("a verified-clean company with one MINOR finding is still shown as verified", () => {
+    const result = evaluateEthicalCompatibility([...cleanCore().filter((x) => x.category !== "GAMBLING"), a("GAMBLING", "MINOR", "HIGH", { revenueSharePercent: 3 })]);
+    expect(result).toMatchObject({ rating: "GREEN", verified: true, noConcernsFound: false });
   });
 
   it("a duplicated category keeps the worse finding", () => {

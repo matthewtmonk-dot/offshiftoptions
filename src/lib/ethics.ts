@@ -38,6 +38,10 @@ export type EthicsSummary = {
   decisionNote: string | null;
   needsReview: boolean;
   incomplete: boolean;
+  /** Every core category assessed with primary-source (HIGH) evidence. */
+  verified: boolean;
+  /** No assessed category shows even a minor concern (says nothing about how well that was verified). */
+  noConcernsFound: boolean;
   recheckNeeded: boolean;
   recheckReason: string | null;
   reviewDue: boolean;
@@ -106,6 +110,8 @@ function toSummary(row: ProfileRow, now: Date): EthicsSummary {
     decisionNote: row.decisionNote,
     needsReview: evaluation.needsReview,
     incomplete: evaluation.incomplete,
+    verified: evaluation.verified,
+    noConcernsFound: evaluation.noConcernsFound,
     recheckNeeded: row.recheckNeeded,
     recheckReason: row.recheckReason,
     reviewDue: ethicsReviewDue(row.reviewAfter, now),

@@ -60,6 +60,17 @@ const companySchema = z.object({
   reviewAfterDays: z.number().int().min(7).max(730).optional(),
   assessments: z.array(assessmentSchema).min(1).max(ETHICS_CATEGORIES.length),
   evidence: z.array(evidenceSchema).max(16).default([]),
+}).superRefine((company, context) => {
+  // HIGH confidence means "verified from a primary source" - so it must come with one (about that category, or a
+  // general primary description of the business). Without it the claim is not accepted as verified.
+  const primary = (item: (typeof company.evidence)[number]) => ["PRIMARY_FILING", "REGULATOR", "COMPANY"].includes(item.sourceType);
+  company.assessments.forEach((assessment, index) => {
+    if (assessment.confidence !== "HIGH") return;
+    const supported = company.evidence.some((item) => primary(item) && (item.category === assessment.category || item.category === "GENERAL"));
+    if (!supported) {
+      context.addIssue({ code: "custom", path: ["assessments", index, "confidence"], message: `HIGH confidence for ${assessment.category} needs a primary-source link (filing, regulator or the company itself) for that category` });
+    }
+  });
 });
 
 export const ethicsImportSchema = z.object({ companies: z.array(companySchema).min(1).max(MAX_COMPANIES_PER_IMPORT) });

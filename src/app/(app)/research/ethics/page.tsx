@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { EthicsBadge } from "@/components/ethics-badge";
 import { Panel } from "@/components/ui";
-import { ETHICS_CATEGORY_LABELS, ETHICS_RATING_LABELS } from "@/domain/ethics/ethicalCompatibility";
+import { ETHICS_CATEGORY_LABELS, ETHICS_RATING_LABELS, ethicsRatingLabel } from "@/domain/ethics/ethicalCompatibility";
 import { requireCurrentUser } from "@/lib/auth";
 import { ethicsIsSetUp, getEthicsDetailForUser, getEthicsSummariesForUser, type EthicsSummary } from "@/lib/ethics";
 import { EthicsDecisionForm, EthicsImportForm } from "./ethics-forms";
@@ -98,7 +98,7 @@ export default async function EthicsPage({ searchParams }: { searchParams: Promi
               <Panel title={`${detail.summary.ticker} - ${detail.summary.companyName ?? "company"}`}>
                 <div className="space-y-3 text-sm">
                   <p className="text-zinc-300">
-                    <strong>{ETHICS_RATING_LABELS[detail.summary.gate === "BLOCKED" ? "EXCLUDED" : detail.summary.rating]}</strong>
+                    <strong>{ethicsRatingLabel(detail.summary.gate === "BLOCKED" ? "EXCLUDED" : detail.summary.rating, detail.summary)}</strong>
                     {detail.summary.score !== null ? ` · score ${detail.summary.score}/100` : ""} · evidence confidence <strong>{detail.summary.confidence?.toLowerCase() ?? "n/a"}</strong> · researched {detail.summary.researchedAt}
                   </p>
                   {detail.summary.summary ? <p className="text-zinc-300">{detail.summary.summary}</p> : null}

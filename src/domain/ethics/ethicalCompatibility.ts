@@ -17,6 +17,11 @@
  * Evidence confidence is tracked SEPARATELY from the rating: a hard exclusion only takes effect when the evidence is
  * HIGH-confidence (verified from a primary source). A DIRECT finding on weaker evidence is flagged for Matt's review
  * instead, and a model-or-secondary-source judgment can therefore never exclude a company on its own.
+ *
+ * "No concerns found" is NOT the same as "verified acceptable". A clean category only earns full marks when its
+ * evidence is HIGH confidence; an unverified (MEDIUM / LOW) clean category costs a small uncertainty deduction, and a
+ * core category nobody has assessed yet costs a larger one. So a company that merely has not shown a concern after a
+ * light review tops out around 80 ("no concerns found, not verified") and only a verified company can reach green.
  * Revenue percentages are only ever carried when a source states them; nothing here invents one.
  */
 
@@ -71,6 +76,11 @@ const CATEGORY_MULTIPLIER: Record<EthicsCategory, number> = {
 // Categories where a verified DIRECT finding is a hard exclusion on its own.
 const HARD_EXCLUSION_CATEGORIES: readonly EthicsCategory[] = ["ABORTION", "PORNOGRAPHY", "GAMBLING", "PREDATORY_LENDING"];
 
+// Uncertainty: points taken off (before the category multiplier) when a category shows no concern but is not verified,
+// or has not been assessed at all. This is what stops insufficient research from reading as a perfect score.
+const UNVERIFIED_CLEAN_POINTS: Record<EvidenceConfidence, number> = { HIGH: 0, MEDIUM: 3, LOW: 8 };
+const UNASSESSED_CORE_POINTS = 12;
+
 export const GAMBLING_MINOR_BELOW_PERCENT = 5;
 export const GAMBLING_MODERATE_UP_TO_PERCENT = 10;
 export const GAMBLING_DEFINING_FROM_PERCENT = 50;
@@ -96,6 +106,10 @@ export type EthicsEvaluation = {
   needsReview: boolean;
   /** True when one or more core categories have not been assessed yet. */
   incomplete: boolean;
+  /** True only when every core category is assessed with HIGH-confidence (primary-source) evidence. */
+  verified: boolean;
+  /** True when no assessed category shows even a minor concern (says nothing about how well that was verified). */
+  noConcernsFound: boolean;
   /** Short plain-language reasons, worst first (for the compact tooltip). */
   concerns: string[];
 };
@@ -111,10 +125,12 @@ export function evaluateEthicalCompatibility(assessments: readonly CategoryAsses
   }
   const assessed = [...byCategory.values()];
   if (assessed.length === 0) {
-    return { score: null, rating: "UNREVIEWED", confidence: null, needsReview: false, incomplete: true, concerns: [] };
+    return { score: null, rating: "UNREVIEWED", confidence: null, needsReview: false, incomplete: true, verified: false, noConcernsFound: false, concerns: [] };
   }
 
   const incomplete = CORE_ETHICS_CATEGORIES.some((category) => !byCategory.has(category));
+  const verified = !incomplete && CORE_ETHICS_CATEGORIES.every((category) => byCategory.get(category)?.confidence === "HIGH");
+  const noConcernsFound = assessed.every((a) => INVOLVEMENT_LEVELS.indexOf(a.level) < INVOLVEMENT_LEVELS.indexOf("MINOR"));
   const confidence = assessed.reduce<EvidenceConfidence>((lowest, a) => (CONFIDENCE_RANK[a.confidence] < CONFIDENCE_RANK[lowest] ? a.confidence : lowest), "HIGH");
 
   const verifiedHardExclusion = assessed.some((a) => a.level === "DIRECT" && a.confidence === "HIGH" && HARD_EXCLUSION_CATEGORIES.includes(a.category));
@@ -126,19 +142,26 @@ export function evaluateEthicalCompatibility(assessments: readonly CategoryAsses
     .map((a) => `${ETHICS_CATEGORY_LABELS[a.category]}: ${a.level.toLowerCase()}${a.revenueSharePercent != null ? ` (~${a.revenueSharePercent}% of business)` : ""} - ${a.summary}`);
 
   if (verifiedHardExclusion) {
-    return { score: 0, rating: "EXCLUDED", confidence, needsReview: false, incomplete, concerns };
+    return { score: 0, rating: "EXCLUDED", confidence, needsReview: false, incomplete, verified, noConcernsFound, concerns };
   }
 
-  const deduction = assessed.reduce((sum, a) => sum + LEVEL_POINTS[a.level] * CATEGORY_MULTIPLIER[a.category], 0);
+  const findingDeduction = assessed.reduce((sum, a) => sum + LEVEL_POINTS[a.level] * CATEGORY_MULTIPLIER[a.category], 0);
+  // A category that shows no concern but is not verified costs a little; one nobody assessed yet costs more.
+  const uncertaintyDeduction =
+    assessed
+      .filter((a) => INVOLVEMENT_LEVELS.indexOf(a.level) < INVOLVEMENT_LEVELS.indexOf("MINOR"))
+      .reduce((sum, a) => sum + UNVERIFIED_CLEAN_POINTS[a.confidence] * CATEGORY_MULTIPLIER[a.category], 0) +
+    CORE_ETHICS_CATEGORIES.filter((category) => !byCategory.has(category)).reduce((sum, category) => sum + UNASSESSED_CORE_POINTS * CATEGORY_MULTIPLIER[category], 0);
+  const deduction = findingDeduction + uncertaintyDeduction;
   let score = Math.max(0, Math.round(100 - deduction));
   // A severe finding that is not verified can never read as better than a clear warning, and is always flagged.
   if (unverifiedSevere) score = Math.min(score, 39);
 
   let rating: EthicsRating = score >= 90 ? "GREEN" : score >= 70 ? "LIGHT_GREEN" : score >= 40 ? "YELLOW" : "RED";
-  // A company whose core categories are not all assessed yet can not be called strongly compatible.
-  if (incomplete && rating === "GREEN") rating = "LIGHT_GREEN";
+  // Strongly compatible means VERIFIED compatible - never merely "nothing found yet".
+  if (!verified && rating === "GREEN") rating = "LIGHT_GREEN";
 
-  return { score, rating, confidence, needsReview: unverifiedSevere, incomplete, concerns };
+  return { score, rating, confidence, needsReview: unverifiedSevere, incomplete, verified, noConcernsFound, concerns };
 }
 
 export type EthicsGate = "OK" | "REVIEW" | "BLOCKED" | "UNREVIEWED";
@@ -175,6 +198,13 @@ export function isMaterialEthicsChange(
 /** Re-research is due when the scheduled review date has passed. */
 export function ethicsReviewDue(reviewAfter: Date | null, now: Date): boolean {
   return !!reviewAfter && reviewAfter.getTime() <= now.getTime();
+}
+
+/** The label to show a person: separates "verified compatible" from "no concerns found yet, not verified". */
+export function ethicsRatingLabel(rating: EthicsRating, flags: { verified: boolean; noConcernsFound: boolean }): string {
+  if (rating === "GREEN") return "Verified compatible";
+  if (rating === "LIGHT_GREEN" && flags.noConcernsFound && !flags.verified) return "No concerns found - not verified";
+  return ETHICS_RATING_LABELS[rating];
 }
 
 export const ETHICS_RATING_LABELS: Record<EthicsRating, string> = {
