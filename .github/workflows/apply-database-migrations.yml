@@ -1,0 +1,66 @@
+name: Apply database migrations
+
+# Manual only. Hostinger's build cannot run Prisma migrations (see docs/ARCHITECTURE.md), so schema changes are
+# applied to the production database from here instead, BEFORE the code that needs them is merged.
+#
+# One-time setup (Matt): GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret named
+# MIGRATION_DATABASE_URL, value = the Supabase *direct* Postgres connection string. It is only readable by workflows
+# in this repository; it never appears in code, logs or pull requests from forks.
+#
+# To run: Actions -> "Apply database migrations" -> Run workflow, pick the branch whose migration you want to apply
+# (or main), type APPLY. It only ever runs `prisma migrate deploy` (applies new, already-reviewed migration files in
+# order, never resets or drops anything) and prints the status before and after.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type APPLY to confirm"
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apply-database-migrations
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    if: ${{ github.repository == 'matthewtmonk-dot/offshiftoptions' && inputs.confirm == 'APPLY' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the selected branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (no scripts)
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Migration status before
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then echo "MIGRATION_DATABASE_URL secret is not set."; exit 1; fi
+          corepack pnpm prisma migrate status --config prisma7.config.ts || true
+
+      - name: Apply pending migrations
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: corepack pnpm prisma migrate deploy --config prisma7.config.ts
+
+      - name: Migration status after
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: corepack pnpm prisma migrate status --config prisma7.config.ts
