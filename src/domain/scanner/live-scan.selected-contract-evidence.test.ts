@@ -13,7 +13,7 @@ const rules: ScannerRule[] = SCANNER_RULE_DEFINITIONS.filter((rule) => rule.defa
   key: rule.key, name: rule.name, operator: rule.operator, desired: rule.defaultDesired,
 }));
 const ready: LiveScanTechnicalLookup = { state: "READY", rsi: 30, bbLower: 18, bbMiddle: 23, bbUpper: 28 };
-const earnings: LiveScanEarningsLookup = { daysUntilReport: 36, reportDate: "2026-10-22" };
+const earnings = { daysUntilReport: 36, reportDate: "2026-10-22" } satisfies LiveScanEarningsLookup;
 
 function put(overrides: Partial<OptionContractSnapshot> = {}): OptionContractSnapshot {
   return {

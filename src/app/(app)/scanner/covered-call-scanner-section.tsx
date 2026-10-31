@@ -56,12 +56,17 @@ function CoveredCallCard({ scan, highlighted }: { scan: CoveredCallCampaignScan;
         </span>
       </div>
 
-      {scan.earningsCriterion ? (
-        <p className={`mt-1 text-xs ${scan.earningsCriterion.status === "FAIL" ? "text-amber-300" : "text-zinc-500"}`}>
-          Earnings: {scan.earningsDate ? `${scan.earningsDate} (${scan.earningsDistance} days away)` : "UNKNOWN"}
-          {scan.earningsCriterion.status === "FAIL" ? " · inside your earnings-distance minimum" : ""}
-        </p>
-      ) : null}
+      {/* Informational only: shares you already own may deliberately be covered through earnings, so this never blocks. */}
+      <p className={`mt-1 text-xs ${scan.earningsNote.verifyReason || scan.earningsCriterion?.status === "FAIL" ? "text-amber-300" : "text-zinc-500"}`} data-testid="covered-call-earnings-note">
+        Earnings:{" "}
+        {scan.earningsNote.reportDate
+          ? `${scan.earningsNote.reportDate} (${scan.earningsNote.daysAway} days away)`
+          : "date unknown"}
+        {scan.earningsNote.beforeExpiry === true ? " · falls before this call expires (fine if you want to sell through it)" : ""}
+        {scan.earningsNote.beforeExpiry === false ? " · after this call expires" : ""}
+        {scan.earningsCriterion?.status === "FAIL" ? " · inside your earnings-notice window" : ""}
+        {scan.earningsNote.verifyReason ? ` · Verify earnings date: ${scan.earningsNote.verifyReason}` : ""}
+      </p>
 
       {scan.openCall ? (
         <div className="mt-3 rounded-md border border-amber-900/50 bg-amber-950/20 p-3 text-sm text-amber-100">

@@ -105,6 +105,12 @@ export type ScannerViewResult = {
     /** True only when a real earnings date and this contract's own DTE are both known and the
      * earnings date falls on or before expiration - never guessed from just one of the two. */
     earningsWithinHoldingPeriod: boolean | null;
+    /** Earnings-free calendar days between this contract's expiration and the report date (negative = on/before expiry). */
+    earningsFreeDaysAfterExpiry: number | null;
+    /** Full NYSE trading sessions between expiration and earnings. */
+    earningsExitSessions: number | null;
+    /** Why the earnings date itself needs checking (none on file, out of date, or conflicting); null when it is current. */
+    earningsVerifyReason: string | null;
     /** No option-chain provider used here has ever supplied a verified per-quote pricing
      * timestamp (same finding as Tickets 4/5's valuationAsOf) - always null today, kept explicit
      * so its absence is machine-readable rather than silently omitted. */
@@ -440,6 +446,9 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
       earningsDate: snapshotString(result.snapshotJson, "earningsDate"),
       earningsDistance: snapshotNumber(result.snapshotJson, "earningsDistance"),
       earningsWithinHoldingPeriod: snapshotBoolean(result.snapshotJson, "earningsWithinHoldingPeriod"),
+      earningsFreeDaysAfterExpiry: snapshotNumber(result.snapshotJson, "earningsFreeDaysAfterExpiry"),
+      earningsExitSessions: snapshotNumber(result.snapshotJson, "earningsExitSessions"),
+      earningsVerifyReason: snapshotString(result.snapshotJson, "earningsVerifyReason"),
       optionQuotedAt: snapshotString(result.snapshotJson, "optionQuotedAt"),
       retrievedAt: snapshotString(result.snapshotJson, "retrievedAt"),
       retrievedOnNonTradingDay: snapshotBoolean(result.snapshotJson, "retrievedOnNonTradingDay"),

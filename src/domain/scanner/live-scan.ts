@@ -9,6 +9,7 @@ import {
   round,
   wilderRsi,
 } from "@/domain/finance/calculations";
+import { earningsVerifyReason, putEarningsValues, type EarningsEvidenceState } from "@/domain/finance/earningsBuffer";
 import { isNyseMarketDay, marketDate } from "@/domain/finance/marketCalendar";
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
@@ -72,7 +73,15 @@ export type LiveScanTechnicalLookup =
 
 /** Structurally compatible with earnings-calendar-cache.ts's TickerEarningsLookup, with reportDate
  * pre-formatted as an ISO date string (matching how this module already stores earningsDate). */
-export type LiveScanEarningsLookup = { daysUntilReport: number; reportDate: string };
+export type LiveScanEarningsLookup =
+  | {
+      daysUntilReport: number;
+      reportDate: string;
+      /** How current the date is (see earningsEvidence.ts). Omitted by legacy callers, which means "trusted". */
+      evidence?: EarningsEvidenceState;
+    }
+  /** The earnings cache has no usable single date for this ticker (none on file, or conflicting dates). */
+  | { unavailable: true; evidence: "NO_EVIDENCE" | "AMBIGUOUS" };
 
 export type LiveScanOptions = {
   provider: MarketDataProvider;
@@ -217,7 +226,7 @@ export async function evaluateLiveMarketScan({
     // exclusively from the caller-supplied cache (see LiveScanOptions.technicalCache's own doc
     // comment). Never used for a broad universe without this being true.
     stockStage = quoteEligible.map((candidate) =>
-      mergeTechnicalCacheValues(candidate, technicalCache.get(candidate.ticker), earningsLookup?.get(candidate.ticker)),
+      mergeTechnicalCacheValues(candidate, technicalCache.get(candidate.ticker), earningsEntryFor(earningsLookup, candidate.ticker)),
     );
     historyFailedTickers = new Set(); // no live fetch exists in this mode, so nothing can fail this way
   } else {
@@ -238,7 +247,7 @@ export async function evaluateLiveMarketScan({
               candidate.values,
               candles,
               candidate.verifiedFundamentals,
-              earningsLookup?.get(candidate.ticker),
+              earningsEntryFor(earningsLookup, candidate.ticker),
             ),
           };
         } catch (error) {
@@ -457,11 +466,32 @@ const TECHNICAL_SCAN_REASON_MESSAGES: Record<TechnicalScanReasonCode, string> = 
   TECHNICAL_DATA_FAILED: "Technical preparation failed for this ticker; RSI/BB are unavailable.",
 };
 
-function earningsValuesFor(entry: LiveScanEarningsLookup | undefined): { earningsDate: string | null; earningsDistance: number | null } {
+/** The lookup entry for one ticker: undefined when the caller supplied no lookup at all (legacy/demo - behaves as before),
+ * and an explicit "no evidence" entry when a lookup WAS supplied but this ticker is not in it. */
+function earningsEntryFor(lookup: Map<string, LiveScanEarningsLookup> | undefined, ticker: string): LiveScanEarningsLookup | undefined {
+  if (!lookup) return undefined;
+  return lookup.get(ticker) ?? { unavailable: true, evidence: "NO_EVIDENCE" };
+}
+
+function earningsValuesFor(entry: LiveScanEarningsLookup | undefined): {
+  earningsDate: string | null;
+  earningsDistance: number | null;
+  earningsEvidence?: EarningsEvidenceState;
+  earningsVerifyReason?: string | null;
+} {
   if (!entry) {
     return { earningsDate: null, earningsDistance: null };
   }
-  return { earningsDate: entry.reportDate, earningsDistance: entry.daysUntilReport };
+  if ("unavailable" in entry) {
+    return { earningsDate: null, earningsDistance: null, earningsEvidence: entry.evidence, earningsVerifyReason: earningsVerifyReason(entry.evidence) };
+  }
+  // A date is never read as "safe" just because it exists: a stale date keeps feeding the distance rule as before, but the
+  // earnings-buffer rules below treat anything other than a current SCHEDULED date as UNKNOWN and flag it for verification.
+  return {
+    earningsDate: entry.reportDate,
+    earningsDistance: entry.daysUntilReport,
+    ...(entry.evidence ? { earningsEvidence: entry.evidence, earningsVerifyReason: earningsVerifyReason(entry.evidence) } : {}),
+  };
 }
 
 /** Stage 2 (legacy/demo/test mode only - see LiveScanOptions.technicalCache): merges
@@ -883,6 +913,13 @@ function candidateValues(candidate: OptionStageCandidate, option: OptionContract
     // Never guessed from only one side - both the earnings date and this contract's own DTE must
     // be genuinely known before this is anything but null (see "never invent an earnings date").
     earningsWithinHoldingPeriod: earningsDistance === null || dte === null ? null : earningsDistance <= dte,
+    // New-put earnings rules: calendar days and full trading sessions between THIS contract's expiration and the report
+    // date. Null (UNKNOWN, never PASS) unless the date is current; earningsVerifyReason says why a person must check it.
+    ...putEarningsValues({
+      expiration: option.expiration,
+      reportDate: typeof candidate.values.earningsDate === "string" ? candidate.values.earningsDate : null,
+      evidence: candidate.values.earningsEvidence as EarningsEvidenceState | null | undefined,
+    }),
     optionQuotedAt: null as string | null,
     retrievedAt: asOf.toISOString(),
     retrievedOnNonTradingDay: !isNyseMarketDay(marketDate(asOf)),
@@ -926,6 +963,8 @@ function unknownOptionValues() {
     openInterest: null,
     optionVolume: null,
     earningsWithinHoldingPeriod: null,
+    earningsFreeDaysAfterExpiry: null,
+    earningsExitSessions: null,
     optionQuotedAt: null,
     retrievedAt: null,
     retrievedOnNonTradingDay: null,

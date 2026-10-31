@@ -24,6 +24,7 @@ import {
   type CurrentOpenCall,
 } from "../finance/campaigns";
 import { annualizedReturnOnRisk, bidAskSpreadPercent, daysToExpiration, optionContractValue, round } from "../finance/calculations";
+import { coveredCallEarningsNote, type CoveredCallEarningsNote, type EarningsEvidenceState } from "../finance/earningsBuffer";
 import { computeCoveredCallRollStatus, type RollStatus } from "../finance/rollStatus";
 import { compareExpirations, expirationWindowFor, weeklyHorizonFor, WEEKLY_TARGET_DTE } from "./live-scan";
 import { evaluateCriterion, type CriterionResult, type ScannerRule } from "./scanner";
@@ -110,9 +111,13 @@ export type CoveredCallCampaignScan = {
   currentPrice: number | null;
   earningsDate: string | null;
   earningsDistance: number | null;
-  /** Evaluated against the reused earningsDistance rule when the user has it enabled - null (not
-   * a fabricated PASS) when the rule is disabled or the distance itself is unknown. */
+  /** Evaluated against the covered-call-only earnings notice rule when the user has turned it on - null (not a
+   * fabricated PASS) when the rule is off or the distance itself is unknown. It is a notice, never a block: shares
+   * already owned may deliberately be covered through earnings. (The put earnings-buffer rules do not apply here.) */
   earningsCriterion: CriterionResult | null;
+  /** Always present: the date, whether it falls on or before THIS call's expiry, and a verify flag when the date is
+   * missing, stale or conflicting. Informational only. */
+  earningsNote: CoveredCallEarningsNote;
   reasonCode: CoveredCallCampaignReasonCode | null;
   selectedExpiration: string | null;
   targetDte: number;
@@ -135,7 +140,38 @@ export function maxCoveredCallContracts(availableShares: number): number {
   return Math.max(0, Math.floor(availableShares / 100));
 }
 
-export function evaluateCoveredCallCampaign({
+type CoveredCallScanInput = {
+  campaignId: string;
+  ticker: string;
+  events: CampaignEventInput[];
+  status: CampaignStatusInput;
+  currentPrice: number | null;
+  /** null means the chain fetch itself failed/was never attempted - distinct from an empty array
+   * (chain returned, no CALL contracts). */
+  options: OptionContractSnapshot[] | null;
+  rules: ScannerRule[];
+  earnings: { daysUntilReport: number; reportDate: string; evidence?: EarningsEvidenceState } | null;
+  /** How current the earnings date is. Omit for legacy callers (a present date is then trusted). */
+  earningsEvidence?: EarningsEvidenceState | null;
+  rollBufferPercent: number;
+  asOf?: Date;
+};
+
+export function evaluateCoveredCallCampaign(input: CoveredCallScanInput): CoveredCallCampaignScan {
+  const scan = scanCoveredCallCampaign(input);
+  const evidence = input.earningsEvidence ?? input.earnings?.evidence ?? (input.earnings ? undefined : null);
+  return {
+    ...scan,
+    earningsNote: coveredCallEarningsNote({
+      reportDate: scan.earningsDate,
+      daysAway: scan.earningsDistance,
+      expiration: scan.selectedExpiration,
+      evidence: evidence === null ? "NO_EVIDENCE" : evidence,
+    }),
+  };
+}
+
+function scanCoveredCallCampaign({
   campaignId,
   ticker,
   events,
@@ -146,30 +182,17 @@ export function evaluateCoveredCallCampaign({
   earnings,
   rollBufferPercent,
   asOf = new Date(),
-}: {
-  campaignId: string;
-  ticker: string;
-  events: CampaignEventInput[];
-  status: CampaignStatusInput;
-  currentPrice: number | null;
-  /** null means the chain fetch itself failed/was never attempted - distinct from an empty array
-   * (chain returned, no CALL contracts). */
-  options: OptionContractSnapshot[] | null;
-  rules: ScannerRule[];
-  earnings: { daysUntilReport: number; reportDate: string } | null;
-  rollBufferPercent: number;
-  asOf?: Date;
-}): CoveredCallCampaignScan {
+}: CoveredCallScanInput): Omit<CoveredCallCampaignScan, "earningsNote"> {
   const summary = summarizeCampaign({ status, events, currentUnderlyingPrice: currentPrice, asOf });
   const openCall = getCurrentOpenCall(events);
   const availableShares = availableSharesForCoveredCall(summary.sharesHeld, openCall);
   const maxContracts = maxCoveredCallContracts(availableShares);
 
   const earningsDistance = earnings?.daysUntilReport ?? null;
-  const earningsRule = rules.find((rule) => rule.key === "earningsDistance");
+  const earningsRule = rules.find((rule) => rule.key === "coveredCallEarningsDistance");
   const earningsCriterion = earningsRule ? evaluateCriterion(earningsRule, earningsDistance) : null;
 
-  const base: CoveredCallCampaignScan = {
+  const base: Omit<CoveredCallCampaignScan, "earningsNote"> = {
     campaignId,
     ticker,
     sharesHeld: summary.sharesHeld,

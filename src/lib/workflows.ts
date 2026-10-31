@@ -4,7 +4,7 @@ import { getCurrentOpenCall, isPastExpiration, summarizeCampaign } from "@/domai
 import { nyCalendarDateOf } from "@/domain/finance/marketSession";
 import { marketDate, refreshSessionRequirementMet } from "@/domain/finance/marketCalendar";
 import type { SchwabReconciliationEvidence, TransactionEvidenceStatus } from "@/domain/finance/schwabReconciliation";
-import { compareStockStageCandidates, evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate } from "@/domain/scanner/live-scan";
+import { compareStockStageCandidates, evaluateLiveMarketScan, STARTER_LIVE_SCAN_UNIVERSE, type LiveScanCandidate, type LiveScanEarningsLookup } from "@/domain/scanner/live-scan";
 import type {
   LsegRecommendation,
   NoteCategory,
@@ -14,7 +14,7 @@ import type {
   RollFriendliness,
   WouldOwnStatus,
 } from "@/generated/prisma/enums";
-import { evaluateDemoScan, GATING_RULE_KEYS, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS, readScannerField } from "@/domain/scanner/profile";
+import { evaluateDemoScan, GATING_RULE_KEYS, missingScannerRuleDefinitions, parseScannerDesiredFromForm, scannerRulesFromRecords, SCANNER_RULE_DEFINITIONS, readScannerField } from "@/domain/scanner/profile";
 import { classifyReadiness } from "@/domain/scanner/scanner";
 import { sanitizeResearchColumns, isResearchSortKey } from "@/domain/research/columns";
 import { isRecommendationStatus, normalizeReasonTags, type RecommendationStatus } from "@/domain/social/recommendations";
@@ -52,7 +52,7 @@ import { getEquityMarketSessionEvidenceForUser, getQuoteReviewEvidenceForUser } 
 import { resolveRelevantCampaignLegs, tickersNeedingReviewQuotes, type PositionReviewCampaignInput } from "./position-review-scope";
 import { clearRefreshGuardsForTests, runGuarded, type RefreshDisposition } from "./refresh-guard";
 import { getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
-import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
+import { EARNINGS_SCANNER_TRUST_WINDOW_MS, getEarningsEvidenceLookup } from "./earnings-calendar-cache";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
 import {
   prepareChatImageAttachments,
@@ -2400,6 +2400,53 @@ async function waitForConcurrentMyLstScannerProfileCreation(userId: string) {
 }
 
 /**
+ * Rules added to the app after a profile was created never reach that profile on their own (rows are only written when the
+ * profile is created or the settings are saved/reset). This inserts ONLY the rule keys that have no row yet, with their
+ * defaults - it never touches an existing row, never changes the profile's `updatedAt` (so existing scan results do not
+ * suddenly read as "generated with earlier settings"), and is a no-op after the first call. Safe to run concurrently:
+ * (profileId, key) is unique and duplicates are skipped.
+ */
+async function ensureMissingDefaultScannerRules(profileId: string) {
+  const existingRows = await prisma.scannerRule.findMany({ where: { profileId }, select: { key: true } });
+  const missing = missingScannerRuleDefinitions(existingRows.map((row) => row.key));
+  if (missing.length === 0) return;
+  await prisma.scannerRule.createMany({
+    data: missing.map(({ definition, sortOrder }) => ({
+      profileId,
+      key: definition.key,
+      name: definition.name,
+      operator: definition.operator,
+      valueJson: { desired: definition.defaultDesired },
+      sortOrder,
+      enabled: definition.defaultEnabled,
+    })),
+    skipDuplicates: true,
+  });
+}
+
+/** One entry per ticker, always: a current date, a stale date, or an explicit "unavailable" - never an omitted ticker. */
+async function buildLiveScanEarningsLookup(universe: string[]): Promise<Map<string, LiveScanEarningsLookup>> {
+  const evidence = await getEarningsEvidenceLookup(universe, new Date(), EARNINGS_SCANNER_TRUST_WINDOW_MS);
+  const today = marketDate(new Date());
+  return new Map(
+    universe.map((ticker): [string, LiveScanEarningsLookup] => {
+      const entry = evidence.get(ticker.trim().toUpperCase());
+      if (entry && (entry.status === "SCHEDULED" || entry.status === "STALE") && entry.reportDate) {
+        return [
+          ticker,
+          {
+            reportDate: entry.reportDate.toISOString().slice(0, 10),
+            daysUntilReport: Math.round((entry.reportDate.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
+            evidence: entry.status,
+          },
+        ];
+      }
+      return [ticker, { unavailable: true, evidence: entry?.status === "AMBIGUOUS" ? "AMBIGUOUS" : "NO_EVIDENCE" }];
+    }),
+  );
+}
+
+/**
  * Returns the current user's "My LST" ScannerProfile, creating it (with its full set of default
  * ScannerRule rows from SCANNER_RULE_DEFINITIONS) only if none exists yet.
  *
@@ -2417,6 +2464,7 @@ export async function ensureMyLstScannerProfileForUser(userId: string) {
   });
 
   if (existing) {
+    await ensureMissingDefaultScannerRules(existing.id);
     return existing;
   }
 
@@ -2720,13 +2768,7 @@ export async function rerunLiveSchwabScannerForUser(
     const technicalCache = await getTechnicalIndicatorSnapshotsForUser(userId, universe);
 
     advanceStage("EARNINGS_JOIN");
-    const earningsRows = await getEarningsCalendarLookup(universe);
-    const earningsLookup = new Map(
-      [...earningsRows.entries()].map(([ticker, entry]) => [
-        ticker,
-        { daysUntilReport: entry.daysUntilReport, reportDate: entry.reportDate.toISOString().slice(0, 10) },
-      ]),
-    );
+    const earningsLookup = await buildLiveScanEarningsLookup(universe);
 
     advanceStage("EVALUATE");
     const candidates = await evaluateLiveMarketScan({ provider, rules, universe, technicalCache, earningsLookup });

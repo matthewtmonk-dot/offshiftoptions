@@ -6,7 +6,8 @@ import type { OptionContractSnapshot } from "@/providers/market-data/types";
 import { getAssignedCampaignsForCoveredCallScanForUser } from "./app-data";
 import { getSchwabMarketDataProviderForUser } from "./broker-connections";
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
-import { getEarningsCalendarLookup } from "./earnings-calendar-cache";
+import { EARNINGS_SCANNER_TRUST_WINDOW_MS, getEarningsEvidenceLookup } from "./earnings-calendar-cache";
+import { marketDate } from "@/domain/finance/marketCalendar";
 import { getQuoteSnapshotsForUser } from "./live-quotes";
 import { prisma } from "./prisma";
 import { ensureMyLstScannerProfileForUser } from "./workflows";
@@ -46,11 +47,11 @@ export async function getCoveredCallScanForUser(userId: string, asOf: Date = new
     ensureMyLstScannerProfileForUser(userId),
     prisma.userSettings.findUnique({ where: { userId }, select: { rollBufferPercent: true } }),
     getQuoteSnapshotsForUser(userId, tickers),
-    getEarningsCalendarLookup(tickers, asOf),
+    getEarningsEvidenceLookup(tickers, asOf, EARNINGS_SCANNER_TRUST_WINDOW_MS),
     getSchwabMarketDataProviderForUser(userId),
   ]);
   const records = await prisma.scannerRule.findMany({ where: { profileId: profile.id }, orderBy: { sortOrder: "asc" } });
-  const rules = scannerRulesFromRecords(records);
+  const rules = scannerRulesFromRecords(records, { includeCoveredCallRules: true });
   const rollBufferPercent = Number(settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
   const horizon = expirationWindowFor(weeklyHorizonFor(rules), asOf);
 
@@ -71,6 +72,8 @@ export async function getCoveredCallScanForUser(userId: string, asOf: Date = new
 
   const scans = campaigns.map((campaign) => {
     const ticker = campaign.ticker.toUpperCase();
+    const evidence = earnings.get(ticker);
+    const dated = evidence && (evidence.status === "SCHEDULED" || evidence.status === "STALE") && evidence.reportDate ? evidence : null;
     return evaluateCoveredCallCampaign({
       campaignId: campaign.id,
       ticker: campaign.ticker,
@@ -79,7 +82,14 @@ export async function getCoveredCallScanForUser(userId: string, asOf: Date = new
       currentPrice: quotes.get(ticker)?.price ?? null,
       options: provider ? (chainsByTicker.get(ticker) ?? null) : null,
       rules,
-      earnings: earnings.get(ticker) ? { daysUntilReport: earnings.get(ticker)!.daysUntilReport, reportDate: earnings.get(ticker)!.reportDate.toISOString().slice(0, 10) } : null,
+      earnings: dated?.reportDate
+        ? {
+            daysUntilReport: Math.round((dated.reportDate.getTime() - marketDate(asOf).getTime()) / (24 * 60 * 60 * 1000)),
+            reportDate: dated.reportDate.toISOString().slice(0, 10),
+            evidence: dated.status as "SCHEDULED" | "STALE",
+          }
+        : null,
+      earningsEvidence: dated ? undefined : evidence?.status === "AMBIGUOUS" ? "AMBIGUOUS" : "NO_EVIDENCE",
       rollBufferPercent,
       asOf,
     });
