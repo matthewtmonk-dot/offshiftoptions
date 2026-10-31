@@ -83,10 +83,10 @@ describe("technicalReadyHint (when will fresh data be ready?)", () => {
     expect(hint("2026-10-17T14:00:00Z")).toMatch(/being prepared right now.*noon ET/); // Sat 10:00 AM EDT
   });
 
-  it("after the window it does NOT promise data will arrive - it says the job may have failed", () => {
-    expect(hint("2026-10-15T17:00:00Z")).toMatch(/may have failed/); // Thu 1:00 PM EDT
-    expect(hint("2026-10-17T18:00:00Z")).toMatch(/may have failed/); // Sat 2:00 PM EDT
-    expect(hint("2026-10-18T15:00:00Z")).toMatch(/may have failed/); // Sunday
+  it("after the window it does NOT promise data will arrive - it points at the Prepare data now button", () => {
+    expect(hint("2026-10-15T17:00:00Z")).toMatch(/Prepare data now/); // Thu 1:00 PM EDT
+    expect(hint("2026-10-17T18:00:00Z")).toMatch(/Prepare data now/); // Sat 2:00 PM EDT
+    expect(hint("2026-10-18T15:00:00Z")).toMatch(/Prepare data now/); // Sunday
   });
 
   it("is DST-safe", () => {

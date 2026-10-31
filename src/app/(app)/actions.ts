@@ -7,6 +7,7 @@ import { getCurrentSessionTokenHash, requireCurrentUser, signOut } from "@/lib/a
 import { changePasswordForUser } from "@/lib/account";
 import { checkMoreScannerOptionsForUser, type OptionCheckOutcome } from "@/lib/scanner-option-check";
 import { recordDiagnostic } from "@/lib/diagnostics";
+import { prepareTechnicalDataNowForUser, type PrepareTechnicalDataOutcome } from "@/lib/technical-preparation-manual";
 import { runSettingsMutation, type SettingsActionResult } from "@/lib/safe-action-error";
 import {
   addAccountLedgerEntryForUser,
@@ -455,6 +456,19 @@ export async function checkMoreScannerOptionsAction(): Promise<OptionCheckOutcom
   if (outcome.ok && outcome.checked > 0) {
     revalidatePath("/scanner");
     revalidatePath("/dashboard");
+  }
+  return outcome;
+}
+
+/**
+ * "Prepare data now" for the Scanner - runs one bounded cycle of the technical-data preparation for the
+ * signed-in user only (see technical-preparation-manual.ts). The button calls it repeatedly until done.
+ */
+export async function prepareTechnicalDataAction(): Promise<PrepareTechnicalDataOutcome> {
+  const user = await requireCurrentUser();
+  const outcome = await prepareTechnicalDataNowForUser(user.id);
+  if (outcome.ok && outcome.processed > 0) {
+    revalidatePath("/scanner");
   }
   return outcome;
 }

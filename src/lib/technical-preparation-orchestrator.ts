@@ -266,6 +266,25 @@ export async function runTechnicalPreparationOrchestratorCycle(
     return { status: "NO_ELIGIBLE_USER" };
   }
 
+  return runTechnicalPreparationCycleForUser(selected.userId, selected.provider, now, options);
+}
+
+/**
+ * One bounded cycle for ONE already-chosen user: up to MAX_SUB_BATCHES_PER_INVOCATION of the existing
+ * 25-symbol batches (see runTechnicalPreparationOrchestratorCycle for the stop conditions). It never
+ * checks the preparation window - the scheduled orchestrator checks that before choosing a user, and
+ * the Scanner's own "Prepare data now" button (technical-preparation-manual.ts) runs this for the
+ * signed-in user at any time, because the daily-candle gate and the claim mechanism - not the clock -
+ * are what keep an early or repeated run safe.
+ */
+export type TechnicalPreparationUserCycleResult = Exclude<TechnicalPreparationOrchestratorResult, { status: "OUTSIDE_WINDOW" } | { status: "NO_ELIGIBLE_USER" }>;
+
+export async function runTechnicalPreparationCycleForUser(
+  userId: string,
+  provider: MarketDataProvider,
+  now: Date = new Date(),
+  options: { probeUniverseSource?: string } = {},
+): Promise<TechnicalPreparationUserCycleResult> {
   const startedAt = Date.now();
   let subBatchesProcessed = 0;
   let historySymbolsProcessed = 0;
@@ -279,7 +298,7 @@ export async function runTechnicalPreparationOrchestratorCycle(
         break; // never start another sub-batch once the wall-clock guard says the budget is spent
       }
 
-      const batch = await refreshTechnicalIndicatorCacheBatchForUser(selected.userId, selected.provider, {
+      const batch = await refreshTechnicalIndicatorCacheBatchForUser(userId, provider, {
         batchSize: TECHNICAL_REFRESH_BATCH_SIZE,
         now,
         probeUniverseSource: options.probeUniverseSource,
