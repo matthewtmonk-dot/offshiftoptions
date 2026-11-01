@@ -314,6 +314,21 @@ function selectTradedSecurityTransferItem(transaction: Record<string, unknown>):
       return item;
     }
   }
+  // A stock/ETF trade or share delivery: Schwab may list cash and fee legs BEFORE the security (a real SOFI sale
+  // had four currency legs ahead of the equity leg), so never assume the traded security is first - taking the
+  // first leg turned that sale into an empty currency record with no ticker, price or action. Limited to TRADE and
+  // RECEIVE_AND_DELIVER so dividend / interest records keep being read exactly as before.
+  const type = stringValue(transaction.type);
+  if (type === "TRADE" || type === "RECEIVE_AND_DELIVER") {
+    for (const itemValue of items) {
+      const item = objectValue(itemValue);
+      const instrument = objectValue(item?.instrument);
+      const assetType = stringValue(instrument?.assetType);
+      if (instrument && stringValue(instrument.symbol) && assetType && assetType !== "CURRENCY" && !stringValue(item?.feeType)) {
+        return item;
+      }
+    }
+  }
   return objectValue(items[0]);
 }
 
