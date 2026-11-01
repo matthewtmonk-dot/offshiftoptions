@@ -719,6 +719,10 @@ export default async function AccountPage({
                   <SearchCheck className="size-3" aria-hidden />
                   Diagnose Schwab Transactions &amp; Orders
                 </Link>
+                <Link href="/account/schwab-balances" prefetch={false} className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200">
+                  <SearchCheck className="size-3" aria-hidden />
+                  Schwab Balances (available to trade)
+                </Link>
                 <Link href="/account/schwab-quote-batch-diagnostic" prefetch={false} className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 underline decoration-sky-700 underline-offset-4 hover:text-sky-200">
                   <SearchCheck className="size-3" aria-hidden />
                   Scanner Engineering Diagnostics
