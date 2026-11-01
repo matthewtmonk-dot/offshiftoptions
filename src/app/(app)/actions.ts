@@ -81,6 +81,7 @@ import {
 } from "@/lib/schwab-transactions-diagnostic";
 import { runSchwabQuoteBatchDiagnosticForUser, type SchwabQuoteBatchDiagnosticResult } from "@/lib/schwab-quote-batch-diagnostic";
 import { runSchwabBalancesDiagnosticForUser, type SchwabBalancesDiagnosticResult } from "@/lib/schwab-balances-diagnostic";
+import { getTradingCapitalForUser, type TradingCapital } from "@/lib/portfolio-plan";
 import {
   getSanitizedBrokerRecordClassificationForUser,
   type BrokerRecordClassificationReport,
@@ -528,6 +529,12 @@ export async function setEthicsDecisionAction(ticker: string, decision: string, 
 export async function runSchwabTransactionsDiagnosticAction(): Promise<SchwabTransactionsDiagnosticResult> {
   const user = await requireCurrentUser();
   return runSchwabTransactionsDiagnosticForUser(user.id);
+}
+
+/** Read-only: Schwab's cash available for trading + account value for the Scanner's plan panel. Nothing is saved. */
+export async function getTradingCapitalAction(): Promise<TradingCapital> {
+  const user = await requireCurrentUser();
+  return getTradingCapitalForUser(user.id);
 }
 
 export async function runSchwabBalancesDiagnosticAction(): Promise<SchwabBalancesDiagnosticResult> {

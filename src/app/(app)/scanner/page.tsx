@@ -27,10 +27,13 @@ import { shortCalendarDate } from "@/lib/format";
 import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
 import { ensureMyLstScannerProfileForUser, MAX_DISPLAYED_STOCK_STAGE_RESULTS } from "@/lib/workflows";
 import { getCoveredCallScanForUser } from "@/lib/covered-call-scanner";
+import { buildPlanCandidates } from "@/domain/portfolio/candidates";
+import { getClassificationForTickers, getPlanExposureForUser } from "@/lib/portfolio-plan";
 import { runDemoScannerAction } from "../actions";
 import { CoveredCallScannerSection } from "./covered-call-scanner-section";
 import { LiveScanButton } from "./live-scan-button";
 import { OptionCheckButton } from "./option-check-button";
+import { PortfolioPlanPanel } from "./portfolio-plan-panel";
 import { PrepareDataButton } from "./prepare-data-button";
 import { ScannerModeTabs, type ScannerMode } from "./scanner-mode-tabs";
 import { ScannerWorkspace } from "./scanner-workspace";
@@ -229,6 +232,7 @@ export default async function ScannerPage({
   const isLiveSchwabRun = run?.source === "LIVE:SCHWAB";
   // Ethics research for just the tickers on screen; Record (not Map) because it crosses to a client component.
   const ethics = Object.fromEntries(await getEthicsSummariesForUser(user.id, allResults.map((result) => result.record.ticker)));
+  const planData = await loadPlanData(user.id, allResults, ethics);
   const diagnostics = buildExclusionDiagnostics(
     allResults.map((result) => ({ ticker: result.record.ticker, summary: result.summary })),
   );
@@ -398,6 +402,8 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
+      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} /> : null}
+
       <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} ethics={ethics} />
     </div>
   );
@@ -461,6 +467,39 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
       scanNote: snapshotString(result.snapshotJson, "scanNote"),
     },
   };
+}
+
+/**
+ * Inputs for the "Monday plan" panel: PASS/NEAR rows plus what is already committed. Wrapped so a problem here can
+ * never take the whole Scanner page down - the panel simply does not render.
+ */
+async function loadPlanData(userId: string, results: ScannerViewResult[], ethics: Record<string, { gate: "OK" | "REVIEW" | "BLOCKED" | "UNREVIEWED" }>) {
+  try {
+    const actionable = results.filter((result) => result.readiness === "PASS" || result.readiness === "NEAR");
+    const [exposure, classification] = await Promise.all([getPlanExposureForUser(userId), getClassificationForTickers(actionable.map((result) => result.record.ticker))]);
+    const gates = Object.fromEntries(Object.entries(ethics).map(([ticker, summary]) => [ticker, summary.gate]));
+    const candidates = buildPlanCandidates(
+      actionable.map((result) => ({
+        ticker: result.record.ticker,
+        readiness: result.readiness,
+        gatingClear: result.gatingClear,
+        score: result.score,
+        values: {
+          strike: result.values.strike,
+          expiration: result.values.expiration,
+          dte: result.values.dte,
+          bidProceedsPerContract: result.values.bidProceedsPerContract,
+          ror: result.values.ror,
+          earningsVerifyReason: result.values.earningsVerifyReason,
+        },
+      })),
+      gates,
+      classification,
+    );
+    return { candidates, existing: exposure.existing, unknownCount: exposure.unknownCount };
+  } catch {
+    return null;
+  }
 }
 
 /** Verdict over ONLY the stock-level criteria (the same STOCK_STAGE_RULE_KEYS the scan shortlists on). */
