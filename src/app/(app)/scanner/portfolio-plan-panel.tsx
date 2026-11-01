@@ -19,14 +19,15 @@ import type { TradingCapital } from "@/lib/portfolio-plan";
 import { getTradingCapitalAction } from "../actions";
 
 const LIMITS_KEY = "oso.plan.limits.v1";
-const CONFIRM_KEY = "oso.plan.confirm.v1";
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const usd0 = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
-/** Today's date in New York, so "confirmed once per trading session" rolls over with the market's day. */
-function easternDate(now = new Date()): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(now);
+/** "9:41 AM" in New York, so the figure's age is obvious at a glance. */
+function easternTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "just now";
+  return new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }).format(date) + " ET";
 }
 
 function readStored<T>(key: string): T | null {
@@ -73,8 +74,6 @@ type Props = {
 export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount }: Props) {
   const [limits, setLimits] = useState<PlanLimits>(DEFAULT_PLAN_LIMITS);
   const [capital, setCapital] = useState<TradingCapital | "loading">("loading");
-  const [confirmed, setConfirmed] = useState<{ date: string; amount: number } | null>(null);
-  const [confirmInput, setConfirmInput] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [suggested, setSuggested] = useState<string[] | null>(null);
 
@@ -85,8 +84,6 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount 
     void Promise.resolve().then(() => {
       if (!active) return;
       setLimits(sanitizeLimits(readStored<Partial<PlanLimits>>(LIMITS_KEY)));
-      const stored = readStored<{ date: string; amount: number }>(CONFIRM_KEY);
-      if (stored && stored.date === easternDate() && Number.isFinite(stored.amount)) setConfirmed(stored);
     });
     getTradingCapitalAction()
       .then((result) => {
@@ -118,22 +115,10 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount 
   }
 
   const schwab = capital !== "loading" && capital.ok ? capital : null;
-  const confirmedToday = confirmed && confirmed.date === easternDate() ? confirmed : null;
-  const availableToTrade = confirmedToday?.amount ?? schwab?.availableToTrade ?? null;
+  const availableToTrade = schwab?.availableToTrade ?? null;
   const accountValue = schwab?.accountValue ?? null;
   const ready = availableToTrade !== null && accountValue !== null;
   const planCapital = ready ? { accountValue, availableToTrade } : null;
-
-  function confirmAmount() {
-    const amount = Number(confirmInput.replace(/[$,\s]/g, ""));
-    if (!Number.isFinite(amount) || amount < 0) return;
-    const next = { date: easternDate(), amount };
-    setConfirmed(next);
-    writeStored(CONFIRM_KEY, next);
-    setConfirmInput("");
-    setSelected([]);
-    setSuggested(null);
-  }
 
   const { eligible, ineligible } = useMemo(() => {
     const quality = (candidate: PlanCandidate) => (candidate.readiness === "PASS" ? 100 : 0) + candidate.score;
@@ -163,7 +148,6 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount 
   }
 
   const committedNow = existing.reduce((sum, row) => sum + row.amount, 0);
-  const matchesSchwab = confirmedToday && schwab ? Math.abs(confirmedToday.amount - schwab.availableToTrade) <= 1 : null;
 
   return (
     <Panel title="Monday plan" action={<span className="text-xs text-zinc-500">Recommendations only - you place every trade yourself</span>}>
@@ -173,8 +157,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount 
           <Stat
             label="Available to trade"
             value={availableToTrade === null ? "-" : usd.format(availableToTrade)}
-            note={confirmedToday ? (matchesSchwab ? "Confirmed with Schwab today" : `Your confirmed number (Schwab says ${schwab ? usd.format(schwab.availableToTrade) : "unavailable"})`) : "Not confirmed yet today"}
-            tone={confirmedToday ? (matchesSchwab === false ? "warn" : "good") : "warn"}
+            note={schwab ? `Read from Schwab at ${easternTime(schwab.asOf)}` : undefined}
           />
           <Stat label="Already committed" value={usd.format(committedNow)} note={accountValue ? `${((committedNow / accountValue) * 100).toFixed(1)}% of the account (puts + shares at cost)` : undefined} />
           <Stat
@@ -196,21 +179,13 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount 
           <p className="text-xs text-zinc-500">{usd.format(schwab.unsettledCash)} is shown by Schwab as unsettled/held and is not counted as available.</p>
         ) : null}
 
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 p-2 text-xs text-zinc-300">
-          <label htmlFor="plan-confirm" className="font-medium">Verify with Schwab before trading - thinkorswim &quot;Option Buying Power&quot;:</label>
-          <input
-            id="plan-confirm"
-            inputMode="decimal"
-            value={confirmInput}
-            onChange={(event) => setConfirmInput(event.target.value)}
-            placeholder={schwab ? usd.format(schwab.availableToTrade) : "$"}
-            className="min-h-8 w-32 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-zinc-100"
-          />
-          <button type="button" onClick={confirmAmount} className="min-h-8 rounded-md border border-sky-400/40 bg-sky-400/10 px-2.5 font-medium text-sky-100 hover:border-sky-300">Confirm for today</button>
-          {schwab ? (
-            <button type="button" onClick={() => void loadCapital()} className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200">Refresh from Schwab</button>
-          ) : null}
-        </div>
+        {schwab ? (
+          <p className="text-xs text-zinc-500">
+            This is Schwab&apos;s own &quot;available to trade&quot; figure (the same number thinkorswim shows as Option Buying Power).{" "}
+            <button type="button" onClick={() => void loadCapital()} className="underline underline-offset-2 hover:text-zinc-300">Refresh</button>
+            {" "}before placing a trade; thinkorswim&apos;s order ticket shows the final number at that moment.
+          </p>
+        ) : null}
 
         {unknownExposureCount > 0 ? (
           <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200">
