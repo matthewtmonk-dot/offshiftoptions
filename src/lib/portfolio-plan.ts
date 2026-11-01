@@ -50,7 +50,7 @@ export async function getPlanExposureForUser(userId: string): Promise<PlanExposu
 }
 
 export type TradingCapital =
-  | { ok: true; availableToTrade: number; accountValue: number; unsettledCash: number | null; accountType: string | null; asOf: string }
+  | { ok: true; availableToTrade: number; accountValue: number; cashBalance: number | null; unsettledCash: number | null; accountType: string | null; asOf: string }
   | { ok: false; message: string };
 
 /**
@@ -67,5 +67,5 @@ export async function getTradingCapitalForUser(userId: string): Promise<TradingC
   if (availableToTrade === undefined || accountValue === undefined) {
     return { ok: false, message: "Schwab did not report cash available for trading or account value for this account type." };
   }
-  return { ok: true, availableToTrade, accountValue, unsettledCash: current.get("unsettledCash") ?? null, accountType: result.balances.accountType, asOf: result.timestamp };
+  return { ok: true, availableToTrade, accountValue, cashBalance: current.get("cashBalance") ?? null, unsettledCash: current.get("unsettledCash") ?? null, accountType: result.balances.accountType, asOf: result.timestamp };
 }

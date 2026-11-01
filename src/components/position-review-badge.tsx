@@ -123,6 +123,12 @@ export function cannotAssessPresentationTier(reasonCodes: readonly string[]): Ca
   return reasonCodes.every((code) => isRoutineCannotAssessReason(code)) ? "calm" : "attention";
 }
 
+/** Assigned shares with no covered call open - the only reason this row cannot be assessed as an option position. */
+function isSharesWithNoCall(result: PositionReviewResult): boolean {
+  const reasons = result.explanation.reasonCodes;
+  return reasons.length > 0 && reasons.every((code) => code === "ASSIGNED_SHARES_NO_CALL");
+}
+
 const POSITION_EVIDENCE_LABELS: Record<PositionReviewEvidence["position"], string> = {
   SCHWAB_CONFIRMED: "Schwab confirmed",
   AWAITING_CONFIRMATION: "Awaiting confirmation",
@@ -148,6 +154,15 @@ const POSITION_EVIDENCE_LABELS: Record<PositionReviewEvidence["position"], strin
  */
 export function PositionReviewActionBadge({ result }: { result: PositionReviewResult }) {
   if (result.action === "CANNOT_ASSESS") {
+    // Shares held with no covered call sold: nothing is "unconfirmed" - there is simply no option to assess. Say what
+    // the next step is instead of the generic "Needs confirmation" (which reads as if the shares were in doubt).
+    if (isSharesWithNoCall(result)) {
+      return (
+        <Badge tone="warn">
+          <span>No covered call yet</span>
+        </Badge>
+      );
+    }
     if (cannotAssessPresentationTier(result.explanation.reasonCodes) === "calm") {
       return null;
     }
@@ -219,7 +234,11 @@ export function PositionReviewEvidenceLine({ result }: { result: PositionReviewR
     }
   }
 
-  parts.push(POSITION_EVIDENCE_LABELS[evidence.position]);
+  parts.push(
+    isSharesWithNoCall(result) && evidence.position === "NOT_ASSESSED"
+      ? "Share count not compared with Schwab yet"
+      : POSITION_EVIDENCE_LABELS[evidence.position],
+  );
 
   // Attention-First Freshness Phase 1 - a persistable (live) action gets the same "<tier> ·
   // <time>" sub-line shape the historical presentation uses (see lastValidTimingCopy), so the

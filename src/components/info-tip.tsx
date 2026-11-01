@@ -1,7 +1,8 @@
 "use client";
 
 import { Info } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 
 type InfoTipProps = {
   label: string;
@@ -11,6 +12,29 @@ type InfoTipProps = {
   className?: string;
   testId?: string;
 };
+
+const TIP_WIDTH = 288;
+const SCREEN_MARGIN = 8;
+/** Rough height used only to decide whether the tip fits below (or above) the icon. */
+const TIP_ESTIMATED_HEIGHT = 170;
+
+/**
+ * Where the tip sits, in screen coordinates, so it is never cut off: it is drawn on top of the page (not inside the
+ * card that holds the icon, which would clip it), kept inside the screen's left and right edges, and flipped above
+ * the icon when there is no room below.
+ */
+function tipStyle(button: HTMLElement, side: "top" | "bottom", align: "start" | "center" | "end"): CSSProperties {
+  const rect = button.getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const width = Math.min(TIP_WIDTH, viewportWidth - SCREEN_MARGIN * 2);
+  const wantedLeft = align === "start" ? rect.left : align === "end" ? rect.right - width : rect.left + rect.width / 2 - width / 2;
+  const left = Math.max(SCREEN_MARGIN, Math.min(wantedLeft, viewportWidth - width - SCREEN_MARGIN));
+  const fitsBelow = rect.bottom + 8 + TIP_ESTIMATED_HEIGHT <= viewportHeight;
+  const fitsAbove = rect.top - 8 - TIP_ESTIMATED_HEIGHT >= 0;
+  const placeBelow = side === "bottom" ? fitsBelow || !fitsAbove : !fitsAbove && fitsBelow;
+  return placeBelow ? { position: "fixed", top: rect.bottom + 8, left, width } : { position: "fixed", bottom: viewportHeight - rect.top + 8, left, width };
+}
 
 export function InfoTip({
   label,
@@ -22,43 +46,56 @@ export function InfoTip({
 }: InfoTipProps) {
   const tooltipId = useId();
   const rootRef = useRef<HTMLSpanElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [pinned, setPinned] = useState(false);
+  const [style, setStyle] = useState<CSSProperties | null>(null);
   const open = hovered || focused || pinned;
+
+  function place() {
+    if (buttonRef.current) setStyle(tipStyle(buttonRef.current, side, align));
+  }
 
   useEffect(() => {
     if (!open) {
       return;
     }
 
+    function closeAll() {
+      setPinned(false);
+      setHovered(false);
+      setFocused(false);
+    }
+
     function handlePointerDown(event: PointerEvent) {
       if (rootRef.current?.contains(event.target as Node)) {
         return;
       }
-      setPinned(false);
-      setHovered(false);
-      setFocused(false);
+      closeAll();
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") {
         return;
       }
-      setPinned(false);
-      setHovered(false);
-      setFocused(false);
+      closeAll();
       const active = document.activeElement;
       if (active instanceof HTMLElement && rootRef.current?.contains(active)) {
         active.blur();
       }
     }
 
+    // The tip is positioned in screen coordinates, so scrolling or resizing would leave it behind the icon.
     document.addEventListener("pointerdown", handlePointerDown, true);
     document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", closeAll, true);
+    window.addEventListener("resize", closeAll);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown, true);
       document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", closeAll, true);
+      window.removeEventListener("resize", closeAll);
     };
   }, [open]);
 
@@ -66,10 +103,14 @@ export function InfoTip({
     <span
       ref={rootRef}
       className={`relative inline-flex align-middle ${className}`}
-      onMouseEnter={() => setHovered(true)}
+      onMouseEnter={() => {
+        place();
+        setHovered(true);
+      }}
       onMouseLeave={() => setHovered(false)}
     >
       <button
+        ref={buttonRef}
         type="button"
         aria-label={`Help: ${label}`}
         aria-describedby={open ? tooltipId : undefined}
@@ -79,36 +120,30 @@ export function InfoTip({
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
+          place();
           setPinned(true);
         }}
-        onFocus={() => setFocused(true)}
+        onFocus={() => {
+          place();
+          setFocused(true);
+        }}
         onBlur={() => setFocused(false)}
       >
         <Info className="size-3.5" aria-hidden />
       </button>
-      {open ? (
-        <span
-          id={tooltipId}
-          role="tooltip"
-          className={`pointer-events-none absolute z-50 w-72 max-w-[calc(100vw-2rem)] rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-zinc-200 shadow-xl shadow-black/40 ${placementClass(
-            side,
-            align,
-          )}`}
-        >
-          {children}
-        </span>
-      ) : null}
+      {open && style
+        ? createPortal(
+            <span
+              id={tooltipId}
+              role="tooltip"
+              style={style}
+              className="pointer-events-none z-50 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-zinc-200 shadow-xl shadow-black/40"
+            >
+              {children}
+            </span>,
+            document.body,
+          )
+        : null}
     </span>
   );
-}
-
-function placementClass(side: "top" | "bottom", align: "start" | "center" | "end") {
-  const vertical = side === "top" ? "bottom-full mb-2" : "top-full mt-2";
-  if (align === "start") {
-    return `${vertical} left-0`;
-  }
-  if (align === "end") {
-    return `${vertical} right-0`;
-  }
-  return `${vertical} left-1/2 -translate-x-1/2`;
 }

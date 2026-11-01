@@ -3,6 +3,8 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { Badge, EmptyState, Initials, Panel } from "@/components/ui";
 import { EventTime } from "@/components/event-time";
 import { WeeklyPaceRow } from "@/components/weekly-pace-row";
+import { InfoTip } from "@/components/info-tip";
+import { AccountBalanceLines } from "./account-balance-lines";
 import { accountWeeklyPaceDisplay } from "@/lib/weekly-pace-display";
 import { ClientPresentationProvider, FreshnessStrip, DashboardPositionSections, type DisplayEntry } from "@/components/client-freshness";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
@@ -176,11 +178,13 @@ export default async function DashboardPage() {
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="How am I doing?" data-testid="dashboard-summary-cards">
         <SummaryCard
           label="Account Value"
+          help="Everything in the account if you sold it all right now: cash plus the current value of your shares and options. Thinkorswim calls this “Net Liq.”"
           icon={Wallet}
           href="/account"
           value={accountValue.value}
           detail={accountValue.detail}
           reason={accountValue.unavailableReason}
+          footer={<AccountBalanceLines />}
         />
         <SummaryCard
           label="Whole-Account Gain"
@@ -357,6 +361,7 @@ export default async function DashboardPage() {
 
 function SummaryCard({
   label,
+  help,
   icon: Icon,
   href,
   value,
@@ -366,6 +371,8 @@ function SummaryCard({
   footer,
 }: {
   label: string;
+  /** Plain-English hover explanation shown next to the label. */
+  help?: string;
   icon: LucideIcon;
   href: string;
   value: string;
@@ -383,7 +390,10 @@ function SummaryCard({
     <IntentPrefetchLink href={href} className="group relative block overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400/50 hover:bg-zinc-900/80">
       <span aria-hidden className={`absolute inset-x-0 top-0 h-0.5 ${accentClass}`} />
       <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
-        <span>{label}</span>
+        <span className="inline-flex items-center gap-0.5">
+          {label}
+          {help ? <InfoTip label={label} align="start">{help}</InfoTip> : null}
+        </span>
         <Icon aria-hidden size={15} className="text-zinc-600 transition group-hover:text-sky-300" />
       </div>
       <div className={`mt-1.5 text-[28px] font-bold leading-tight tabular-nums ${toneClass}`}>{value}</div>
