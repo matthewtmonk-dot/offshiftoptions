@@ -8,6 +8,9 @@ import { changePasswordForUser } from "@/lib/account";
 import { checkMoreScannerOptionsForUser, type OptionCheckOutcome } from "@/lib/scanner-option-check";
 import { recordDiagnostic } from "@/lib/diagnostics";
 import { prepareTechnicalDataNowForUser, type PrepareTechnicalDataOutcome } from "@/lib/technical-preparation-manual";
+import { ETHICS_DECISIONS, type EthicsDecision } from "@/domain/ethics/ethicalCompatibility";
+import { parseEthicsImport } from "@/domain/ethics/ethicsImport";
+import { importEthicsResearchForUser, isEthicsNotSetUpError, setEthicsDecisionForUser } from "@/lib/ethics";
 import { runSettingsMutation, type SettingsActionResult } from "@/lib/safe-action-error";
 import {
   addAccountLedgerEntryForUser,
@@ -471,6 +474,54 @@ export async function prepareTechnicalDataAction(): Promise<PrepareTechnicalData
     revalidatePath("/scanner");
   }
   return outcome;
+}
+
+export type EthicsActionResult = { ok: true; message: string } | { ok: false; error: string };
+
+const ETHICS_NOT_SET_UP_MESSAGE = "Ethics storage isn't set up in the database yet. Apply the pending database update first (Claude will tell you how).";
+
+/**
+ * Imports a research file (validated, https-only, size-limited - see ethicsImport.ts) for the signed-in user.
+ * The user's own decisions are never overwritten; a worse new finding only flags them for a second look.
+ */
+export async function importEthicsResearchAction(raw: string): Promise<EthicsActionResult> {
+  const user = await requireCurrentUser();
+  const parsed = parseEthicsImport(typeof raw === "string" ? raw : "");
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  try {
+    const result = await importEthicsResearchForUser(user.id, parsed.document);
+    revalidatePath("/research/ethics");
+    revalidatePath("/research");
+    revalidatePath("/scanner");
+    const flagged = result.changed.filter((item) => item.material).length;
+    return { ok: true, message: `Imported ${result.imported} ${result.imported === 1 ? "company" : "companies"}.${flagged ? ` ${flagged} got worse than before - check them.` : ""}` };
+  } catch (error) {
+    if (isEthicsNotSetUpError(error)) return { ok: false, error: ETHICS_NOT_SET_UP_MESSAGE };
+    throw error;
+  }
+}
+
+/** Records the user's own call on a company: APPROVED, EXCLUDED, UNDER_REVIEW, or CLEAR to go back to the computed rating. */
+export async function setEthicsDecisionAction(ticker: string, decision: string, note: string): Promise<EthicsActionResult> {
+  const user = await requireCurrentUser();
+  let symbol: string;
+  try {
+    symbol = requireTicker(ticker);
+  } catch {
+    return { ok: false, error: "That isn't a valid ticker." };
+  }
+  const next: EthicsDecision | null = decision === "CLEAR" ? null : (ETHICS_DECISIONS as readonly string[]).includes(decision) ? (decision as EthicsDecision) : null;
+  if (decision !== "CLEAR" && next === null) return { ok: false, error: "Unknown decision." };
+  try {
+    const saved = await setEthicsDecisionForUser(user.id, symbol, next, typeof note === "string" ? note : null);
+    if (!saved) return { ok: false, error: `${symbol} hasn't been researched yet.` };
+  } catch (error) {
+    if (isEthicsNotSetUpError(error)) return { ok: false, error: ETHICS_NOT_SET_UP_MESSAGE };
+    throw error;
+  }
+  revalidatePath("/research/ethics");
+  revalidatePath("/scanner");
+  return { ok: true, message: next ? `${symbol} marked ${next.replace("_", " ").toLowerCase()}.` : `${symbol} decision cleared.` };
 }
 
 export async function runSchwabTransactionsDiagnosticAction(): Promise<SchwabTransactionsDiagnosticResult> {

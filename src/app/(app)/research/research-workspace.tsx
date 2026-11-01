@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 import { EmptyState, FieldLabel } from "@/components/ui";
 import { InfoTip } from "@/components/info-tip";
+import { EthicsBadge } from "@/components/ethics-badge";
+import type { EthicsSummary } from "@/lib/ethics";
 import { RECOMMENDATION_REASON_TAGS } from "@/domain/social/recommendations";
 import {
   resolveAutoOrManual,
@@ -93,6 +95,7 @@ export function ResearchWorkspace({
   scanByTicker,
   campaignByTicker,
   avFundamentalsByTicker,
+  ethicsByTicker = {},
   initialColumns,
   initialSortKey,
   error,
@@ -105,6 +108,8 @@ export function ResearchWorkspace({
   scanByTicker: Record<string, ResearchScanSnapshot>;
   campaignByTicker: Record<string, ResearchCampaignSummary>;
   avFundamentalsByTicker: Record<string, ResearchAlphaVantageFundamentals>;
+  /** Ethical-compatibility research by ticker (only researched companies appear; the rest show "?"). */
+  ethicsByTicker?: Record<string, EthicsSummary>;
   initialColumns: string[];
   initialSortKey: ResearchSortKey;
   error?: string;
@@ -388,6 +393,9 @@ export function ResearchWorkspace({
                         </td>
                         <td className="sticky left-16 z-10 border-b border-zinc-900 bg-zinc-950 px-3 py-2">
                           <span className="text-sm font-semibold text-zinc-50">{item.ticker}</span>
+                          <span className="ml-1.5 inline-block align-middle">
+                            <EthicsBadge ticker={item.ticker} summary={ethicsByTicker[item.ticker]} />
+                          </span>
                           {item.visibility === "SHARED" ? <Eye className="ml-1.5 inline size-3 text-sky-400" aria-hidden /> : null}
                           {buddyItem ? (
                             <div className="mt-0.5 text-[10px] font-normal text-zinc-500">
