@@ -80,6 +80,7 @@ import {
   type SchwabTransactionsDiagnosticResult,
 } from "@/lib/schwab-transactions-diagnostic";
 import { runSchwabQuoteBatchDiagnosticForUser, type SchwabQuoteBatchDiagnosticResult } from "@/lib/schwab-quote-batch-diagnostic";
+import { runSchwabBalancesDiagnosticForUser, type SchwabBalancesDiagnosticResult } from "@/lib/schwab-balances-diagnostic";
 import {
   getSanitizedBrokerRecordClassificationForUser,
   type BrokerRecordClassificationReport,
@@ -527,6 +528,11 @@ export async function setEthicsDecisionAction(ticker: string, decision: string, 
 export async function runSchwabTransactionsDiagnosticAction(): Promise<SchwabTransactionsDiagnosticResult> {
   const user = await requireCurrentUser();
   return runSchwabTransactionsDiagnosticForUser(user.id);
+}
+
+export async function runSchwabBalancesDiagnosticAction(): Promise<SchwabBalancesDiagnosticResult> {
+  const user = await requireCurrentUser();
+  return runSchwabBalancesDiagnosticForUser(user.id);
 }
 
 export async function runSchwabQuoteBatchDiagnosticAction(): Promise<SchwabQuoteBatchDiagnosticResult> {
