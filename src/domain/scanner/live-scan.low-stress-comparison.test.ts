@@ -110,8 +110,28 @@ function buildFixtureProvider(fixture: Fixture): MarketDataProvider {
   };
 }
 
+// Leveraged / inverse / volatility funds are now excluded by policy (securityType.ts) before any pricing, so the
+// engine-compatibility check below only covers the fixtures that are still candidates.
+const EXCLUDED_BY_SECURITY_TYPE = new Set(["SCO", "UVIX", "UVXY"]);
+
 describe("Low Stress scanner comparison (diagnostic, not a production universe change)", () => {
-  it.each(LOW_STRESS_FIXTURES)(
+  it.each(LOW_STRESS_FIXTURES.filter((fixture) => EXCLUDED_BY_SECURITY_TYPE.has(fixture.ticker)))(
+    "$ticker: is excluded by security type before any option lookup",
+    async (fixture) => {
+      const results = await evaluateLiveMarketScan({
+        provider: buildFixtureProvider(fixture),
+        rules: LOW_STRESS_COMPARISON_RULES,
+        universe: [fixture.ticker],
+        asOf: new Date("2026-08-31T12:00:00Z"),
+      });
+      const result = results.find((candidate) => candidate.ticker === fixture.ticker);
+      expect(result?.funnelStage).toBe("QUOTE_EXCLUDED");
+      expect(result?.reachedOptionChainLookup).toBe(false);
+      expect(String(result?.values.scanNote)).toMatch(/^Excluded:/);
+    },
+  );
+
+  it.each(LOW_STRESS_FIXTURES.filter((fixture) => !EXCLUDED_BY_SECURITY_TYPE.has(fixture.ticker)))(
     "$ticker: absent from today's fixed starter universe, but evaluates cleanly on OSO's engine once included",
     async (fixture) => {
       // Part A finding, locked in as a regression: today's live scan can only ever reach a
