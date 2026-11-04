@@ -209,7 +209,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount 
 
         {eligible.length === 0 ? (
           <p className="rounded-md border border-dashed border-zinc-800 p-3 text-sm text-zinc-300" data-testid="plan-empty">
-            No trade in this scan clears every rule right now, so the plan is to leave the cash available. Weekend option prices are last Friday&apos;s; re-scan after 10:30 AM ET on Monday.
+            No trade in this scan clears every rule right now, so the plan is to leave the cash available. Prices move during the session, so re-scan before acting - on a weekend the quotes are Friday&apos;s close, so wait for Monday after 10:30 AM ET.
           </p>
         ) : (
           <ul className="space-y-2" data-testid="plan-candidates">

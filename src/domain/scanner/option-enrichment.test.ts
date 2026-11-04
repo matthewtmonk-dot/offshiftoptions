@@ -28,7 +28,7 @@ describe("option enrichment state", () => {
   );
 
   it("distinguishes a budget loss from a stock-screen disqualification in both UI and persisted wording", () => {
-    expect(notOptionAssessedLabel("NOT_ENRICHED_BUDGET", 8)).toBe("Passed the stock screen. Options not priced yet - beyond the first 8 checked automatically. Press Check options.");
+    expect(notOptionAssessedLabel("NOT_ENRICHED_BUDGET", 8)).toBe("No stock-screen failures (an earnings date may still need checking). Options not priced yet - beyond the first 8 checked automatically. Press Check options.");
     expect(notOptionAssessedLabel("NOT_ENRICHED_STOCK_FILTER", 8)).toBe("Options not checked — stock screen did not qualify");
     // A stock-screen exclusion must never claim it ran out of budget - it never competed at all.
     expect(notOptionAssessedLabel("NOT_ENRICHED_STOCK_FILTER", 8)).not.toContain("budget");
