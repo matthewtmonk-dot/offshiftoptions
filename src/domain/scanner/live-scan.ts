@@ -15,6 +15,7 @@ import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCand
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { DEMO_SCAN_CANDIDATES } from "./profile";
 import { notEnrichedScanNote, type NotEnrichedState } from "./option-enrichment";
+import { excludedSecurityFor } from "./securityType";
 import { evaluateCandidate, evaluateCriterion, setupScore, type ScannerRule } from "./scanner";
 
 /**
@@ -215,7 +216,12 @@ export async function evaluateLiveMarketScan({
   const unavailableTickers = quoteOutcomes.filter((outcome): outcome is QuoteStageOutcome & { ok: false } => !outcome.ok);
 
   const quoteOnlyRules = rules.filter((rule) => QUOTE_ONLY_STOCK_RULE_KEYS.has(rule.key));
-  const quoteEligible = quoteStage.filter((candidate) => !evaluateCandidate(quoteOnlyRules, candidate.values).results.some((r) => r.status === "FAIL"));
+  // Leveraged / inverse / option-income / preferred funds are never candidates, so they are cut here with the price and
+  // volume exclusions: no history or option-chain request is ever spent on them, and the pricing queue never sees them.
+  const excludedSecurityOf = (candidate: { ticker: string; quote: MarketQuote }) => excludedSecurityFor(candidate.ticker, candidate.quote.companyDescription);
+  const quoteEligible = quoteStage.filter(
+    (candidate) => !excludedSecurityOf(candidate) && !evaluateCandidate(quoteOnlyRules, candidate.values).results.some((r) => r.status === "FAIL"),
+  );
   const quoteExcluded = quoteStage.filter((candidate) => !quoteEligible.includes(candidate));
 
   let stockStage: StockStageCandidate[];
@@ -373,7 +379,8 @@ export async function evaluateLiveMarketScan({
       ...unknownOptionValues(),
       // A deliberate stock-screen exclusion, not a budget loss - this ticker never competed.
       optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" as const,
-      scanNote: quoteStageExclusionScanNote(evaluateCandidate(quoteOnlyRules, candidate.values).results),
+      securityExclusion: excludedSecurityOf(candidate)?.kind ?? null,
+      scanNote: excludedSecurityOf(candidate)?.reason ?? quoteStageExclusionScanNote(evaluateCandidate(quoteOnlyRules, candidate.values).results),
     };
     return {
       ticker: candidate.ticker,
