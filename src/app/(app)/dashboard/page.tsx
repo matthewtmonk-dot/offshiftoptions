@@ -19,7 +19,9 @@ import { getCurrentOpenCall, summarizeCampaign } from "@/domain/finance/campaign
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { summarizeThisWeek, summarizeWinLoss } from "@/domain/finance/performance";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
+import { underlyingPositionReviewResult } from "@/domain/finance/positionReviewAssessment";
 import { attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows } from "@/domain/finance/positionReviewRows";
+import { getPositionEarningsNotes } from "@/lib/position-earnings";
 import {
   accountValueCard,
   activeSettlementBreakdown,
@@ -140,9 +142,23 @@ export default async function DashboardPage() {
     getOpenPutCreditKeptForUser(user.id, data.openCampaigns, asOf),
   ]);
   const displaysByCampaignId = new Map(resolvedDisplays.map((entry) => [entry.campaignId, entry.display]));
+  // Earnings warnings come from the cached earnings calendar (no provider call); a failure just means no note.
+  const earningsNotesByCampaignId = await getPositionEarningsNotes(
+    allReviewRows.map((row) => {
+      const display = displaysByCampaignId.get(row.campaignId);
+      return {
+        campaignId: row.campaignId,
+        ticker: row.ticker,
+        legType: row.legType,
+        expiration: row.expiration,
+        rollSuggested: display ? underlyingPositionReviewResult(display).action === "REVIEW_ROLL" : false,
+      };
+    }),
+  );
   const sortedReviewRows = sortPositionToReviewDisplayRows(attachPositionAssessmentDisplays(allReviewRows, displaysByCampaignId)).map((row) => ({
     ...row,
     creditKept: creditKeptByCampaignId.get(row.campaignId) ?? null,
+    earnings: earningsNotesByCampaignId.get(row.campaignId) ?? null,
   }));
   const reviewEntries: DisplayEntry[] = sortedReviewRows.flatMap((row) => (row.display ? [{ key: row.campaignId, display: row.display }] : []));
 

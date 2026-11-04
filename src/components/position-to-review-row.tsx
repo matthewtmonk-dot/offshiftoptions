@@ -4,6 +4,7 @@ import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from 
 import { CreditKeptMeter } from "@/components/credit-kept-meter";
 import { PositionStrikeGauge } from "@/components/position-strike-gauge";
 import { NextStepLine } from "@/components/next-step-line";
+import { PositionEarningsNoteView } from "@/components/position-earnings-note";
 import type { PositionToReviewDisplayRow } from "@/domain/finance/positionReviewRows";
 import { money, shortCalendarDate } from "@/lib/format";
 import { activityTone, currentActivityLabel } from "@/domain/finance/positionActivity";
@@ -69,6 +70,7 @@ export function PositionToReviewRowView({ row, now = new Date(), loading = false
           </div>
         ) : null}
         {row.display ? <LivePositionAssessmentEvidenceLine display={row.display} now={now} /> : null}
+        {!awaitingSettlement ? <PositionEarningsNoteView note={row.earnings} /> : null}
         {row.legType ? (
           <NextStepLine
             display={row.display}

@@ -1,5 +1,6 @@
 import type { CampaignCurrentStage } from "./campaigns";
 import type { CreditKeptSummary } from "./creditKept";
+import type { PositionEarningsNote } from "./positionEarningsWarning";
 import { comparePositionReviewPriority } from "./positionReview";
 import { isRoutineCannotAssessReason, underlyingPositionReviewResult, type PositionAssessmentDisplay } from "./positionReviewAssessment";
 import { resolveEffectivePresentation, type EffectivePresentation } from "./presentationFreshness";
@@ -32,6 +33,9 @@ export type PositionToReviewRow = {
   /** Dashboard "credit kept" (creditKept.ts) - optional presentation enrichment, absent/null when no
    * trustworthy mark exists. Never read by any status/priority/attention logic. */
   creditKept?: CreditKeptSummary | null;
+  /** Earnings caution for this open position (positionEarningsWarning.ts) - presentation only, like creditKept:
+   * never read by status/priority/attention logic. */
+  earnings?: PositionEarningsNote | null;
 };
 
 /**
