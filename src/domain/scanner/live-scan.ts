@@ -1030,8 +1030,27 @@ function persistedStockValues(values: Record<string, number | string | boolean |
   return stockValues;
 }
 
-/** True when a persisted row can be option-checked honestly: it has a usable stored price and still
- * passes every enabled stock-level rule under the supplied rules. The on-demand checker uses this
+/** Stock-stage rules whose UNKNOWN must not block pricing the option chain. A missing earnings date
+ * (an ETF, or a stock the 25-request/day earnings cache has not reached yet) is the single most
+ * common UNKNOWN on a broad scan. Pricing such a row is still honest: the row's own earnings
+ * criteria stay UNKNOWN, so it can only ever land as VERIFY - never PASS - until the date is known. */
+const OPTION_CHECK_TOLERATED_UNKNOWN_KEYS = new Set(["earningsDistance"]);
+
+/** Whether a stock-stage screen is good enough to spend an option-chain request on: no enabled
+ * stock rule FAILs, and every UNKNOWN is one of OPTION_CHECK_TOLERATED_UNKNOWN_KEYS. Matches the
+ * full scan's own shortlist (which already prices no-FAIL/UNKNOWN rows within its budget) so the
+ * follow-up "Check options" pass no longer silently skips rows the scan itself would have priced. */
+export function isStockScreenOptionCheckable(
+  rules: ScannerRule[],
+  stockValues: Record<string, number | string | boolean | null | undefined>,
+): boolean {
+  const { results } = evaluateCandidate(rules.filter((rule) => STOCK_STAGE_RULE_KEYS.has(rule.key)), stockValues);
+  if (results.some((result) => result.status === "FAIL")) return false;
+  return results.every((result) => result.status !== "UNKNOWN" || OPTION_CHECK_TOLERATED_UNKNOWN_KEYS.has(result.key));
+}
+
+/** True when a persisted row can be option-checked honestly: it has a usable stored price and its
+ * stock screen is option-checkable (see isStockScreenOptionCheckable). The on-demand checker uses this
  * to pick WHICH rows to spend a chain request on, so it never fetches a chain it would then discard. */
 export function isPersistedRowOptionCheckable(
   values: Record<string, number | string | boolean | null | undefined>,
@@ -1039,7 +1058,7 @@ export function isPersistedRowOptionCheckable(
 ): boolean {
   const stockValues = persistedStockValues(values);
   const price = numericValue(stockValues.price);
-  return price !== null && price > 0 && stockScreenVerdict(rules, stockValues) === "PASS";
+  return price !== null && price > 0 && isStockScreenOptionCheckable(rules, stockValues);
 }
 
 /**
@@ -1063,7 +1082,7 @@ export function enrichPersistedStockStageRow({
 }) {
   const stockValues = persistedStockValues(values);
   const price = numericValue(stockValues.price);
-  if (price === null || price <= 0 || stockScreenVerdict(rules, stockValues) !== "PASS") return null;
+  if (price === null || price <= 0 || !isStockScreenOptionCheckable(rules, stockValues)) return null;
 
   // Widened to the persisted-values shape on purpose: bestPutValues returns one of two object
   // shapes (a selected contract, or a "no contract" blank), and every consumer reads these by key.
