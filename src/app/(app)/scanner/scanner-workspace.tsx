@@ -30,7 +30,7 @@ import {
 } from "@/domain/scanner/option-enrichment";
 import { funnelInputOf, isBestAvailable, isWorthALook } from "@/domain/scanner/scannerFunnel";
 import { ruleSeverityTone, type SeverityTone } from "@/domain/scanner/severity";
-import { formatEtDateTime, money, percent, shortDate, toNumber } from "@/lib/format";
+import { formatEtDateTime, money, percent, shortCalendarDate, toNumber } from "@/lib/format";
 import { recommendStockAction, setResearchStatusAction } from "../actions";
 import type { ScannerBuddy, ScannerViewResult } from "./page";
 
@@ -752,7 +752,7 @@ function CandidateInspector({
       {hasContract ? (
         <section aria-label="Trade summary" className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
           <p className="text-sm text-zinc-300">
-            Sell the <span className="font-semibold text-zinc-50">{shortDate(v.expiration as string)}</span>{" "}
+            Sell the <span className="font-semibold text-zinc-50">{shortCalendarDate(v.expiration as string)}</span>{" "}
             <span className="font-semibold text-zinc-50">{money(v.strike as number)}</span> put
             {v.bidProceedsPerContract !== null ? (
               <>
@@ -802,7 +802,7 @@ function CandidateInspector({
               value={
                 v.earningsDate ? (
                   <>
-                    {shortDate(v.earningsDate)}
+                    {shortCalendarDate(v.earningsDate)}
                     {v.earningsDistance !== null ? (
                       <span className={`ml-1 text-xs ${severityTextClass(ruleSeverityTone(criterionFor(result, "earningsDistance")))}`}>
                         ({formatCount(v.earningsDistance)}d)

@@ -62,7 +62,7 @@ function CoveredCallCard({ scan, highlighted }: { scan: CoveredCallCampaignScan;
         {scan.earningsNote.reportDate
           ? `${scan.earningsNote.reportDate} (${scan.earningsNote.daysAway} days away)`
           : "date unknown"}
-        {scan.earningsNote.beforeExpiry === true ? " · falls before this call expires (fine if you want to sell through it)" : ""}
+        {scan.earningsNote.beforeExpiry === true ? " · falls before this call expires - your shares stay exposed to an earnings move either way, and a call only cushions a drop by its premium" : ""}
         {scan.earningsNote.beforeExpiry === false ? " · after this call expires" : ""}
         {scan.earningsCriterion?.status === "FAIL" ? " · inside your earnings-notice window" : ""}
         {scan.earningsNote.verifyReason ? ` · Verify earnings date: ${scan.earningsNote.verifyReason}` : ""}

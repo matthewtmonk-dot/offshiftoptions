@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MarketDataProvider, OptionContractSnapshot } from "@/providers/market-data/types";
-import { enrichPersistedStockStageRow, evaluateLiveMarketScan, stockScreenVerdict, type LiveScanEarningsLookup, type LiveScanTechnicalLookup } from "./live-scan";
+import { enrichPersistedStockStageRow, evaluateLiveMarketScan, isStockScreenOptionCheckable, stockScreenVerdict, type LiveScanEarningsLookup, type LiveScanTechnicalLookup } from "./live-scan";
 import { SCANNER_RULE_DEFINITIONS } from "./profile";
 import type { ScannerRule } from "./scanner";
 
@@ -89,6 +89,36 @@ describe("enrichPersistedStockStageRow (the on-demand 'Check options' path)", ()
     const before = JSON.stringify(stored);
     enrichPersistedStockStageRow({ values: stored, options: chain, rules, asOf });
     expect(JSON.stringify(stored)).toBe(before);
+  });
+});
+
+describe("isStockScreenOptionCheckable (which persisted rows 'Check options' may price)", () => {
+  const values = { price: 20, stockVolume: 2_000_000, rsi: 30, bbPercent: 20, earningsDistance: 36, doNotTrade: false };
+
+  it("prices a full stock-screen PASS", () => {
+    expect(isStockScreenOptionCheckable(rules, values)).toBe(true);
+  });
+
+  it("prices a row whose ONLY unknown is the earnings date (ETF, or not yet in the earnings cache)", () => {
+    expect(stockScreenVerdict(rules, { ...values, earningsDistance: null })).toBe("UNKNOWN");
+    expect(isStockScreenOptionCheckable(rules, { ...values, earningsDistance: null })).toBe(true);
+  });
+
+  it("still refuses any stock-level FAIL, and any other unknown", () => {
+    expect(isStockScreenOptionCheckable(rules, { ...values, rsi: 55 })).toBe(false);
+    expect(isStockScreenOptionCheckable(rules, { ...values, rsi: null })).toBe(false);
+    expect(isStockScreenOptionCheckable(rules, { ...values, earningsDistance: null, rsi: null })).toBe(false);
+  });
+
+  it("an earnings-unknown row priced this way can never come back as PASS", async () => {
+    const chain = [put(7)];
+    const input = scanInput(chain);
+    const [budgetLimited] = await evaluateLiveMarketScan({ ...input, earningsLookup: new Map(), maxOptionChainLookups: 0 });
+    expect(budgetLimited.values.optionEnrichment).toBe("NOT_ENRICHED_BUDGET");
+    const checked = enrichPersistedStockStageRow({ values: persisted(budgetLimited.values), options: chain, rules, asOf });
+    expect(checked).not.toBeNull();
+    expect(checked!.values.optionEnrichment).toBe("ENRICHED");
+    expect(checked!.summary.status).not.toBe("PASS");
   });
 });
 
