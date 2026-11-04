@@ -21,6 +21,9 @@ import { Badge, EmptyState, FieldLabel } from "@/components/ui";
 import { DteBadge } from "@/components/dte-badge";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
+import { PositionEarningsNoteView } from "@/components/position-earnings-note";
+import type { PositionEarningsNote } from "@/domain/finance/positionEarningsWarning";
+import { getPositionEarningsNotes } from "@/lib/position-earnings";
 import { NextStepLine } from "@/components/next-step-line";
 import { WeeklyPaceRow } from "@/components/weekly-pace-row";
 import { PerformanceScorecardPanel } from "@/components/performance-scorecard-panel";
@@ -296,6 +299,7 @@ export default async function PositionsPage({
   // wording and expiration-guidance suppression logic - those are now the shared orchestration's
   // own action/lifecycle contract.
   const positionAssessmentDisplayByCampaignId = new Map<string, PositionAssessmentDisplay>();
+  const earningsNoteByCampaignId = new Map<string, PositionEarningsNote>();
   // Recomputed only for ASSIGNED rows once a quote is available, so the Assigned Stock card can
   // show unrealized/total campaign P/L - summarizeCampaign never fabricates these without a real
   // current price (see PROJECT_HANDOFF.md), so an unavailable quote just leaves them UNKNOWN.
@@ -338,6 +342,22 @@ export default async function PositionsPage({
     for (const entry of resolvedDisplays) {
       positionAssessmentDisplayByCampaignId.set(entry.campaignId, entry.display);
     }
+
+    // Earnings caution per open position, from the cached earnings calendar (no provider call).
+    const earningsNotes = await getPositionEarningsNotes(
+      openRows.map((row) => {
+        const leg = row.campaign.status === "ASSIGNED" ? getCurrentOpenCall(row.campaign.events) : getCurrentOpenPut(row.campaign.events);
+        const display = positionAssessmentDisplayByCampaignId.get(row.campaign.id);
+        return {
+          campaignId: row.campaign.id,
+          ticker: row.campaign.ticker,
+          legType: leg ? (row.campaign.status === "ASSIGNED" ? ("CALL" as const) : ("PUT" as const)) : null,
+          expiration: leg?.expiration ?? null,
+          rollSuggested: display ? underlyingPositionReviewResult(display).action === "REVIEW_ROLL" : false,
+        };
+      }),
+    );
+    for (const [campaignId, note] of earningsNotes) earningsNoteByCampaignId.set(campaignId, note);
   }
   const trackerFreshnessEntries: DisplayEntry[] = Array.from(positionAssessmentDisplayByCampaignId.entries()).map(([key, display]) => ({ key, display }));
 
@@ -569,6 +589,7 @@ export default async function PositionsPage({
                         row={row}
                         currentUserId={user.id}
                         display={positionAssessmentDisplayByCampaignId.get(row.campaign.id) ?? null}
+                        earningsNote={earningsNoteByCampaignId.get(row.campaign.id) ?? null}
                         openView
                         quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
                         asOf={snapshotCheckedAt}
@@ -589,6 +610,7 @@ export default async function PositionsPage({
                         row={row}
                         currentUserId={user.id}
                         display={positionAssessmentDisplayByCampaignId.get(row.campaign.id) ?? null}
+                        earningsNote={earningsNoteByCampaignId.get(row.campaign.id) ?? null}
                         openView
                         quoteSnapshot={quoteSnapshots.get(row.campaign.ticker.toUpperCase()) ?? null}
                         asOf={snapshotCheckedAt}
@@ -823,6 +845,7 @@ function CampaignCard({
   row,
   currentUserId,
   display = null,
+  earningsNote = null,
   openView = false,
   quoteSnapshot = null,
   asOf = new Date(),
@@ -835,6 +858,8 @@ function CampaignCard({
    * hasn't resolved it (a different view is showing this card) or the campaign has no leg the
    * evaluator could resolve at all - never a guessed status. */
   display?: PositionAssessmentDisplay | null;
+  /** Earnings caution for this open position (positionEarningsWarning.ts); Open view only. */
+  earningsNote?: PositionEarningsNote | null;
   openView?: boolean;
   quoteSnapshot?: QuoteSnapshot | null;
   asOf?: Date;
@@ -978,6 +1003,7 @@ function CampaignCard({
               <LivePositionAssessmentEvidenceLine display={display} now={asOf} />
             </div>
           ) : null}
+          {openView && !awaitingSettlement ? <PositionEarningsNoteView note={earningsNote} /> : null}
           {openView && (openPut || openCall) ? (
             <NextStepLine
               display={display ?? null}
