@@ -13,10 +13,10 @@ import { earningsVerifyReason, putEarningsValues, type EarningsEvidenceState } f
 import { isNyseMarketDay, marketDate } from "@/domain/finance/marketCalendar";
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
-import { DEMO_SCAN_CANDIDATES } from "./profile";
+import { DEMO_SCAN_CANDIDATES, GATING_RULE_KEYS } from "./profile";
 import { notEnrichedScanNote, type NotEnrichedState } from "./option-enrichment";
 import { excludedSecurityFor } from "./securityType";
-import { evaluateCandidate, evaluateCriterion, setupScore, type ScannerRule } from "./scanner";
+import { evaluateCandidate, evaluateCriterion, hasGatingFailure, setupScore, type ScannerRule } from "./scanner";
 
 /**
  * Which funnel stage a returned ticker reached - lets a caller persisting only a bounded,
@@ -809,14 +809,55 @@ function bestPutValues(
   const selectedExpiration = [...withinHorizon].sort(compareExpirations)[0].expiration;
   const contractsAtSelectedExpiration = withinHorizon.filter((values) => values.expiration === selectedExpiration);
 
-  // Strategy quality now only influences WHICH STRIKE at the already-chosen expiration is
-  // preferred - never whether the expiration exists. Prefer a strike passing every enabled gate;
-  // if none of this expiration's strikes do, score all of them anyway so the row still shows an
-  // honest FAIL/NEAR rather than going blank or jumping to a different expiration.
-  const gatePassing = contractsAtSelectedExpiration.filter(
+  // Strategy quality now only influences WHICH STRIKE at an expiration is preferred - never whether the
+  // expiration exists. Prefer a strike passing every enabled gate; if none of this expiration's strikes do, score
+  // all of them anyway so the row still shows an honest FAIL/NEAR rather than going blank.
+  const primary = selectStrikeAtExpiration(contractsAtSelectedExpiration, rules);
+
+  // SECOND WEEKLY EXPIRATION. Only when the preferred expiration's best strike has a definite hard-rule FAIL
+  // (liquidity, delta, earnings...), look at the OTHER expirations that are already inside the same horizon (the
+  // owner's own DTE range, or the default weekly horizon) and use one only if its best strike has no hard-rule FAIL.
+  // This never reaches outside the horizon, never relaxes any threshold, and never triggers on a missed preference
+  // such as ROR (missing the ROR target still never moves to a different expiration).
+  let chosen = primary;
+  let chosenExpiration = selectedExpiration;
+  let usedSecondExpiration = false;
+  if (hasGatingFailure(primary.summary.results, GATING_RULE_KEYS)) {
+    const alternates = [...new Set(withinHorizon.map((values) => values.expiration))]
+      .filter((expiration) => expiration !== selectedExpiration)
+      .map((expiration) => withinHorizon.find((values) => values.expiration === expiration)!)
+      .sort(compareExpirations);
+    for (const representative of alternates) {
+      const alternate = selectStrikeAtExpiration(withinHorizon.filter((values) => values.expiration === representative.expiration), rules);
+      if (!hasGatingFailure(alternate.summary.results, GATING_RULE_KEYS)) {
+        chosen = alternate;
+        chosenExpiration = representative.expiration;
+        usedSecondExpiration = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    ...chosen.values,
+    optionSelectionTargetDte: WEEKLY_TARGET_DTE,
+    optionSelectionReason: usedSecondExpiration ? "SECOND_WEEKLY_EXPIRATION_AFTER_HARD_RULE_FAILURE" : "CLOSEST_USABLE_EXPIRATION_TO_WEEKLY_TARGET",
+    optionSelectionPreferredExpiration: preferredReturned.expiration,
+    optionSelectionFallback: chosenExpiration !== preferredReturned.expiration,
+  };
+}
+
+type PutContractValues = ReturnType<typeof candidateValues>;
+
+/**
+ * Picks the strike to show at ONE expiration (see bestPutValues' doc for the ordering). Returns the chosen contract
+ * values plus its evaluated summary so the caller can tell whether that expiration has a hard-rule failure.
+ */
+function selectStrikeAtExpiration(contracts: PutContractValues[], rules: ScannerRule[]) {
+  const gatePassing = contracts.filter(
     (values) => LIQUIDITY_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)) && OTHER_OPTION_GATE_KEYS.every((key) => passesEnabledGate(values, rules, key)),
   );
-  const scoringPool = gatePassing.length ? gatePassing : contractsAtSelectedExpiration;
+  const scoringPool = gatePassing.length ? gatePassing : contracts;
 
   const scored = scoringPool
     .map((values) => ({
@@ -840,7 +881,7 @@ function bestPutValues(
   // the price, least assignment pressure, least collateral). Never applies without a ROR target, and
   // never prefers a strike that misses it - if none of the top-scoring strikes pass ROR, the
   // ordering above stands. Score still decides first; this only breaks ties among passers.
-  let selected = scored[0].values;
+  let selected = scored[0];
   if (rules.some((rule) => rule.key === "ror")) {
     const topScore = setupScore(scored[0].summary);
     const passingTarget = scored.filter(
@@ -852,16 +893,10 @@ function bestPutValues(
           left.values.strike - right.values.strike
           || (numericValue(right.values.annualizedRor) ?? 0) - (numericValue(left.values.annualizedRor) ?? 0)
           || compareText(left.values.optionSymbol, right.values.optionSymbol),
-      )[0].values;
+      )[0];
     }
   }
-  return {
-    ...selected,
-    optionSelectionTargetDte: WEEKLY_TARGET_DTE,
-    optionSelectionReason: "CLOSEST_USABLE_EXPIRATION_TO_WEEKLY_TARGET",
-    optionSelectionPreferredExpiration: preferredReturned.expiration,
-    optionSelectionFallback: selectedExpiration !== preferredReturned.expiration,
-  };
+  return selected;
 }
 
 /** Shared with the Covered Call scanner (see compareExpirations above) - same "disabled rule never
