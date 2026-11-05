@@ -124,6 +124,22 @@ export function describeScannerFunnel(funnel: ScannerFunnel, options: { truncate
   return parts.join(" - ");
 }
 
+/**
+ * The "SCAN INCOMPLETE" notice. Shown whenever stocks that passed the stock screen still have unpriced options, because
+ * the best candidate could be one of them and a quiet "nothing to trade" would be misleading. Returns null once every
+ * qualified stock has been priced. `truncated` means the persisted list was capped, so the real count is "at least" this.
+ */
+export function describeScanIncomplete(funnel: ScannerFunnel, options: { truncated?: boolean } = {}): { headline: string; detail: string } | null {
+  if (funnel.awaitingOptionCheck <= 0) return null;
+  const count = `${options.truncated ? "At least " : ""}${funnel.awaitingOptionCheck}`;
+  const single = funnel.awaitingOptionCheck === 1;
+  const noun = single ? "stock that passed" : "stocks that passed";
+  return {
+    headline: "SCAN INCOMPLETE",
+    detail: `${count} ${noun} the stock screen ${single ? "has" : "have"} not had options priced yet, so the best trade could be one of them. Press Check options before deciding there is nothing to trade.`,
+  };
+}
+
 /** Maps a Scanner view row (see ScannerViewResult in scanner/page.tsx) to the funnel's input, so the
  * server-rendered funnel strip and the client-side default filter can never classify a row differently. */
 export function funnelInputOf(result: {
