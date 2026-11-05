@@ -1,4 +1,4 @@
-import { reasonMessage, type CoveredCallCampaignScan, type CoveredCallCandidate } from "@/domain/scanner/covered-call-scan";
+import { describeLiquidityFailures, reasonMessage, type CoveredCallCampaignScan, type CoveredCallCandidate } from "@/domain/scanner/covered-call-scan";
 import type { CoveredCallScanForUser } from "@/lib/covered-call-scanner";
 import { Badge, EmptyState } from "@/components/ui";
 import { money, percent, shortCalendarDate } from "@/lib/format";
@@ -120,6 +120,7 @@ function CandidateRow({ candidate, tone }: { candidate: CoveredCallCandidate; to
         : candidate.distanceStatus.color === "AMBER"
           ? "NEAR STRIKE"
           : "ITM";
+  const liquidityFailures = describeLiquidityFailures(candidate.liquidityCriteria);
   const distanceTone = candidate.distanceStatus === null ? "neutral" : candidate.distanceStatus.color === "GREEN" ? "good" : candidate.distanceStatus.color === "AMBER" ? "warn" : "bad";
 
   return (
@@ -162,7 +163,12 @@ function CandidateRow({ candidate, tone }: { candidate: CoveredCallCandidate; to
             ? "UNKNOWN"
             : `${candidate.estimatedCampaignPLIfCalledAway >= 0 ? "+" : ""}${money(candidate.estimatedCampaignPLIfCalledAway)}`}
         </span>
-        {!candidate.liquidityPass ? <span className="text-amber-300">Liquidity below your configured minimum</span> : null}
+        {!candidate.liquidityPass ? (
+          <span className="text-amber-300" data-testid="covered-call-liquidity-failures">
+            Liquidity below your configured minimum
+            {liquidityFailures.length > 0 ? `: ${liquidityFailures.join("; ")}` : ""}
+          </span>
+        ) : null}
       </div>
       {tone === "warn" ? (
         <div className="sm:col-span-4 rounded-md border border-amber-900/50 bg-amber-950/20 p-2 text-xs text-amber-200">
