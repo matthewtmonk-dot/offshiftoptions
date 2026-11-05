@@ -18,6 +18,7 @@ import { summarizeCampaignExposure, type CampaignExposureInput } from "@/domain/
 import { getCurrentOpenCall, summarizeCampaign } from "@/domain/finance/campaigns";
 import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { summarizeThisWeek, summarizeWinLoss } from "@/domain/finance/performance";
+import { buildStressTable, type StressTable } from "@/domain/finance/stressTest";
 import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { underlyingPositionReviewResult } from "@/domain/finance/positionReviewAssessment";
 import { attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows } from "@/domain/finance/positionReviewRows";
@@ -111,6 +112,11 @@ export default async function DashboardPage() {
   const confirmedTradingPL = confirmedTradingPLCard(report, winLoss);
   const openCampaigns = openCampaignsCard(data.openCampaigns);
   const capitalPanel = capitalPanelViewModel(report, exposure);
+  const stressTable = buildStressTable({
+    committed: report.currentCapitalCommitted,
+    accountValue: report.currentAccountValue,
+    hasUnknownExposure: report.capitalUtilizationHasUnknownExposure,
+  });
   const closedThisWeek = closedThisWeekViewModel(report, thisWeek);
   const scannerInsight = scannerInsightViewModel(data.latestScanRun, neverTradeTickers);
   const chatPreview = chatPreviewViewModel(unreadChatCount, data.recentMessages);
@@ -275,6 +281,7 @@ export default async function DashboardPage() {
               <UtilizationBar percent={report.currentCapitalUtilizationPercent} />
             ) : null}
             {capitalPanel.ambiguousNotice ? <p className="text-xs text-amber-300">{capitalPanel.ambiguousNotice}</p> : null}
+            {stressTable && stressTable.rows.length > 0 && (report.currentCapitalCommitted ?? 0) > 0 ? <StressTableView table={stressTable} /> : null}
             <IntentPrefetchLink href="/account" className="block text-xs text-sky-300 hover:text-sky-200">
               View account detail
             </IntentPrefetchLink>
@@ -435,6 +442,35 @@ function UtilizationBar({ percent }: { percent: number }) {
         <span>{Math.round(percent)}% of account committed</span>
         <span>100%</span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * "What if everything fell at once" - a worst-case reading of the capital currently at work (see stressTest.ts for the
+ * assumptions). Shown only when the committed capital and account value are both known.
+ */
+function StressTableView({ table }: { table: StressTable }) {
+  const usd = (value: number) => `$${Math.round(value).toLocaleString("en-US")}`;
+  return (
+    <div className="border-t border-zinc-800 pt-2" data-testid="stress-table">
+      <div className="text-[13px] text-zinc-400">
+        If everything fell at once{" "}
+        <InfoTip label="About this stress table">
+          Worst case, not a forecast: every tracked put and share position is assumed to drop by the same percent from its strike or cost at the same time, ignoring the premium you collected. It shows how much of the account a broad drop could cost.
+        </InfoTip>
+      </div>
+      <ul className="mt-1 space-y-0.5">
+        {table.rows.map((row) => (
+          <li key={row.shockPercent} className="flex items-baseline justify-between gap-3 text-[13px]">
+            <span className="text-zinc-400">-{row.shockPercent}%</span>
+            <span className="tabular-nums text-zinc-200">
+              about -{usd(row.lossDollars)} <span className="text-zinc-500">({row.lossPercentOfAccount.toFixed(1)}% of account)</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {table.isFloor ? <p className="mt-1 text-xs text-amber-300">Some positions have unknown collateral or cost, so the real figure could be larger.</p> : null}
     </div>
   );
 }
