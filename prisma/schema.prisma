@@ -1266,6 +1266,10 @@ model TechnicalIndicatorSnapshot {
   bbLower          Float?
   bbMiddle         Float?
   bbUpper          Float?
+  /// Average daily share volume over the last 20 completed sessions, from the same daily candles as the indicators.
+  /// Null until the next technical refresh writes it (the scanner then falls back to today's quote volume). Used so the
+  /// "Underlying volume" rule no longer depends on what time of day a scan runs.
+  avgVolume20      Float?
   /// A small, fixed, sanitized vocabulary only (e.g. "HISTORY_FETCH_FAILED") - never a raw
   /// provider exception, response body, token, or credential. Null unless status = FAILED.
   failureReason    String?
