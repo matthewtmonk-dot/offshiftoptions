@@ -25,8 +25,11 @@ export type PlanLimits = {
 };
 
 export const DEFAULT_PLAN_LIMITS: PlanLimits = {
-  maxPerCompanyPct: 25,
-  maxCommittedPct: 80,
+  // Tightened from 25 / 80 on Nov 5 2026 (Matt: yes to the Claude + ChatGPT review's provisional 20 / 60). On a roughly
+  // $10k account one contract is already 10-20% of equity, so these are ceilings, not targets. Saved per-browser limits
+  // (the panel's own inputs) still override these defaults.
+  maxPerCompanyPct: 20,
+  maxCommittedPct: 60,
   maxPerTheme: 1,
   warnPerSector: 2,
   minReturnPct: 0.6,
