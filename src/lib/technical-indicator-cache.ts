@@ -1,7 +1,7 @@
 import "server-only";
 
 import { randomUUID, createHash } from "node:crypto";
-import { bollingerBands, wilderRsi } from "@/domain/finance/calculations";
+import { averageVolume, bollingerBands, wilderRsi } from "@/domain/finance/calculations";
 import { marketDate, previousNyseMarketDay } from "@/domain/finance/marketCalendar";
 import { mapWithConcurrency } from "./concurrency";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
@@ -843,6 +843,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
           bbLower: null,
           bbMiddle: null,
           bbUpper: null,
+          avgVolume20: null,
           failureReason: TECHNICAL_SNAPSHOT_FAILURE_REASONS.HISTORY_FETCH_FAILED,
           historyFetchedAt: null,
           now,
@@ -874,6 +875,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
           bbLower: bands?.lower ?? null,
           bbMiddle: bands?.middle ?? null,
           bbUpper: bands?.upper ?? null,
+          avgVolume20: averageVolume(candles.map((candle) => candle.volume)),
           failureReason: null,
           historyFetchedAt: now,
           now,
@@ -918,6 +920,7 @@ export async function refreshTechnicalIndicatorCacheBatchForUser(
         bbLower: null,
         bbMiddle: null,
         bbUpper: null,
+        avgVolume20: null,
         failureReason: TECHNICAL_SNAPSHOT_FAILURE_REASONS.HISTORY_FETCH_FAILED,
         historyFetchedAt: null,
         now,
@@ -966,6 +969,7 @@ async function upsertSnapshot(
     bbLower: number | null;
     bbMiddle: number | null;
     bbUpper: number | null;
+    avgVolume20: number | null;
     failureReason: string | null;
     historyFetchedAt: Date | null;
     now: Date;
@@ -977,8 +981,8 @@ async function upsertSnapshot(
 ): Promise<void> {
   if (values.preserveExistingGoodValues) {
     await prisma.$executeRaw`
-      INSERT INTO "TechnicalIndicatorSnapshot" ("userId", "ticker", "asOfDate", "status", "rsi", "bbLower", "bbMiddle", "bbUpper", "failureReason", "historyFetchedAt", "updatedAt")
-      VALUES (${userId}, ${ticker}, ${values.asOfDate}, ${values.status}::"TechnicalSnapshotStatus", ${values.rsi}, ${values.bbLower}, ${values.bbMiddle}, ${values.bbUpper}, ${values.failureReason}, ${values.historyFetchedAt}, ${values.now})
+      INSERT INTO "TechnicalIndicatorSnapshot" ("userId", "ticker", "asOfDate", "status", "rsi", "bbLower", "bbMiddle", "bbUpper", "avgVolume20", "failureReason", "historyFetchedAt", "updatedAt")
+      VALUES (${userId}, ${ticker}, ${values.asOfDate}, ${values.status}::"TechnicalSnapshotStatus", ${values.rsi}, ${values.bbLower}, ${values.bbMiddle}, ${values.bbUpper}, ${values.avgVolume20}, ${values.failureReason}, ${values.historyFetchedAt}, ${values.now})
       ON CONFLICT ("userId", "ticker") DO UPDATE SET
         "status" = EXCLUDED."status",
         "failureReason" = EXCLUDED."failureReason",
@@ -988,8 +992,8 @@ async function upsertSnapshot(
   }
 
   await prisma.$executeRaw`
-    INSERT INTO "TechnicalIndicatorSnapshot" ("userId", "ticker", "asOfDate", "status", "rsi", "bbLower", "bbMiddle", "bbUpper", "failureReason", "historyFetchedAt", "updatedAt")
-    VALUES (${userId}, ${ticker}, ${values.asOfDate}, ${values.status}::"TechnicalSnapshotStatus", ${values.rsi}, ${values.bbLower}, ${values.bbMiddle}, ${values.bbUpper}, ${values.failureReason}, ${values.historyFetchedAt}, ${values.now})
+    INSERT INTO "TechnicalIndicatorSnapshot" ("userId", "ticker", "asOfDate", "status", "rsi", "bbLower", "bbMiddle", "bbUpper", "avgVolume20", "failureReason", "historyFetchedAt", "updatedAt")
+    VALUES (${userId}, ${ticker}, ${values.asOfDate}, ${values.status}::"TechnicalSnapshotStatus", ${values.rsi}, ${values.bbLower}, ${values.bbMiddle}, ${values.bbUpper}, ${values.avgVolume20}, ${values.failureReason}, ${values.historyFetchedAt}, ${values.now})
     ON CONFLICT ("userId", "ticker") DO UPDATE SET
       "asOfDate" = EXCLUDED."asOfDate",
       "status" = EXCLUDED."status",
@@ -997,6 +1001,7 @@ async function upsertSnapshot(
       "bbLower" = EXCLUDED."bbLower",
       "bbMiddle" = EXCLUDED."bbMiddle",
       "bbUpper" = EXCLUDED."bbUpper",
+      "avgVolume20" = EXCLUDED."avgVolume20",
       "failureReason" = EXCLUDED."failureReason",
       "historyFetchedAt" = EXCLUDED."historyFetchedAt",
       "updatedAt" = EXCLUDED."updatedAt"
@@ -1022,8 +1027,8 @@ export function requiredTechnicalMarketDateUtc(now: Date): Date {
 // ---------------------------------------------------------------------------------------------
 
 export type TechnicalIndicatorLookup =
-  | { state: "READY"; asOfDate: Date; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null }
-  | { state: "TECHNICAL_DATA_STALE"; asOfDate: Date; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null }
+  | { state: "READY"; asOfDate: Date; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null; avgVolume20: number | null }
+  | { state: "TECHNICAL_DATA_STALE"; asOfDate: Date; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null; avgVolume20: number | null }
   | { state: "TECHNICAL_DATA_PENDING" }
   | { state: "HISTORY_UNAVAILABLE" };
 
@@ -1059,7 +1064,7 @@ export async function getTechnicalIndicatorSnapshotsForUser(
       map.set(ticker, { state: "HISTORY_UNAVAILABLE" });
       continue;
     }
-    const base = { asOfDate: row.asOfDate as Date, rsi: row.rsi, bbLower: row.bbLower, bbMiddle: row.bbMiddle, bbUpper: row.bbUpper };
+    const base = { asOfDate: row.asOfDate as Date, rsi: row.rsi, bbLower: row.bbLower, bbMiddle: row.bbMiddle, bbUpper: row.bbUpper, avgVolume20: row.avgVolume20 };
     const isStale = !row.asOfDate || row.asOfDate.getTime() < freshCutoff.getTime();
     map.set(ticker, isStale ? { state: "TECHNICAL_DATA_STALE", ...base } : { state: "READY", ...base });
   }

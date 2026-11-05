@@ -67,8 +67,8 @@ export type LiveScanCandidate = {
  * cross-layer import; TypeScript's structural typing means the real lib type is assignable here
  * without any explicit conversion at the call site. */
 export type LiveScanTechnicalLookup =
-  | { state: "READY"; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null }
-  | { state: "TECHNICAL_DATA_STALE"; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null }
+  | { state: "READY"; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null; avgVolume20?: number | null }
+  | { state: "TECHNICAL_DATA_STALE"; rsi: number | null; bbLower: number | null; bbMiddle: number | null; bbUpper: number | null; avgVolume20?: number | null }
   | { state: "TECHNICAL_DATA_PENDING" }
   | { state: "HISTORY_UNAVAILABLE" };
 
@@ -219,8 +219,15 @@ export async function evaluateLiveMarketScan({
   // Leveraged / inverse / option-income / preferred funds are never candidates, so they are cut here with the price and
   // volume exclusions: no history or option-chain request is ever spent on them, and the pricing queue never sees them.
   const excludedSecurityOf = (candidate: { ticker: string; quote: MarketQuote }) => excludedSecurityFor(candidate.ticker, candidate.quote.companyDescription);
+  // The "Underlying volume" rule is judged on the 20-day AVERAGE share volume when the technical cache has it, so a
+  // liquid stock cannot fail at 10 AM and pass at 3 PM just because today's cumulative volume is still small. Without a
+  // cached average it falls back to today's quote volume (unchanged behaviour).
+  const quoteRuleValuesOf = (candidate: { ticker: string; values: Record<string, number | string | boolean | null | undefined> }) => {
+    const average = cachedAverageVolume(technicalCache?.get(candidate.ticker));
+    return average === null ? candidate.values : { ...candidate.values, stockVolume: average };
+  };
   const quoteEligible = quoteStage.filter(
-    (candidate) => !excludedSecurityOf(candidate) && !evaluateCandidate(quoteOnlyRules, candidate.values).results.some((r) => r.status === "FAIL"),
+    (candidate) => !excludedSecurityOf(candidate) && !evaluateCandidate(quoteOnlyRules, quoteRuleValuesOf(candidate)).results.some((r) => r.status === "FAIL"),
   );
   const quoteExcluded = quoteStage.filter((candidate) => !quoteEligible.includes(candidate));
 
@@ -375,12 +382,12 @@ export async function evaluateLiveMarketScan({
   // outside this user's own configured quote-stage rules.
   const priceExcluded = quoteExcluded.map((candidate) => {
     const values = {
-      ...candidate.values,
+      ...quoteRuleValuesOf(candidate),
       ...unknownOptionValues(),
       // A deliberate stock-screen exclusion, not a budget loss - this ticker never competed.
       optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" as const,
       securityExclusion: excludedSecurityOf(candidate)?.kind ?? null,
-      scanNote: excludedSecurityOf(candidate)?.reason ?? quoteStageExclusionScanNote(evaluateCandidate(quoteOnlyRules, candidate.values).results),
+      scanNote: excludedSecurityOf(candidate)?.reason ?? quoteStageExclusionScanNote(evaluateCandidate(quoteOnlyRules, quoteRuleValuesOf(candidate)).results),
     };
     return {
       ticker: candidate.ticker,
@@ -532,6 +539,13 @@ function mergeHistoryValues(
   };
 }
 
+/** The cached 20-day average share volume, only when the cache has a real, positive number for this ticker. */
+function cachedAverageVolume(technical: LiveScanTechnicalLookup | undefined): number | null {
+  if (technical?.state !== "READY" && technical?.state !== "TECHNICAL_DATA_STALE") return null;
+  const average = technical.avgVolume20;
+  return typeof average === "number" && Number.isFinite(average) && average > 0 ? average : null;
+}
+
 /** Stage 2 (technical-cache mode - see LiveScanOptions.technicalCache): NEVER calls
  * provider.getPriceHistory. Only a READY cache entry contributes real rsi/bands; every other
  * state (stale/pending/failed/missing) leaves rsi/bbPercent null with an honest
@@ -551,6 +565,12 @@ function mergeTechnicalCacheValues(
     verifiedFundamentals: candidate.verifiedFundamentals,
   };
   const earnings = earningsValuesFor(earningsEntry);
+  // Volume basis: the 20-day average when cached (what the rule is judged on), else today's quote volume.
+  const averageVolume = cachedAverageVolume(technical);
+  const volumeValues =
+    averageVolume === null
+      ? { stockVolumeBasis: "TODAY" as const }
+      : { stockVolume: averageVolume, stockVolumeBasis: "AVG_20_DAY" as const, quoteVolume: candidate.quote.volume ?? null };
 
   // Only a READY entry ever contributes a real rsi/bbPercent - stale/pending/failed/missing all
   // fall through to the honest reason-code branch below, exactly per the "stale technical cannot
@@ -565,6 +585,7 @@ function mergeTechnicalCacheValues(
       values: {
         ...candidate.values,
         ...earnings,
+        ...volumeValues,
         rsi: technical.rsi,
         // Bands genuinely never computed yet (fewer than 20 real closes existed when the
         // background worker last ran) - bbPercent honestly stays null even though rsi may be real.
@@ -585,6 +606,7 @@ function mergeTechnicalCacheValues(
     values: {
       ...candidate.values,
       ...earnings,
+      ...volumeValues,
       rsi: null,
       bbPercent: null,
       technicalReasonCode: reasonCode,

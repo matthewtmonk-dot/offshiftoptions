@@ -80,6 +80,23 @@ export function bollingerBands(closes: number[], period = 20, deviations = 2): B
   };
 }
 
+/**
+ * Average daily share volume over the last `period` completed sessions (default 20). Null unless there are at least
+ * `period` volumes and every one in the window is a finite, non-negative number - a missing or garbage volume is never
+ * averaged in as zero, because that would quietly understate liquidity. Unlike today's cumulative quote volume, this
+ * does not change with the time of day the scan runs.
+ */
+export function averageVolume(volumes: ReadonlyArray<number | null | undefined>, period = 20): number | null {
+  if (period < 1 || volumes.length < period) {
+    return null;
+  }
+  const window = volumes.slice(-period);
+  if (!window.every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+    return null;
+  }
+  return round((window as number[]).reduce((sum, value) => sum + value, 0) / period, 0);
+}
+
 export function bollingerPositionPercent(price: number, bands: BollingerBands): number | null {
   const range = bands.upper - bands.lower;
   if (range <= 0) {
