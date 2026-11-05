@@ -80,6 +80,7 @@ function normalizeSchwabQuoteRecord(normalizedSymbol: string, record: unknown): 
     volume: integerValue(quote?.totalVolume) ?? integerValue(regular?.regularMarketTradeSize) ?? undefined,
     asOf,
     companyDescription: stringValue(reference?.description),
+    assetSubType: stringValue(objectValue(record)?.assetSubType) ?? stringValue(reference?.assetSubType),
     fundamentals: fundamental
       ? {
           peRatio: numberValue(fundamental.peRatio),
