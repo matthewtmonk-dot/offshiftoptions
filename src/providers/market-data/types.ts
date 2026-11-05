@@ -16,6 +16,9 @@ export type MarketQuote = {
   /** Company/legal name from Schwab's `reference` quote field group, when present. Never
    * fabricated - undefined/null when the provider didn't supply it (e.g. demo data). */
   companyDescription?: string | null;
+  /** Schwab's own asset sub-type for the symbol (for example "ETF", "COE" for common equity, "ADR", "REIT"), when the quote
+   * carries one. Never guessed; undefined/null when absent. */
+  assetSubType?: string | null;
   /** Verified values from Schwab's `fundamental` quote field group. Optional/undefined for
    * providers that don't supply it (e.g. demo data) - never guessed or backfilled. */
   fundamentals?: QuoteFundamentals | null;

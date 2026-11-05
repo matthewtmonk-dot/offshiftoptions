@@ -16,13 +16,16 @@ const DESCRIPTIONS: Record<string, string | null> = {
   FUNDY: "YieldMax FUNDY Option Income Strategy ETF",
   PLAINETF: "Plain Total Market ETF",
   ULTY: null, // description missing: caught by the known-ticker list
+  COMDTY: "Invesco DB Commodity Index Tracking Fund",
 };
+// Schwab's own asset sub-type, when the quote carries one.
+const SUBTYPES: Record<string, string | null> = { COMDTY: "ETF", PLAINETF: "ETF", GOODCO: "COE" };
 
 function setup(tickers: string[]) {
   const chainSymbols: string[] = [];
   const historySymbols: string[] = [];
   const provider: MarketDataProvider = {
-    async getQuote(symbol) { return { symbol, price: 20, volume: 2_000_000, asOf, companyDescription: DESCRIPTIONS[symbol] ?? null }; },
+    async getQuote(symbol) { return { symbol, price: 20, volume: 2_000_000, asOf, companyDescription: DESCRIPTIONS[symbol] ?? null, assetSubType: SUBTYPES[symbol] ?? null }; },
     async getPriceHistory(symbol) { historySymbols.push(symbol); throw new Error("Unexpected live history fetch"); },
     async getOptionChain(symbol): Promise<OptionContractSnapshot[]> { chainSymbols.push(symbol); return []; },
     async getInstrument(symbol) { return { symbol, description: symbol, assetType: "EQUITY" }; },
@@ -41,7 +44,7 @@ describe("security-type exclusion in the live scan", () => {
     const rows = await evaluateLiveMarketScan(input);
     const byTicker = new Map(rows.map((row) => [row.ticker, row]));
 
-    expect(input.chainSymbols.sort()).toEqual(["GOODCO", "PLAINETF"]);
+    expect(input.chainSymbols.sort()).toEqual(["GOODCO"]);
     for (const excluded of ["FUNDY", "ULTY"]) {
       const row = byTicker.get(excluded)!;
       expect(row.funnelStage).toBe("QUOTE_EXCLUDED");
@@ -52,11 +55,21 @@ describe("security-type exclusion in the live scan", () => {
     }
   });
 
-  it("leaves ordinary stocks and plain ETFs alone", async () => {
-    const rows = await evaluateLiveMarketScan(setup(["GOODCO", "PLAINETF"]));
-    for (const row of rows) {
-      expect(row.funnelStage).toBe("STOCK_STAGE");
-      expect(row.values.securityExclusion).toBeUndefined();
+  it("leaves ordinary stocks alone", async () => {
+    const rows = await evaluateLiveMarketScan(setup(["GOODCO"]));
+    expect(rows[0].funnelStage).toBe("STOCK_STAGE");
+    expect(rows[0].values.securityExclusion).toBeUndefined();
+  });
+
+  it("excludes any ETF that Schwab labels as an ETF, with no chain request spent on it", async () => {
+    const input = setup(["GOODCO", "COMDTY", "PLAINETF"]);
+    const rows = await evaluateLiveMarketScan(input);
+    const byTicker = new Map(rows.map((row) => [row.ticker, row]));
+    for (const etf of ["COMDTY", "PLAINETF"]) {
+      expect(byTicker.get(etf)!.funnelStage).toBe("QUOTE_EXCLUDED");
+      expect(byTicker.get(etf)!.values.securityExclusion).toBe("ETF");
+      expect(String(byTicker.get(etf)!.values.scanNote)).toMatch(/^Excluded: exchange-traded fund/);
     }
+    expect(input.chainSymbols).toEqual(["GOODCO"]);
   });
 });

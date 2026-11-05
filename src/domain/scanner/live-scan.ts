@@ -218,7 +218,7 @@ export async function evaluateLiveMarketScan({
   const quoteOnlyRules = rules.filter((rule) => QUOTE_ONLY_STOCK_RULE_KEYS.has(rule.key));
   // Leveraged / inverse / option-income / preferred funds are never candidates, so they are cut here with the price and
   // volume exclusions: no history or option-chain request is ever spent on them, and the pricing queue never sees them.
-  const excludedSecurityOf = (candidate: { ticker: string; quote: MarketQuote }) => excludedSecurityFor(candidate.ticker, candidate.quote.companyDescription);
+  const excludedSecurityOf = (candidate: { ticker: string; quote: MarketQuote }) => excludedSecurityFor(candidate.ticker, candidate.quote.companyDescription, candidate.quote.assetSubType);
   // The "Underlying volume" rule is judged on the 20-day AVERAGE share volume when the technical cache has it, so a
   // liquid stock cannot fail at 10 AM and pass at 3 PM just because today's cumulative volume is still small. Without a
   // cached average it falls back to today's quote volume (unchanged behaviour).
