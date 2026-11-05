@@ -317,6 +317,7 @@ model User {
   brokerImportBatches         BrokerImportBatch[]
   campaigns                   Campaign[]
   technicalIndicatorSnapshots TechnicalIndicatorSnapshot[]
+  companyQualityReviews       CompanyQualityReview[]
   technicalPreparationRuns    TechnicalPreparationRun[]
   positionReviewAssessments   PositionReviewAssessment[]
   scheduledCaptureRuns        ScheduledCaptureRun[]
@@ -1769,4 +1770,35 @@ model CompanyEthicsHistory {
   profile CompanyEthicsProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
   @@index([profileId, at])
+}
+
+/// Minimum-financial-health reading of one company, computed from its public SEC filings (see
+/// src/domain/scanner/companyQuality.ts and secCompanyFacts.ts). Public data, so it is shared across users and keyed by
+/// ticker only. `status` is a small vocabulary ("OK", "NOT_FOUND", "FAILED"); `failureReason` is never a raw provider
+/// error. A FAILED refresh never overwrites a previous good reading.
+model CompanyQualitySnapshot {
+  ticker         String   @id
+  cik            String?
+  sic            Int?
+  status         String
+  tier           String?
+  reasons        Json?
+  runwayQuarters Float?
+  fcfTtm         Float?
+  dataAgeDays    Int?
+  failureReason  String?
+  fetchedAt      DateTime
+  updatedAt      DateTime @updatedAt
+}
+
+/// "I've looked at this": the signed-in owner's written reason for letting a CAUTION or VERIFY company be recommended.
+/// A REJECT can never be overridden. One row per owner and ticker.
+model CompanyQualityReview {
+  userId     String
+  ticker     String
+  note       String
+  reviewedAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, ticker])
 }

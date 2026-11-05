@@ -27,6 +27,7 @@ export function buildPlanCandidates(
   rows: ScannerRowForPlan[],
   ethicsGateByTicker: Record<string, EthicsGateValue | undefined>,
   classificationByTicker: Record<string, CompanyClassification | undefined>,
+  qualityByTicker: Record<string, { eligible: boolean; reason: string } | null | undefined> = {},
 ): PlanCandidate[] {
   return rows.flatMap((row) => {
     if (row.readiness !== "PASS" && row.readiness !== "NEAR") return [];
@@ -47,6 +48,7 @@ export function buildPlanCandidates(
       theme: themeForTicker(row.ticker),
       ethics: ethicsGateByTicker[row.ticker] ?? "UNREVIEWED",
       earningsVerifyReason: row.values.earningsVerifyReason,
+      quality: qualityByTicker[row.ticker] ?? null,
     }];
   });
 }

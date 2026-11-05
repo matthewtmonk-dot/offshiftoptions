@@ -4,6 +4,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { InfoTip } from "@/components/info-tip";
 import { EthicsBadge } from "@/components/ethics-badge";
+import { CompanyQualityBadge, type CompanyQualityChipData } from "@/components/company-quality-badge";
 import type { EthicsSummary } from "@/lib/ethics";
 import {
   ArrowDownUp,
@@ -112,6 +113,8 @@ export function ScannerWorkspace({
   diagnostics,
   modeLabel,
   ethics = {},
+  quality = {},
+  qualityEnabled = false,
 }: {
   results: ScannerViewResult[];
   buddies: ScannerBuddy[];
@@ -119,6 +122,9 @@ export function ScannerWorkspace({
   modeLabel: string;
   /** Ethical-compatibility research by ticker (only researched companies appear; the rest show "?"). */
   ethics?: Record<string, EthicsSummary>;
+  /** Company-quality readings by ticker (SEC filings). Shown only when the check is set up (qualityEnabled). */
+  quality?: Record<string, CompanyQualityChipData>;
+  qualityEnabled?: boolean;
 }) {
   const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, ScannerStatusOverride | undefined>>({});
   const [pendingStatuses, setPendingStatuses] = useState<Record<string, QuickResearchStatus | undefined>>({});
@@ -515,6 +521,7 @@ export function ScannerWorkspace({
                         <ResearchBadge status={result.researchStatus} />
                       </button>
                       <EthicsBadge ticker={result.record.ticker} summary={ethics[result.record.ticker]} />
+                      {qualityEnabled ? <CompanyQualityBadge ticker={result.record.ticker} data={quality[result.record.ticker]} /> : null}
                       </div>
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">

@@ -190,3 +190,20 @@ describe("optimizePlan", () => {
     expect(result.picks.map((pick) => pick.ticker)).toEqual(["PASS1"]);
   });
 });
+
+describe("company-quality gate in the plan", () => {
+  it("an ineligible quality verdict blocks the candidate with its reason; an eligible or missing one does not", () => {
+    const base = candidate({ ticker: "QQQ1", strike: 20 });
+    expect(candidateBlockers({ ...base, quality: { eligible: false, reason: "Company quality CAUTION: excluded unless you review it" } }, limits)).toContain("Company quality CAUTION: excluded unless you review it");
+    expect(candidateBlockers({ ...base, quality: { eligible: true, reason: "Company quality A" } }, limits)).toEqual([]);
+    expect(candidateBlockers({ ...base, quality: null }, limits)).toEqual([]);
+    expect(candidateBlockers({ ...base }, limits)).toEqual([]);
+  });
+
+  it("the optimizer never picks a candidate whose quality is not eligible", () => {
+    const good = candidate({ ticker: "GOOD1", strike: 15, score: 80, quality: { eligible: true, reason: "A" } });
+    const blocked = candidate({ ticker: "BLOCK1", strike: 15, score: 95, theme: "other", quality: { eligible: false, reason: "Company quality not checked yet" } });
+    const result = optimizePlan([blocked, good], [], capital, limits);
+    expect(result.picks.map((pick) => pick.ticker)).toEqual(["GOOD1"]);
+  });
+});
