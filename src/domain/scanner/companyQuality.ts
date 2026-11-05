@@ -70,12 +70,35 @@ function result(tier: CompanyQualityTier, reasons: string[], extra: { runwayQuar
 }
 
 export function evaluateCompanyQuality(facts: CompanyFacts): CompanyQuality {
+  if (isFinancialSic(facts.sic)) {
+    return result("VERIFY", ["Bank, lender, broker, insurer, or real-estate company: these cash-flow and debt rules do not fit, so it needs a manual look."]);
+  }
+  // The SEC's catch-all "finance services" code covers real lenders AND crypto miners / hosting firms, so cash-flow rules
+  // may mislead either way. Such a company can still earn A or B, but it can never be REJECTed or CAUTIONed by these rules.
+  if (isMixedSic(facts.sic)) {
+    const inner = evaluateCore(facts);
+    if (inner.tier === "REJECT" || inner.tier === "CAUTION") {
+      return result("VERIFY", [`Its industry code mixes lenders and operating companies, so this distress reading needs a human check: ${inner.reasons[0]}`], { runwayQuarters: inner.runwayQuarters, fcfTtm: inner.fcfTtm });
+    }
+    return { ...inner, reasons: [...inner.reasons, "Its industry code mixes lenders and operating companies, so read the cash-flow numbers with care."] };
+  }
+  return evaluateCore(facts);
+}
+
+/** Banks, lenders, brokers, insurers, real estate and REITs. */
+export function isFinancialSic(sic: number | null): boolean {
+  if (!isNum(sic)) return false;
+  return (sic >= 6000 && sic <= 6099) || (sic >= 6111 && sic <= 6163) || (sic >= 6200 && sic <= 6289) || (sic >= 6300 && sic <= 6411) || (sic >= 6500 && sic <= 6599) || sic === 6798;
+}
+
+/** Codes that are used for both financial and operating companies (finance services, blank check, patent owners, investors). */
+export function isMixedSic(sic: number | null): boolean {
+  return isNum(sic) && [6199, 6770, 6794, 6799].includes(sic);
+}
+
+function evaluateCore(facts: CompanyFacts): CompanyQuality {
   const t = QUALITY_THRESHOLDS;
   const reasons: string[] = [];
-
-  if (isNum(facts.sic) && facts.sic >= 6000 && facts.sic <= 6799) {
-    return result("VERIFY", ["Bank, insurer, or real-estate company: these cash-flow and debt rules do not fit, so it needs a manual look."]);
-  }
   if (facts.goingConcernDoubt === true) {
     return result("REJECT", ["Filing discloses substantial doubt about the company's ability to continue as a going concern."]);
   }
@@ -90,8 +113,11 @@ export function evaluateCompanyQuality(facts: CompanyFacts): CompanyQuality {
   const capexTtm = isNum(facts.capexTtm) ? Math.abs(facts.capexTtm) : null;
   const fcfTtm = facts.ocfTtm - (capexTtm ?? 0);
   if (capexTtm === null) reasons.push("Capital spending was not found in the filing, so free cash flow is treated as operating cash flow.");
-  if (facts.equity < 0) {
-    return result("VERIFY", ["Shareholders' equity is negative. That can come from buybacks, so it needs a human look rather than an automatic call."], { fcfTtm });
+  // Negative equity is a warning, not a verdict. With strongly positive free cash flow it is usually buybacks (HPQ-style),
+  // so it caps the company at B; while also burning cash it needs a human look.
+  const negativeEquity = facts.equity < 0;
+  if (negativeEquity && fcfTtm <= 0) {
+    return result("VERIFY", ["Shareholders' equity is negative while the company is not generating free cash flow, so it needs a human look rather than an automatic call."], { fcfTtm });
   }
 
   const last2Q =
@@ -117,6 +143,10 @@ export function evaluateCompanyQuality(facts: CompanyFacts): CompanyQuality {
   }
 
   const flags: string[] = [];
+  if (negativeEquity) {
+    flags.push("negative equity");
+    reasons.push("Shareholders' equity is negative (often from buybacks when cash flow is strong, but check it).");
+  }
   if (burn > 0) flags.push("cash-burning");
   if (isNum(facts.currentAssets) && isNum(facts.currentLiabilities) && facts.currentLiabilities > 0) {
     const ratio = facts.currentAssets / facts.currentLiabilities;
