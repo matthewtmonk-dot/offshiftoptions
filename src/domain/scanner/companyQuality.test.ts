@@ -69,11 +69,18 @@ describe("evaluateCompanyQuality", () => {
     expect(negative.eligibleForAutomaticPass).toBe(false);
   });
 
-  it("negative equity with strong free cash flow (buyback-style) is a B, not a block", () => {
+  it("negative equity with strong free cash flow and an OK current ratio (buyback-style) is a B, not a block", () => {
     const quality = evaluateCompanyQuality({ ...healthy, equity: -50 });
     expect(quality.tier).toBe("B");
     expect(quality.eligibleForAutomaticPass).toBe(true);
     expect(quality.reasons.join(" ")).toMatch(/equity is negative/);
+  });
+
+  it("negative equity AND a weak current ratio is CAUTION (excluded by default) even with strong cash flow", () => {
+    const quality = evaluateCompanyQuality({ ...healthy, equity: -50, currentAssets: 800, currentLiabilities: 1_000 });
+    expect(quality.tier).toBe("CAUTION");
+    expect(quality.eligibleForAutomaticPass).toBe(false);
+    expect(quality.reasons.join(" ")).toMatch(/current ratio is only 0\.80/);
   });
 
   it("banks, lenders, brokers, insurers and REITs are VERIFY; ordinary industrial codes are not", () => {
@@ -81,15 +88,17 @@ describe("evaluateCompanyQuality", () => {
     for (const sic of [3571, 3812, 7372, 6199, 6770, null]) expect(isFinancialSic(sic)).toBe(false);
   });
 
-  it("the catch-all finance code can earn A/B but can never be REJECTed or CAUTIONed by the cash-flow rules", () => {
+  it("the catch-all finance code can never pass automatically (VERIFY), and still shows the underlying reading", () => {
     expect(isMixedSic(6199)).toBe(true);
     const burner = { ...healthy, sic: 6199, ocfTtm: -300, capexTtm: 100, ocfLast2Q: null, capexLast2Q: null, liquidInvestments: 0, debtDue12m: 0 };
-    const distressed = evaluateCompanyQuality({ ...burner, cash: 300 }); // would be REJECT (3 quarters)
+    const distressed = evaluateCompanyQuality({ ...burner, cash: 300 }); // underlying reading is REJECT (3 quarters)
     expect(distressed.tier).toBe("VERIFY");
-    expect(distressed.reasons.join(" ")).toMatch(/needs a human check/);
-    expect(evaluateCompanyQuality({ ...burner, cash: 600 }).tier).toBe("VERIFY"); // would be CAUTION
-    expect(evaluateCompanyQuality({ ...burner, cash: 900 }).tier).toBe("B"); // 9 quarters
-    expect(evaluateCompanyQuality({ ...healthy, sic: 6199 }).tier).toBe("A");
+    expect(distressed.eligibleForAutomaticPass).toBe(false);
+    expect(distressed.reasons.join(" ")).toMatch(/cannot pass automatically.*was REJECT/);
+    expect(evaluateCompanyQuality({ ...burner, cash: 600 }).tier).toBe("VERIFY"); // underlying CAUTION
+    const healthyMixed = evaluateCompanyQuality({ ...healthy, sic: 6199 }); // underlying A
+    expect(healthyMixed.tier).toBe("VERIFY");
+    expect(healthyMixed.reasons.join(" ")).toMatch(/was A/);
   });
 
   it("REJECT only on a confirmed going-concern doubt or clear cash distress; unknown going-concern does not reject", () => {

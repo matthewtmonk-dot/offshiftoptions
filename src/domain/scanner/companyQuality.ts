@@ -7,8 +7,10 @@
  *  - REJECT only on clear distress: a cash-burning company whose stressed cash runway is under 4 quarters, or a confirmed
  *    substantial-doubt going-concern disclosure.
  *  - CAUTION: runway of 4 to under 8 quarters. Excluded from automatic allocation unless the owner overrides it.
- *  - VERIFY: essential facts are missing or stale, the company is a bank/insurer/REIT (these rules do not fit), or equity
- *    is negative (needs a human look - it can come from buybacks). Never an automatic PASS.
+ *  - VERIFY: essential facts are missing or stale, the company is a bank/insurer/REIT or has an ambiguous industry code
+ *    (these rules do not fit until a human classifies it), or equity is negative while not generating free cash flow.
+ *    Never an automatic PASS.
+ *  - Negative equity plus a current ratio under 1.2 is CAUTION even with strong cash flow (reviewed Nov 5 by ChatGPT).
  *  - B: passes the required checks but has a caution flag (weak current ratio, heavy dilution, or burning cash with at
  *    least 8 quarters of runway).
  *  - A: positive free cash flow and no flags.
@@ -73,14 +75,13 @@ export function evaluateCompanyQuality(facts: CompanyFacts): CompanyQuality {
   if (isFinancialSic(facts.sic)) {
     return result("VERIFY", ["Bank, lender, broker, insurer, or real-estate company: these cash-flow and debt rules do not fit, so it needs a manual look."]);
   }
-  // The SEC's catch-all "finance services" code covers real lenders AND crypto miners / hosting firms, so cash-flow rules
-  // may mislead either way. Such a company can still earn A or B, but it can never be REJECTed or CAUTIONed by these rules.
+  // The SEC's catch-all "finance services" code covers real lenders AND crypto miners / hosting firms, so the cash-flow
+  // rules may mislead either way (a lender's loans are operating cash flow; a miner's bitcoin is ignored by runway). Until a
+  // human classifies the company, such a name can NEVER earn an automatic pass. The underlying reading is still shown.
   if (isMixedSic(facts.sic)) {
     const inner = evaluateCore(facts);
-    if (inner.tier === "REJECT" || inner.tier === "CAUTION") {
-      return result("VERIFY", [`Its industry code mixes lenders and operating companies, so this distress reading needs a human check: ${inner.reasons[0]}`], { runwayQuarters: inner.runwayQuarters, fcfTtm: inner.fcfTtm });
-    }
-    return { ...inner, reasons: [...inner.reasons, "Its industry code mixes lenders and operating companies, so read the cash-flow numbers with care."] };
+    const reading = `${inner.tier}: ${inner.reasons.filter((reason) => !reason.startsWith("Going-concern")).join(" ")}`.trim();
+    return result("VERIFY", [`Its industry code mixes lenders and operating companies, so it cannot pass automatically until someone classifies it. The cash-flow reading, for reference, was ${reading}`], { runwayQuarters: inner.runwayQuarters, fcfTtm: inner.fcfTtm });
   }
   return evaluateCore(facts);
 }
@@ -140,6 +141,18 @@ function evaluateCore(facts: CompanyFacts): CompanyQuality {
       return result("CAUTION", [...reasons, `Burning cash with about ${rounded} quarters of runway (comfortable is ${t.cautionRunwayQuarters}+). Excluded from automatic picks unless you override it.`], { runwayQuarters, fcfTtm });
     }
     reasons.push(`Burning cash, but with about ${Math.round(runwayQuarters * 10) / 10} quarters of runway.`);
+  }
+
+  const currentRatio =
+    isNum(facts.currentAssets) && isNum(facts.currentLiabilities) && facts.currentLiabilities > 0 ? facts.currentAssets / facts.currentLiabilities : null;
+  // Negative equity AND a weak current ratio together: excluded by default (CAUTION) until someone checks cash, debt
+  // maturities and cash-flow consistency. Negative equity alone, with strong cash flow, is only a flag.
+  if (negativeEquity && currentRatio !== null && currentRatio < t.minCurrentRatio) {
+    return result(
+      "CAUTION",
+      [...reasons, `Shareholders' equity is negative and the current ratio is only ${currentRatio.toFixed(2)} (below ${t.minCurrentRatio}). Often buybacks with strong cash flow, but check cash, debt due within a year and cash-flow consistency first. Excluded from automatic picks unless you override it.`],
+      { runwayQuarters, fcfTtm },
+    );
   }
 
   const flags: string[] = [];
