@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateCompanyQuality, type CompanyFacts } from "./companyQuality";
+import { evaluateCompanyQuality, isFinancialSic, isMixedSic, type CompanyFacts } from "./companyQuality";
 import { parseCompanyFacts, trailingTwelveMonths } from "./secCompanyFacts";
 
 const healthy: CompanyFacts = {
@@ -63,9 +63,42 @@ describe("evaluateCompanyQuality", () => {
     expect(evaluateCompanyQuality({ ...healthy, dataAgeDays: null }).tier).toBe("VERIFY");
     expect(evaluateCompanyQuality({ ...healthy, sic: 6021 }).tier).toBe("VERIFY");
     expect(evaluateCompanyQuality({ ...healthy, sic: 6798 }).tier).toBe("VERIFY");
-    const negative = evaluateCompanyQuality({ ...healthy, equity: -50 });
+    // Negative equity while NOT generating free cash flow needs a human look.
+    const negative = evaluateCompanyQuality({ ...healthy, equity: -50, ocfTtm: 50, capexTtm: 100, ocfLast2Q: null, capexLast2Q: null });
     expect(negative.tier).toBe("VERIFY");
     expect(negative.eligibleForAutomaticPass).toBe(false);
+  });
+
+  it("negative equity with strong free cash flow and an OK current ratio (buyback-style) is a B, not a block", () => {
+    const quality = evaluateCompanyQuality({ ...healthy, equity: -50 });
+    expect(quality.tier).toBe("B");
+    expect(quality.eligibleForAutomaticPass).toBe(true);
+    expect(quality.reasons.join(" ")).toMatch(/equity is negative/);
+  });
+
+  it("negative equity AND a weak current ratio is CAUTION (excluded by default) even with strong cash flow", () => {
+    const quality = evaluateCompanyQuality({ ...healthy, equity: -50, currentAssets: 800, currentLiabilities: 1_000 });
+    expect(quality.tier).toBe("CAUTION");
+    expect(quality.eligibleForAutomaticPass).toBe(false);
+    expect(quality.reasons.join(" ")).toMatch(/current ratio is only 0\.80/);
+  });
+
+  it("banks, lenders, brokers, insurers and REITs are VERIFY; ordinary industrial codes are not", () => {
+    for (const sic of [6021, 6141, 6211, 6331, 6512, 6798]) expect(isFinancialSic(sic)).toBe(true);
+    for (const sic of [3571, 3812, 7372, 6199, 6770, null]) expect(isFinancialSic(sic)).toBe(false);
+  });
+
+  it("the catch-all finance code can never pass automatically (VERIFY), and still shows the underlying reading", () => {
+    expect(isMixedSic(6199)).toBe(true);
+    const burner = { ...healthy, sic: 6199, ocfTtm: -300, capexTtm: 100, ocfLast2Q: null, capexLast2Q: null, liquidInvestments: 0, debtDue12m: 0 };
+    const distressed = evaluateCompanyQuality({ ...burner, cash: 300 }); // underlying reading is REJECT (3 quarters)
+    expect(distressed.tier).toBe("VERIFY");
+    expect(distressed.eligibleForAutomaticPass).toBe(false);
+    expect(distressed.reasons.join(" ")).toMatch(/cannot pass automatically.*was REJECT/);
+    expect(evaluateCompanyQuality({ ...burner, cash: 600 }).tier).toBe("VERIFY"); // underlying CAUTION
+    const healthyMixed = evaluateCompanyQuality({ ...healthy, sic: 6199 }); // underlying A
+    expect(healthyMixed.tier).toBe("VERIFY");
+    expect(healthyMixed.reasons.join(" ")).toMatch(/was A/);
   });
 
   it("REJECT only on a confirmed going-concern doubt or clear cash distress; unknown going-concern does not reject", () => {
@@ -171,5 +204,20 @@ describe("parseCompanyFacts", () => {
       expect(facts.ocfTtm).toBeNull();
       expect(evaluateCompanyQuality(facts).tier).toBe("VERIFY");
     }
+  });
+});
+
+describe("parseCompanyFacts concept choice (found on real HPQ data)", () => {
+  it("uses the alternative concept name when the common name only has ancient rows", () => {
+    const json = wrap({
+      NetCashProvidedByUsedInOperatingActivities: [flow("2024-01-01", "2024-12-31", 500)],
+      // Stale 2008-style rows under the usual capex name must not hide the real, current figure under the other name.
+      PaymentsToAcquirePropertyPlantAndEquipment: [flow("2007-11-01", "2008-07-31", 1_966)],
+      PaymentsToAcquireProductiveAssets: [flow("2024-01-01", "2024-12-31", 90)],
+      CashAndCashEquivalentsAtCarryingValue: [instant("2024-12-31", 700)],
+    });
+    const facts = parseCompanyFacts(json, { now: new Date("2025-02-15T00:00:00Z") });
+    expect(facts.capexTtm).toBe(90);
+    expect(facts.ocfTtm).toBe(500);
   });
 });

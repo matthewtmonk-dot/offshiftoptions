@@ -18,14 +18,25 @@ const DAY_MS = 86_400_000;
 const day = (iso: string) => Date.parse(`${iso}T00:00:00Z`);
 const daysBetween = (from: string, to: string) => Math.round((day(to) - day(from)) / DAY_MS);
 
+/**
+ * The rows for the first-listed concept that has the most RECENT data. Picking merely the first concept that has any rows
+ * is wrong: a company can have a few ancient rows under a common name (HPQ's 2008 "PaymentsToAcquirePropertyPlantAnd
+ * Equipment") while its current figures live under an alternative name.
+ */
 function series(json: FactsJson, taxonomy: string, concepts: readonly string[], unit: string): RawFact[] {
+  let best: RawFact[] = [];
+  let bestEnd = "";
   for (const concept of concepts) {
-    const rows = json.facts?.[taxonomy]?.[concept]?.units?.[unit];
-    if (Array.isArray(rows) && rows.length) {
-      return rows.filter((row) => row && typeof row.val === "number" && Number.isFinite(row.val) && typeof row.end === "string");
+    const raw = json.facts?.[taxonomy]?.[concept]?.units?.[unit];
+    if (!Array.isArray(raw)) continue;
+    const rows = raw.filter((row) => row && typeof row.val === "number" && Number.isFinite(row.val) && typeof row.end === "string");
+    const latest = rows.reduce((max, row) => (row.end > max ? row.end : max), "");
+    if (rows.length && latest > bestEnd) {
+      best = rows;
+      bestEnd = latest;
     }
   }
-  return [];
+  return best;
 }
 
 /** One row per period: if a period was reported more than once (restated), the most recently filed one wins. */
@@ -92,7 +103,7 @@ const CONCEPTS = {
   ocf: ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"],
   capex: ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsForCapitalImprovements"],
   cash: ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
-  shortInvestments: ["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent"],
+  shortInvestments: ["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "AvailableForSaleSecuritiesCurrent"],
   debtCurrent: ["DebtCurrent", "LongTermDebtCurrent", "ShortTermBorrowings", "ConvertibleNotesPayableCurrent"],
   equity: ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
   currentAssets: ["AssetsCurrent"],

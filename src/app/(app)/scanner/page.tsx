@@ -16,12 +16,14 @@ import {
 } from "@/domain/scanner/scanner";
 import { GATING_RULE_KEYS, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { STOCK_STAGE_RULE_KEYS } from "@/domain/scanner/live-scan";
-import { buildScannerFunnel, describeOptionOutcomes, describeScanIncomplete, describeScannerFunnel, funnelInputOf, summarizeOptionOutcomes, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
+import { buildScannerFunnel, describeOptionOutcomes, describeScanIncomplete, describeScannerFunnel, funnelInputOf, isWorthALook, summarizeOptionOutcomes, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
 import { scannerTimingGuide, technicalReadyHint } from "@/domain/scanner/timingGuide";
 import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
 import { getScannerPageData } from "@/lib/app-data";
 import { getEthicsSummariesForUser } from "@/lib/ethics";
+import { getCompanyQualityForUser, tickersNeedingQualityRefresh, type CompanyQualityView } from "@/lib/company-quality";
+import { CheckQualityButton } from "./check-quality-button";
 import { prisma } from "@/lib/prisma";
 import { shortCalendarDate } from "@/lib/format";
 import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
@@ -232,7 +234,12 @@ export default async function ScannerPage({
   const isLiveSchwabRun = run?.source === "LIVE:SCHWAB";
   // Ethics research for just the tickers on screen; Record (not Map) because it crosses to a client component.
   const ethics = Object.fromEntries(await getEthicsSummariesForUser(user.id, allResults.map((result) => result.record.ticker)));
-  const planData = await loadPlanData(user.id, allResults, ethics);
+  // Company quality (SEC filings). Not set up (no table yet, or no SEC contact on the server) = nothing shown, nothing gated.
+  const qualityState = await getCompanyQualityForUser(user.id, allResults.map((result) => result.record.ticker)).catch(() => ({ configured: false, secReady: false, byTicker: {} as Record<string, CompanyQualityView> }));
+  const staleQualityTickers = qualityState.configured
+    ? await tickersNeedingQualityRefresh(allResults.filter((result) => isWorthALook(funnelInputOf(result))).map((result) => result.record.ticker)).catch(() => [] as string[])
+    : [];
+  const planData = await loadPlanData(user.id, allResults, ethics, qualityState.configured ? Object.fromEntries(Object.entries(qualityState.byTicker).map(([ticker, view]) => [ticker, view.gate ? { eligible: view.gate.eligible, reason: view.gate.reason } : null])) : {});
   const diagnostics = buildExclusionDiagnostics(
     allResults.map((result) => ({ ticker: result.record.ticker, summary: result.summary })),
   );
@@ -410,9 +417,18 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
+      {qualityState.configured && staleQualityTickers.length > 0 ? (
+        <div data-testid="company-quality-prompt" className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2">
+          <p className="min-w-0 text-sm text-zinc-300">
+            {staleQualityTickers.length} listed {staleQualityTickers.length === 1 ? "company has" : "companies have"} no recent company-quality check. Until it is checked it cannot be picked by Suggest allocation.
+          </p>
+          <CheckQualityButton tickers={staleQualityTickers} />
+        </div>
+      ) : null}
+
       {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete ? scanIncomplete.detail : null} /> : null}
 
-      <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} ethics={ethics} />
+      <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} ethics={ethics} quality={qualityState.byTicker} qualityEnabled={qualityState.configured} />
     </div>
   );
 }
@@ -481,7 +497,12 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
  * Inputs for the "Monday plan" panel: PASS/NEAR rows plus what is already committed. Wrapped so a problem here can
  * never take the whole Scanner page down - the panel simply does not render.
  */
-async function loadPlanData(userId: string, results: ScannerViewResult[], ethics: Record<string, { gate: "OK" | "REVIEW" | "BLOCKED" | "UNREVIEWED" }>) {
+async function loadPlanData(
+  userId: string,
+  results: ScannerViewResult[],
+  ethics: Record<string, { gate: "OK" | "REVIEW" | "BLOCKED" | "UNREVIEWED" }>,
+  qualityGates: Record<string, { eligible: boolean; reason: string } | null>,
+) {
   try {
     const actionable = results.filter((result) => result.readiness === "PASS" || result.readiness === "NEAR");
     const [exposure, classification] = await Promise.all([getPlanExposureForUser(userId), getClassificationForTickers(actionable.map((result) => result.record.ticker))]);
@@ -503,6 +524,7 @@ async function loadPlanData(userId: string, results: ScannerViewResult[], ethics
       })),
       gates,
       classification,
+      qualityGates,
     );
     return { candidates, existing: exposure.existing, unknownCount: exposure.unknownCount };
   } catch {

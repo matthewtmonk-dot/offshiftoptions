@@ -58,6 +58,11 @@ export type PlanCandidate = {
   theme: string | null;
   ethics: EthicsGateValue;
   earningsVerifyReason: string | null;
+  /**
+   * Company-quality verdict (see scanner/qualityGate.ts). undefined / null = the check is not set up, so nothing is gated.
+   * When present and not eligible, the candidate is excluded from automatic picks and the reason is shown.
+   */
+  quality?: { eligible: boolean; reason: string } | null;
 };
 
 /** Existing exposure by company. `amount` is open put collateral, or share cost basis for assigned shares. */
@@ -110,6 +115,7 @@ export function candidateBlockers(candidate: PlanCandidate, limits: PlanLimits):
   else if (candidate.ethics === "REVIEW") blockers.push("Ethics needs your review");
   else if (candidate.ethics === "UNREVIEWED") blockers.push("Ethics not researched yet");
   if (!candidate.gatingClear) blockers.push("A required scanner rule is not a clear pass");
+  if (candidate.quality && !candidate.quality.eligible) blockers.push(candidate.quality.reason);
   if (candidate.earningsVerifyReason) blockers.push("Earnings date needs checking");
   if (collateralOf(candidate) === null) blockers.push("No strike");
   if (candidate.bidProceedsPerContract === null || candidate.bidProceedsPerContract <= 0) blockers.push("No bid to sell into");
