@@ -12,7 +12,24 @@ import {
 } from "./portfolioPlan";
 
 const capital: PlanCapital = { accountValue: 10_680.91, availableToTrade: 7_124.91 };
-const limits = DEFAULT_PLAN_LIMITS;
+// The logic tests below were written against the original 25% / 80% limits; they pin those numbers explicitly so they
+// keep testing the rules themselves, independent of whatever the shipped defaults are.
+const limits = { ...DEFAULT_PLAN_LIMITS, maxPerCompanyPct: 25, maxCommittedPct: 80 };
+
+describe("shipped default limits", () => {
+  it("are 20% per company and 60% total (tightened Nov 5 2026), with one position per theme", () => {
+    expect(DEFAULT_PLAN_LIMITS.maxPerCompanyPct).toBe(20);
+    expect(DEFAULT_PLAN_LIMITS.maxCommittedPct).toBe(60);
+    expect(DEFAULT_PLAN_LIMITS.maxPerTheme).toBe(1);
+  });
+
+  it("a single $20 put on a ~$10.7k account (18.7%) fits, a $25 put (23.4%) does not", () => {
+    const fits = evaluatePlan([candidate({ ticker: "AAA", strike: 20 })], [], capital, DEFAULT_PLAN_LIMITS);
+    expect(fits.valid).toBe(true);
+    const tooBig = evaluatePlan([candidate({ ticker: "BBB", strike: 25 })], [], capital, DEFAULT_PLAN_LIMITS);
+    expect(tooBig.violations.map((violation) => violation.code)).toContain("COMPANY");
+  });
+});
 
 function candidate(overrides: Partial<PlanCandidate> & { ticker: string }): PlanCandidate {
   return {
