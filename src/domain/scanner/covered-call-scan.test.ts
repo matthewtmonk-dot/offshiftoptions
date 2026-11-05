@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { CampaignEventInput } from "../finance/campaigns";
-import type { ScannerRule } from "./scanner";
+import { evaluateCriterion, type ScannerRule } from "./scanner";
 import type { OptionContractSnapshot } from "@/providers/market-data/types";
-import { availableSharesForCoveredCall, evaluateCoveredCallCampaign, maxCoveredCallContracts } from "./covered-call-scan";
+import { availableSharesForCoveredCall, describeLiquidityFailures, evaluateCoveredCallCampaign, maxCoveredCallContracts } from "./covered-call-scan";
 
 const ASOF = new Date("2026-09-01T14:00:00Z");
 const ROLL_BUFFER = 3;
@@ -633,5 +633,27 @@ describe("evaluateCoveredCallCampaign - earnings (its own setting, never the put
       asOf: ASOF,
     });
     expect(scan.earningsCriterion).toBeNull();
+  });
+});
+
+describe("describeLiquidityFailures", () => {
+  const rule = (key: string, operator: ScannerRule["operator"], desired: ScannerRule["desired"]): ScannerRule => ({ key, name: key, operator, desired });
+  const spreadRule = rule("spreadPercent", "LTE", 25);
+  const oiRule = rule("openInterest", "GTE", 100);
+  const bidRule = rule("optionBid", "GTE", 0.1);
+
+  it("names only the checks that failed, with the real value and the limit", () => {
+    const criteria = [evaluateCriterion(bidRule, 0.3), evaluateCriterion(oiRule, 250), evaluateCriterion(spreadRule, 31.25)];
+    expect(describeLiquidityFailures(criteria)).toEqual(["Bid/ask spread 31.3% (max 25.0%)"]);
+  });
+
+  it("lists every failed check", () => {
+    const criteria = [evaluateCriterion(bidRule, 0.05), evaluateCriterion(oiRule, 40), evaluateCriterion(spreadRule, 12)];
+    expect(describeLiquidityFailures(criteria)).toEqual(["Bid $0.05 (min $0.10)", "Open interest 40 (min 100)"]);
+  });
+
+  it("is empty when nothing failed, and an unknown value is not reported as a failure", () => {
+    expect(describeLiquidityFailures([evaluateCriterion(oiRule, 500), evaluateCriterion(spreadRule, null)])).toEqual([]);
+    expect(describeLiquidityFailures([])).toEqual([]);
   });
 });

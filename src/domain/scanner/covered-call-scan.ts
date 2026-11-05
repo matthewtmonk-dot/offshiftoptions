@@ -37,6 +37,30 @@ const MAX_BASIS_SAFE_SHOWN = 4;
 const MAX_BELOW_BASIS_SHOWN = 2;
 const LIQUIDITY_RULE_KEYS = ["optionBid", "openInterest", "spreadPercent", "optionVolume"] as const;
 
+const LIQUIDITY_FAILURE_LABELS: Record<(typeof LIQUIDITY_RULE_KEYS)[number], { label: string; format: (value: number) => string }> = {
+  optionBid: { label: "Bid", format: (value) => `$${value.toFixed(2)}` },
+  openInterest: { label: "Open interest", format: (value) => String(Math.round(value)) },
+  spreadPercent: { label: "Bid/ask spread", format: (value) => `${value.toFixed(1)}%` },
+  optionVolume: { label: "Option volume", format: (value) => String(Math.round(value)) },
+};
+
+/**
+ * Names the liquidity checks a covered-call strike actually failed, with the real value and the owner's limit, e.g.
+ * "Bid/ask spread 31.2% (max 25%)". Only definite FAILs are listed (an UNKNOWN value is not a failure). Empty when
+ * nothing failed. Pure; the pass/fail decision itself is still `liquidityPass`.
+ */
+export function describeLiquidityFailures(criteria: readonly CriterionResult[]): string[] {
+  return criteria.flatMap((criterion) => {
+    if (criterion.status !== "FAIL") return [];
+    const info = LIQUIDITY_FAILURE_LABELS[criterion.key as keyof typeof LIQUIDITY_FAILURE_LABELS];
+    if (!info) return [criterion.name];
+    const actual = typeof criterion.actualValue === "number" ? info.format(criterion.actualValue) : "missing";
+    const desired = typeof criterion.desiredValue === "number" ? info.format(criterion.desiredValue) : null;
+    const limit = desired === null ? "" : criterion.operator === "LTE" ? ` (max ${desired})` : criterion.operator === "GTE" ? ` (min ${desired})` : ` (needs ${desired})`;
+    return [`${info.label} ${actual}${limit}`];
+  });
+}
+
 export type CoveredCallCampaignReasonCode =
   | "NO_SHARES_AVAILABLE"
   | "FULLY_COVERED"
