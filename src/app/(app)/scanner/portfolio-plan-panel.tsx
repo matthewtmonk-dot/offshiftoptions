@@ -69,9 +69,11 @@ type Props = {
   candidates: PlanCandidate[];
   existing: ExistingExposure[];
   unknownExposureCount: number;
+  /** Set while qualified stocks are still unpriced: the plan is built from partial results and says so. */
+  scanIncompleteNote?: string | null;
 };
 
-export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount }: Props) {
+export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount, scanIncompleteNote = null }: Props) {
   const [limits, setLimits] = useState<PlanLimits>(DEFAULT_PLAN_LIMITS);
   const [capital, setCapital] = useState<TradingCapital | "loading">("loading");
   const [selected, setSelected] = useState<string[]>([]);
@@ -184,6 +186,12 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount 
             This is Schwab&apos;s own &quot;available to trade&quot; figure (the same number thinkorswim shows as Option Buying Power).{" "}
             <button type="button" onClick={() => void loadCapital()} className="underline underline-offset-2 hover:text-zinc-300">Refresh</button>
             {" "}before placing a trade; thinkorswim&apos;s order ticket shows the final number at that moment.
+          </p>
+        ) : null}
+
+        {scanIncompleteNote ? (
+          <p data-testid="plan-scan-incomplete" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200">
+            <strong>SCAN INCOMPLETE.</strong> This plan only sees the names priced so far. {scanIncompleteNote}
           </p>
         ) : null}
 

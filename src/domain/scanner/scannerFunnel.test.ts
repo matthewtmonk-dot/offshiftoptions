@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScannerFunnel, describeScannerFunnel, isAwaitingOptionCheck, isBestAvailable, isStockQualified, isWorthALook, summarizeOptionOutcomes, describeOptionOutcomes, type FunnelRowInput } from "./scannerFunnel";
+import { buildScannerFunnel, describeScanIncomplete, describeScannerFunnel, isAwaitingOptionCheck, isBestAvailable, isStockQualified, isWorthALook, summarizeOptionOutcomes, describeOptionOutcomes, type FunnelRowInput } from "./scannerFunnel";
 
 const row = (overrides: Partial<FunnelRowInput> = {}): FunnelRowInput => ({
   readiness: "FAIL",
@@ -139,5 +139,31 @@ describe("summarizeOptionOutcomes (why priced names didn't pass)", () => {
 
   it("labels a NEAR row with no failed rule, and unknown-only rows, honestly", () => {
     expect(summarizeOptionOutcomes([priced({ readiness: "NEAR" }), priced({ readiness: "NEEDS_DATA" })]).map((o) => o.label).sort()).toEqual(["just under one preference", "missing option data"]);
+  });
+});
+
+describe("describeScanIncomplete", () => {
+  it("is silent once every stock that passed the screen has been priced", () => {
+    expect(describeScanIncomplete(buildScannerFunnel([row(), row({ readiness: "PASS" })]))).toBeNull();
+    expect(describeScanIncomplete(buildScannerFunnel([]))).toBeNull();
+  });
+
+  it("says SCAN INCOMPLETE with the exact count while qualified stocks are unpriced", () => {
+    const funnel = buildScannerFunnel([row(), row({ optionEnrichment: "NOT_ENRICHED_BUDGET" }), row({ optionEnrichment: "NOT_ENRICHED_BUDGET" })]);
+    const notice = describeScanIncomplete(funnel)!;
+    expect(notice.headline).toBe("SCAN INCOMPLETE");
+    expect(notice.detail).toMatch(/^2 stocks that passed the stock screen have not had options priced yet/);
+    expect(notice.detail).toMatch(/Press Check options/);
+  });
+
+  it("uses singular wording for one, and 'At least' when the saved list was capped", () => {
+    const one = buildScannerFunnel([row({ optionEnrichment: "NOT_ENRICHED_BUDGET" })]);
+    expect(describeScanIncomplete(one)!.detail).toMatch(/^1 stock that passed the stock screen has not had options priced/);
+    expect(describeScanIncomplete(one, { truncated: true })!.detail).toMatch(/^At least 1 stock that passed the stock screen has not/);
+  });
+
+  it("does not count stocks that failed the screen or have no usable data", () => {
+    const funnel = buildScannerFunnel([row({ stockScreen: "FAIL", optionEnrichment: "NOT_ENRICHED_BUDGET" }), row({ optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" })]);
+    expect(describeScanIncomplete(funnel)).toBeNull();
   });
 });

@@ -16,7 +16,7 @@ import {
 } from "@/domain/scanner/scanner";
 import { GATING_RULE_KEYS, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { STOCK_STAGE_RULE_KEYS } from "@/domain/scanner/live-scan";
-import { buildScannerFunnel, describeOptionOutcomes, describeScannerFunnel, funnelInputOf, summarizeOptionOutcomes, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
+import { buildScannerFunnel, describeOptionOutcomes, describeScanIncomplete, describeScannerFunnel, funnelInputOf, summarizeOptionOutcomes, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
 import { scannerTimingGuide, technicalReadyHint } from "@/domain/scanner/timingGuide";
 import type { ResearchStatus } from "@/generated/prisma/enums";
 import { requireCurrentUser } from "@/lib/auth";
@@ -246,6 +246,7 @@ export default async function ScannerPage({
   // The saved list is capped (MAX_DISPLAYED_STOCK_STAGE_RESULTS non-Research rows), so when it's full
   // the funnel counts are a floor, not an exact total.
   const funnelTruncated = allResults.filter((result) => !researchByTicker.has(result.record.ticker)).length >= MAX_DISPLAYED_STOCK_STAGE_RESULTS;
+  const scanIncomplete = describeScanIncomplete(funnel, { truncated: funnelTruncated });
   const optionOutcomes = summarizeOptionOutcomes(
     allResults.map((result) => ({
       readiness: result.readiness,
@@ -385,6 +386,13 @@ export default async function ScannerPage({
         {run ? <span className="ml-auto text-xs text-zinc-500">Last run: {shortRunTime(run.createdAt)}</span> : null}
       </div>
 
+      {isLiveSchwabRun && scanIncomplete ? (
+        <div data-testid="scan-incomplete" role="status" className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+          <p className="font-semibold tracking-wide">{scanIncomplete.headline}</p>
+          <p className="mt-0.5 text-amber-200/90">{scanIncomplete.detail}</p>
+        </div>
+      ) : null}
+
       {isLiveSchwabRun && allResults.length > 0 ? (
         <div data-testid="scanner-funnel" className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2">
           <div className="min-w-0 text-sm text-zinc-300">
@@ -402,7 +410,7 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
-      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} /> : null}
+      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete ? scanIncomplete.detail : null} /> : null}
 
       <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} ethics={ethics} />
     </div>
