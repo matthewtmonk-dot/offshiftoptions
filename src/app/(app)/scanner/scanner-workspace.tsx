@@ -5,6 +5,7 @@ import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { InfoTip } from "@/components/info-tip";
 import { EthicsBadge } from "@/components/ethics-badge";
 import { CompanyQualityBadge, type CompanyQualityChipData } from "@/components/company-quality-badge";
+import { ChartLinks } from "@/components/chart-links";
 import type { EthicsSummary } from "@/lib/ethics";
 import {
   ArrowDownUp,
@@ -522,6 +523,7 @@ export function ScannerWorkspace({
                       </button>
                       <EthicsBadge ticker={result.record.ticker} summary={ethics[result.record.ticker]} />
                       {qualityEnabled ? <CompanyQualityBadge ticker={result.record.ticker} data={quality[result.record.ticker]} /> : null}
+                      <ChartLinks ticker={result.record.ticker} />
                       </div>
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
