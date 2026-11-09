@@ -784,7 +784,7 @@ function CandidateInspector({
       ) : (
         <p className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-400">
           {isNotOptionAssessed(result)
-            ? "No option contract has been priced for this stock yet. Press Check options above."
+            ? "No option contract has been priced for this stock yet - the page prices it automatically (or use Check options under Scan details)."
             : "No qualifying put contract was found for this stock."}
           {v.scanNote ? <span className="mt-1 block text-xs text-zinc-500">{v.scanNote}</span> : null}
         </p>
