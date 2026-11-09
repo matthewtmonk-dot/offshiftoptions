@@ -470,9 +470,9 @@ export function ScannerWorkspace({
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Strike</th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
                 <span className="inline-flex items-center gap-1">
-                  Premium
+                  Bid
                   <InfoTip label="Premium basis" testId="help-scanner-premium-basis">
-                    A mark/midpoint estimate, not the bid. Expand a row for the bid-based dollar figure ROR actually uses.
+                    The option&apos;s bid - what a sell order is most likely to get, and the figure ROR uses. Expand a row for the mark/midpoint.
                   </InfoTip>
                 </span>
               </th>
@@ -480,7 +480,7 @@ export function ScannerWorkspace({
                 <span className="inline-flex items-center gap-1">
                   ROR
                   <InfoTip label="ROR basis" testId="help-scanner-ror-basis">
-                    Calculated from the bid, not the mark/midpoint premium shown to its left.
+                    Return on the cash held, calculated from the bid shown to its left.
                   </InfoTip>
                 </span>
               </th>
@@ -557,7 +557,7 @@ export function ScannerWorkspace({
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.strike, money)}</td>
                     <td className="border-b border-zinc-900 px-3 py-2">
-                      {coloredCell(result.values.premium, money, ruleSeverityTone(criterionFor(result, "optionBid")))}
+                      {coloredCell(result.values.optionBid, money, ruleSeverityTone(criterionFor(result, "optionBid")))}
                     </td>
                     <td className="border-b border-zinc-900 px-3 py-2">
                       {coloredCell(result.values.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))}
@@ -676,7 +676,7 @@ function CandidateCard({
             }
           />
           <MobileDatum label="Strike" value={cell(result.values.strike, money)} />
-          <MobileDatum label="Premium" value={coloredCell(result.values.premium, money, ruleSeverityTone(criterionFor(result, "optionBid")))} />
+          <MobileDatum label="Bid" value={coloredCell(result.values.optionBid, money, ruleSeverityTone(criterionFor(result, "optionBid")))} />
           <MobileDatum label="ROR" value={coloredCell(result.values.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))} />
           <MobileDatum label="DTE" value={coloredCell(result.values.dte, (v) => `${v}d`, ruleSeverityTone(criterionFor(result, "dte")))} />
         </dl>

@@ -25,7 +25,6 @@ import { getEthicsSummariesForUser } from "@/lib/ethics";
 import { getCompanyQualityForUser, tickersNeedingQualityRefresh, type CompanyQualityView } from "@/lib/company-quality";
 import { CheckQualityButton } from "./check-quality-button";
 import { prisma } from "@/lib/prisma";
-import { shortCalendarDate } from "@/lib/format";
 import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
 import { ensureMyLstScannerProfileForUser, MAX_DISPLAYED_STOCK_STAGE_RESULTS } from "@/lib/workflows";
 import { getCoveredCallScanForUser } from "@/lib/covered-call-scanner";
@@ -37,6 +36,7 @@ import { LiveScanButton } from "./live-scan-button";
 import { OptionCheckButton } from "./option-check-button";
 import { PortfolioPlanPanel } from "./portfolio-plan-panel";
 import { PrepareDataButton } from "./prepare-data-button";
+import { ScanAutoFinisher } from "./scan-auto-finisher";
 import { ScannerModeTabs, type ScannerMode } from "./scanner-mode-tabs";
 import { ScannerWorkspace } from "./scanner-workspace";
 
@@ -184,6 +184,16 @@ function currentTimingGuide() {
   return scannerTimingGuide(new Date());
 }
 
+/** Option prices older than this are shown as "re-scan before placing" on the picks. */
+const PICKS_PRICE_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** Plain helper outside the component (render purity): a short note when the picks are built from old option prices. */
+function picksPriceAgeNote(runCreatedAt: Date | null): string | null {
+  if (!runCreatedAt) return null;
+  if (Date.now() - runCreatedAt.getTime() <= PICKS_PRICE_MAX_AGE_MS) return null;
+  return `Option prices are from ${shortRunTime(runCreatedAt)}. Run Live Scan again before placing anything - premiums move.`;
+}
+
 function currentTechnicalReadyHint() {
   return technicalReadyHint(new Date());
 }
@@ -328,105 +338,75 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
-      {settingsChangedAfterRun ? (
-        <div
-          data-testid="settings-changed-after-run-warning"
-          className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100"
+      <div data-testid="scanner-status-line" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
+        {run ? (
+          <span>
+            Scanned {shortRunTime(run.createdAt)} · <strong className="text-emerald-300">{passCount} pass</strong> · <strong className="text-amber-300">{nearMatchCount} near</strong>
+          </span>
+        ) : (
+          <span>No scan yet - press Run Live Scan.</span>
+        )}
+        <span
+          data-testid="scanner-timing-guide"
+          data-phase={timingGuide.phase}
+          title={timingGuide.detail}
+          className={timingGuide.tone === "caution" ? "text-amber-300" : "text-sky-300"}
         >
-          Results below were generated with earlier settings. Run another scan to evaluate them under your current rules.
+          {timingGuide.headline}
+        </span>
+        <ScanAutoFinisher runId={isLiveSchwabRun && run ? run.id : null} awaitingOptionCheck={funnel.awaitingOptionCheck} qualityTickers={staleQualityTickers} enabled={isLiveSchwabRun && !settingsChangedAfterRun} />
+      </div>
+
+      {settingsChangedAfterRun ? (
+        <div data-testid="settings-changed-after-run-warning" className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+          Your rules changed after this scan. Run Live Scan again to see results under the new rules.
         </div>
       ) : null}
 
       {showStaleTechnicalWarning ? (
-        <div
-          data-testid="stale-technical-cache-warning"
-          className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100"
-        >
-          <p className="font-medium">Technical cache is not current for this scan.</p>
-          <p className="mt-0.5 text-amber-200/90">
-            Required market date: {shortCalendarDate(technicalFreshness.requiredMarketDate)} · Fresh technicals:{" "}
-            {technicalFreshness.freshUsableCount.toLocaleString()} / {technicalFreshness.eligibleCount.toLocaleString()}
-          </p>
-          <p className="mt-0.5 text-amber-200/90">Scanner results are incomplete.</p>
-          <p className="mt-0.5 text-amber-100" data-testid="technical-ready-hint">{currentTechnicalReadyHint()}</p>
+        <div data-testid="stale-technical-cache-warning" className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+          <span>
+            Only {technicalFreshness.freshUsableCount.toLocaleString()} of {technicalFreshness.eligibleCount.toLocaleString()} stocks have today&apos;s RSI/Bollinger data, so this scan is missing names.{" "}
+            <span className="text-amber-200/90" data-testid="technical-ready-hint">{currentTechnicalReadyHint()}</span>
+          </span>
           <PrepareDataButton />
         </div>
       ) : null}
 
-      <div
-        data-testid="scanner-timing-guide"
-        data-phase={timingGuide.phase}
-        className={`rounded-md border px-3 py-2 text-sm ${
-          timingGuide.tone === "caution" ? "border-amber-400/30 bg-amber-400/10 text-amber-100" : "border-sky-400/30 bg-sky-400/5 text-sky-100"
-        }`}
-      >
-        <p className="font-medium">{timingGuide.headline}</p>
-        <p className={`mt-0.5 ${timingGuide.tone === "caution" ? "text-amber-200/90" : "text-sky-200/90"}`}>{timingGuide.detail}</p>
-        <details className="mt-1.5">
-          <summary className="cursor-pointer text-xs underline underline-offset-2 opacity-80 hover:opacity-100">The weekly routine</summary>
-          <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-xs opacity-90">
-            <li><strong>Saturday afternoon or Sunday:</strong> Run Live Scan, then Check options, and save the names you like to Research. This is your shortlist.</li>
-            <li><strong>Monday around 10:30 AM ET:</strong> Run a fresh scan. Weekend option prices were Friday&apos;s close and reset at the open - only names that still PASS are worth acting on.</li>
-            <li><strong>Mon-Thu around 3:00 PM ET:</strong> Check open positions on the Dashboard.</li>
-            <li><strong>Friday around 3:00 PM ET:</strong> Roll call on expiring positions. Fresh research waits for Saturday afternoon.</li>
+      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete ? scanIncomplete.detail : null} priceAgeNote={isLiveSchwabRun ? picksPriceAgeNote(run?.createdAt ?? null) : null} /> : null}
+
+      <details data-testid="scan-details" className="group rounded-md border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-sm text-zinc-300">
+        <summary className="cursor-pointer list-none text-zinc-400 hover:text-zinc-200">
+          <span className="group-open:hidden">▸</span><span className="hidden group-open:inline">▾</span> Scan details
+          {run ? <span className="text-zinc-500"> · {allResults.length} stocks listed · {funnel.awaitingOptionCheck > 0 ? `${funnel.awaitingOptionCheck} still to price` : "all qualifying options priced"}</span> : null}
+        </summary>
+        <div className="mt-2 space-y-2">
+          <p className="text-zinc-300">{timingGuide.detail}</p>
+          <ol className="list-decimal space-y-0.5 pl-5 text-xs text-zinc-400">
+            <li><strong>Saturday afternoon or Sunday:</strong> run a scan to build the shortlist (RSI/Bollinger use Friday&apos;s close).</li>
+            <li><strong>Monday 10:30 AM-12:30 PM ET:</strong> run a fresh scan; only names that still pass at live prices are worth placing.</li>
+            <li><strong>Mon-Thu around 3:00 PM ET:</strong> check open positions on the Dashboard.</li>
+            <li><strong>Friday around 3:00 PM ET:</strong> roll call on expiring positions.</li>
           </ol>
-          <p className="mt-1.5 text-xs opacity-80">A timing aid only - not an instruction to place a trade. Execution stays in Schwab/thinkorswim.</p>
-        </details>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300">
-        <span>
-          <strong className="text-zinc-50">{allResults.length}</strong> candidates
-        </span>
-        <span className="text-emerald-300">
-          <strong>{passCount}</strong> pass
-        </span>
-        <span className="text-amber-300">
-          <strong>{nearMatchCount}</strong> near
-        </span>
-        <span className="text-zinc-400">
-          <strong>{unknownCount}</strong> unknown
-        </span>
-        <span>
-          Avg <strong className="text-zinc-50">{allResults.length ? averageScore : "N/A"}</strong>
-        </span>
-        {run ? <span className="ml-auto text-xs text-zinc-500">Last run: {shortRunTime(run.createdAt)}</span> : null}
-      </div>
-
-      {isLiveSchwabRun && scanIncomplete ? (
-        <div data-testid="scan-incomplete" role="status" className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
-          <p className="font-semibold tracking-wide">{scanIncomplete.headline}</p>
-          <p className="mt-0.5 text-amber-200/90">{scanIncomplete.detail}</p>
-        </div>
-      ) : null}
-
-      {isLiveSchwabRun && allResults.length > 0 ? (
-        <div data-testid="scanner-funnel" className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2">
-          <div className="min-w-0 text-sm text-zinc-300">
-            <p>{describeScannerFunnel(funnel, { truncated: funnelTruncated })}</p>
-            <p className="mt-0.5 text-xs text-zinc-500">
-              A stock that passes the screen still needs its weekly option prices looked up (premium, return, strikes). That step is called Check options - it runs by itself after each scan, or press the button.
-            </p>
-            {optionOutcomes.length > 0 ? (
-              <p className="mt-0.5 text-xs text-zinc-400" data-testid="scanner-option-outcomes">
-                Why priced names didn&apos;t pass: {describeOptionOutcomes(optionOutcomes)}
-              </p>
-            ) : null}
+          {isLiveSchwabRun && allResults.length > 0 ? (
+            <div data-testid="scanner-funnel" className="space-y-1">
+              <p>{describeScannerFunnel(funnel, { truncated: funnelTruncated })}</p>
+              {optionOutcomes.length > 0 ? (
+                <p className="text-xs text-zinc-400" data-testid="scanner-option-outcomes">
+                  Why priced names didn&apos;t pass: {describeOptionOutcomes(optionOutcomes)}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="flex flex-wrap items-start gap-3">
+            {isLiveSchwabRun && funnel.awaitingOptionCheck > 0 ? <OptionCheckButton awaiting={funnel.awaitingOptionCheck} /> : null}
+            {qualityState.configured && staleQualityTickers.length > 0 ? <CheckQualityButton tickers={staleQualityTickers} /> : null}
           </div>
-          {funnel.awaitingOptionCheck > 0 ? <OptionCheckButton awaiting={funnel.awaitingOptionCheck} /> : null}
-        </div>
-      ) : null}
-
-      {qualityState.configured && staleQualityTickers.length > 0 ? (
-        <div data-testid="company-quality-prompt" className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2">
-          <p className="min-w-0 text-sm text-zinc-300">
-            {staleQualityTickers.length} listed {staleQualityTickers.length === 1 ? "company has" : "companies have"} no recent company-quality check. Until it is checked it cannot be picked by Suggest allocation.
+          <p className="text-xs text-zinc-500">
+            {allResults.length} candidates · {passCount} pass · {nearMatchCount} near · {unknownCount} missing data · average score {allResults.length ? averageScore : "N/A"}
           </p>
-          <CheckQualityButton tickers={staleQualityTickers} />
         </div>
-      ) : null}
-
-      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete ? scanIncomplete.detail : null} /> : null}
+      </details>
 
       <ScannerWorkspace results={allResults} buddies={buddies} diagnostics={diagnostics} modeLabel={run ? "showing" : "found"} ethics={ethics} quality={qualityState.byTicker} qualityEnabled={qualityState.configured} />
     </div>

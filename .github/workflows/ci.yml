@@ -1,0 +1,44 @@
+name: CI
+
+# Runs the same checks a developer runs locally (typecheck, lint, unit tests, production build) on every pull request
+# and on pushes to main. No secrets, no database: DB-gated tests skip themselves without RUN_DB_TESTS.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: corepack pnpm typecheck
+      - name: Lint
+        run: corepack pnpm lint
+      - name: Unit tests
+        run: corepack pnpm test
+      - name: Production build
+        run: corepack pnpm build
