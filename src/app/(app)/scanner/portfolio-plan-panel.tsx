@@ -154,6 +154,15 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
     return blockers.every((blocker) => blocker === ETHICS_PENDING);
   });
   const leftOut = ineligible.filter((candidate) => !needsEthics.includes(candidate));
+  /** Every reason, including "too big for your account", which would still apply after the other checks clear. */
+  const leftOutReasons = (candidate: PlanCandidate) => {
+    const reasons = candidateBlockers(candidate, limits);
+    const collateral = collateralOf(candidate);
+    if (planCapital && collateral !== null && evaluatePlan([candidate], existing, planCapital, limits).violations.some((violation) => violation.code === "COMPANY")) {
+      reasons.push(`one contract holds ${usd0.format(collateral)} (${pct(collateral)}), over your ${limits.maxPerCompanyPct}% per-company limit`);
+    }
+    return reasons;
+  };
 
   function toggle(ticker: string) {
     setManual((current) => {
@@ -240,7 +249,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
                   <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one ${candidate.strike} put holds {usd0.format(collateralOf(candidate) ?? 0)} ({pct(collateralOf(candidate) ?? 0)}), over your {limits.maxPerCompanyPct}% per-company limit</li>
                 ))}
                 {leftOut.map((candidate) => (
-                  <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {candidateBlockers(candidate, limits).join("; ")}</li>
+                  <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {leftOutReasons(candidate).join("; ")}</li>
                 ))}
               </ul>
             ) : needsEthics.length > 0 ? null : (
@@ -283,7 +292,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
                 <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one contract holds {usd0.format(collateralOf(candidate) ?? 0)} ({pct(collateralOf(candidate) ?? 0)}), over your {limits.maxPerCompanyPct}% per-company limit</li>
               ))}
               {leftOut.map((candidate) => (
-                <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {candidateBlockers(candidate, limits).join("; ")}</li>
+                <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {leftOutReasons(candidate).join("; ")}</li>
               ))}
             </ul>
           </details>
