@@ -202,7 +202,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
   };
 
   return (
-    <Panel title="This week's picks" action={<span className="text-xs text-zinc-500">Suggestions only - you place every trade in thinkorswim</span>}>
+    <Panel title={priceAgeNote ? "Picks from the last scan - reconfirm before placing" : "This week's picks"} action={<span className="text-xs text-zinc-500">Suggestions only - you place every trade in thinkorswim</span>}>
       <div className="space-y-3" data-testid="portfolio-plan">
         <p className="text-xs text-zinc-400" data-testid="plan-capital">
           {capital === "loading" ? "Reading your balance from Schwab…" : null}

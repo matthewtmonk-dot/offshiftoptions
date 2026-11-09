@@ -62,8 +62,10 @@ export function ScanAutoFinisher({ runId, awaitingOptionCheck, qualityTickers, e
   useEffect(() => {
     if (!step || busy.current) return;
     if (readAttempts().includes(step.signature)) return;
-    rememberAttempt(step.signature);
     busy.current = true;
+    // Recorded only once the step has actually ended (finished, capped or failed) - an interrupted run (page left,
+    // tab closed) is resumed on the next visit; a step that ended without progress is never repeated automatically.
+    const finish = () => rememberAttempt(step.signature);
     void (async () => {
       // Yield first so no state is set synchronously inside the effect.
       await Promise.resolve();
@@ -80,8 +82,9 @@ export function ScanAutoFinisher({ runId, awaitingOptionCheck, qualityTickers, e
             },
           });
           if (stopped.current) return;
+          finish();
           if (outcome.status === "error") {
-            setStatus({ kind: "note", message: `Option pricing stopped: ${outcome.message}` });
+            setStatus({ kind: "note", message: `Option pricing stopped: ${outcome.message} The Check options button under Scan details retries.` });
             return;
           }
           setStatus(outcome.note ? { kind: "note", message: outcome.note } : { kind: "idle" });
@@ -91,6 +94,7 @@ export function ScanAutoFinisher({ runId, awaitingOptionCheck, qualityTickers, e
           for (let round = 0; round < MAX_QUALITY_ROUNDS && !stopped.current; round += 1) {
             const outcome = await refreshCompanyQualityAction(step.tickers);
             if (!outcome.ok) {
+              finish();
               setStatus({ kind: "note", message: `Company-quality check stopped: ${outcome.error}` });
               return;
             }
@@ -99,10 +103,12 @@ export function ScanAutoFinisher({ runId, awaitingOptionCheck, qualityTickers, e
             if (outcome.remaining === 0 || outcome.processed === 0) break;
           }
           if (stopped.current) return;
+          finish();
           setStatus({ kind: "idle" });
         }
         router.refresh();
       } catch {
+        finish();
         if (!stopped.current) setStatus({ kind: "note", message: "Couldn't finish the scan automatically. Use the buttons under Scan details." });
       } finally {
         busy.current = false;
