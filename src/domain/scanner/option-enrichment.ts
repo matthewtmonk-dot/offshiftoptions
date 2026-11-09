@@ -119,7 +119,7 @@ export function notOptionAssessedLabel(state: unknown, chainBudget: number): str
     case "NOT_ENRICHED_BUDGET":
       // chainBudget kept in the signature for callers; the page now prices these by itself (ScanAutoFinisher).
       void chainBudget;
-      return "Passed the stock screen - options being priced";
+      return "Options not priced yet - passed the stock screen; the page prices these automatically";
     case "NOT_ENRICHED_STOCK_FILTER":
       return "Options not checked — stock screen did not qualify";
     case "NOT_ENRICHED_DATA_UNAVAILABLE":
