@@ -450,19 +450,19 @@ export function ScannerWorkspace({
         <div className="rounded-md border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{statusError}</div>
       ) : null}
 
-      <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-        <span>Cell colors compare each metric with your active Scanner Rules.</span>
-        <InfoTip label="Cell colors" testId="help-scanner-cell-colors">
-          Green meets the rule, amber is near the threshold, red misses it, and gray/neutral means unavailable or
-          informational (the rule is disabled, or OSO doesn&apos;t have this value yet).
-        </InfoTip>
-      </div>
 
       <div data-testid="scanner-desktop-table" className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/60 lg:block">
         <table className="w-full min-w-[960px] border-separate border-spacing-0 text-left text-xs">
           <thead>
             <tr className="text-[11px] uppercase tracking-normal text-zinc-500">
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Ticker</th>
+              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
+                <span className="inline-flex items-center gap-1">
+                  Ticker
+                  <InfoTip label="Cell colors" testId="help-scanner-cell-colors">
+                    Cell colors compare each value with your Scanner Rules: green meets the rule, amber is near the threshold, red misses it, gray means unavailable or the rule is off.
+                  </InfoTip>
+                </span>
+              </th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Score</th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Status</th>
               <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Price</th>
