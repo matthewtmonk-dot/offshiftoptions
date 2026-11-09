@@ -4,7 +4,9 @@ import {
   canAdd,
   candidateBlockers,
   evaluatePlan,
+  OPTIMIZER_MAX_CANDIDATES,
   optimizePlan,
+  pickFlags,
   themeKeyOf,
   type ExistingExposure,
   type PlanCandidate,
@@ -205,5 +207,37 @@ describe("company-quality gate in the plan", () => {
     const blocked = candidate({ ticker: "BLOCK1", strike: 15, score: 95, theme: "other", quality: { eligible: false, reason: "Company quality not checked yet" } });
     const result = optimizePlan([blocked, good], [], capital, limits);
     expect(result.picks.map((pick) => pick.ticker)).toEqual(["GOOD1"]);
+  });
+});
+
+describe("pickFlags", () => {
+  it("flags a premium far above the ~1%/week target as a risk signal", () => {
+    const flags = pickFlags({ returnPct: 4, dte: 11, readiness: "PASS" });
+    expect(flags).toHaveLength(1);
+    expect(flags[0]).toContain("Rich premium (about 2.5% a week)");
+  });
+
+  it("stays quiet for a normal weekly premium", () => {
+    expect(pickFlags({ returnPct: 1.02, dte: 4, readiness: "PASS" })).toEqual([]);
+  });
+
+  it("explains what NEAR means", () => {
+    expect(pickFlags({ returnPct: 0.95, dte: 4, readiness: "NEAR" })[0]).toContain("preference rule");
+  });
+
+  it("does not guess without a return or days to expiry", () => {
+    expect(pickFlags({ returnPct: null, dte: 4, readiness: "PASS" })).toEqual([]);
+    expect(pickFlags({ returnPct: 3, dte: null, readiness: "PASS" })).toEqual([]);
+  });
+});
+
+describe("optimizePlan affordability", () => {
+  it("never lets trades too big for the per-company limit crowd affordable ones out of the search", () => {
+    const capital = { accountValue: 10_561, availableToTrade: 9_299 };
+    // 14 high-scoring trades that each need $4,400 (41.7% of the account) plus one affordable $10 strike.
+    const big = Array.from({ length: OPTIMIZER_MAX_CANDIDATES }, (_, index) => candidate({ ticker: `BIG${index}`, strike: 44, score: 99, theme: `big${index}` }));
+    const small = candidate({ ticker: "SMALL", strike: 10, score: 50, theme: "small" });
+    const result = optimizePlan([...big, small], [], capital, DEFAULT_PLAN_LIMITS);
+    expect(result.picks.map((pick) => pick.ticker)).toEqual(["SMALL"]);
   });
 });

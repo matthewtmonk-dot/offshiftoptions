@@ -124,6 +124,25 @@ export function candidateBlockers(candidate: PlanCandidate, limits: PlanLimits):
   return blockers;
 }
 
+/** Above this weekly-equivalent return a premium is a risk signal (a volatile or struggling company), not a bargain. */
+export const RICH_PREMIUM_WEEKLY_PCT = 2;
+
+/**
+ * Cautions shown on a trade that is otherwise eligible. They never block or re-rank anything - they tell Matt what to
+ * look at before he places it.
+ */
+export function pickFlags(candidate: Pick<PlanCandidate, "returnPct" | "dte" | "readiness">): string[] {
+  const flags: string[] = [];
+  if (candidate.returnPct !== null && candidate.dte !== null && candidate.dte > 0) {
+    const weekly = (candidate.returnPct / candidate.dte) * 7;
+    if (weekly > RICH_PREMIUM_WEEKLY_PCT) {
+      flags.push(`Rich premium (about ${weekly.toFixed(1)}% a week) - the market sees real risk here; read the company check before selling`);
+    }
+  }
+  if (candidate.readiness === "NEAR") flags.push("A preference rule (RSI, Bollinger or return) is just outside your target");
+  return flags;
+}
+
 /**
  * Checks any set of new one-contract puts against the cash and the limits. Existing exposure counts toward the
  * limits only; cash is checked against Schwab's available figure, which already excludes existing put collateral.
@@ -215,6 +234,9 @@ export type OptimizeResult = { picks: PlanCandidate[]; evaluation: PlanEvaluatio
 export function optimizePlan(candidates: PlanCandidate[], existing: ExistingExposure[], capital: PlanCapital, limits: PlanLimits): OptimizeResult {
   const pool = candidates
     .filter((candidate) => candidateBlockers(candidate, limits).length === 0)
+    // Drop trades that cannot fit even on their own (e.g. one contract is bigger than the per-company limit) BEFORE the
+    // top-N cut, so unaffordable high scorers never crowd affordable trades out of the search.
+    .filter((candidate) => evaluatePlan([candidate], existing, capital, limits).valid)
     // One contract per company: two strikes on the same company would double its exposure for no diversification.
     .sort((left, right) => qualityOf(right) - qualityOf(left) || (right.returnPct ?? 0) - (left.returnPct ?? 0) || left.ticker.localeCompare(right.ticker))
     .filter((candidate, index, all) => all.findIndex((other) => other.ticker === candidate.ticker) === index)
