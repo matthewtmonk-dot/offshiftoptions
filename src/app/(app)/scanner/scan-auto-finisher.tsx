@@ -47,6 +47,9 @@ export function ScanAutoFinisher({ runId, awaitingOptionCheck, qualityTickers, e
   const router = useRouter();
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const busy = useRef(false);
+  /** Bumped when a step ends, so a newer signature that arrived while it was busy (the page re-renders after every
+   * pricing batch) is picked up instead of being skipped for good. */
+  const [settled, setSettled] = useState(0);
   const stopped = useRef(false);
 
   useEffect(() => {
@@ -112,11 +115,12 @@ export function ScanAutoFinisher({ runId, awaitingOptionCheck, qualityTickers, e
         if (!stopped.current) setStatus({ kind: "note", message: "Couldn't finish the scan automatically. Use the buttons under Scan details." });
       } finally {
         busy.current = false;
+        if (!stopped.current) setSettled((value) => value + 1);
       }
     })();
     // The signature captures everything the step depends on; re-running only when it changes is intentional.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature]);
+  }, [signature, settled]);
 
   if (status.kind === "idle") return null;
   if (status.kind === "note") {
@@ -126,7 +130,7 @@ export function ScanAutoFinisher({ runId, awaitingOptionCheck, qualityTickers, e
     <span data-testid="scan-autofinish" role="status" className="inline-flex items-center gap-1.5 text-xs text-sky-200">
       <Loader2 className="size-3.5 motion-safe:animate-spin" aria-hidden />
       {status.kind === "pricing"
-        ? `Finishing the scan: pricing options ${status.checked} of ${status.target}…`
+        ? `Finishing the scan: pricing options (${status.checked} checked)…`
         : `Finishing the scan: checking company quality ${status.done} of ${status.total}…`}
     </span>
   );

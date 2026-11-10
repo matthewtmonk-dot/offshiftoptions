@@ -117,7 +117,9 @@ export function scannerRowReasons(state: unknown, unknownCriterionReasons: strin
 export function notOptionAssessedLabel(state: unknown, chainBudget: number): string | null {
   switch (state) {
     case "NOT_ENRICHED_BUDGET":
-      return `No stock-screen failures (an earnings date may still need checking). Options not priced yet - beyond the first ${chainBudget} checked automatically. Press Check options.`;
+      // chainBudget kept in the signature for callers; the page now prices these by itself (ScanAutoFinisher).
+      void chainBudget;
+      return "Options not priced yet - passed the stock screen; the page prices these automatically";
     case "NOT_ENRICHED_STOCK_FILTER":
       return "Options not checked — stock screen did not qualify";
     case "NOT_ENRICHED_DATA_UNAVAILABLE":

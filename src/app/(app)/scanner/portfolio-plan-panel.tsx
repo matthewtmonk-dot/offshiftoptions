@@ -78,6 +78,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
   const [capital, setCapital] = useState<TradingCapital | "loading">("loading");
   /** null = follow the planner's suggestion; an array = Matt's own selection. */
   const [manual, setManual] = useState<string[] | null>(null);
+  const [showLimits, setShowLimits] = useState(false);
 
   // Browser-only state (saved limits) and the first Schwab read are loaded after mount; the setters run in async
   // callbacks so the server-rendered markup and the first client render always agree.
@@ -154,6 +155,15 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
     return blockers.every((blocker) => blocker === ETHICS_PENDING);
   });
   const leftOut = ineligible.filter((candidate) => !needsEthics.includes(candidate));
+  /** Every reason, including "too big for your account", which would still apply after the other checks clear. */
+  const leftOutReasons = (candidate: PlanCandidate) => {
+    const reasons = candidateBlockers(candidate, limits);
+    const collateral = collateralOf(candidate);
+    if (planCapital && collateral !== null && evaluatePlan([candidate], existing, planCapital, limits).violations.some((violation) => violation.code === "COMPANY")) {
+      reasons.push(`one contract holds ${usd0.format(collateral)} (${pct(collateral)}), over your ${limits.maxPerCompanyPct}% per-company limit`);
+    }
+    return reasons;
+  };
 
   function toggle(ticker: string) {
     setManual((current) => {
@@ -172,7 +182,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
     const unavailable = kind === "ethics" || (!isSelected && (!planCapital || !fit.ok));
     const flags = pickFlags(candidate);
     return (
-      <li key={candidate.ticker} className={`rounded-md border px-3 py-2 text-sm ${kind === "pick" ? "border-emerald-400/50 bg-emerald-400/5" : kind === "ethics" ? "border-sky-400/30 bg-sky-400/5" : "border-zinc-800 bg-zinc-900/40"} ${unavailable && kind !== "ethics" ? "opacity-60" : ""}`}>
+      <li key={candidate.ticker} className={`rounded-md border px-3 py-2 text-sm ${kind === "pick" ? (flags.length ? "border-amber-400/40 bg-zinc-900/60" : "border-emerald-400/50 bg-emerald-400/5") : kind === "ethics" ? "border-sky-400/30 bg-sky-400/5" : "border-zinc-800 bg-zinc-900/40"} ${unavailable && kind !== "ethics" ? "opacity-60" : ""}`}>
         <label className="flex cursor-pointer items-start gap-3">
           <input type="checkbox" checked={isSelected} disabled={unavailable} onChange={() => toggle(candidate.ticker)} className="mt-1 size-4" aria-label={`Include ${candidate.ticker}`} />
           <div className="min-w-0 flex-1">
@@ -202,7 +212,17 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
   };
 
   return (
-    <Panel title={priceAgeNote ? "Picks from the last scan - reconfirm before placing" : "This week's picks"} action={<span className="text-xs text-zinc-500">Suggestions only - you place every trade in thinkorswim</span>}>
+    <Panel
+      title={priceAgeNote ? "Picks from the last scan - reconfirm" : "This week's picks"}
+      action={
+        <span className="flex items-center gap-3 text-xs text-zinc-500">
+          <span className="hidden sm:inline">Suggestions only - you place trades in thinkorswim</span>
+          <button type="button" onClick={() => setShowLimits((value) => !value)} aria-expanded={showLimits} className="underline underline-offset-2 hover:text-zinc-200">
+            {showLimits ? "Hide limits" : "Limits"}
+          </button>
+        </span>
+      }
+    >
       <div className="space-y-3" data-testid="portfolio-plan">
         <p className="text-xs text-zinc-400" data-testid="plan-capital">
           {capital === "loading" ? "Reading your balance from Schwab…" : null}
@@ -221,8 +241,11 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
           ) : null}
         </p>
 
-        {priceAgeNote ? <p data-testid="plan-price-age" className="text-xs text-amber-300">{priceAgeNote}</p> : null}
-        {scanIncompleteNote ? <p data-testid="plan-scan-incomplete" className="text-xs text-amber-300">The scan is still being finished - picks may change when it completes.</p> : null}
+        {priceAgeNote || scanIncompleteNote ? (
+          <p data-testid="plan-notes" className="text-xs text-amber-300">
+            {[priceAgeNote, scanIncompleteNote ? "The scan is still finishing - picks may change." : null].filter(Boolean).join(" ")}
+          </p>
+        ) : null}
         {unknownExposureCount > 0 ? (
           <p className="text-xs text-amber-300">
             {unknownExposureCount} open position(s) have unknown collateral or cost basis, so no picks are suggested until they are fixed in the Tracker.
@@ -240,7 +263,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
                   <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one ${candidate.strike} put holds {usd0.format(collateralOf(candidate) ?? 0)} ({pct(collateralOf(candidate) ?? 0)}), over your {limits.maxPerCompanyPct}% per-company limit</li>
                 ))}
                 {leftOut.map((candidate) => (
-                  <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {candidateBlockers(candidate, limits).join("; ")}</li>
+                  <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {leftOutReasons(candidate).join("; ")}</li>
                 ))}
               </ul>
             ) : needsEthics.length > 0 ? null : (
@@ -283,22 +306,24 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
                 <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one contract holds {usd0.format(collateralOf(candidate) ?? 0)} ({pct(collateralOf(candidate) ?? 0)}), over your {limits.maxPerCompanyPct}% per-company limit</li>
               ))}
               {leftOut.map((candidate) => (
-                <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {candidateBlockers(candidate, limits).join("; ")}</li>
+                <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {leftOutReasons(candidate).join("; ")}</li>
               ))}
             </ul>
           </details>
         ) : null}
 
-        <details className="text-sm">
-          <summary className="cursor-pointer text-zinc-500 hover:text-zinc-200">Limits (saved on this device)</summary>
-          <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
+        {showLimits ? (
+          <div data-testid="plan-limits" className="rounded-md border border-zinc-800 p-2">
+            <p className="text-xs text-zinc-500">Limits are saved on this device.</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <LimitField label="Max per company (% of account)" value={limits.maxPerCompanyPct} onChange={(value) => updateLimit("maxPerCompanyPct", value)} />
             <LimitField label="Max committed (% ceiling)" value={limits.maxCommittedPct} onChange={(value) => updateLimit("maxCommittedPct", value)} />
             <LimitField label="Companies per theme" value={limits.maxPerTheme} onChange={(value) => updateLimit("maxPerTheme", value)} />
             <LimitField label="Warn above per sector" value={limits.warnPerSector} onChange={(value) => updateLimit("warnPerSector", value)} />
             <LimitField label="Minimum return per trade (%)" value={limits.minReturnPct} onChange={(value) => updateLimit("minReturnPct", value)} />
           </div>
-        </details>
+          </div>
+        ) : null}
       </div>
     </Panel>
   );
