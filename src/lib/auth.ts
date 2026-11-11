@@ -6,23 +6,16 @@ import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { prisma } from "./prisma";
+import { readSessionSecretFromEnv, resolveSessionSecret } from "./session-secret";
 
 export const SESSION_COOKIE = "lst_buddy_session";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
-/** Exported for tests. Fails closed: the repository is public, so the development fallback is
- * publicly known - in production a missing secret must stop sign-in/session checks, never silently
- * use it. */
-export function resolveSessionSecret(secret: string | undefined, nodeEnv: string | undefined): string {
-  if (secret) return secret;
-  if (nodeEnv === "production") {
-    throw new Error("LST_SESSION_SECRET is required in production.");
-  }
-  return "local-development-session-secret";
-}
+// Re-exported so existing imports/tests keep working; the rule itself lives in session-secret.ts.
+export { resolveSessionSecret };
 
 function getSessionSecret() {
-  return resolveSessionSecret(process.env.LST_SESSION_SECRET, process.env.NODE_ENV);
+  return resolveSessionSecret(readSessionSecretFromEnv(), process.env.NODE_ENV);
 }
 
 function hashSessionToken(token: string) {

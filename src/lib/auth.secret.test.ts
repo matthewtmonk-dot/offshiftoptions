@@ -8,7 +8,7 @@ describe("resolveSessionSecret (fail closed in production)", () => {
   });
 
   it("refuses to run in production without a secret, instead of using the publicly-known fallback", () => {
-    expect(() => resolveSessionSecret(undefined, "production")).toThrow(/LST_SESSION_SECRET is required/);
+    expect(() => resolveSessionSecret(undefined, "production")).toThrow(/session secret is required in production: set OSO_SESSION_SECRET \(or the older name LST_SESSION_SECRET\)/);
     expect(() => resolveSessionSecret("", "production")).toThrow(/required/);
   });
 
