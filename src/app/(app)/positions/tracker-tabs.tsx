@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
+import { segmentedGroupClass, segmentedItemClass } from "@/components/ui";
 
 type TrackerScope = "mine" | "buddy" | "both";
 type ViewMode = "open" | "history" | "performance" | "accounts";
@@ -18,7 +19,7 @@ export function TrackerTabs({ scope, view }: { scope: TrackerScope; view: ViewMo
   const activeView = selection.serverView === view ? selection.clientView : view;
 
   return (
-    <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-1" data-testid="tracker-tabs">
+    <div className={segmentedGroupClass} data-testid="tracker-tabs">
       {tabs.map(({ mode, label }) => {
         const active = activeView === mode;
         const pending = active && view !== mode;
@@ -50,10 +51,5 @@ function trackerHref(scope: TrackerScope, view: ViewMode) {
 }
 
 function tabClass(active: boolean) {
-  // visual-tradingview-refresh: a selected tab is a navigation/selection control, not a
-  // financial value - blue, not green (verified via real rendering: this was the one tab
-  // control still using the old green-everywhere treatment).
-  return `inline-flex items-center rounded px-3 py-1.5 text-sm transition ${
-    active ? "bg-sky-400 text-black" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
-  }`;
+  return segmentedItemClass(active);
 }

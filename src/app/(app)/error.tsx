@@ -26,7 +26,7 @@ export default function AppError({ error, reset }: { error: Error & { digest?: s
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        <button type="button" onClick={reset} className="min-h-10 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300">
+        <button type="button" onClick={reset} className="min-h-10 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-on-accent hover:bg-emerald-300">
           Try again
         </button>
         <Link href="/dashboard" className="inline-flex min-h-10 items-center rounded-md border border-zinc-700 px-4 text-sm font-medium text-zinc-200 hover:border-zinc-500">

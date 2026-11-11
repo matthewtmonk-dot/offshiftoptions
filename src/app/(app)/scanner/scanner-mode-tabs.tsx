@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
+import { segmentedGroupClass, segmentedItemClass } from "@/components/ui";
 
 export type ScannerMode = "csp" | "covered-calls";
 
@@ -16,7 +17,7 @@ export function ScannerModeTabs({ mode }: { mode: ScannerMode }) {
   const activeMode = selection.serverMode === mode ? selection.clientMode : mode;
 
   return (
-    <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-1" data-testid="scanner-mode-tabs">
+    <div className={segmentedGroupClass} data-testid="scanner-mode-tabs">
       {tabs.map(({ mode: tabMode, label }) => {
         const active = activeMode === tabMode;
         const pending = active && mode !== tabMode;
@@ -39,7 +40,5 @@ export function ScannerModeTabs({ mode }: { mode: ScannerMode }) {
 }
 
 function tabClass(active: boolean) {
-  return `inline-flex items-center rounded px-3 py-1.5 text-sm transition ${
-    active ? "bg-emerald-400 text-black" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
-  }`;
+  return segmentedItemClass(active);
 }

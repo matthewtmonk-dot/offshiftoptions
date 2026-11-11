@@ -134,11 +134,11 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="space-y-1.5">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Scanner</span>
+            <span className="text-xs font-semibold text-zinc-500">Scanner</span>
             <Badge tone={scannerChip.tone}>{scannerChip.label}</Badge>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{isDeterministicGate ? "LST Gate" : "AI Take"}</span>
+            <span className="text-xs font-semibold text-zinc-400">{isDeterministicGate ? "LST Gate" : "AI Take"}</span>
             <Badge tone={presentation.tone}>{presentation.label}</Badge>
             {!isDeterministicGate ? <span className="text-xs text-zinc-500">· {review.confidence} confidence</span> : null}
           </div>
@@ -153,14 +153,14 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
 
       {review.strongestReasons.length > 0 ? (
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Why</p>
+          <p className="text-xs font-semibold text-zinc-500">Why</p>
           <BulletList items={review.strongestReasons} />
         </div>
       ) : null}
 
       {showMainConcerns && review.mainConcerns.length > 0 ? (
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Watch</p>
+          <p className="text-xs font-semibold text-zinc-500">Watch</p>
           <BulletList items={review.mainConcerns} />
         </div>
       ) : null}
@@ -178,7 +178,7 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
               : "rounded-md border border-zinc-800 p-2"
         }
       >
-        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{hardRuleSummaryLabel(hardState)}</p>
+        <p className="text-xs font-semibold text-zinc-500">{hardRuleSummaryLabel(hardState)}</p>
         {hardState === "ALL_PASSED" ? (
           <p className="mt-1 text-[13px] text-emerald-200">All known hard LST rules passed.</p>
         ) : hardState === "FAILED" ? (
@@ -202,28 +202,28 @@ export function AiAdvisorReviewPanel({ scanResultId }: { scanResultId: string })
 
       {review.softPreferenceNotes.length > 0 ? (
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Preference tradeoffs</p>
+          <p className="text-xs font-semibold text-zinc-500">Preference tradeoffs</p>
           <BulletList items={review.softPreferenceNotes} />
         </div>
       ) : null}
 
       {showUnknownCriticalEvidence && review.unknownCriticalEvidence.length > 0 ? (
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Missing evidence</p>
+          <p className="text-xs font-semibold text-zinc-500">Missing evidence</p>
           <BulletList items={review.unknownCriticalEvidence} />
         </div>
       ) : null}
 
       {review.whatWouldChangeDecision.length > 0 ? (
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">What would change this</p>
+          <p className="text-xs font-semibold text-zinc-500">What would change this</p>
           <BulletList items={review.whatWouldChangeDecision} />
         </div>
       ) : null}
 
       {review.riskNotes.length > 0 ? (
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Risk notes</p>
+          <p className="text-xs font-semibold text-zinc-500">Risk notes</p>
           <BulletList items={review.riskNotes} />
         </div>
       ) : null}

@@ -14,6 +14,12 @@
 export type PlanLimits = {
   /** Max exposure to one company (open put collateral + share cost basis + new put), % of account value. */
   maxPerCompanyPct: number;
+  /**
+   * ONE company at a time may exceed maxPerCompanyPct, up to this % of account value ("one larger position").
+   * A value at or below maxPerCompanyPct switches the exception off. Every other hard rule (cash, total-committed
+   * ceiling, theme, ethics, quality, earnings) still applies to that position.
+   */
+  maxLargePositionPct: number;
   /** Ceiling on total capital committed (existing + new), % of account value. A ceiling, not a target. */
   maxCommittedPct: number;
   /** Max distinct companies in one theme (existing + new). */
@@ -29,6 +35,10 @@ export const DEFAULT_PLAN_LIMITS: PlanLimits = {
   // $10k account one contract is already 10-20% of equity, so these are ceilings, not targets. Saved per-browser limits
   // (the panel's own inputs) still override these defaults.
   maxPerCompanyPct: 20,
+  // Nov 11 2026 (Matt): keep scanning stocks up to $50 and allow ONE larger position. A $50 strike is $5,000 of
+  // collateral, about 47% of a ~$10.7k account, so the single exception is capped at 50%. The 20% limit still governs
+  // every other position, and the 60% total-committed ceiling still applies on top.
+  maxLargePositionPct: 50,
   maxCommittedPct: 60,
   maxPerTheme: 1,
   warnPerSector: 2,
@@ -168,9 +178,27 @@ export function evaluatePlan(selected: PlanCandidate[], existing: ExistingExposu
   for (const row of existing) exposureByTicker.set(row.ticker, (exposureByTicker.get(row.ticker) ?? 0) + row.amount);
   for (const candidate of selected) exposureByTicker.set(candidate.ticker, (exposureByTicker.get(candidate.ticker) ?? 0) + (collateralOf(candidate) ?? 0));
   const companyPct: Record<string, number> = {};
-  for (const [ticker, amount] of exposureByTicker) {
-    companyPct[ticker] = pct(amount);
-    if (companyPct[ticker] > limits.maxPerCompanyPct) violations.push({ code: "COMPANY", message: `${ticker} would be ${companyPct[ticker].toFixed(1)}% of the account (limit ${limits.maxPerCompanyPct}%).` });
+  for (const [ticker, amount] of exposureByTicker) companyPct[ticker] = pct(amount);
+  // Per-company size: everything at or under maxPerCompanyPct is fine; ONE company may sit above it, up to
+  // maxLargePositionPct. A company above the larger cap, or a second company above the normal limit, is a violation.
+  const largeCap = Math.max(limits.maxLargePositionPct, limits.maxPerCompanyPct);
+  const overNormal = Object.entries(companyPct)
+    .filter(([, value]) => value > limits.maxPerCompanyPct)
+    .sort(([left], [right]) => left.localeCompare(right));
+  for (const [ticker, value] of overNormal) {
+    if (value > largeCap) {
+      violations.push({ code: "COMPANY", message: `${ticker} would be ${value.toFixed(1)}% of the account (limit ${largeCap}%${largeCap > limits.maxPerCompanyPct ? " for the one larger position" : ""}).` });
+    }
+  }
+  const usingLargeSlot = overNormal.filter(([, value]) => value <= largeCap);
+  if (usingLargeSlot.length > 1) {
+    violations.push({
+      code: "COMPANY",
+      message: `Only one position may be above ${limits.maxPerCompanyPct}% of the account; this would make ${usingLargeSlot.length}: ${usingLargeSlot.map(([ticker, value]) => `${ticker} (${value.toFixed(1)}%)`).join(", ")}.`,
+    });
+  } else if (usingLargeSlot.length === 1 && selected.some((candidate) => candidate.ticker === usingLargeSlot[0][0])) {
+    const [ticker, value] = usingLargeSlot[0];
+    warnings.push(`${ticker} would be ${value.toFixed(1)}% of the account - your one larger position (normal limit ${limits.maxPerCompanyPct}%). A 20% drop in it alone is about ${(value * 0.2).toFixed(1)}% of the account.`);
   }
 
   // Distinct companies per theme / sector across what is already held and what is being added.
@@ -218,6 +246,8 @@ export function canAdd(candidate: PlanCandidate, selected: PlanCandidate[], exis
 
 export const OPTIMIZER_MAX_CANDIDATES = 14;
 export const OPTIMIZER_MAX_TRADES = 4;
+/** How many trades that need the one larger-position slot stay in the optimizer's search (only one can be picked). */
+export const OPTIMIZER_MAX_LARGE_CANDIDATES = 3;
 
 /** What a candidate is worth to the optimizer: quality only. A NEAR trade counts for less than a PASS. */
 function qualityOf(candidate: PlanCandidate): number {
@@ -240,6 +270,19 @@ export function optimizePlan(candidates: PlanCandidate[], existing: ExistingExpo
     // One contract per company: two strikes on the same company would double its exposure for no diversification.
     .sort((left, right) => qualityOf(right) - qualityOf(left) || (right.returnPct ?? 0) - (left.returnPct ?? 0) || left.ticker.localeCompare(right.ticker))
     .filter((candidate, index, all) => all.findIndex((other) => other.ticker === candidate.ticker) === index)
+    // Only ONE trade can ever use the larger-position exception, so keep just the best few that need it. Otherwise a
+    // week full of high-scoring $40-50 names fills the whole top-N cut and no normal-size trade is even considered.
+    .filter(
+      (() => {
+        let largeKept = 0;
+        return (candidate: PlanCandidate) => {
+          const pctAlone = evaluatePlan([candidate], existing, capital, limits).companyPct[candidate.ticker] ?? 0;
+          if (pctAlone <= limits.maxPerCompanyPct) return true;
+          largeKept += 1;
+          return largeKept <= OPTIMIZER_MAX_LARGE_CANDIDATES;
+        };
+      })(),
+    )
     .slice(0, OPTIMIZER_MAX_CANDIDATES);
 
   let best: { picks: PlanCandidate[]; quality: number; premium: number; committed: number } | null = null;

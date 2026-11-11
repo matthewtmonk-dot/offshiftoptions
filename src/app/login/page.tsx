@@ -23,7 +23,7 @@ export default async function LoginPage({
     <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,rgba(52,211,153,0.16),transparent_34%),linear-gradient(135deg,var(--color-zinc-950),var(--color-zinc-900)_58%,var(--color-zinc-950))] px-4 py-10">
       <section className="w-full max-w-md rounded-lg border border-zinc-800 bg-zinc-950/90 p-6 shadow-2xl shadow-black/40">
         <div className="mb-8 flex items-center gap-3">
-          <div className="flex size-11 items-center justify-center rounded-md bg-emerald-400 text-black">
+          <div className="flex size-11 items-center justify-center rounded-md bg-emerald-400 text-on-accent">
             <LockKeyhole className="size-5" aria-hidden />
           </div>
           <div>
@@ -73,7 +73,7 @@ export default async function LoginPage({
 
           <button
             type="submit"
-            className="min-h-12 w-full rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black transition hover:bg-emerald-300"
+            className="min-h-12 w-full rounded-md bg-emerald-400 px-4 text-sm font-semibold text-on-accent transition hover:bg-emerald-300"
           >
             Sign in
           </button>

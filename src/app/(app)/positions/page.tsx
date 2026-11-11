@@ -17,7 +17,7 @@ import {
   Users,
   WalletCards,
 } from "lucide-react";
-import { Badge, EmptyState, FieldLabel } from "@/components/ui";
+import { Badge, EmptyState, FieldLabel, segmentedGroupClass, segmentedItemClass } from "@/components/ui";
 import { DteBadge } from "@/components/dte-badge";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { LivePositionAssessmentBadge, LivePositionAssessmentEvidenceLine } from "@/components/live-position-assessment-badge";
@@ -484,13 +484,10 @@ export default async function PositionsPage({
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <p className="text-sm font-medium text-sky-300">Campaign &amp; account tracker</p>
-          <h1 className="text-2xl font-semibold text-zinc-50">Tracker</h1>
-        </div>
-        <div className="flex flex-wrap gap-2">
+        <h1 className="text-2xl font-semibold text-zinc-50">Tracker</h1>
+        <div className={`${segmentedGroupClass} self-start`}>
           {(["mine", "buddy", "both"] as TrackerScope[]).map((option) => (
-            <IntentPrefetchLink key={option} href={trackerHref(option, view)} className={segmentClass(scope === option)}>
+            <IntentPrefetchLink key={option} href={trackerHref(option, view)} aria-current={scope === option ? "page" : undefined} className={segmentedItemClass(scope === option)}>
               {option === "mine" ? "Mine" : option === "buddy" ? buddyName : "Both"}
             </IntentPrefetchLink>
           ))}
@@ -550,12 +547,15 @@ export default async function PositionsPage({
 
       {view === "open" ? (
         <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-400" data-testid="tracker-snapshot-status">
+          <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-400" data-testid="tracker-snapshot-status">
             <div className="space-y-1">
-              <p>Snapshot checked: {snapshotTime(snapshotCheckedAt)} · {quoteSnapshots.size ? `${Array.from(quoteSnapshots.values()).filter(Boolean).length}/${quoteSnapshots.size} stock prices available` : "No unexpired puts need prices"}</p>
-              <p>Your brokerage last synced: {snapshotTime(schwabConnection?.lastAccountSyncAt)} · Positions {schwabPositions === null ? "unavailable" : "available"}</p>
-              <p>Snapshots may be delayed or from the last session; quotes and positions can be cached for 15 seconds.</p>
-              <p>Use &ldquo;Refresh status&rdquo; in the header above to check current prices and positions. Brokerage Sync imports account activity and updates campaign history.</p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 text-[13px] text-zinc-300">
+                <p>Snapshot checked: {snapshotTime(snapshotCheckedAt)} · {quoteSnapshots.size ? `${Array.from(quoteSnapshots.values()).filter(Boolean).length}/${quoteSnapshots.size} stock prices available` : "No unexpired puts need prices"}</p>
+                <p>Your brokerage last synced: {snapshotTime(schwabConnection?.lastAccountSyncAt)} · Positions {schwabPositions === null ? "unavailable" : "available"}</p>
+              </div>
+              <p className="text-zinc-500">
+                Snapshots may be delayed or from the last session; quotes and positions can be cached for 15 seconds. &ldquo;Refresh status&rdquo; (top right) re-checks prices and positions; Brokerage Sync imports account activity.
+              </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <IntentPrefetchLink href="/account#brokerage-sync" className={tinyButtonClass}>Brokerage Sync in Account</IntentPrefetchLink>
@@ -582,7 +582,7 @@ export default async function PositionsPage({
               <>
                 {activeOpenRows.length > 0 ? (
                   <div className="space-y-2.5">
-                    {awaitingSettlementOpenRows.length > 0 ? <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Active</h3> : null}
+                    {awaitingSettlementOpenRows.length > 0 ? <h3 className="text-xs font-semibold text-zinc-500">Active</h3> : null}
                     {activeOpenRows.map((row) => (
                       <CampaignCard
                         key={row.campaign.id}
@@ -603,7 +603,7 @@ export default async function PositionsPage({
                     looking visually equivalent to a future-dated active position. */}
                 {awaitingSettlementOpenRows.length > 0 ? (
                   <div className="space-y-2.5">
-                    <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Awaiting Settlement ({awaitingSettlementOpenRows.length})</h3>
+                    <h3 className="text-xs font-semibold text-zinc-500">Awaiting Settlement ({awaitingSettlementOpenRows.length})</h3>
                     {awaitingSettlementOpenRows.map((row) => (
                       <CampaignCard
                         key={row.campaign.id}
@@ -639,7 +639,7 @@ export default async function PositionsPage({
         <section className="space-y-2.5" data-testid="campaign-history-table">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3.5">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Campaign History</p>
+              <p className="text-xs font-semibold text-zinc-500">Campaign History</p>
               <h2 className="mt-1 inline-flex items-center gap-2 text-lg font-semibold text-zinc-50">
                 Every campaign, not just closed wins
                 <InfoTip label="Campaign status" align="start" testId="help-history-status">
@@ -712,9 +712,9 @@ function NewCampaignPanel({
   buddyName: string;
 }) {
   return (
-    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" open={accounts.length === 0}>
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]" open={accounts.length === 0}>
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
-        <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-300">
           <Plus className="size-4 text-sky-300" aria-hidden />
           New Campaign
         </span>
@@ -804,9 +804,9 @@ function NewAccountPanel({
   defaultOpen?: boolean;
 }) {
   return (
-    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" open={defaultOpen}>
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]" open={defaultOpen}>
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
-        <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-300">
           <WalletCards className="size-4 text-sky-300" aria-hidden />
           New Account
         </span>
@@ -945,7 +945,7 @@ function CampaignCard({
   const activityBadgeTone = campaign.status === "CLOSED" ? statusTone(campaign.status, plValue) : activityTone(activityLabel);
 
   return (
-    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 shadow-sm shadow-black/20" data-testid={`campaign-card-${campaign.ticker}`}>
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-900 shadow-[0_1px_2px_rgba(16,24,40,0.05)]" data-testid={`campaign-card-${campaign.ticker}`}>
       <summary className="relative grid cursor-pointer list-none gap-2 p-3 transition hover:bg-zinc-900/70 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center [&::-webkit-details-marker]:hidden">
         <div className="min-w-0 pr-5 xl:pr-0">
           {/* Ticker + lifecycle status dominate this line - the assessment badge gets its own
@@ -1108,7 +1108,7 @@ function CampaignCard({
       <div className="border-t border-zinc-800 p-4">
         <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
           <div>
-            <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+            <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-300">
               <History className="size-4 text-sky-300" aria-hidden />
               Lifecycle
             </div>
@@ -1121,13 +1121,13 @@ function CampaignCard({
 
           <div className="space-y-4">
             <div>
-              <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-300">
                 <Flag className="size-4 text-sky-300" aria-hidden />
                 Result So Far
               </div>
               {firstPutSale ? (
                 <div className="mb-3 rounded-md border border-sky-400/25 bg-sky-400/5 p-3 text-sm" data-testid="original-trade">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-sky-300">Original trade</div>
+                  <div className="text-xs font-semibold text-sky-300">Original trade</div>
                   <p className="mt-1 text-zinc-100">
                     Sold {toNumber(firstPutSale.contracts)} x {money(toNumber(firstPutSale.strike))} put
                     {firstPutSale.expiration ? ` (expiring ${shortCalendarDate(firstPutSale.expiration)})` : ""} on{" "}
@@ -1195,7 +1195,7 @@ function CampaignCard({
 
             {campaign.status === "ASSIGNED" ? (
               <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3" data-testid="assigned-stock-card">
-                <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-300">
                   <WalletCards className="size-4 text-amber-300" aria-hidden />
                   Assigned Stock
                 </div>
@@ -1561,7 +1561,7 @@ function AccountsSection({
           fallbackTradingPL: realized,
         });
         return (
-          <article key={account.id} className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+          <article key={account.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -1662,9 +1662,9 @@ function SchwabPositionsPanel({
   }
 
   return (
-    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
-        <h2 className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-300">
           <ShieldCheck className="size-4 text-sky-300" aria-hidden />
           Your Schwab position snapshot ({positions.length})
         </h2>
@@ -1779,9 +1779,9 @@ function SchwabImportPanel({
   recentBatches: Awaited<ReturnType<typeof getBrokerImportBatchesForUser>>;
 }) {
   return (
-    <details className="group rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+    <details className="group rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
-        <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-300">
           <ShieldCheck className="size-4 text-sky-300" aria-hidden />
           Import Schwab Data
         </span>
@@ -1815,7 +1815,7 @@ function SchwabImportPanel({
         </form>
         {recentBatches.length > 0 ? (
           <div>
-            <div className="mb-2 text-xs font-semibold uppercase tracking-normal text-zinc-500">Recent imports</div>
+            <div className="mb-2 text-xs font-semibold text-zinc-500">Recent imports</div>
             <div className="space-y-1">
               {recentBatches.map((batch) => (
                 <div key={batch.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-zinc-900/60 px-3 py-2 text-xs text-zinc-400">
@@ -1857,9 +1857,9 @@ function SchwabImportPreviewPanel({
   rows: BrokerImportPreviewRow[];
 }) {
   return (
-    <div className="rounded-lg border border-emerald-400/30 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+    <div className="rounded-lg border border-emerald-400/30 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-normal text-zinc-200">
+        <h2 className="text-sm font-semibold text-zinc-200">
           Preview: {batch.safeOriginalFilename} ({batch.exportType})
         </h2>
         <div className="flex gap-2">
@@ -1934,8 +1934,8 @@ function BrokerActivityAwaitingReviewPanel({
   }
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
-      <h2 className="mb-3 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
+      <h2 className="mb-3 inline-flex items-center gap-2 text-sm font-semibold text-zinc-300">
         <Flag className="size-4 text-amber-300" aria-hidden />
         Broker Activity Awaiting Review
       </h2>
@@ -1958,14 +1958,14 @@ function BrokerActivityAwaitingReviewPanel({
             </summary>
             <div className="space-y-4 border-t border-zinc-800 p-3">
               <div>
-                <div className="mb-1 text-xs font-semibold uppercase tracking-normal text-zinc-500">Broker Evidence</div>
+                <div className="mb-1 text-xs font-semibold text-zinc-500">Broker Evidence</div>
                 <p className="text-sm text-zinc-400">
                   Schwab symbol {item.symbol} - current position {item.quantity}, {item.transactionEvidenceCount} matching
                   transaction record{item.transactionEvidenceCount === 1 ? "" : "s"} found.
                 </p>
               </div>
               <div>
-                <div className="mb-2 text-xs font-semibold uppercase tracking-normal text-zinc-500">Proposed OSO Campaign</div>
+                <div className="mb-2 text-xs font-semibold text-zinc-500">Proposed OSO Campaign</div>
                 {accounts.length === 0 ? (
                   <EmptyState>Add an account first, then you can confirm this as a campaign.</EmptyState>
                 ) : (
@@ -2088,10 +2088,10 @@ function PerformanceSection({
     <section className="space-y-4" data-testid="performance-cockpit">
       <PerformanceScorecardPanel scorecard={scorecard} />
       <div
-        className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20"
+        className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]"
         data-testid="this-week-summary"
       >
-        <p className="text-xs font-semibold uppercase tracking-wide text-sky-300">This Week</p>
+        <p className="text-xs font-semibold text-sky-300">This Week</p>
         {thisWeek.completedCount === 0 ? (
           <p className="text-sm text-zinc-400">No campaigns closed yet this week.</p>
         ) : (
@@ -2118,10 +2118,10 @@ function PerformanceSection({
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
-        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-sky-300">Trading Record</p>
+              <p className="text-xs font-semibold text-sky-300">Trading Record</p>
               <h2 className="mt-1 text-xl font-semibold text-zinc-50">Confirmed, current, projected</h2>
             </div>
             <Badge tone="info">Mine only</Badge>
@@ -2172,8 +2172,8 @@ function PerformanceSection({
           </p>
         </div>
 
-        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
-          <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
+          <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-zinc-300">
             <Target className="size-4 text-sky-300" aria-hidden />
             Return on campaigns closed this week
           </div>
@@ -2193,8 +2193,8 @@ function PerformanceSection({
       </div>
 
       <div className="grid gap-4">
-        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20">
-          <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
+          <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-zinc-300">
             <BarChart3 className="size-4 text-sky-300" aria-hidden />
             Closed Campaign Stats
           </div>
@@ -2266,7 +2266,7 @@ function PerformanceMetric({
 }) {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
-      <dt className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-normal text-zinc-500">
+      <dt className="flex items-center gap-2 text-[11px] font-semibold text-zinc-500">
         <span className="text-zinc-400">{icon}</span>
         <HelpLabel label={label} help={help} testId={helpTestId} />
       </dt>
@@ -2288,9 +2288,9 @@ function PerformanceMetric({
  */
 function CampaignPerformanceTable({ rows }: { rows: PerformanceCampaignViewRow[] }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" data-testid="performance-campaign-table">
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]" data-testid="performance-campaign-table">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-300">
+        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
           <ClipboardList className="size-4 text-sky-300" aria-hidden />
           Campaign Performance
         </div>
@@ -2359,7 +2359,7 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
       </summary>
       <div className="grid gap-4 border-t border-zinc-800 bg-zinc-900/40 px-3 py-4 text-sm lg:grid-cols-[1fr_1fr]">
         <div>
-          <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-500">
+          <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-500">
             Accounting Split
             <InfoTip label="Campaign accounting split" align="start">
               Realized, current, and projected results answer different questions. OSO keeps them separate so open campaigns do not look closed.
@@ -2404,7 +2404,7 @@ function CampaignPerformanceRow({ row }: { row: PerformanceCampaignViewRow }) {
           </dl>
         </div>
         <div>
-          <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-500">
+          <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-500">
             Current Mark Source
             <InfoTip label="Mark source" align="start" testId="help-mark-source">
               {HELP.markSource}
@@ -2474,12 +2474,12 @@ function TrackerStat({
   helpTestId?: string;
 }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 shadow-sm shadow-black/20">
-      <div className="flex items-center gap-2 text-xs uppercase tracking-normal text-zinc-500">
-        <span className="text-zinc-400">{icon}</span>
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
+      <div className="flex items-center gap-2 text-[13px] font-medium text-zinc-500">
+        <span className="text-zinc-600">{icon}</span>
         <HelpLabel label={label} help={help} testId={helpTestId} />
       </div>
-      <div className={`mt-0.5 text-xl font-semibold ${toneClass(tone)}`}>{value}</div>
+      <div className={`mt-1 text-2xl font-semibold tracking-tight ${toneClass(tone)}`}>{value}</div>
       <div className="mt-0.5 text-xs text-zinc-500">{detail}</div>
     </div>
   );
@@ -2500,7 +2500,7 @@ function SummaryCell({
 }) {
   return (
     <div>
-      <div className="text-xs uppercase tracking-wide text-zinc-500">
+      <div className="text-xs text-zinc-500">
         <HelpLabel label={label} help={help} testId={helpTestId} />
       </div>
       <div className={`mt-1 text-[17px] font-semibold leading-tight ${toneClass(tone)}`}>{value}</div>
@@ -2523,7 +2523,7 @@ function ResultItem({
 }) {
   return (
     <div className="border-t border-zinc-800 pt-2">
-      <dt className="text-xs uppercase tracking-wide text-zinc-500">
+      <dt className="text-xs text-zinc-500">
         <HelpLabel label={label} help={help} testId={helpTestId} />
       </dt>
       <dd className={`mt-1 text-[15px] font-medium ${toneClass(tone)}`}>{value}</dd>
@@ -2731,14 +2731,6 @@ function trackerHref(scope: TrackerScope, view: ViewMode) {
   return `/positions?${params.toString()}`;
 }
 
-function segmentClass(active: boolean) {
-  return `rounded-md border px-3 py-2 text-sm transition ${
-    active
-      ? "border-sky-400/70 bg-sky-400/15 text-sky-100"
-      : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-600 hover:text-zinc-50"
-  }`;
-}
-
 function outcomeLabel(finalResult: ReturnType<typeof summarizeCampaign>["finalResult"]) {
   if (finalResult === "GAIN") return "WIN";
   if (finalResult === "LOSS") return "LOSS";
@@ -2815,7 +2807,7 @@ function roundMoney(value: number) {
 const inputClass =
   "min-h-11 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-[15px] text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-sky-400/70";
 const primaryButtonClass =
-  "inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-sky-400 px-4 text-sm font-semibold text-black transition hover:bg-sky-300";
+  "inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-sky-400 px-4 text-sm font-semibold text-on-accent transition hover:bg-sky-300";
 const secondaryButtonClass =
   "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-zinc-700 px-4 text-sm font-semibold text-zinc-100 transition hover:border-sky-400/70 hover:text-sky-100";
 const tinyButtonClass =

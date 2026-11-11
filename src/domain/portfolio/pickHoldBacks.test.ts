@@ -29,30 +29,41 @@ describe("pickHoldBackReasons", () => {
     expect(pickHoldBackReasons(candidate(), DEFAULT_PLAN_LIMITS, 10_000)).toEqual([]);
   });
 
-  it("flags one contract that is bigger than the per-company limit", () => {
-    const reasons = pickHoldBackReasons(candidate({ strike: 44 }), DEFAULT_PLAN_LIMITS, 10_731);
-    expect(reasons).toEqual(["one contract holds $4,400 (41.0% of the account), over the 20% per-company limit"]);
+  const noLargeSlot = { ...DEFAULT_PLAN_LIMITS, maxPerCompanyPct: 20, maxLargePositionPct: 20 };
+
+  it("allows one contract above the normal limit when it fits the larger-position cap", () => {
+    expect(pickHoldBackReasons(candidate({ strike: 44 }), DEFAULT_PLAN_LIMITS, 10_731)).toEqual([]);
+  });
+
+  it("flags one contract that is bigger than the larger-position cap", () => {
+    const reasons = pickHoldBackReasons(candidate({ strike: 60 }), DEFAULT_PLAN_LIMITS, 10_731);
+    expect(reasons).toEqual(["one contract holds $6,000 (55.9% of the account), over the 50% limit for one larger position"]);
+  });
+
+  it("uses the per-company limit when the larger-position exception is switched off", () => {
+    const reasons = pickHoldBackReasons(candidate({ strike: 44 }), noLargeSlot, 10_731);
+    expect(reasons).toEqual(["one contract holds $4,400 (41.0% of the account), over the 20% limit per company"]);
   });
 
   it("does not flag a contract exactly at the limit", () => {
-    expect(pickHoldBackReasons(candidate({ strike: 20 }), DEFAULT_PLAN_LIMITS, 10_000)).toEqual([]);
+    expect(pickHoldBackReasons(candidate({ strike: 20 }), noLargeSlot, 10_000)).toEqual([]);
   });
 
   it("keeps the planner's own blockers and adds the size reason after them", () => {
     const reasons = pickHoldBackReasons(
-      candidate({ strike: 27.5, ethics: "UNREVIEWED", quality: { eligible: false, reason: "Company quality CAUTION: excluded unless you review it" } }),
+      candidate({ strike: 60, ethics: "UNREVIEWED", quality: { eligible: false, reason: "Company quality CAUTION: excluded unless you review it" } }),
       DEFAULT_PLAN_LIMITS,
       10_731,
     );
     expect(reasons).toEqual([
       "Ethics not researched yet",
       "Company quality CAUTION: excluded unless you review it",
-      "one contract holds $2,750 (25.6% of the account), over the 20% per-company limit",
+      "one contract holds $6,000 (55.9% of the account), over the 50% limit for one larger position",
     ]);
   });
 
   it("skips the size check when the account value is unknown, but still reports other blockers", () => {
-    expect(pickHoldBackReasons(candidate({ strike: 44 }), DEFAULT_PLAN_LIMITS, null)).toEqual([]);
-    expect(pickHoldBackReasons(candidate({ strike: 44, gatingClear: false }), DEFAULT_PLAN_LIMITS, 0)).toEqual(["A required scanner rule is not a clear pass"]);
+    expect(pickHoldBackReasons(candidate({ strike: 60 }), DEFAULT_PLAN_LIMITS, null)).toEqual([]);
+    expect(pickHoldBackReasons(candidate({ strike: 60, gatingClear: false }), DEFAULT_PLAN_LIMITS, 0)).toEqual(["A required scanner rule is not a clear pass"]);
   });
 });

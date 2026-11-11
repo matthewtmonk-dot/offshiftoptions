@@ -8,7 +8,7 @@ export function ChartLinks({ ticker }: { ticker: string }) {
   const links = chartLinksFor(ticker);
   if (links.length === 0) return null;
   return (
-    <span className="inline-flex items-center gap-1" data-testid={`chart-links-${ticker}`}>
+    <span className="inline-flex items-center gap-0.5" data-testid={`chart-links-${ticker}`}>
       {links.map((link) => (
         <a
           key={link.key}
@@ -19,7 +19,7 @@ export function ChartLinks({ ticker }: { ticker: string }) {
           title={link.title}
           aria-label={`${ticker} ${link.title}`}
           onClick={(event) => event.stopPropagation()}
-          className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300 hover:border-sky-400/60 hover:text-sky-200"
+          className="rounded px-1 py-0.5 text-[11px] font-medium text-zinc-500 underline decoration-zinc-700 underline-offset-2 transition hover:text-sky-300 hover:decoration-sky-300"
         >
           {link.label}
         </a>

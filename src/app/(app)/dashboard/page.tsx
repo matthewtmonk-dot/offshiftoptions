@@ -186,26 +186,25 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-3">
-      {/* 1. Compact header */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-400">
-        <span>
-          <span className="font-semibold text-zinc-100">Hey {user.name}</span> -{" "}
-          <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "SCHWAB SCAN" : "DEMO SCANNER"}</Badge>{" "}
-          {/* The open-campaign exposure summary and win rate live in the cards directly below; repeating
-              them here only added noise. */}
-        </span>
-        <span className="flex flex-col items-end gap-0.5 text-right">
-          <span className="text-xs font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
+      {/* 1. Page header */}
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-1">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <h1 className="text-2xl font-semibold text-zinc-50">Hey {user.name}</h1>
+          {/* Only the exception is worth a badge: a live Schwab scan is the normal state. */}
+          {scannerIsLiveSchwab ? null : <Badge tone="warn">Demo scanner data</Badge>}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[13px] text-zinc-500">
+          <span className="font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
             {checkpointLabel}
           </span>
           {schwabConnection?.lastAccountSyncAt ? (
-            <span className="text-xs">
-              Brokerage synced: <EventTime value={new Date(schwabConnection.lastAccountSyncAt)} asOf={asOf} />
+            <span>
+              Brokerage synced <EventTime value={new Date(schwabConnection.lastAccountSyncAt)} asOf={asOf} />
             </span>
           ) : (
-            <span className="text-xs">Brokerage synced: never</span>
+            <span>Brokerage synced: never</span>
           )}
-        </span>
+        </div>
       </div>
 
       {syncNotice ? (
@@ -451,16 +450,16 @@ function SummaryCard({
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   const accentClass = tone === undefined || tone === 0 ? "bg-zinc-700" : tone > 0 ? "bg-emerald-400" : "bg-red-400";
   return (
-    <IntentPrefetchLink href={href} className="group relative block overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400/50 hover:bg-zinc-900/80">
+    <IntentPrefetchLink href={href} className="group relative block overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)] transition hover:border-zinc-600">
       <span aria-hidden className={`absolute inset-x-0 top-0 h-0.5 ${accentClass}`} />
-      <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+      <div className="flex items-center justify-between gap-2 text-[13px] font-medium text-zinc-500">
         <span className="inline-flex items-center gap-0.5">
           {label}
           {help ? <InfoTip label={label} align="start">{help}</InfoTip> : null}
         </span>
-        <Icon aria-hidden size={15} className="text-zinc-600 transition group-hover:text-sky-300" />
+        <Icon aria-hidden size={15} className="text-zinc-600 transition group-hover:text-zinc-300" />
       </div>
-      <div className={`mt-1.5 text-[28px] font-bold leading-tight tabular-nums ${toneClass}`}>{value}</div>
+      <div className={`mt-1 text-[28px] font-semibold leading-tight tracking-tight tabular-nums ${toneClass}`}>{value}</div>
       {detail ? <div className="mt-1 text-[13px] text-zinc-400">{detail}</div> : null}
       {reason ? <div className="mt-1 text-[13px] text-amber-300">{reason}</div> : null}
       {footer ? <div className="mt-1.5 border-t border-zinc-800 pt-1.5">{footer}</div> : null}

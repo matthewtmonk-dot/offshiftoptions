@@ -3,7 +3,7 @@ import { LoaderCircle } from "lucide-react";
 export function RouteLoading({ title = "Loading", detail }: { title?: string; detail?: string }) {
   return (
     <div className="space-y-4" aria-busy="true" aria-live="polite">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950/80 p-4 shadow-sm shadow-black/20">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950/80 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]">
         <div className="flex items-center gap-3">
           <LoaderCircle className="size-4 animate-spin text-emerald-300" aria-hidden />
           <div>

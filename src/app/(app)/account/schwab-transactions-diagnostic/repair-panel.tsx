@@ -79,11 +79,11 @@ export function RepairPanel() {
           </div>
           <dl className="grid gap-3 text-sm sm:grid-cols-2">
             <div>
-              <dt className="text-xs uppercase tracking-normal text-zinc-500">Cash-leg misidentified (symbol was CURRENCY_USD)</dt>
+              <dt className="text-xs text-zinc-500">Cash-leg misidentified (symbol was CURRENCY_USD)</dt>
               <dd className="mt-1 font-medium text-zinc-100">{state.preview.countsByCategory.CASH_LEG_MISIDENTIFIED}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase tracking-normal text-zinc-500">Unrecognized activity (e.g. expiration removal)</dt>
+              <dt className="text-xs text-zinc-500">Unrecognized activity (e.g. expiration removal)</dt>
               <dd className="mt-1 font-medium text-zinc-100">{state.preview.countsByCategory.UNRECOGNIZED_ACTIVITY}</dd>
             </div>
           </dl>

@@ -120,7 +120,7 @@ export function CoveredCallOutcomePlanner({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center justify-between gap-2 p-3 text-left text-sm font-semibold uppercase tracking-normal text-zinc-300"
+        className="flex w-full items-center justify-between gap-2 p-3 text-left text-sm font-semibold text-zinc-300"
         data-testid="covered-call-outcome-planner-toggle"
         aria-label={`${open ? "Collapse" : "Expand"} the covered call outcome planner for ${ticker}`}
       >
@@ -140,15 +140,15 @@ export function CoveredCallOutcomePlanner({
             <div className="space-y-4">
               <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
                 <div>
-                  <dt className="uppercase tracking-wide text-zinc-500">Assigned basis</dt>
+                  <dt className="text-zinc-500">Assigned basis</dt>
                   <dd className="mt-0.5 font-medium text-zinc-200">{money(assignedPrice)}/share</dd>
                 </div>
                 <div>
-                  <dt className="uppercase tracking-wide text-zinc-500">Shares held</dt>
+                  <dt className="text-zinc-500">Shares held</dt>
                   <dd className="mt-0.5 font-medium text-zinc-200">{shares}</dd>
                 </div>
                 <div className="col-span-2">
-                  <dt className="uppercase tracking-wide text-zinc-500">Tracked prior option cash flow</dt>
+                  <dt className="text-zinc-500">Tracked prior option cash flow</dt>
                   <dd className={`mt-0.5 font-medium ${priorOptionCashFlow < 0 ? "text-red-200" : "text-emerald-200"}`}>
                     {signed(priorOptionCashFlow)}
                     {!feesFullyKnown ? <span className="ml-1.5 font-normal text-zinc-500">Fees may still be pending</span> : null}
@@ -162,7 +162,7 @@ export function CoveredCallOutcomePlanner({
               ) : null}
 
               <div>
-                <label htmlFor={strikeId} className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                <label htmlFor={strikeId} className="text-xs font-semibold text-zinc-400">
                   Proposed call strike
                 </label>
                 <div className="mt-1.5 flex items-center gap-3">
@@ -190,7 +190,7 @@ export function CoveredCallOutcomePlanner({
               </div>
 
               <div>
-                <label htmlFor={premiumId} className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                <label htmlFor={premiumId} className="text-xs font-semibold text-zinc-400">
                   Expected net call premium ($/share)
                 </label>
                 <input
@@ -207,7 +207,7 @@ export function CoveredCallOutcomePlanner({
               </div>
 
               <div>
-                <label htmlFor={targetId} className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                <label htmlFor={targetId} className="text-xs font-semibold text-zinc-400">
                   Target total campaign return
                 </label>
                 <div className="mt-1.5 flex items-center gap-1.5">
@@ -230,7 +230,7 @@ export function CoveredCallOutcomePlanner({
               {result ? (
                 <>
                   <div className={`rounded-md border p-3 ${toneBorder[tone]}`} data-testid="covered-call-outcome-result">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">If called away at {money(strike)}</p>
+                    <p className="text-xs font-semibold text-zinc-400">If called away at {money(strike)}</p>
                     <dl className="mt-2 space-y-1.5 text-[13px]">
                       <div className="flex items-center justify-between">
                         <dt className="text-zinc-400">Stock gain/loss</dt>
@@ -247,18 +247,18 @@ export function CoveredCallOutcomePlanner({
                     </dl>
                     <div className={`mt-3 border-t border-zinc-800 pt-2 ${toneText[tone]}`}>
                       <div className="flex items-baseline justify-between">
-                        <span className="text-xs font-semibold uppercase tracking-wide">Final campaign P/L</span>
+                        <span className="text-xs font-semibold">Final campaign P/L</span>
                         <span className="text-xl font-bold tabular-nums">{signed(result.campaignProfitIfCalled)}</span>
                       </div>
                       <div className="mt-0.5 flex items-baseline justify-between">
-                        <span className="text-xs font-semibold uppercase tracking-wide">Total return</span>
+                        <span className="text-xs font-semibold">Total return</span>
                         <span className="text-base font-semibold tabular-nums">{signed(result.campaignReturnPct)}%</span>
                       </div>
                     </div>
                   </div>
 
                   <div className={`rounded-md border p-2.5 text-xs ${toneBorder[tone]} ${toneText[tone]}`} data-testid="covered-call-outcome-target">
-                    <span className="font-semibold uppercase tracking-wide">Target: {signed(targetPct)}%</span>{" "}
+                    <span className="font-semibold">Target: {signed(targetPct)}%</span>{" "}
                     {tone === "bad"
                       ? `Below target by ${Math.abs(result.targetDifferencePct).toFixed(2)} percentage points`
                       : tone === "warn"
@@ -283,7 +283,7 @@ export function CoveredCallOutcomePlanner({
 
                   {result.hypotheticalShareExitProfit !== null && currentStockPrice !== null ? (
                     <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5 text-xs" data-testid="covered-call-outcome-share-exit">
-                      <p className="font-semibold uppercase tracking-wide text-zinc-400">
+                      <p className="font-semibold text-zinc-400">
                         Hypothetical share exit at {money(currentStockPrice)}
                       </p>
                       <p className={`mt-1 text-sm font-semibold tabular-nums ${result.hypotheticalShareExitProfit < 0 ? "text-red-200" : "text-emerald-200"}`}>

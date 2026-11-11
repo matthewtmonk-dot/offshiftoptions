@@ -22,7 +22,7 @@ export function CreditKeptMeter({ summary }: { summary: CreditKeptSummary }) {
   return (
     <div data-testid="credit-kept-meter" role="img" aria-label={label} title={label} className="w-full">
       <div className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="font-medium uppercase tracking-wide text-zinc-500">Credit kept</span>
+        <span className="font-medium text-zinc-500">Credit kept</span>
         <span className={`font-semibold tabular-nums ${tone}`}>
           {percentText}
           {summary.provisional ? <span className="ml-1 font-normal text-zinc-500">est.</span> : null}

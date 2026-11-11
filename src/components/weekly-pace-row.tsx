@@ -30,7 +30,7 @@ export function WeeklyPaceRow({
   }
   return (
     <div data-testid="weekly-pace">
-      <div className="flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-zinc-500">
+      <div className="flex items-center gap-1 text-xs font-medium text-zinc-500">
         {label}
         <InfoTip label={label} align="start">{pace.help}</InfoTip>
       </div>

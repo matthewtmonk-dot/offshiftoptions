@@ -77,24 +77,24 @@ function SequenceReport({ report }: { report: CampaignEventSequenceReport }) {
           </div>
           <dl className="mb-3 grid gap-3 text-sm sm:grid-cols-3">
             <div>
-              <dt className="text-xs uppercase tracking-normal text-zinc-500">Total premium received</dt>
+              <dt className="text-xs text-zinc-500">Total premium received</dt>
               <dd className="mt-1 font-medium text-zinc-100">${campaign.totalPremiumReceived}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase tracking-normal text-zinc-500">Option debits paid</dt>
+              <dt className="text-xs text-zinc-500">Option debits paid</dt>
               <dd className="mt-1 font-medium text-zinc-100">${campaign.optionDebitsPaid}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase tracking-normal text-zinc-500">Realized P/L</dt>
+              <dt className="text-xs text-zinc-500">Realized P/L</dt>
               <dd className="mt-1 font-medium text-zinc-100">{campaign.realizedPL === null ? "—" : `$${campaign.realizedPL}`}</dd>
             </div>
           </dl>
 
-          <p className="mb-2 text-xs font-medium uppercase tracking-normal text-zinc-500">Event sequence (chronological)</p>
+          <p className="mb-2 text-xs font-medium text-zinc-500">Event sequence (chronological)</p>
           <div className="overflow-x-auto">
             <table className="min-w-[700px] w-full border-separate border-spacing-0 text-left text-sm">
               <thead>
-                <tr className="text-xs uppercase tracking-normal text-zinc-500">
+                <tr className="text-xs text-zinc-500">
                   <th className="border-b border-zinc-800 px-3 py-2 font-medium">Event</th>
                   <th className="border-b border-zinc-800 px-3 py-2 font-medium">Date</th>
                   <th className="border-b border-zinc-800 px-3 py-2 font-medium">Strike</th>
@@ -122,11 +122,11 @@ function SequenceReport({ report }: { report: CampaignEventSequenceReport }) {
 
           {campaign.linkedRecords.length > 0 ? (
             <>
-              <p className="mb-2 mt-4 text-xs font-medium uppercase tracking-normal text-zinc-500">Linked source records (classification)</p>
+              <p className="mb-2 mt-4 text-xs font-medium text-zinc-500">Linked source records (classification)</p>
               <div className="overflow-x-auto">
                 <table className="min-w-[500px] w-full border-separate border-spacing-0 text-left text-sm">
                   <thead>
-                    <tr className="text-xs uppercase tracking-normal text-zinc-500">
+                    <tr className="text-xs text-zinc-500">
                       <th className="border-b border-zinc-800 px-3 py-2 font-medium">Date</th>
                       <th className="border-b border-zinc-800 px-3 py-2 font-medium">Normalized action</th>
                       <th className="border-b border-zinc-800 px-3 py-2 font-medium">Classification</th>

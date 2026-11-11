@@ -15,7 +15,7 @@ import {
   ThumbsUp,
   Trash2,
 } from "lucide-react";
-import { EmptyState, FieldLabel } from "@/components/ui";
+import { EmptyState, FieldLabel, primaryButtonClass } from "@/components/ui";
 import { InfoTip } from "@/components/info-tip";
 import { EthicsBadge } from "@/components/ethics-badge";
 import type { EthicsSummary } from "@/lib/ethics";
@@ -299,7 +299,7 @@ export function ResearchWorkspace({
           />
           <button
             type="submit"
-            className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-black hover:bg-emerald-300"
+            className={primaryButtonClass}
           >
             <Plus className="size-3.5" aria-hidden />
             Add
@@ -324,16 +324,16 @@ export function ResearchWorkspace({
                 onClick={() => setStatus(tab.key)}
                 className={`inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition ${
                   status === tab.key
-                    ? "border-emerald-400/70 bg-emerald-400/15 text-emerald-100"
-                    : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-600 hover:text-zinc-50"
+                    ? "border-zinc-100 bg-zinc-100 text-zinc-950"
+                    : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-50"
                 }`}
               >
                 {tab.label}
-                <span className="text-[10px] text-zinc-500">{counts[tab.key]}</span>
+                <span className={`text-[11px] tabular-nums ${status === tab.key ? "text-zinc-600" : "text-zinc-500"}`}>{counts[tab.key]}</span>
               </button>
             ))}
 
-            <label className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300">
+            <label className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300">
               <ArrowDownUp className="size-3.5" aria-hidden />
               Sort
               <select
@@ -353,14 +353,14 @@ export function ResearchWorkspace({
             <ColumnsMenu columns={columns} onToggle={toggleColumn} onMove={moveColumn} />
           </div>
 
-          <div className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/60 lg:block" data-testid="research-desktop-table">
+          <div className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-900 shadow-[0_1px_2px_rgba(16,24,40,0.05)] lg:block" data-testid="research-desktop-table">
             <table className="w-full border-separate border-spacing-0 text-left text-xs">
               <thead>
-                <tr className="text-[11px] uppercase tracking-normal text-zinc-500">
-                  <th className="sticky left-0 z-10 w-16 border-b border-zinc-800 bg-zinc-900 px-3 py-2">Status</th>
-                  <th className="sticky left-16 z-10 border-b border-zinc-800 bg-zinc-900 px-3 py-2">Ticker</th>
+                <tr className="text-xs text-zinc-500">
+                  <th className="sticky left-0 z-10 w-16 border-b border-zinc-800 bg-zinc-950 px-3 py-2 font-medium">Status</th>
+                  <th className="sticky left-16 z-10 border-b border-zinc-800 bg-zinc-950 px-3 py-2 font-medium">Ticker</th>
                   {activeColumns.map((column) => (
-                    <th key={column.key} className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2 whitespace-nowrap">
+                    <th key={column.key} className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-3 py-2 font-medium">
                       {column.label}
                     </th>
                   ))}
@@ -375,8 +375,8 @@ export function ResearchWorkspace({
                   const buddyItem = scope === "both" ? buddyStatusByTicker.get(item.ticker) : undefined;
                   return (
                     <Fragment key={item.id}>
-                      <tr onClick={() => toggleExpanded(item.id)} className="cursor-pointer transition hover:bg-zinc-900/55">
-                        <td className="sticky left-0 z-10 border-b border-zinc-900 bg-zinc-950 px-3 py-2">
+                      <tr onClick={() => toggleExpanded(item.id)} className="group/row cursor-pointer transition hover:bg-zinc-950">
+                        <td className="sticky left-0 z-10 border-b border-zinc-800/70 bg-zinc-900 px-3 py-2.5">
                           <button
                             type="button"
                             aria-expanded={isOpen}
@@ -391,7 +391,7 @@ export function ResearchWorkspace({
                             <StatusChip status={item.researchStatus} />
                           </button>
                         </td>
-                        <td className="sticky left-16 z-10 border-b border-zinc-900 bg-zinc-950 px-3 py-2">
+                        <td className="sticky left-16 z-10 border-b border-zinc-800/70 bg-zinc-900 px-3 py-2.5">
                           <span className="text-sm font-semibold text-zinc-50">{item.ticker}</span>
                           <span className="ml-1.5 inline-block align-middle">
                             <EthicsBadge ticker={item.ticker} summary={ethicsByTicker[item.ticker]} />
@@ -404,14 +404,14 @@ export function ResearchWorkspace({
                           ) : null}
                         </td>
                         {activeColumns.map((column) => (
-                          <td key={column.key} className="border-b border-zinc-900 px-3 py-2 whitespace-nowrap">
+                          <td key={column.key} className="whitespace-nowrap border-b border-zinc-800/70 px-3 py-2.5">
                             {renderResearchCell(column.key, item, scan, history, avFundamentals)}
                           </td>
                         ))}
                       </tr>
                       {isOpen ? (
                         <tr>
-                          <td colSpan={columnCount} className="border-b border-zinc-900 bg-zinc-950/60 px-3 py-3">
+                          <td colSpan={columnCount} className="border-b border-zinc-800/70 bg-zinc-950/60 px-3 py-3">
                             <ResearchDetail
                               item={item}
                               buddies={buddies}
@@ -456,7 +456,7 @@ export function ResearchWorkspace({
 
       {showBuddy ? (
         <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
-          <h2 className="mb-2 text-xs font-semibold uppercase tracking-normal text-zinc-400">{buddyName}&apos;s Shared Research</h2>
+          <h2 className="mb-2 text-xs font-semibold text-zinc-400">{buddyName}&apos;s Shared Research</h2>
           {buddyItems.length ? (
             <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
               {buddyItems.map((item) => {
@@ -536,7 +536,7 @@ function ColumnsMenu({
         aria-haspopup="true"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50"
+        className="flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50"
       >
         Columns
         <ChevronDown className="size-3.5" aria-hidden />
@@ -553,7 +553,7 @@ function ColumnsMenu({
             }
             return (
               <div key={group}>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-normal text-zinc-500">{RESEARCH_COLUMN_GROUP_LABELS[group]}</div>
+                <div className="mb-1 text-[10px] font-semibold text-zinc-500">{RESEARCH_COLUMN_GROUP_LABELS[group]}</div>
                 <div className="space-y-0.5">
                   {definitions.map((definition) => {
                     const index = columns.indexOf(definition.key);
@@ -679,7 +679,7 @@ function ResearchDetail({
       <div className="grid gap-5 rounded-md border border-zinc-800 bg-zinc-950 p-4 xl:grid-cols-[1fr_1fr_0.8fr]">
       <section className="space-y-4">
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">My Decision</h3>
+          <h3 className="text-xs font-semibold text-zinc-400">My Decision</h3>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {statusChoices.map((choice) => {
               const isActive = item.researchStatus === choice.key;
@@ -707,7 +707,7 @@ function ResearchDetail({
           <input type="hidden" name="itemId" value={item.id} />
 
           <div>
-            <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Company</h4>
+            <h4 className="text-xs font-semibold text-zinc-400">Company</h4>
             {scan?.companyDescription ? (
               <p className="mt-1 text-[11px] text-zinc-600">
                 Schwab Trader API: <span className="text-zinc-400">{scan.companyDescription}</span> - shown above/in the table when
@@ -731,7 +731,7 @@ function ResearchDetail({
           </div>
 
           <div>
-            <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Fundamentals</h4>
+            <h4 className="text-xs font-semibold text-zinc-400">Fundamentals</h4>
             <p className="mt-1 text-[11px] text-zinc-600">
               P/E, EPS, and Dividend use a verified Schwab Trader API value automatically when available
               {item.fundamentalAsOf ? ` (last verified ${shortDateTime(item.fundamentalAsOf)})` : ""}. PEG, Current Ratio, and
@@ -843,7 +843,7 @@ function ResearchDetail({
           </div>
 
           <div>
-            <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">External Research (manual)</h4>
+            <h4 className="text-xs font-semibold text-zinc-400">External Research (manual)</h4>
             <p className="mt-1 text-[11px] text-zinc-600">Manual · your own read of Schwab/LSEG research. OSO does not fetch or scrape these.</p>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <input
@@ -884,7 +884,7 @@ function ResearchDetail({
           </div>
 
           <div>
-            <h4 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">My Decision</h4>
+            <h4 className="text-xs font-semibold text-zinc-400">My Decision</h4>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <FieldLabel>
                 Would I own this?
@@ -945,7 +945,7 @@ function ResearchDetail({
             </div>
           </div>
 
-          <button type="submit" className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-black hover:bg-emerald-300">
+          <button type="submit" className={primaryButtonClass}>
             <Save className="size-3.5" aria-hidden />
             Save research details
           </button>
@@ -954,7 +954,7 @@ function ResearchDetail({
 
       <section className="space-y-4">
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Current Setup</h3>
+          <h3 className="text-xs font-semibold text-zinc-400">Current Setup</h3>
           {scan ? (
             <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <Datum label="Scanner" value={<ScannerChip score={scan.score} label={scan.label} />} />
@@ -970,7 +970,7 @@ function ResearchDetail({
         </div>
 
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Trade History</h3>
+          <h3 className="text-xs font-semibold text-zinc-400">Trade History</h3>
           {history ? (
             <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <Datum label="Campaigns" value={String(history.count)} />
@@ -984,7 +984,7 @@ function ResearchDetail({
         </div>
 
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">My Notes / Past Experience</h3>
+          <h3 className="text-xs font-semibold text-zinc-400">My Notes / Past Experience</h3>
           <div className="mt-2 grid gap-3">
             <NoteEditor itemId={item.id} category="GENERAL" label="Notes / past experience" notes={generalNotes.map((note) => note.body)} />
             <NoteEditor itemId={item.id} category="PRO" label="Pro" notes={proNotes.map((note) => note.body)} />
@@ -995,7 +995,7 @@ function ResearchDetail({
 
       <section className="space-y-4">
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Sharing</h3>
+          <h3 className="text-xs font-semibold text-zinc-400">Sharing</h3>
           <div className="mt-2 flex flex-wrap gap-2">
             <form action={toggleWatchlistItemVisibilityAction}>
               <input type="hidden" name="itemId" value={item.id} />
@@ -1015,7 +1015,7 @@ function ResearchDetail({
         </div>
 
         <details>
-          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-normal text-zinc-400">Recommend to buddy</summary>
+          <summary className="cursor-pointer text-xs font-semibold text-zinc-400">Recommend to buddy</summary>
           <form action={recommendStockAction} className="mt-2 space-y-2">
             <input type="hidden" name="ticker" value={item.ticker} />
             <input type="hidden" name="returnTo" value="/research" />
@@ -1034,7 +1034,7 @@ function ResearchDetail({
                 </label>
               ))}
             </div>
-            <button type="submit" className="inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-black hover:bg-emerald-300">
+            <button type="submit" className="inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-on-accent hover:bg-emerald-300">
               <Send className="size-3.5" aria-hidden />
               Recommend
             </button>
@@ -1042,7 +1042,7 @@ function ResearchDetail({
         </details>
 
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Buddy comments</h3>
+          <h3 className="text-xs font-semibold text-zinc-400">Buddy comments</h3>
           <form action={addWatchlistCommentAction} className="mt-2 flex gap-2">
             <input type="hidden" name="itemId" value={item.id} />
             <input name="body" placeholder="Comment" className="min-h-9 min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm" />
@@ -1121,7 +1121,7 @@ function ResearchAutoDataSection({
 
   return (
     <details className="rounded-md border border-zinc-800 bg-zinc-900/60">
-      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-normal text-zinc-400">
+      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-xs font-semibold text-zinc-400">
         Auto Data (Schwab / Alpha Vantage)
         <ChevronDown className="size-3.5" aria-hidden />
       </summary>
@@ -1174,7 +1174,7 @@ function ResearchAutoDataSection({
 function AutoDataGroup({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-normal text-sky-300">{label}</div>
+      <div className="mb-1 text-[10px] font-semibold text-sky-300">{label}</div>
       <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">{children}</div>
     </div>
   );
@@ -1183,7 +1183,7 @@ function AutoDataGroup({ label, children }: { label: string; children: ReactNode
 function AutoDatum({ label, value, node }: { label: ReactNode; value?: string | null; node?: ReactNode }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-normal text-zinc-500">{label}</div>
+      <div className="text-[10px] text-zinc-500">{label}</div>
       <div className="text-zinc-200">{node ?? value ?? dash()}</div>
     </div>
   );
@@ -1228,7 +1228,7 @@ function NoteEditor({ itemId, category, label, notes }: { itemId: string; catego
 function Datum({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs text-zinc-500">{label}</dt>
       <dd className="mt-1 font-medium text-zinc-100">{value}</dd>
     </div>
   );

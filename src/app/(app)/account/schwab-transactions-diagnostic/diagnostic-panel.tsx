@@ -193,7 +193,7 @@ function OrdersSummary({ orders }: { orders: OrdersDiagnosticResult }) {
         <div className="overflow-x-auto">
           <table className="min-w-[720px] w-full border-separate border-spacing-0 text-left text-sm">
             <thead>
-              <tr className="text-xs uppercase tracking-normal text-zinc-500">
+              <tr className="text-xs text-zinc-500">
                 <th className="border-b border-zinc-800 px-3 py-2 font-medium">Underlying</th>
                 <th className="border-b border-zinc-800 px-3 py-2 font-medium">Put/Call</th>
                 <th className="border-b border-zinc-800 px-3 py-2 font-medium">Strike</th>
@@ -248,13 +248,13 @@ function TransferItemShapesSection({ transferItemShapes }: { transferItemShapes:
     <div className="space-y-4">
       {transferItemShapes.transactions.map((transaction) => (
         <div key={transaction.transactionOrdinal} className="rounded-md border border-zinc-800 p-3">
-          <p className="mb-2 text-xs font-medium uppercase tracking-normal text-zinc-500">
+          <p className="mb-2 text-xs font-medium text-zinc-500">
             Transaction #{transaction.transactionOrdinal} · type: {transaction.transactionType ?? "—"}
           </p>
           <div className="overflow-x-auto">
             <table className="min-w-[900px] w-full border-separate border-spacing-0 text-left text-sm">
               <thead>
-                <tr className="text-xs uppercase tracking-normal text-zinc-500">
+                <tr className="text-xs text-zinc-500">
                   <th className="border-b border-zinc-800 px-3 py-2 font-medium">Item #</th>
                   <th className="border-b border-zinc-800 px-3 py-2 font-medium">Asset type</th>
                   <th className="border-b border-zinc-800 px-3 py-2 font-medium">Instrument type</th>
@@ -306,7 +306,7 @@ function ResultTable<T>({
     <div className="overflow-x-auto">
       <table className="min-w-[600px] w-full border-separate border-spacing-0 text-left text-sm">
         <thead>
-          <tr className="text-xs uppercase tracking-normal text-zinc-500">
+          <tr className="text-xs text-zinc-500">
             {columns.map((column) => (
               <th key={column.header} className="border-b border-zinc-800 px-3 py-2 font-medium">
                 {column.header}
@@ -333,7 +333,7 @@ function ResultTable<T>({
 function SummaryDatum({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs text-zinc-500">{label}</dt>
       <dd className="mt-1 break-words font-medium text-zinc-100">{value}</dd>
     </div>
   );

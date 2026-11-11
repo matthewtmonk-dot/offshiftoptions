@@ -83,7 +83,7 @@ export function CampaignHistoryRepairPanel() {
             <div className="overflow-x-auto">
               <table className="min-w-[700px] w-full border-separate border-spacing-0 text-left text-sm">
                 <thead>
-                  <tr className="text-xs uppercase tracking-normal text-zinc-500">
+                  <tr className="text-xs text-zinc-500">
                     <th className="border-b border-zinc-800 px-3 py-2 font-medium">Ticker</th>
                     <th className="border-b border-zinc-800 px-3 py-2 font-medium">Current status</th>
                     <th className="border-b border-zinc-800 px-3 py-2 font-medium">Event sequence</th>

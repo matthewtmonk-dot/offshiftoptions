@@ -175,7 +175,7 @@ export function ChatComposer({ conversationId }: { conversationId: string }) {
           <button
             type="submit"
             disabled={isPending}
-            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-on-accent hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Send className="size-4" aria-hidden />
             {isPending ? "Sending" : "Send"}

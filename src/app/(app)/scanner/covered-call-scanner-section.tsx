@@ -39,7 +39,7 @@ function CoveredCallCard({ scan, highlighted }: { scan: CoveredCallCampaignScan;
 
   return (
     <div
-      className={`rounded-lg border bg-zinc-950 p-4 shadow-sm shadow-black/20 ${highlighted ? "border-emerald-400/60" : "border-zinc-800"}`}
+      className={`rounded-lg border bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)] ${highlighted ? "border-emerald-400/60" : "border-zinc-800"}`}
       data-testid={`covered-call-card-${scan.ticker}`}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -101,7 +101,7 @@ function CoveredCallCard({ scan, highlighted }: { scan: CoveredCallCampaignScan;
 function CandidateGroup({ title, candidates, tone }: { title: string; candidates: CoveredCallCandidate[]; tone: "safe" | "warn" | "unknown" }) {
   return (
     <div className="mt-3">
-      <div className={`text-xs font-semibold uppercase tracking-normal ${tone === "warn" ? "text-amber-300" : "text-zinc-400"}`}>{title}</div>
+      <div className={`text-xs font-semibold ${tone === "warn" ? "text-amber-300" : "text-zinc-400"}`}>{title}</div>
       <div className="mt-1 space-y-2">
         {candidates.map((candidate) => (
           <CandidateRow key={`${candidate.strike}-${candidate.expiration}`} candidate={candidate} tone={tone} />
