@@ -161,10 +161,16 @@ export function themeKeyOf(input: { theme: string | null; industry: string | nul
   return input.theme ?? input.industry ?? input.sector ?? null;
 }
 
-/** Why a candidate cannot be part of a recommendation (empty = eligible). Shown to Matt, never hidden. */
+/** The blocker for a company the ethics screen excludes. Pages use it to leave such a company out of sight entirely. */
+export const ETHICS_EXCLUDED_BLOCKER = "Excluded by ethics";
+
+/**
+ * Why a candidate cannot be part of a recommendation (empty = eligible). Reasons are shown to Matt - except a company
+ * he (or a verified hard exclusion) has already ruled out for ethics, which the pages leave out altogether.
+ */
 export function candidateBlockers(candidate: PlanCandidate, limits: PlanLimits): string[] {
   const blockers: string[] = [];
-  if (candidate.ethics === "BLOCKED") blockers.push("Excluded by ethics");
+  if (candidate.ethics === "BLOCKED") blockers.push(ETHICS_EXCLUDED_BLOCKER);
   else if (candidate.ethics === "REVIEW") blockers.push("Ethics needs your review");
   else if (candidate.ethics === "UNREVIEWED") blockers.push("Ethics not researched yet");
   if (!candidate.gatingClear) blockers.push("A required scanner rule is not a clear pass");

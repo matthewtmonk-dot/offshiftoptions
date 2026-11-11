@@ -59,3 +59,14 @@ export function schwabConnectionNotice(input: {
   }
   return null;
 }
+
+/**
+ * When the current Schwab sign-in stops working (7 days after the user last authorized), or null when that moment
+ * is not on record. Shown on the Account page so the weekly reconnect can be planned instead of discovered.
+ */
+export function schwabSignInExpiresAt(connectedAt: string | null): Date | null {
+  if (!connectedAt) return null;
+  const authorizedAt = new Date(connectedAt);
+  if (Number.isNaN(authorizedAt.getTime())) return null;
+  return new Date(authorizedAt.getTime() + SCHWAB_SIGN_IN_LIFETIME_DAYS * MS_PER_DAY);
+}

@@ -9,6 +9,7 @@ import { accountWeeklyPaceDisplay } from "@/lib/weekly-pace-display";
 import { ClientPresentationProvider, FreshnessStrip, DashboardPositionSections, type DisplayEntry } from "@/components/client-freshness";
 import { getDashboardData, getNeverTradeTickersForUser, getUnreadChatCount } from "@/lib/app-data";
 import { requireCurrentUser } from "@/lib/auth";
+import { ETHICS_EXCLUDED_BLOCKER } from "@/domain/portfolio/portfolioPlan";
 import { getSchwabConnectionSummaryForUser } from "@/lib/broker-connections";
 import { resolvePositionAssessmentDisplaysForUser } from "@/lib/positionAssessmentOrchestration";
 import { getOpenPutCreditKeptForUser } from "@/lib/open-put-credit-kept";
@@ -159,6 +160,9 @@ export default async function DashboardPage() {
     // Why each PASS/NEAR name in the scan preview would be held back from the Scanner's picks (null = unavailable).
     getScannerInsightHoldBacksForUser(user.id, scannerInsight.items.map((item) => item.planRow), report.currentAccountValue),
   ]);
+  // A company the ethics screen blocks is left out of the scan preview altogether - Matt has already ruled on it
+  // (same rule as the Scanner table and picks; it stays visible on Research > Ethics). Display only.
+  const insightItems = scannerInsight.items.filter((item) => !(insightHoldBacks?.[item.ticker] ?? []).includes(ETHICS_EXCLUDED_BLOCKER));
   const displaysByCampaignId = new Map(resolvedDisplays.map((entry) => [entry.campaignId, entry.display]));
   // Earnings warnings come from the cached earnings calendar (no provider call); a failure just means no note.
   const earningsNotesByCampaignId = await getPositionEarningsNotes(
@@ -349,7 +353,7 @@ export default async function DashboardPage() {
           }
         >
           <div className="space-y-1.5">
-            {scannerInsight.items.map((item) => {
+            {insightItems.map((item) => {
               // null = the hold-back checks could not be read; the row then shows only the technical result.
               const heldBack = insightHoldBacks ? (insightHoldBacks[item.ticker] ?? []) : null;
               const isHeldBack = heldBack !== null && heldBack.length > 0;
@@ -383,7 +387,7 @@ export default async function DashboardPage() {
             ) : (
               <p className="text-xs text-zinc-500">Scanner run: never</p>
             )}
-            {scannerInsight.items.length === 0 ? (
+            {insightItems.length === 0 ? (
               <EmptyState>{scannerInsight.hasRun ? "No actionable setups from the latest scan - check Scanner for candidates still needing data." : "No scan results yet."}</EmptyState>
             ) : null}
           </div>

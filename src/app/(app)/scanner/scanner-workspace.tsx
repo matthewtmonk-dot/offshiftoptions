@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IntentPrefetchLink } from "@/components/intent-prefetch-link";
 import { InfoTip } from "@/components/info-tip";
 import { EthicsBadge } from "@/components/ethics-badge";
@@ -187,10 +187,17 @@ export function ScannerWorkspace({
     [results, optimisticStatuses],
   );
 
-  const excludedCount = useMemo(() => optimisticResults.filter((result) => result.researchStatus === "NEVER_TRADE").length, [optimisticResults]);
+  // A company is out of sight when Matt excluded it himself (Research "never trade") OR his ethics screen blocks it
+  // (his Exclude decision, or a verified hard exclusion). Display only: the row's technical score/status is untouched,
+  // and "Show Excluded" brings every hidden row back.
+  const isHiddenByChoice = useCallback(
+    (result: ScannerViewResult) => result.researchStatus === "NEVER_TRADE" || ethics[result.record.ticker]?.gate === "BLOCKED",
+    [ethics],
+  );
+  const excludedCount = useMemo(() => optimisticResults.filter(isHiddenByChoice).length, [optimisticResults, isHiddenByChoice]);
   const actionable = useMemo(
-    () => (showExcluded ? optimisticResults : optimisticResults.filter((result) => result.researchStatus !== "NEVER_TRADE")),
-    [optimisticResults, showExcluded],
+    () => (showExcluded ? optimisticResults : optimisticResults.filter((result) => !isHiddenByChoice(result))),
+    [optimisticResults, showExcluded, isHiddenByChoice],
   );
   const counts = useMemo(
     () => ({
@@ -463,11 +470,11 @@ export function ScannerWorkspace({
                   </InfoTip>
                 </span>
               </th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Score</th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Status</th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Price</th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">RSI / BB</th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Strike</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="Score" help="How closely this setup matches your Scanner Rules, 0 to 100. A match score, not a prediction." /></th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="Status" help="PASS meets every rule. NEAR misses one preference rule narrowly. VERIFY or OPTIONS NOT CHECKED means data is still missing. FAIL misses a rule." /></th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="Price" help="The stock's price when the scan ran." /></th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="RSI / BB" help="RSI: momentum over 14 days - low means the stock has sold off. BB: where the price sits inside its Bollinger Bands - 0% is the lower band, 100% the upper." /></th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="Strike" help="The put strike the scanner chose: the lowest strike that still meets your return target." /></th>
               <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">
                 <span className="inline-flex items-center gap-1">
                   Bid
@@ -484,9 +491,9 @@ export function ScannerWorkspace({
                   </InfoTip>
                 </span>
               </th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">DTE</th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">OI / Vol</th>
-              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Earnings</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="DTE" help="Days until the chosen option expires." /></th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="OI / Vol" help="Open interest and today's volume for the chosen option - how easy it is to trade." /></th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium"><ColumnHelp label="Earnings" help="Days until the company's next earnings report." /></th>
               {activeOptionalColumns.map((column) => (
                 <th key={column.key} className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">
                   {column.label}
@@ -1032,6 +1039,15 @@ function cell(value: number | null, format: (value: number) => string) {
 /** Looks up this row's evaluated criterion for a Scanner Rule key, straight off the already-
  * computed `summary.results` - a miss means the rule is disabled (or doesn't apply to this
  * metric, e.g. "strike"), which `ruleSeverityTone` renders as neutral, never a hard pass/fail. */
+/** A column heading that explains itself on hover (dotted underline = there is a hint). */
+function ColumnHelp({ label, help }: { label: string; help: string }) {
+  return (
+    <span title={help} className="cursor-help underline decoration-zinc-600 decoration-dotted underline-offset-4">
+      {label}
+    </span>
+  );
+}
+
 function criterionFor(result: ScannerViewResult, key: string): CriterionResult | undefined {
   return result.summary.results.find((criterion) => criterion.key === key);
 }

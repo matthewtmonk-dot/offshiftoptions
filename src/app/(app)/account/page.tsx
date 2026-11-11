@@ -86,8 +86,9 @@ export default async function AccountPage({
 
   return (
     <div className="space-y-6">
-      <div>
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <h1 className="text-3xl font-semibold text-zinc-50">Account</h1>
+        <Link href="/guide" className="text-sm text-sky-300 underline underline-offset-2 hover:text-sky-200">How this site works</Link>
       </div>
 
       {params.error ? (
@@ -445,6 +446,11 @@ export default async function AccountPage({
                       ? `last synced ${formatEtDateTime(schwabConnection.lastAccountSyncAt)}`
                       : "not yet synced"}
                   </p>
+                  {schwabConnection.signInExpiresAt ? (
+                    <p className="text-xs text-zinc-400" data-testid="schwab-sign-in-expiry">
+                      Schwab sign-in is good until <span className="font-medium text-zinc-200">{formatEtDateTime(schwabConnection.signInExpiresAt)}</span>. Schwab asks for a fresh sign-in every 7 days - use Reconnect Schwab under Connection details before then.
+                    </p>
+                  ) : null}
                   {schwabConnection.lastAccountSyncFailureAt ? (
                     <p className="text-xs text-amber-200">
                       Last sync attempt failed ({schwabConnection.lastAccountSyncFailureReason ?? "unknown reason"}) at{" "}

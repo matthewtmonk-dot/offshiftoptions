@@ -30,12 +30,14 @@ import { ensureMyLstScannerProfileForUser, MAX_DISPLAYED_STOCK_STAGE_RESULTS } f
 import { getCoveredCallScanForUser } from "@/lib/covered-call-scanner";
 import { MAX_SCAN_AGE_MS } from "@/lib/scanner-option-check";
 import { getPlanLimitsForUser } from "@/lib/plan-limits";
+import { ethicsResearchQueue } from "@/domain/ethics/ethicsQueue";
 import { buildPlanCandidates } from "@/domain/portfolio/candidates";
 import { getClassificationForTickers, getPlanExposureForUser } from "@/lib/portfolio-plan";
 import { runDemoScannerAction } from "../actions";
 import { CoveredCallScannerSection } from "./covered-call-scanner-section";
 import { LiveScanButton } from "./live-scan-button";
 import { OptionCheckButton } from "./option-check-button";
+import { EthicsQueueLine } from "./ethics-queue-line";
 import { PortfolioPlanPanel } from "./portfolio-plan-panel";
 import { PrepareDataButton } from "./prepare-data-button";
 import { ScanAutoFinisher } from "./scan-auto-finisher";
@@ -287,6 +289,18 @@ export default async function ScannerPage({
       criteria: result.summary.results,
     })),
   );
+  // Names worth a look that have no ethics research yet - the short weekend to-do, closest-to-a-pick first.
+  const ethicsQueue = isLiveSchwabRun
+    ? ethicsResearchQueue(
+        allResults.map((result) => ({
+          ticker: result.record.ticker,
+          readiness: result.readiness,
+          score: result.score,
+          worthALook: isWorthALook(funnelInputOf(result)),
+          researched: Boolean(ethics[result.record.ticker]),
+        })),
+      )
+    : [];
   const timingGuide = currentTimingGuide();
   const tooOldToFinish = scanTooOldToFinish(run?.createdAt ?? null);
   const averageScore = allResults.length
@@ -390,6 +404,8 @@ export default async function ScannerPage({
       ) : null}
 
       {planData ? <PortfolioPlanPanel limits={planLimits} candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete && !tooOldToFinish ? scanIncomplete.detail : null} priceAgeNote={isLiveSchwabRun ? picksPriceAgeNote(run?.createdAt ?? null) : null} /> : null}
+
+      <EthicsQueueLine tickers={ethicsQueue} />
 
       <details data-testid="scan-details" className="group rounded-md border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-sm text-zinc-300">
         <summary className="cursor-pointer list-none text-zinc-400 hover:text-zinc-200">

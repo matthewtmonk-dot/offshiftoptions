@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { CircleHelp } from "lucide-react";
 import { cookies } from "next/headers";
 import { requireCurrentUser } from "@/lib/auth";
 import { getUnreadChatCount, getUnreadNotificationCount } from "@/lib/app-data";
@@ -32,7 +34,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               available on every authenticated page (never in the left nav rail - that's navigation,
               this is a global status/action). Reuses the exact same action/component Tracker's own
               refresh button now uses (see positions/page.tsx) - never a second implementation. */}
-          <div className="flex justify-end border-b border-zinc-800 bg-zinc-900 px-4 py-2 md:px-6 lg:px-8">
+          <div className="flex items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-900 px-4 py-2 md:px-6 lg:px-8">
+            {/* The one always-there way into the plain-English guide - a quiet link, not a nav slot. */}
+            <Link href="/guide" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100" data-testid="guide-link">
+              <CircleHelp className="size-3.5" aria-hidden />
+              How it works
+            </Link>
             <RefreshStatusControl />
           </div>
           <SchwabConnectionBanner notice={schwabNotice} />

@@ -16,7 +16,7 @@ import {
 } from "@/providers/schwab/tokens";
 import { getUserSchwabDeveloperCredentialSummary } from "@/providers/schwab/developer-credentials";
 import { prisma } from "./prisma";
-import { schwabConnectionNotice, type SchwabConnectionNotice } from "./schwab-connection-notice";
+import { schwabConnectionNotice, schwabSignInExpiresAt, type SchwabConnectionNotice } from "./schwab-connection-notice";
 
 export type SchwabConnectionSummary = {
   id: string;
@@ -28,6 +28,8 @@ export type SchwabConnectionSummary = {
   accountCount: number;
   accountNumberLast4s: string[];
   accountDiscoveryStatus: string | null;
+  /** When the current Schwab sign-in runs out (7 days after the last sign-in); null when unknown or not connected. */
+  signInExpiresAt: Date | null;
   lastSuccessfulRefreshAt: string | null;
   lastRefreshFailureAt: string | null;
   lastRefreshFailureReason: string | null;
@@ -437,6 +439,7 @@ function summarizeSchwabConnection(connection: {
     accountCount: numberValue(metadata?.accountCount) ?? accountLast4s.length,
     accountNumberLast4s: accountLast4s,
     accountDiscoveryStatus: stringValue(metadata?.accountDiscoveryStatus),
+    signInExpiresAt: connection.status === "CONNECTED" ? schwabSignInExpiresAt(stringValue(metadata?.connectedAt)) : null,
     lastSuccessfulRefreshAt: stringValue(metadata?.lastSuccessfulRefreshAt),
     lastRefreshFailureAt: stringValue(metadata?.lastRefreshFailureAt),
     lastRefreshFailureReason: stringValue(metadata?.lastRefreshFailureReason),

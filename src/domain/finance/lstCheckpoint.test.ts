@@ -31,7 +31,19 @@ describe("getNextLstCheckpointLabel", () => {
     expect(getNextLstCheckpointLabel(new Date("2026-09-08T11:00:00.000Z"))).toBe(
       "Next position check · 3:00 PM ET",
     );
+    // Tuesday 23:00 UTC = 7:00 PM ET - today's check has passed, so the next one is tomorrow's.
     expect(getNextLstCheckpointLabel(new Date("2026-09-08T23:00:00.000Z"))).toBe(
+      "Next position check · tomorrow 3:00 PM ET",
+    );
+    // Monday 19:00 UTC = 3:00 PM ET (boundary) and Wednesday evening.
+    expect(getNextLstCheckpointLabel(new Date("2026-09-07T19:00:00.000Z"))).toBe(
+      "Next position check · tomorrow 3:00 PM ET",
+    );
+    expect(getNextLstCheckpointLabel(new Date("2026-09-09T22:00:00.000Z"))).toBe(
+      "Next position check · tomorrow 3:00 PM ET",
+    );
+    // Tuesday 18:59 UTC = 2:59 PM ET - still today's.
+    expect(getNextLstCheckpointLabel(new Date("2026-09-08T18:59:00.000Z"))).toBe(
       "Next position check · 3:00 PM ET",
     );
     // Wednesday 2026-09-09.

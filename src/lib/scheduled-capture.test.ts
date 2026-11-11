@@ -192,3 +192,18 @@ describe("describeScheduledCaptureStatus (Codex blocker repair B2/B4/B5 UI wordi
     }
   });
 });
+
+describe("assigned shares with no covered call (nothing to capture)", () => {
+  it("is not a contradiction: the capture had no option leg to assess", () => {
+    const resolved = [{ display: unavailableDisplay(["ASSIGNED_SHARES_NO_CALL"]) }];
+    expect(classifyCaptureOutcome(resolved, false)).toBe("NO_CURRENT_LEGITIMATE");
+    expect(tallyPositionAssessmentDisplays(resolved)).toEqual({ positionsExamined: 1, currentAssessmentsPersisted: 0, unavailableCount: 1, contradictionCount: 0 });
+    expect(describeScheduledCaptureStatus({ known: true, status: "SUCCEEDED", resultCategory: "NO_CURRENT_LEGITIMATE" } as LatestScheduledCaptureStatus).tone).toBe("neutral");
+  });
+
+  it("does not hide a current capture or a real contradiction on another position", () => {
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["ASSIGNED_SHARES_NO_CALL"]) }, { display: currentDisplay() }], false)).toBe("CURRENT_CAPTURED");
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["ASSIGNED_SHARES_NO_CALL"]) }, { display: unavailableDisplay(["POSITION_POSITION_MISMATCH"]) }], false)).toBe("CONTRADICTION_DETECTED");
+    expect(classifyCaptureOutcome([{ display: unavailableDisplay(["ASSIGNED_SHARES_NO_CALL", "UNKNOWN_FUTURE_REASON"]) }], false)).toBe("CONTRADICTION_DETECTED");
+  });
+});
