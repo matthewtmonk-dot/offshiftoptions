@@ -28,6 +28,7 @@ import { prisma } from "@/lib/prisma";
 import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indicator-cache";
 import { ensureMyLstScannerProfileForUser, MAX_DISPLAYED_STOCK_STAGE_RESULTS } from "@/lib/workflows";
 import { getCoveredCallScanForUser } from "@/lib/covered-call-scanner";
+import { MAX_SCAN_AGE_MS } from "@/lib/scanner-option-check";
 import { buildPlanCandidates } from "@/domain/portfolio/candidates";
 import { getClassificationForTickers, getPlanExposureForUser } from "@/lib/portfolio-plan";
 import { runDemoScannerAction } from "../actions";
@@ -56,7 +57,10 @@ export type ScannerBuddy = { id: string; name: string };
 export type ScannerResult = NonNullable<Awaited<ReturnType<typeof getScannerPageData>>>["scanRuns"][number]["results"][number];
 
 export type ScannerViewResult = {
-  record: ScannerResult;
+  /** Only the identity the browser needs. The full database row (snapshot JSON + every criterion row) is read on the
+   * server in toViewResult and must NOT be passed to the client: it duplicated `summary`/`values` and made the page
+   * ship over 1 MB of HTML for ~100 rows. */
+  record: Pick<ScannerResult, "id" | "ticker">;
   summary: ScanSummary;
   score: number;
   scoreLabel: ReturnType<typeof honestSetupLabel>;
@@ -194,6 +198,15 @@ function picksPriceAgeNote(runCreatedAt: Date | null): string | null {
   return `Option prices are from ${shortRunTime(runCreatedAt)}. Run Live Scan again before placing anything - premiums move.`;
 }
 
+/**
+ * Plain helper outside the component (render purity). Once a scan is older than the option-check cutoff its remaining
+ * rows can no longer be priced, so the page stops trying (and stops saying "still finishing") and the single
+ * "run Live Scan again" note is the only message.
+ */
+function scanTooOldToFinish(runCreatedAt: Date | null): boolean {
+  return runCreatedAt !== null && Date.now() - runCreatedAt.getTime() > MAX_SCAN_AGE_MS;
+}
+
 function currentTechnicalReadyHint() {
   return technicalReadyHint(new Date());
 }
@@ -273,6 +286,7 @@ export default async function ScannerPage({
     })),
   );
   const timingGuide = currentTimingGuide();
+  const tooOldToFinish = scanTooOldToFinish(run?.createdAt ?? null);
   const averageScore = allResults.length
     ? Math.round(allResults.reduce((sum, result) => sum + result.score, 0) / allResults.length)
     : 0;
@@ -354,7 +368,7 @@ export default async function ScannerPage({
         >
           {timingGuide.headline}
         </span>
-        <ScanAutoFinisher runId={isLiveSchwabRun && run ? run.id : null} awaitingOptionCheck={funnel.awaitingOptionCheck} qualityTickers={staleQualityTickers} enabled={isLiveSchwabRun && !settingsChangedAfterRun} />
+        <ScanAutoFinisher runId={isLiveSchwabRun && run ? run.id : null} awaitingOptionCheck={funnel.awaitingOptionCheck} qualityTickers={staleQualityTickers} enabled={isLiveSchwabRun && !settingsChangedAfterRun && !tooOldToFinish} />
       </div>
 
       {settingsChangedAfterRun ? (
@@ -373,7 +387,7 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
-      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete ? scanIncomplete.detail : null} priceAgeNote={isLiveSchwabRun ? picksPriceAgeNote(run?.createdAt ?? null) : null} /> : null}
+      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete && !tooOldToFinish ? scanIncomplete.detail : null} priceAgeNote={isLiveSchwabRun ? picksPriceAgeNote(run?.createdAt ?? null) : null} /> : null}
 
       <details data-testid="scan-details" className="group rounded-md border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-sm text-zinc-300">
         <summary className="cursor-pointer list-none text-zinc-400 hover:text-zinc-200">
@@ -399,7 +413,7 @@ export default async function ScannerPage({
             </div>
           ) : null}
           <div className="flex flex-wrap items-start gap-3">
-            {isLiveSchwabRun && funnel.awaitingOptionCheck > 0 ? <OptionCheckButton awaiting={funnel.awaitingOptionCheck} /> : null}
+            {isLiveSchwabRun && funnel.awaitingOptionCheck > 0 && !tooOldToFinish ? <OptionCheckButton awaiting={funnel.awaitingOptionCheck} /> : null}
             {qualityState.configured && staleQualityTickers.length > 0 ? <CheckQualityButton tickers={staleQualityTickers} /> : null}
           </div>
           <p className="text-xs text-zinc-500">
@@ -424,7 +438,7 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
   const contractReasonCode = snapshotString(result.snapshotJson, "contractReasonCode");
 
   return {
-    record: result,
+    record: { id: result.id, ticker: result.ticker },
     summary,
     score,
     scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
