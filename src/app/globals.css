@@ -136,6 +136,11 @@
     --color-emerald-300: #047857;
     --color-emerald-400: #0b7a55;
 
+    /* Lime marks "leaning OK, not verified" chips (ethics score, quality B). Tailwind's own lime-200
+     * is a pale tint meant for dark backgrounds - on white it was unreadable. */
+    --color-lime-200: #3f6212;
+    --color-lime-400: #65a30d;
+
     --color-red-100: #7f1d1d;
     --color-red-200: #991b1b;
     --color-red-300: #b42318;
@@ -180,6 +185,11 @@
   --color-emerald-200: #065f46;
   --color-emerald-300: #047857;
   --color-emerald-400: #0b7a55;
+
+  /* Lime marks "leaning OK, not verified" chips (ethics score, quality B). Tailwind's own lime-200
+   * is a pale tint meant for dark backgrounds - on white it was unreadable. */
+  --color-lime-200: #3f6212;
+  --color-lime-400: #65a30d;
 
   --color-red-100: #7f1d1d;
   --color-red-200: #991b1b;
