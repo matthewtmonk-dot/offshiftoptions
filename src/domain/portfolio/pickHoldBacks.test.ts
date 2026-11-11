@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { pickHoldBackReasons } from "./pickHoldBacks";
-import { DEFAULT_PLAN_LIMITS, type PlanCandidate } from "./portfolioPlan";
+import { DEFAULT_PLAN_LIMITS as SHIPPED_DEFAULTS, type PlanCandidate } from "./portfolioPlan";
+
+// Size limits enforced at any account size, to test the size-limit wording itself (the shipped default starts them at $25,000).
+const DEFAULT_PLAN_LIMITS = { ...SHIPPED_DEFAULTS, sizeLimitsFromAccountValue: 0 };
 
 function candidate(overrides: Partial<PlanCandidate> = {}): PlanCandidate {
   return {
@@ -65,5 +68,10 @@ describe("pickHoldBackReasons", () => {
   it("skips the size check when the account value is unknown, but still reports other blockers", () => {
     expect(pickHoldBackReasons(candidate({ strike: 60 }), DEFAULT_PLAN_LIMITS, null)).toEqual([]);
     expect(pickHoldBackReasons(candidate({ strike: 60, gatingClear: false }), DEFAULT_PLAN_LIMITS, 0)).toEqual(["A required scanner rule is not a clear pass"]);
+  });
+
+  it("with the shipped defaults, size is not a hold-back on an account under $25,000 but is on a larger one", () => {
+    expect(pickHoldBackReasons(candidate({ strike: 60 }), SHIPPED_DEFAULTS, 10_731)).toEqual([]);
+    expect(pickHoldBackReasons(candidate({ strike: 160 }), SHIPPED_DEFAULTS, 30_000)).toEqual(["one contract holds $16,000 (53.3% of the account), over the 50% limit for one larger position"]);
   });
 });

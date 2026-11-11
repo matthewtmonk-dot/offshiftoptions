@@ -4,13 +4,13 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Panel } from "@/components/ui";
 import {
-  DEFAULT_PLAN_LIMITS,
   candidateBlockers,
   canAdd,
   collateralOf,
   evaluatePlan,
   optimizePlan,
   pickFlags,
+  sizeLimitsApply,
   type ExistingExposure,
   type PlanCandidate,
   type PlanEvaluation,
@@ -18,8 +18,6 @@ import {
 } from "@/domain/portfolio/portfolioPlan";
 import type { TradingCapital } from "@/lib/portfolio-plan";
 import { getTradingCapitalAction } from "../actions";
-
-const LIMITS_KEY = "oso.plan.limits.v1";
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const usd0 = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -31,36 +29,6 @@ function easternTime(iso: string): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }).format(date) + " ET";
 }
 
-function readStored<T>(key: string): T | null {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStored(key: string, value: unknown) {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // Storage can be unavailable (private window); the plan still works for this visit.
-  }
-}
-
-function sanitizeLimits(value: Partial<PlanLimits> | null): PlanLimits {
-  const pick = (candidate: unknown, fallback: number) => (typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 ? candidate : fallback);
-  return {
-    maxPerCompanyPct: pick(value?.maxPerCompanyPct, DEFAULT_PLAN_LIMITS.maxPerCompanyPct),
-    // Limits saved before this field existed have no value for it: the default (one larger position allowed) applies.
-    maxLargePositionPct: pick(value?.maxLargePositionPct, DEFAULT_PLAN_LIMITS.maxLargePositionPct),
-    maxCommittedPct: pick(value?.maxCommittedPct, DEFAULT_PLAN_LIMITS.maxCommittedPct),
-    maxPerTheme: Math.max(1, Math.round(pick(value?.maxPerTheme, DEFAULT_PLAN_LIMITS.maxPerTheme))),
-    warnPerSector: Math.max(1, Math.round(pick(value?.warnPerSector, DEFAULT_PLAN_LIMITS.warnPerSector))),
-    minReturnPct: pick(value?.minReturnPct, DEFAULT_PLAN_LIMITS.minReturnPct),
-  };
-}
-
 type Props = {
   candidates: PlanCandidate[];
   existing: ExistingExposure[];
@@ -69,27 +37,24 @@ type Props = {
   scanIncompleteNote?: string | null;
   /** Set when the scan's option prices are old enough that they must be refreshed before placing a trade. */
   priceAgeNote?: string | null;
+  /** This user's saved portfolio limits (Scanner settings -> Portfolio limits), read on the server. */
+  limits: PlanLimits;
 };
 
 /**
  * "This week's picks": the suggested allocation is computed as soon as Schwab's balance arrives, so the page opens on
  * an answer instead of a button. Matt can untick/tick names to try his own mix; every hard rule still applies.
  */
-export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount, scanIncompleteNote = null, priceAgeNote = null }: Props) {
-  const [limits, setLimits] = useState<PlanLimits>(DEFAULT_PLAN_LIMITS);
+export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount, scanIncompleteNote = null, priceAgeNote = null, limits }: Props) {
   const [capital, setCapital] = useState<TradingCapital | "loading">("loading");
   /** null = follow the planner's suggestion; an array = Matt's own selection. */
   const [manual, setManual] = useState<string[] | null>(null);
   const [showLimits, setShowLimits] = useState(false);
 
-  // Browser-only state (saved limits) and the first Schwab read are loaded after mount; the setters run in async
-  // callbacks so the server-rendered markup and the first client render always agree.
+  // The first Schwab read happens after mount; the setter runs in an async callback so the server-rendered markup and
+  // the first client render always agree.
   useEffect(() => {
     let active = true;
-    void Promise.resolve().then(() => {
-      if (!active) return;
-      setLimits(sanitizeLimits(readStored<Partial<PlanLimits>>(LIMITS_KEY)));
-    });
     getTradingCapitalAction()
       .then((result) => {
         if (active) setCapital(result);
@@ -111,17 +76,12 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
     }
   }
 
-  function updateLimit(key: keyof PlanLimits, raw: string) {
-    const next = sanitizeLimits({ ...limits, [key]: Number(raw) });
-    setLimits(next);
-    writeStored(LIMITS_KEY, next);
-    setManual(null);
-  }
-
   const schwab = capital !== "loading" && capital.ok ? capital : null;
   const availableToTrade = schwab?.availableToTrade ?? null;
   const accountValue = schwab?.accountValue ?? null;
   const planCapital = availableToTrade !== null && accountValue !== null ? { accountValue, availableToTrade } : null;
+  /** null until Schwab's account value arrives; then whether the per-company size limits block or only warn. */
+  const sizeLimitsOn = accountValue === null ? null : sizeLimitsApply(accountValue, limits);
 
   const { eligible, ineligible } = useMemo(() => {
     const rank = (candidate: PlanCandidate) => (candidate.readiness === "PASS" ? 100 : 0) + candidate.score;
@@ -328,16 +288,28 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
         ) : null}
 
         {showLimits ? (
-          <div data-testid="plan-limits" className="rounded-md border border-zinc-800 p-2">
-            <p className="text-xs text-zinc-500">Limits are saved on this device.</p>
-            <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
-            <LimitField label="Max per company (% of account)" value={limits.maxPerCompanyPct} onChange={(value) => updateLimit("maxPerCompanyPct", value)} />
-            <LimitField label="One larger position, up to (%)" value={limits.maxLargePositionPct} onChange={(value) => updateLimit("maxLargePositionPct", value)} />
-            <LimitField label="Max committed (% ceiling)" value={limits.maxCommittedPct} onChange={(value) => updateLimit("maxCommittedPct", value)} />
-            <LimitField label="Companies per theme" value={limits.maxPerTheme} onChange={(value) => updateLimit("maxPerTheme", value)} />
-            <LimitField label="Warn above per sector" value={limits.warnPerSector} onChange={(value) => updateLimit("warnPerSector", value)} />
-            <LimitField label="Minimum return per trade (%)" value={limits.minReturnPct} onChange={(value) => updateLimit("minReturnPct", value)} />
-          </div>
+          <div data-testid="plan-limits" className="rounded-md border border-zinc-800 p-3 text-xs text-zinc-400">
+            <dl className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
+              <LimitRow label="Most of the account in use at once" value={`${limits.maxCommittedPct}%`} />
+              <LimitRow label="Companies per theme" value={String(limits.maxPerTheme)} />
+              <LimitRow label="Minimum return per trade" value={`${limits.minReturnPct}%`} />
+              <LimitRow
+                label="Per-company size limits"
+                value={
+                  sizeLimitsOn === null
+                    ? `${limits.maxPerCompanyPct}% (one up to ${limits.maxLargePositionPct}%) from ${usd0.format(limits.sizeLimitsFromAccountValue)}`
+                    : sizeLimitsOn
+                      ? `On - ${limits.maxPerCompanyPct}% each, one up to ${limits.maxLargePositionPct}%`
+                      : `Warning only until the account reaches ${usd0.format(limits.sizeLimitsFromAccountValue)}`
+                }
+              />
+            </dl>
+            <p className="mt-2 text-zinc-500">
+              Saved to your account.{" "}
+              <Link href="/scanner/settings#portfolio-limits" className="text-sky-300 underline underline-offset-2">
+                Change limits
+              </Link>
+            </p>
           </div>
         ) : null}
       </div>
@@ -353,11 +325,11 @@ function shortExpiry(iso: string | null): string {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))));
 }
 
-function LimitField({ label, value, onChange }: { label: string; value: number; onChange: (value: string) => void }) {
+function LimitRow({ label, value }: { label: string; value: string }) {
   return (
-    <label className="flex flex-col gap-1 text-xs text-zinc-400">
-      {label}
-      <input type="number" min={0} step="any" defaultValue={value} key={value} onBlur={(event) => onChange(event.target.value)} className="min-h-8 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-zinc-100" />
-    </label>
+    <div className="flex justify-between gap-3">
+      <dt>{label}</dt>
+      <dd className="text-right font-medium text-zinc-200">{value}</dd>
+    </div>
   );
 }

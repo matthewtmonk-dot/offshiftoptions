@@ -378,7 +378,7 @@ export default async function DashboardPage() {
             })}
             {scannerInsight.hasRun ? (
               <p className="text-xs text-zinc-500" data-testid="dashboard-scan-time">
-                Scan run <EventTime value={scannerInsight.runAt!} asOf={asOf} />. Saved results; hold-backs use the default limits - the Scanner has the final picks.
+                Scan run <EventTime value={scannerInsight.runAt!} asOf={asOf} />. Saved results, checked against your portfolio limits - the Scanner has the final picks.
               </p>
             ) : (
               <p className="text-xs text-zinc-500">Scanner run: never</p>
