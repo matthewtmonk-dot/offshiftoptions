@@ -304,6 +304,22 @@ async function eligibleOwnerIdsInFairOrder(excludeOwnerIds: ReadonlySet<string>)
     .slice(0, MAX_OWNERS_PER_INVOCATION);
 }
 
+/**
+ * Assigned shares with no covered call open have NO option leg, so there is nothing for a scheduled capture to
+ * assess - `evaluatePositionReview` reports that as CANNOT_ASSESS with this one reason. It is not broker evidence
+ * disagreeing with the app, and re-running Brokerage Sync cannot change it. Before this was singled out, holding
+ * assigned shares made every weekday capture read "Connection attention needed - evidence contradiction found"
+ * and the Dashboard told the owner to run a sync that could never clear it (seen live Nov 11, 2026 with one
+ * assigned-shares campaign). The row itself still asks for attention on the Dashboard/Tracker ("Assigned shares -
+ * review next step") - only the CAPTURE HEALTH no longer calls it a contradiction.
+ */
+const NOTHING_TO_CAPTURE_REASON = "ASSIGNED_SHARES_NO_CALL";
+
+/** The capture-health contradiction boundary: anything that is neither a known transient reason nor "no option leg". */
+function isCaptureContradictionReason(code: string): boolean {
+  return code !== NOTHING_TO_CAPTURE_REASON && !isKnownTransientFallbackReason(code);
+}
+
 export type CaptureTally = { positionsExamined: number; currentAssessmentsPersisted: number; unavailableCount: number; contradictionCount: number };
 
 /**
@@ -325,7 +341,7 @@ export function tallyPositionAssessmentDisplays(resolved: readonly { display: Po
       currentAssessmentsPersisted += 1;
     } else if (display.state === "UNAVAILABLE") {
       unavailableCount += 1;
-      if (display.currentUnavailable.explanation.reasonCodes.some((code) => !isKnownTransientFallbackReason(code))) {
+      if (display.currentUnavailable.explanation.reasonCodes.some((code) => isCaptureContradictionReason(code))) {
         contradictionCount += 1;
       }
     }
@@ -392,7 +408,7 @@ export function classifyCaptureOutcome(resolved: readonly { display: PositionAss
     // itself did not produce CURRENT - a historical fallback existing (LAST_VALID) never changes
     // that underlying reason's own classification.
     for (const code of display.currentUnavailable.explanation.reasonCodes) {
-      if (!isKnownTransientFallbackReason(code)) {
+      if (isCaptureContradictionReason(code)) {
         hasContradiction = true;
       } else if (PROVIDER_ISSUE_REASONS.has(code)) {
         hasProviderIssue = true;

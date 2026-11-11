@@ -186,7 +186,17 @@ export function FreshnessStrip({ entries, now }: { entries: readonly DisplayEntr
     return { tier: state.tier, evaluatedAt: state.evaluatedAt };
   });
   const state = classifyFreshnessStripStateFromObservations(observations);
-  const headline = freshnessStripHeadline(state, now);
+  // Assigned shares with no covered call have no option leg to assess, so "status unavailable" would read as a
+  // fault when nothing is wrong. Say what is actually true instead (the row itself still asks for a next step).
+  const sharesOnly =
+    state.kind === "ALL_UNAVAILABLE" &&
+    entries.length > 0 &&
+    entries.every((entry) => {
+      if (entry.display?.state !== "UNAVAILABLE") return false;
+      const reasons = entry.display.currentUnavailable.explanation.reasonCodes;
+      return reasons.length > 0 && reasons.every((code) => code === "ASSIGNED_SHARES_NO_CALL");
+    });
+  const headline = sharesOnly ? "Shares held - no open option to check" : freshnessStripHeadline(state, now);
 
   return (
     <div className="flex items-start gap-2 rounded-md border border-sky-400/30 bg-sky-400/5 px-3 py-1.5 text-xs text-sky-200">

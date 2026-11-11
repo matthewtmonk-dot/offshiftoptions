@@ -12,6 +12,7 @@ export type LstCheckpointLabel =
   | "Entry review begins around 10:30 AM ET"
   | "Monday entry window · setups still must qualify"
   | "Next position check · 3:00 PM ET"
+  | "Next position check · tomorrow 3:00 PM ET"
   | "Friday Roll Call · 3:00 PM ET"
   | "Next entry review · Monday 10:30 AM ET";
 
@@ -62,6 +63,12 @@ export function getNextLstCheckpointLabel(now: Date = new Date()): LstCheckpoint
     if (minutesSinceMidnight < MONDAY_ENTRY_WINDOW_END_MINUTES) {
       return "Monday entry window · setups still must qualify";
     }
+  }
+
+  // Monday-Wednesday once today's 3:00 PM check has passed: the next one is tomorrow's, so say so (the bare
+  // "3:00 PM ET" read as a time already gone when the page was opened in the evening).
+  if (minutesSinceMidnight >= MANAGEMENT_CHECKPOINT_MINUTES) {
+    return "Next position check · tomorrow 3:00 PM ET";
   }
 
   return "Next position check · 3:00 PM ET";

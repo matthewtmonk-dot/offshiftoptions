@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { schwabConnectionNotice } from "./schwab-connection-notice";
+import { schwabSignInExpiresAt, schwabConnectionNotice } from "./schwab-connection-notice";
 
 const now = new Date("2026-10-30T15:00:00Z");
 const daysAgo = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
@@ -27,5 +27,16 @@ describe("schwabConnectionNotice", () => {
   it("shows nothing when the authorization time is unknown or unreadable", () => {
     expect(schwabConnectionNotice({ status: "CONNECTED", connectedAt: null, now })).toBeNull();
     expect(schwabConnectionNotice({ status: "CONNECTED", connectedAt: "not a date", now })).toBeNull();
+  });
+});
+
+describe("schwabSignInExpiresAt", () => {
+  it("is seven days after the last sign-in", () => {
+    expect(schwabSignInExpiresAt("2026-11-09T15:20:00.000Z")?.toISOString()).toBe("2026-11-16T15:20:00.000Z");
+  });
+
+  it("is unknown when the sign-in time is missing or unreadable", () => {
+    expect(schwabSignInExpiresAt(null)).toBeNull();
+    expect(schwabSignInExpiresAt("not a date")).toBeNull();
   });
 });

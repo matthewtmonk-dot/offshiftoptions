@@ -116,7 +116,9 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
     if (planCapital && !evaluatePlan([candidate], existing, planCapital, limits).valid) return false;
     return blockers.every((blocker) => blocker === ETHICS_PENDING);
   });
-  const leftOut = ineligible.filter((candidate) => !needsEthics.includes(candidate));
+  // A company the ethics screen blocks (Matt's Exclude decision or a verified hard exclusion) is not listed at all:
+  // he has already ruled on it. It stays visible on Research > Ethics and behind the Scanner's "Show Excluded".
+  const leftOut = ineligible.filter((candidate) => !needsEthics.includes(candidate) && candidate.ethics !== "BLOCKED");
   /** Why this one contract breaks a per-company size rule on its own (with what is already held), in the planner's words. */
   const sizeReason = (candidate: PlanCandidate): string | null => {
     if (!planCapital) return null;
@@ -229,6 +231,13 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
 
         {picked.length > 0 ? (
           <ul className="space-y-2" data-testid="plan-candidates">{picked.map((candidate) => renderRow(candidate, "pick"))}</ul>
+        ) : capital === "loading" ? (
+          // Picks are sized against Schwab's balance, so until it arrives there is no answer yet - never "no trade".
+          <p className="rounded-md border border-dashed border-zinc-700 p-3 text-sm text-zinc-400" data-testid="plan-working">Working out the picks…</p>
+        ) : !planCapital ? (
+          <p className="rounded-md border border-dashed border-zinc-700 p-3 text-sm text-zinc-300" data-testid="plan-no-balance">
+            Picks are sized against your Schwab balance, so there are none to show until it can be read.
+          </p>
         ) : (
           <div className="rounded-md border border-dashed border-zinc-700 p-3 text-sm text-zinc-200" data-testid="plan-empty">
             <p className="font-medium">No trade to place right now - keeping the cash is the plan.</p>
