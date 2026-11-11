@@ -308,17 +308,17 @@ export function ScannerWorkspace({
             onClick={() => setQuick(filter.key)}
             className={`inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition ${
               quick === filter.key
-                ? "border-emerald-400/70 bg-emerald-400/15 text-emerald-100"
-                : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-600 hover:text-zinc-50"
+                ? "border-zinc-100 bg-zinc-100 text-zinc-950"
+                : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-50"
             }`}
           >
             {filter.label}
-            <span className="text-[10px] text-zinc-500">{counts[filter.key as "worth" | "best" | "pass" | "near" | "watchlist" | "all"]}</span>
+            <span className={`text-[11px] tabular-nums ${quick === filter.key ? "text-zinc-600" : "text-zinc-500"}`}>{counts[filter.key as "worth" | "best" | "pass" | "near" | "watchlist" | "all"]}</span>
           </button>
         ))}
 
         <details className="group relative">
-          <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50">
+          <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50">
             <ListFilter className="size-3.5" aria-hidden />
             Filters
             <ChevronDown className="size-3.5" aria-hidden />
@@ -330,7 +330,7 @@ export function ScannerWorkspace({
                 type="button"
                 onClick={() => setQuick(filter.key)}
                 className={`flex min-h-8 w-full items-center rounded px-2 text-left text-xs transition ${
-                  quick === filter.key ? "bg-emerald-400/15 text-emerald-100" : "text-zinc-300 hover:bg-zinc-800"
+                  quick === filter.key ? "bg-zinc-950 font-semibold text-zinc-50" : "text-zinc-300 hover:bg-zinc-950"
                 }`}
               >
                 {filter.label}
@@ -339,7 +339,7 @@ export function ScannerWorkspace({
           </div>
         </details>
 
-        <label className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300">
+        <label className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300">
           <ArrowDownUp className="size-3.5" aria-hidden />
           Sort
           <select
@@ -362,7 +362,7 @@ export function ScannerWorkspace({
             aria-haspopup="true"
             aria-expanded={columnsMenuOpen}
             onClick={() => setColumnsMenuOpen((value) => !value)}
-            className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50"
+            className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-50"
           >
             <Table2 className="size-3.5" aria-hidden />
             Columns
@@ -395,7 +395,7 @@ export function ScannerWorkspace({
             className={`inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition ${
               showExcluded
                 ? "border-zinc-500 bg-zinc-800 text-zinc-100"
-                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+                : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
             }`}
           >
             <EyeOff className="size-3.5" aria-hidden />
@@ -405,7 +405,7 @@ export function ScannerWorkspace({
         ) : null}
 
         <details className="ml-auto">
-          <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200">
+          <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200">
             <CircleHelp className="size-3.5" aria-hidden />
             Why {modeLabel} {results.length}?
           </summary>
@@ -451,11 +451,11 @@ export function ScannerWorkspace({
       ) : null}
 
 
-      <div data-testid="scanner-desktop-table" className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/60 lg:block">
+      <div data-testid="scanner-desktop-table" className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-900 shadow-[0_1px_2px_rgba(16,24,40,0.05)] lg:block">
         <table className="w-full min-w-[960px] border-separate border-spacing-0 text-left text-xs">
           <thead>
-            <tr className="text-[11px] uppercase tracking-normal text-zinc-500">
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
+            <tr className="text-xs text-zinc-500">
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">
                 <span className="inline-flex items-center gap-1">
                   Ticker
                   <InfoTip label="Cell colors" testId="help-scanner-cell-colors">
@@ -463,12 +463,12 @@ export function ScannerWorkspace({
                   </InfoTip>
                 </span>
               </th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Score</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Status</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Price</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">RSI / BB</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Strike</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Score</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Status</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Price</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">RSI / BB</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Strike</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">
                 <span className="inline-flex items-center gap-1">
                   Bid
                   <InfoTip label="Premium basis" testId="help-scanner-premium-basis">
@@ -476,7 +476,7 @@ export function ScannerWorkspace({
                   </InfoTip>
                 </span>
               </th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">
                 <span className="inline-flex items-center gap-1">
                   ROR
                   <InfoTip label="ROR basis" testId="help-scanner-ror-basis">
@@ -484,11 +484,11 @@ export function ScannerWorkspace({
                   </InfoTip>
                 </span>
               </th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">DTE</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">OI / Vol</th>
-              <th className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">Earnings</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">DTE</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">OI / Vol</th>
+              <th className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">Earnings</th>
               {activeOptionalColumns.map((column) => (
-                <th key={column.key} className="border-b border-zinc-800 bg-zinc-900/60 px-3 py-2">
+                <th key={column.key} className="whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-2.5 py-2 font-medium">
                   {column.label}
                 </th>
               ))}
@@ -500,8 +500,8 @@ export function ScannerWorkspace({
               const status = statusInfo(result);
               return (
                 <Fragment key={result.record.id}>
-                  <tr onClick={() => toggleExpanded(result.record.id)} className="cursor-pointer transition hover:bg-zinc-900/55">
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                  <tr onClick={() => toggleExpanded(result.record.id)} className="cursor-pointer transition hover:bg-zinc-950">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       <div className="flex items-center gap-1.5">
                       <button
                         type="button"
@@ -526,12 +526,12 @@ export function ScannerWorkspace({
                       <ChartLinks ticker={result.record.ticker} />
                       </div>
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       <span className={`inline-flex min-w-9 justify-center rounded-md border px-1.5 py-0.5 text-xs font-semibold ${scoreChipClass(result.score, result.readiness, result.scoreLabel)}`}>
                         {result.score}
                       </span>
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="border-b border-zinc-800/70 px-2.5 py-2.5">
                       <span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${status.tone}`}>
                         {status.word}
                       </span>
@@ -548,28 +548,28 @@ export function ScannerWorkspace({
                       ) : null}
                       {status.word === "VERIFY" || isNotOptionAssessed(result) ? <VerifyReasons result={result} /> : null}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       {coloredCell(result.values.price, money, ruleSeverityTone(criterionFor(result, "price")))}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       {coloredCell(result.values.rsi, (value) => toNumber(value).toFixed(1), ruleSeverityTone(criterionFor(result, "rsi")))} /{" "}
                       {coloredCell(result.values.bbPercent, percent, ruleSeverityTone(criterionFor(result, "bbPercent")))}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">{cell(result.values.strike, money)}</td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">{cell(result.values.strike, money)}</td>
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       {coloredCell(result.values.optionBid, money, ruleSeverityTone(criterionFor(result, "optionBid")))}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       {coloredCell(result.values.ror, percent, ruleSeverityTone(criterionFor(result, "ror")))}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       {coloredCell(result.values.dte, (value) => `${value}d`, ruleSeverityTone(criterionFor(result, "dte")))}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       {coloredCell(result.values.openInterest, formatCount, ruleSeverityTone(criterionFor(result, "openInterest")))} /{" "}
                       {coloredCell(result.values.optionVolume, formatCount, ruleSeverityTone(criterionFor(result, "optionVolume")))}
                     </td>
-                    <td className="border-b border-zinc-900 px-3 py-2">
+                    <td className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                       {result.values.earningsVerifyReason ? (
                         <span className="text-amber-300" title={result.values.earningsVerifyReason} data-testid="verify-earnings-cell">
                           {result.values.earningsDistance !== null ? `${result.values.earningsDistance}d?` : "Verify"}
@@ -579,7 +579,7 @@ export function ScannerWorkspace({
                       )}
                     </td>
                     {activeOptionalColumns.map((column) => (
-                      <td key={column.key} className="border-b border-zinc-900 px-3 py-2">
+                      <td key={column.key} className="whitespace-nowrap border-b border-zinc-800/70 px-2.5 py-2.5">
                         {column.key === "delta" ? cell(result.values.delta, (value) => toNumber(value).toFixed(2)) : null}
                         {column.key === "annualizedRor" ? cell(result.values.annualizedRor, percent) : null}
                         {column.key === "spreadPercent" ? cell(result.values.spreadPercent, percent) : null}
@@ -696,7 +696,7 @@ function CandidateCard({
 function MobileDatum({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div>
-      <dt className="text-[10px] uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-[10px] text-zinc-500">{label}</dt>
       <dd className="font-medium text-zinc-100">{value}</dd>
     </div>
   );
@@ -729,7 +729,7 @@ function CandidateInspector({
   return (
     <div className="space-y-4 rounded-md border border-zinc-800 bg-zinc-950 p-3 sm:p-4">
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Research</span>
+        <span className="text-xs font-semibold text-zinc-500">Research</span>
         {quickResearchChoices.map((choice) => {
           const isActive = result.researchStatus === choice.key;
           return (
@@ -792,7 +792,7 @@ function CandidateInspector({
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section>
-          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-400">Stock</h3>
+          <h3 className="text-xs font-semibold text-zinc-400">Stock</h3>
           <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
             <Datum
               label="Price"
@@ -854,7 +854,7 @@ function CandidateInspector({
           </dl>
         </section>
         <section>
-          <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-normal text-zinc-400">
+          <h3 className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400">
             Option quote
             <InfoTip label="DTE filtering" testId="help-scanner-dte">
               DTE is colored against your Scanner Rules only when the DTE rule is enabled. It&apos;s shown for reference even when
@@ -889,7 +889,7 @@ function CandidateInspector({
       </div>
 
       <section aria-label="Criteria">
-        <h3 className="flex flex-wrap items-baseline gap-x-2 text-xs font-semibold uppercase tracking-normal text-zinc-400">
+        <h3 className="flex flex-wrap items-baseline gap-x-2 text-xs font-semibold text-zinc-400">
           Criteria
           <span className="font-normal normal-case text-zinc-500">
             {passing.length} passing
@@ -999,7 +999,7 @@ function RecommendMiniForm({ ticker, buddies, returnTo }: { ticker: string; budd
       </div>
       <button
         type="submit"
-        className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-black hover:bg-emerald-300"
+        className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-semibold text-on-accent hover:bg-emerald-300"
       >
         <Send className="size-4" aria-hidden />
         Recommend
@@ -1011,7 +1011,7 @@ function RecommendMiniForm({ ticker, buddies, returnTo }: { ticker: string; budd
 function Datum({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs text-zinc-500">{label}</dt>
       <dd className="mt-1 break-words font-medium text-zinc-100">{value}</dd>
     </div>
   );

@@ -153,17 +153,17 @@ export function RefreshStatusControl() {
   }
 
   return (
-    <div className="flex flex-col items-end gap-0.5">
+    <div className="flex flex-row-reverse flex-wrap items-center justify-start gap-x-3 gap-y-1">
       <button
         type="button"
         onClick={handleClick}
         disabled={disabled}
-        className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 text-xs font-medium text-zinc-100 transition hover:border-sky-400 disabled:opacity-60"
+        className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 text-[13px] font-medium text-zinc-100 shadow-[0_1px_2px_rgba(16,24,40,0.05)] transition hover:border-zinc-500 disabled:opacity-60"
       >
         <RefreshCw className={`size-3.5 ${pending ? "animate-spin" : ""}`} aria-hidden />
         {pending ? "Refreshing…" : "Refresh status"}
       </button>
-      <span className={`text-[11px] ${errorMessage ? "text-amber-400" : "text-zinc-500"}`}>{secondary}</span>
+      <span className={`text-xs ${errorMessage ? "text-amber-300" : "text-zinc-500"}`}>{secondary}</span>
     </div>
   );
 }

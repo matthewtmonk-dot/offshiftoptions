@@ -78,6 +78,11 @@
   --accent: var(--color-sky-400);
   --accent-hover: var(--color-sky-300);
   --accent-foreground: #000000;
+  /* Text that sits ON an emerald-400 / sky-400 fill (primary buttons, selected chips, count
+   * pills). Dark theme fills are bright, so the text is black; the light theme overrides both the
+   * fill and this value together (see the light blocks below). Use `text-on-accent`, never a
+   * fixed `text-on-accent`/`text-white`, on those fills. */
+  --on-accent: #000000;
   --positive: var(--color-emerald-300);
   --positive-muted: var(--color-emerald-400);
   --negative: var(--color-red-300);
@@ -101,6 +106,7 @@
   --color-unknown: var(--unknown);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-on-accent: var(--on-accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -108,65 +114,91 @@
 /* LIGHT via explicit OS preference (no user override forcing Dark). */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --color-zinc-50: #0a0a0c;
-    --color-zinc-100: #18181b;
-    --color-zinc-200: #27272a;
-    --color-zinc-300: #3f3f46;
-    --color-zinc-400: #52525b;
-    --color-zinc-500: #71717a;
-    --color-zinc-600: #9a9aa5;
-    --color-zinc-700: #c6c6cd;
-    --color-zinc-800: #e4e4e8;
+/* Neutrals carry a slight blue-grey (slate) tint: the canvas is a step darker than the white
+     * panels and the hairline border is a clear step darker than both, so cards separate without
+     * heavy shadows. */
+    --color-zinc-50: #0b1220;
+    --color-zinc-100: #111a2b;
+    --color-zinc-200: #1d2939;
+    --color-zinc-300: #344054;
+    --color-zinc-400: #475467;
+    --color-zinc-500: #667085;
+    --color-zinc-600: #98a2b3;
+    --color-zinc-700: #c5ccd6;
+    --color-zinc-800: #dfe4ea;
     --color-zinc-900: #ffffff;
-    --color-zinc-950: #f6f7f9;
+    --color-zinc-950: #f1f4f7;
 
+    /* Green means money made / PASS. 400 is the fill (primary buttons, meters): a deep bank green
+     * that takes white text, not the neon the dark theme uses on black. */
     --color-emerald-100: #064e3b;
     --color-emerald-200: #065f46;
     --color-emerald-300: #047857;
+    --color-emerald-400: #0b7a55;
 
     --color-red-100: #7f1d1d;
     --color-red-200: #991b1b;
-    --color-red-300: #b91c1c;
+    --color-red-300: #b42318;
+    --color-red-400: #d92d20;
 
     --color-amber-100: #78350f;
-    --color-amber-200: #92400e;
-    --color-amber-300: #b45309;
+    --color-amber-200: #93370d;
+    --color-amber-300: #b54708;
+    --color-amber-400: #dc6803;
 
-    --color-sky-100: #075985;
-    --color-sky-200: #0369a1;
-    --color-sky-300: #0284c7;
+    /* Blue is navigation, links and selection only - never a financial outcome. */
+    --color-sky-100: #153e75;
+    --color-sky-200: #175cd3;
+    --color-sky-300: #1570ef;
+    --color-sky-400: #2563eb;
+
+    /* Text that sits ON an emerald-400 / sky-400 fill. */
+    --on-accent: #ffffff;
   }
 }
 
 /* LIGHT via explicit user choice - wins over the OS preference in both directions. */
 :root[data-theme="light"] {
-  --color-zinc-50: #0a0a0c;
-  --color-zinc-100: #18181b;
-  --color-zinc-200: #27272a;
-  --color-zinc-300: #3f3f46;
-  --color-zinc-400: #52525b;
-  --color-zinc-500: #71717a;
-  --color-zinc-600: #9a9aa5;
-  --color-zinc-700: #c6c6cd;
-  --color-zinc-800: #e4e4e8;
+/* Neutrals carry a slight blue-grey (slate) tint: the canvas is a step darker than the white
+   * panels and the hairline border is a clear step darker than both, so cards separate without
+   * heavy shadows. */
+  --color-zinc-50: #0b1220;
+  --color-zinc-100: #111a2b;
+  --color-zinc-200: #1d2939;
+  --color-zinc-300: #344054;
+  --color-zinc-400: #475467;
+  --color-zinc-500: #667085;
+  --color-zinc-600: #98a2b3;
+  --color-zinc-700: #c5ccd6;
+  --color-zinc-800: #dfe4ea;
   --color-zinc-900: #ffffff;
-  --color-zinc-950: #f6f7f9;
+  --color-zinc-950: #f1f4f7;
 
+  /* Green means money made / PASS. 400 is the fill (primary buttons, meters): a deep bank green
+   * that takes white text, not the neon the dark theme uses on black. */
   --color-emerald-100: #064e3b;
   --color-emerald-200: #065f46;
   --color-emerald-300: #047857;
+  --color-emerald-400: #0b7a55;
 
   --color-red-100: #7f1d1d;
   --color-red-200: #991b1b;
-  --color-red-300: #b91c1c;
+  --color-red-300: #b42318;
+  --color-red-400: #d92d20;
 
   --color-amber-100: #78350f;
-  --color-amber-200: #92400e;
-  --color-amber-300: #b45309;
+  --color-amber-200: #93370d;
+  --color-amber-300: #b54708;
+  --color-amber-400: #dc6803;
 
-  --color-sky-100: #075985;
-  --color-sky-200: #0369a1;
-  --color-sky-300: #0284c7;
+  /* Blue is navigation, links and selection only - never a financial outcome. */
+  --color-sky-100: #153e75;
+  --color-sky-200: #175cd3;
+  --color-sky-300: #1570ef;
+  --color-sky-400: #2563eb;
+
+  /* Text that sits ON an emerald-400 / sky-400 fill. */
+  --on-accent: #ffffff;
 }
 
 /*
@@ -183,26 +215,56 @@ html {
   font-size: 17px;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
-}
+/*
+ * Base element rules live in Tailwind's `base` layer on purpose. They used to be unlayered, and
+ * unlayered CSS always beats `@layer utilities` - so `button { font: inherit }` silently cancelled
+ * every `text-xs` / `text-sm` / `font-semibold` written on a button, input or select, and those
+ * controls rendered at body size (oversized, uneven) across the whole app.
+ */
+@layer base {
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+    /* Money and counts line up in columns everywhere without each cell opting in. */
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.011em;
+  }
 
-::selection {
-  background: rgba(59, 130, 246, 0.35);
-}
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 
-/* Keyboard focus must stay visible in both themes - the neutral/action blue accent, never the
- * positive-value green (focus is a navigation/selection signal, not a financial outcome). */
-:focus-visible {
-  outline: 2px solid var(--color-sky-400);
-  outline-offset: 2px;
+  button:not(:disabled),
+  summary,
+  [role="button"] {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: rgba(59, 130, 246, 0.3);
+  }
+
+  /* Keyboard focus must stay visible in both themes - the neutral/action blue accent, never the
+   * positive-value green (focus is a navigation/selection signal, not a financial outcome). */
+  :focus-visible {
+    outline: 2px solid var(--color-sky-400);
+    outline-offset: 2px;
+  }
+
+  /* Wide tables scroll inside their card; keep the scrollbar thin and quiet. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-zinc-700) transparent;
+  }
 }

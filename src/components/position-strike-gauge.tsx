@@ -80,7 +80,7 @@ export function PositionStrikeGauge({ display }: { display: PositionAssessmentDi
           {money(source.strike)} strike
         </span>
       </div>
-      {!source.live ? <div className="text-[11px] uppercase tracking-wide text-zinc-500">{tag}</div> : null}
+      {!source.live ? <div className="text-[11px] text-zinc-500">{tag}</div> : null}
     </div>
   );
 }

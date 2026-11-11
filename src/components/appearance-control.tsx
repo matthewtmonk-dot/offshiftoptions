@@ -53,7 +53,7 @@ export function AppearanceControl({
 
   if (compact) {
     return (
-      <div role="radiogroup" aria-label="Appearance" className={`inline-flex shrink-0 rounded-md border border-zinc-800 bg-zinc-900 p-0.5 ${className}`}>
+      <div role="radiogroup" aria-label="Appearance" className={`inline-flex shrink-0 rounded-md border border-zinc-800 bg-zinc-950 p-0.5 ${className}`}>
         {OPTIONS.map((option) => {
           const Icon = option.icon;
           const active = value === option.value;
@@ -68,7 +68,7 @@ export function AppearanceControl({
               disabled={isPending}
               onClick={() => choose(option.value)}
               className={`inline-flex size-7 items-center justify-center rounded transition ${
-                active ? "bg-emerald-400 text-black" : "text-zinc-400 hover:text-zinc-100"
+                active ? "bg-zinc-900 text-zinc-50 shadow-sm ring-1 ring-zinc-700" : "text-zinc-500 hover:text-zinc-100"
               }`}
             >
               <Icon className="size-3.5" aria-hidden />

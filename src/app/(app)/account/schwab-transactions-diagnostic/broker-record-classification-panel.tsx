@@ -100,7 +100,7 @@ function ClassificationReport({ report }: { report: BrokerRecordClassificationRe
         <div className="overflow-x-auto">
           <table className="min-w-[1000px] w-full border-separate border-spacing-0 text-left text-sm">
             <thead>
-              <tr className="text-xs uppercase tracking-normal text-zinc-500">
+              <tr className="text-xs text-zinc-500">
                 <th className="border-b border-zinc-800 px-3 py-2 font-medium">Ticker</th>
                 <th className="border-b border-zinc-800 px-3 py-2 font-medium">Put/Call</th>
                 <th className="border-b border-zinc-800 px-3 py-2 font-medium">Strike</th>
@@ -147,7 +147,7 @@ function ClassificationReport({ report }: { report: BrokerRecordClassificationRe
 function SummaryDatum({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs text-zinc-500">{label}</dt>
       <dd className="mt-1 break-words font-medium text-zinc-100">{value}</dd>
     </div>
   );

@@ -52,6 +52,8 @@ function sanitizeLimits(value: Partial<PlanLimits> | null): PlanLimits {
   const pick = (candidate: unknown, fallback: number) => (typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 ? candidate : fallback);
   return {
     maxPerCompanyPct: pick(value?.maxPerCompanyPct, DEFAULT_PLAN_LIMITS.maxPerCompanyPct),
+    // Limits saved before this field existed have no value for it: the default (one larger position allowed) applies.
+    maxLargePositionPct: pick(value?.maxLargePositionPct, DEFAULT_PLAN_LIMITS.maxLargePositionPct),
     maxCommittedPct: pick(value?.maxCommittedPct, DEFAULT_PLAN_LIMITS.maxCommittedPct),
     maxPerTheme: Math.max(1, Math.round(pick(value?.maxPerTheme, DEFAULT_PLAN_LIMITS.maxPerTheme))),
     warnPerSector: Math.max(1, Math.round(pick(value?.warnPerSector, DEFAULT_PLAN_LIMITS.warnPerSector))),
@@ -155,13 +157,26 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
     return blockers.every((blocker) => blocker === ETHICS_PENDING);
   });
   const leftOut = ineligible.filter((candidate) => !needsEthics.includes(candidate));
+  /** Why this one contract breaks a per-company size rule on its own (with what is already held), in the planner's words. */
+  const sizeReason = (candidate: PlanCandidate): string | null => {
+    if (!planCapital) return null;
+    const messages = evaluatePlan([candidate], existing, planCapital, limits)
+      .violations.filter((violation) => violation.code === "COMPANY")
+      .map((violation) => violation.message);
+    return messages.length ? messages.join(" ") : null;
+  };
+  /** Why this contract cannot be placed even on its own (cash or the total-committed ceiling), when size is not the reason. */
+  const aloneReason = (candidate: PlanCandidate): string => {
+    if (!planCapital) return "does not fit the account limits";
+    const messages = evaluatePlan([candidate], existing, planCapital, limits).violations.map((violation) => violation.message);
+    return messages.length ? messages.join(" ") : "does not fit the account limits";
+  };
   /** Every reason, including "too big for your account", which would still apply after the other checks clear. */
   const leftOutReasons = (candidate: PlanCandidate) => {
     const reasons = candidateBlockers(candidate, limits);
     const collateral = collateralOf(candidate);
-    if (planCapital && collateral !== null && evaluatePlan([candidate], existing, planCapital, limits).violations.some((violation) => violation.code === "COMPANY")) {
-      reasons.push(`one contract holds ${usd0.format(collateral)} (${pct(collateral)}), over your ${limits.maxPerCompanyPct}% per-company limit`);
-    }
+    const size = sizeReason(candidate);
+    if (collateral !== null && size) reasons.push(`one contract holds ${usd0.format(collateral)} - ${size}`);
     return reasons;
   };
 
@@ -260,7 +275,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
             {leftOut.length + tooBig.length > 0 ? (
               <ul className="mt-1.5 space-y-0.5 text-xs text-zinc-400">
                 {tooBig.map((candidate) => (
-                  <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one ${candidate.strike} put holds {usd0.format(collateralOf(candidate) ?? 0)} ({pct(collateralOf(candidate) ?? 0)}), over your {limits.maxPerCompanyPct}% per-company limit</li>
+                  <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one ${candidate.strike} put holds {usd0.format(collateralOf(candidate) ?? 0)} - {sizeReason(candidate) ?? aloneReason(candidate)}</li>
                 ))}
                 {leftOut.map((candidate) => (
                   <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {leftOutReasons(candidate).join("; ")}</li>
@@ -303,7 +318,7 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
             <summary className="cursor-pointer text-zinc-400 hover:text-zinc-200">{leftOut.length + tooBig.length} passing name(s) left out, and why</summary>
             <ul className="mt-2 space-y-1 text-xs text-zinc-400">
               {tooBig.map((candidate) => (
-                <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one contract holds {usd0.format(collateralOf(candidate) ?? 0)} ({pct(collateralOf(candidate) ?? 0)}), over your {limits.maxPerCompanyPct}% per-company limit</li>
+                <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: one contract holds {usd0.format(collateralOf(candidate) ?? 0)} - {sizeReason(candidate) ?? aloneReason(candidate)}</li>
               ))}
               {leftOut.map((candidate) => (
                 <li key={candidate.ticker}><span className="font-medium text-zinc-200">{candidate.ticker}</span>: {leftOutReasons(candidate).join("; ")}</li>
@@ -315,8 +330,9 @@ export function PortfolioPlanPanel({ candidates, existing, unknownExposureCount,
         {showLimits ? (
           <div data-testid="plan-limits" className="rounded-md border border-zinc-800 p-2">
             <p className="text-xs text-zinc-500">Limits are saved on this device.</p>
-            <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
             <LimitField label="Max per company (% of account)" value={limits.maxPerCompanyPct} onChange={(value) => updateLimit("maxPerCompanyPct", value)} />
+            <LimitField label="One larger position, up to (%)" value={limits.maxLargePositionPct} onChange={(value) => updateLimit("maxLargePositionPct", value)} />
             <LimitField label="Max committed (% ceiling)" value={limits.maxCommittedPct} onChange={(value) => updateLimit("maxCommittedPct", value)} />
             <LimitField label="Companies per theme" value={limits.maxPerTheme} onChange={(value) => updateLimit("maxPerTheme", value)} />
             <LimitField label="Warn above per sector" value={limits.warnPerSector} onChange={(value) => updateLimit("warnPerSector", value)} />

@@ -22,18 +22,14 @@ export async function getUnreadNotificationCount(userId: string) {
   });
 }
 
+/**
+ * Everything the Dashboard reads, in one parallel round. Only what the page actually renders is loaded: the older
+ * first-account snapshot, open-trade, watchlist, incoming-recommendation and activity-feed queries were removed when
+ * nothing on the Dashboard used them any more (they still ran on every load).
+ */
 export async function getDashboardData(userId: string) {
-  const [account, ownAccounts, openCampaigns, completedCampaigns, openTrades, watchlistItems, incomingRecommendations, activities, conversation, profile, settings] =
+  const [ownAccounts, openCampaigns, completedCampaigns, conversation, profile, settings] =
     await Promise.all([
-      prisma.tradingAccount.findFirst({
-        where: { userId },
-        include: {
-          snapshots: {
-            orderBy: { capturedAt: "desc" },
-            take: 1,
-          },
-        },
-      }),
       prisma.tradingAccount.findMany({
         where: { userId },
         include: {
@@ -54,43 +50,6 @@ export async function getDashboardData(userId: string) {
       prisma.campaign.findMany({
         where: { ownerId: userId, status: "CLOSED" },
         include: { events: { orderBy: [{ occurredAt: "asc" }, { sortOrder: "asc" }] } },
-      }),
-      prisma.trade.findMany({
-        where: { userId, status: "OPEN" },
-        orderBy: { openedAt: "desc" },
-        include: {
-          legs: true,
-          positionSnapshots: {
-            orderBy: { capturedAt: "desc" },
-            take: 1,
-          },
-        },
-      }),
-      prisma.watchlistItem.findMany({
-        where: {
-          OR: [{ ownerId: userId }, { visibility: "SHARED" }],
-        },
-        orderBy: { addedAt: "desc" },
-        take: 6,
-        include: {
-          owner: true,
-          notes: true,
-          reactions: true,
-        },
-      }),
-      prisma.recommendation.findMany({
-        where: { recipientId: userId },
-        orderBy: { createdAt: "desc" },
-        take: 4,
-        include: { sender: true, reactions: true },
-      }),
-      prisma.activity.findMany({
-        where: {
-          OR: [{ actorId: userId }, { visibility: "SHARED" }],
-        },
-        orderBy: { createdAt: "desc" },
-        take: 8,
-        include: { actor: true, reactions: true },
       }),
       prisma.conversation.findFirst({
         where: { members: { some: { userId } } },
@@ -125,15 +84,9 @@ export async function getDashboardData(userId: string) {
     ]);
 
   return {
-    account,
-    accountSnapshot: account?.snapshots[0] ?? null,
     ownAccounts,
     openCampaigns,
     completedCampaigns,
-    openTrades,
-    watchlistItems,
-    incomingRecommendations,
-    activities,
     conversation,
     // The query above already orders these `desc` (newest first) and bounds them to the 5 most
     // recent - this is a compact preview, not a transcript, so newest-first (matching how the

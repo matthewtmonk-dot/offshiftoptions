@@ -90,7 +90,7 @@ function DiagnosticReport({ result }: { result: Extract<SchwabFundamentalsDiagno
         <div className="overflow-x-auto">
           <table className="min-w-[900px] w-full border-separate border-spacing-0 text-left text-sm">
             <thead>
-              <tr className="text-xs uppercase tracking-normal text-zinc-500">
+              <tr className="text-xs text-zinc-500">
                 <th className="border-b border-zinc-800 px-3 py-2 font-medium">Field</th>
                 {report.quoteRequest.symbols.map((symbol) => (
                   <th key={symbol} className="border-b border-zinc-800 px-3 py-2 font-medium">
@@ -121,7 +121,7 @@ function FieldGroupRows({ group, rows, symbols }: { group: string; rows: SchwabD
   return (
     <>
       <tr>
-        <td colSpan={symbols.length + 2} className="border-b border-zinc-800 bg-zinc-900/80 px-3 py-2 text-xs font-semibold uppercase tracking-normal text-sky-200">
+        <td colSpan={symbols.length + 2} className="border-b border-zinc-800 bg-zinc-900/80 px-3 py-2 text-xs font-semibold text-sky-200">
           {group}
         </td>
       </tr>
@@ -163,7 +163,7 @@ function PresenceValue({ value }: { value: FieldPresence }) {
 
   return (
     <div className={`inline-flex max-w-64 flex-col gap-1 rounded-md border px-2 py-1 ${stateClass}`}>
-      <span className="text-[11px] font-semibold uppercase tracking-normal">{label}</span>
+      <span className="text-[11px] font-semibold">{label}</span>
       {value.value ? <span className="break-words text-xs">{value.value}</span> : null}
     </div>
   );
@@ -215,7 +215,7 @@ function UnavailableState({
 function SummaryDatum({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs text-zinc-500">{label}</dt>
       <dd className="mt-1 break-words font-medium text-zinc-100">{value}</dd>
     </div>
   );

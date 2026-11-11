@@ -16,7 +16,8 @@ import {
 const capital: PlanCapital = { accountValue: 10_680.91, availableToTrade: 7_124.91 };
 // The logic tests below were written against the original 25% / 80% limits; they pin those numbers explicitly so they
 // keep testing the rules themselves, independent of whatever the shipped defaults are.
-const limits = { ...DEFAULT_PLAN_LIMITS, maxPerCompanyPct: 25, maxCommittedPct: 80 };
+// maxLargePositionPct equal to the per-company limit switches the "one larger position" exception off for these tests.
+const limits = { ...DEFAULT_PLAN_LIMITS, maxPerCompanyPct: 25, maxLargePositionPct: 25, maxCommittedPct: 80 };
 
 describe("shipped default limits", () => {
   it("are 20% per company and 60% total (tightened Nov 5 2026), with one position per theme", () => {
@@ -25,11 +26,68 @@ describe("shipped default limits", () => {
     expect(DEFAULT_PLAN_LIMITS.maxPerTheme).toBe(1);
   });
 
-  it("a single $20 put on a ~$10.7k account (18.7%) fits, a $25 put (23.4%) does not", () => {
+  it("a single $20 put on a ~$10.7k account (18.7%) fits; a $25 put (23.4%) does not once the larger-position exception is off", () => {
     const fits = evaluatePlan([candidate({ ticker: "AAA", strike: 20 })], [], capital, DEFAULT_PLAN_LIMITS);
     expect(fits.valid).toBe(true);
-    const tooBig = evaluatePlan([candidate({ ticker: "BBB", strike: 25 })], [], capital, DEFAULT_PLAN_LIMITS);
+    const tooBig = evaluatePlan([candidate({ ticker: "BBB", strike: 25 })], [], capital, { ...DEFAULT_PLAN_LIMITS, maxLargePositionPct: 20 });
     expect(tooBig.violations.map((violation) => violation.code)).toContain("COMPANY");
+  });
+});
+
+describe("one larger position (Nov 11 2026: scan to $50, allow ONE position above the per-company limit)", () => {
+  const roomy: PlanCapital = { accountValue: 10_700, availableToTrade: 9_299.25 };
+
+  it("defaults to a 50% cap for the single exception", () => {
+    expect(DEFAULT_PLAN_LIMITS.maxLargePositionPct).toBe(50);
+  });
+
+  it("allows one company above 20% up to 50%, and warns about the concentration", () => {
+    const plan = evaluatePlan([candidate({ ticker: "HPE", strike: 44 })], [], roomy, DEFAULT_PLAN_LIMITS);
+    expect(plan.valid).toBe(true);
+    expect(plan.companyPct.HPE).toBeCloseTo(41.12, 1);
+    expect(plan.warnings.some((warning) => /HPE would be 41\.1% of the account - your one larger position/.test(warning))).toBe(true);
+  });
+
+  it("allows a $50 strike on its own (46.7%) but not a $55 strike (51.4%)", () => {
+    expect(evaluatePlan([candidate({ ticker: "AAA", strike: 50 })], [], roomy, DEFAULT_PLAN_LIMITS).valid).toBe(true);
+    const over = evaluatePlan([candidate({ ticker: "BBB", strike: 55 })], [], roomy, DEFAULT_PLAN_LIMITS);
+    expect(over.violations).toEqual([{ code: "COMPANY", message: "BBB would be 51.4% of the account (limit 50% for the one larger position)." }]);
+  });
+
+  it("refuses a second position above the normal limit", () => {
+    const plan = evaluatePlan(
+      [candidate({ ticker: "AAA", strike: 27.5, sector: "Technology" }), candidate({ ticker: "BBB", strike: 25, sector: "Energy" })],
+      [],
+      roomy,
+      DEFAULT_PLAN_LIMITS,
+    );
+    expect(plan.violations.map((violation) => violation.code)).toEqual(["COMPANY"]);
+    expect(plan.violations[0]?.message).toBe("Only one position may be above 20% of the account; this would make 2: AAA (25.7%), BBB (23.4%).");
+  });
+
+  it("counts a position already held above the limit as the one larger position", () => {
+    const held: ExistingExposure[] = [{ ticker: "OLD", kind: "SHARES", amount: 2_600, theme: "legacy", sector: "Utilities" }];
+    const plan = evaluatePlan([candidate({ ticker: "NEW", strike: 25, sector: "Energy" })], held, roomy, DEFAULT_PLAN_LIMITS);
+    expect(plan.violations.map((violation) => violation.code)).toEqual(["COMPANY"]);
+    // A normal-size trade next to it is still fine.
+    expect(evaluatePlan([candidate({ ticker: "NEW", strike: 15, sector: "Energy" })], held, roomy, DEFAULT_PLAN_LIMITS).valid).toBe(true);
+  });
+
+  it("still applies the total-committed ceiling to the larger position", () => {
+    const held: ExistingExposure[] = [{ ticker: "CORZ", kind: "SHARES", amount: 1_450, theme: "miners", sector: "Technology" }];
+    const plan = evaluatePlan([candidate({ ticker: "AAA", strike: 50, sector: "Energy" })], held, roomy, DEFAULT_PLAN_LIMITS);
+    expect(plan.violations.map((violation) => violation.code)).toEqual(["COMMITTED"]);
+  });
+
+  it("the optimizer picks at most one larger position", () => {
+    const result = optimizePlan(
+      [candidate({ ticker: "AAA", strike: 30, score: 99, sector: "Technology" }), candidate({ ticker: "BBB", strike: 28, score: 98, sector: "Energy" }), candidate({ ticker: "CCC", strike: 12, score: 80, sector: "Utilities" })],
+      [],
+      roomy,
+      DEFAULT_PLAN_LIMITS,
+    );
+    expect(result.picks.map((pick) => pick.ticker).sort()).toEqual(["AAA", "CCC"]);
+    expect(result.evaluation.valid).toBe(true);
   });
 });
 
@@ -237,7 +295,11 @@ describe("optimizePlan affordability", () => {
     // 14 high-scoring trades that each need $4,400 (41.7% of the account) plus one affordable $10 strike.
     const big = Array.from({ length: OPTIMIZER_MAX_CANDIDATES }, (_, index) => candidate({ ticker: `BIG${index}`, strike: 44, score: 99, theme: `big${index}` }));
     const small = candidate({ ticker: "SMALL", strike: 10, score: 50, theme: "small" });
+    // With the larger-position exception off, none of the big trades fit and only the affordable one is picked.
+    const strict = optimizePlan([...big, small], [], capital, { ...DEFAULT_PLAN_LIMITS, maxLargePositionPct: DEFAULT_PLAN_LIMITS.maxPerCompanyPct });
+    expect(strict.picks.map((pick) => pick.ticker)).toEqual(["SMALL"]);
+    // With it on (the default), ONE big trade is picked and the affordable one is still found next to it.
     const result = optimizePlan([...big, small], [], capital, DEFAULT_PLAN_LIMITS);
-    expect(result.picks.map((pick) => pick.ticker)).toEqual(["SMALL"]);
+    expect(result.picks.map((pick) => pick.ticker)).toEqual(["BIG0", "SMALL"]);
   });
 });

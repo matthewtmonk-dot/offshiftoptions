@@ -38,10 +38,10 @@ function RowLabel({ title, subtitle, help }: { title: string; subtitle: string; 
  */
 export function PerformanceScorecardPanel({ scorecard }: { scorecard: PerformanceScorecard }) {
   return (
-    <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-sm shadow-black/20" data-testid="account-scorecard">
+    <section className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)]" data-testid="account-scorecard">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-sky-300">Account Scorecard</p>
+          <p className="text-xs font-semibold text-sky-300">Account Scorecard</p>
           <h2 className="mt-1 text-xl font-semibold text-zinc-50">How the account is doing</h2>
         </div>
         <Badge tone="info">Mine only</Badge>
@@ -49,7 +49,7 @@ export function PerformanceScorecardPanel({ scorecard }: { scorecard: Performanc
 
       <dl className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
-          <dt className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-normal text-zinc-500">
+          <dt className="flex items-center gap-2 text-[11px] font-semibold text-zinc-500">
             <Landmark className="size-4 text-zinc-400" aria-hidden />
             Account value
           </dt>
@@ -57,7 +57,7 @@ export function PerformanceScorecardPanel({ scorecard }: { scorecard: Performanc
           <div className="mt-1 text-xs text-zinc-500">{scorecard.accountValue.detail}</div>
         </div>
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
-          <dt className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-normal text-zinc-500">
+          <dt className="flex items-center gap-2 text-[11px] font-semibold text-zinc-500">
             <Gauge className="size-4 text-zinc-400" aria-hidden />
             Money put to work
             <InfoTip label="Money put to work" align="start">
@@ -68,7 +68,7 @@ export function PerformanceScorecardPanel({ scorecard }: { scorecard: Performanc
           <div className="mt-1 text-xs text-zinc-500">{scorecard.moneyInUse.detail}</div>
         </div>
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
-          <dt className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-normal text-zinc-500">
+          <dt className="flex items-center gap-2 text-[11px] font-semibold text-zinc-500">
             <Trophy className="size-4 text-zinc-400" aria-hidden />
             Win - loss record
             <InfoTip label="Win - loss record" align="start">
@@ -99,11 +99,11 @@ export function PerformanceScorecardPanel({ scorecard }: { scorecard: Performanc
           <div key={row.title} className="grid gap-3 border-b border-zinc-800 px-3 py-3 last:border-b-0 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] md:gap-4">
             <RowLabel title={row.title} subtitle={row.subtitle} help={row.data.help} />
             <div>
-              <div className="mb-0.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 md:hidden">This week so far</div>
+              <div className="mb-0.5 text-[11px] font-semibold text-zinc-500 md:hidden">This week so far</div>
               <Cell cell={row.data.thisWeek} />
             </div>
             <div>
-              <div className="mb-0.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 md:hidden">All time</div>
+              <div className="mb-0.5 text-[11px] font-semibold text-zinc-500 md:hidden">All time</div>
               <Cell cell={row.data.allTime} />
             </div>
           </div>

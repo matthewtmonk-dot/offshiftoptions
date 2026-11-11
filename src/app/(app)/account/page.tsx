@@ -87,7 +87,6 @@ export default async function AccountPage({
   return (
     <div className="space-y-6">
       <div>
-        <p className="text-sm font-medium text-emerald-300">{user.name}&apos;s account</p>
         <h1 className="text-3xl font-semibold text-zinc-50">Account</h1>
       </div>
 
@@ -173,7 +172,7 @@ export default async function AccountPage({
                   </div>
                   <div className="mt-2 grid gap-3 text-sm sm:grid-cols-2">
                     <div>
-                      <div className="text-xs uppercase tracking-normal text-zinc-500">Whole-Account Gain</div>
+                      <div className="text-xs text-zinc-500">Whole-Account Gain</div>
                       <div className={`mt-0.5 font-medium ${report.wholeAccountGainStatus === "OK" ? toneClass(report.wholeAccountGain) : "text-zinc-100"}`}>
                         {report.wholeAccountGainStatus === "OK" ? signedMoney(report.wholeAccountGain!) : "Unavailable"}
                       </div>
@@ -182,7 +181,7 @@ export default async function AccountPage({
                       ) : null}
                     </div>
                     <div>
-                      <div className="text-xs uppercase tracking-normal text-zinc-500">Whole-Account Return</div>
+                      <div className="text-xs text-zinc-500">Whole-Account Return</div>
                       <div className="mt-0.5 font-medium text-zinc-100">
                         {report.wholeAccountReturnPercent === null ? "Unavailable" : `${report.wholeAccountReturnPercent.toFixed(2)}%`}
                       </div>
@@ -261,7 +260,7 @@ export default async function AccountPage({
                   {/* Section 5: baseline history / audit trail */}
                   {baselineHistory.length ? (
                     <details className="group mt-3 rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
-                      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium uppercase tracking-normal text-zinc-400 [&::-webkit-details-marker]:hidden">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-zinc-400 [&::-webkit-details-marker]:hidden">
                         Baseline history ({baselineHistory.length})
                         <ChevronDown className="size-3.5 transition group-open:rotate-180" aria-hidden />
                       </summary>
@@ -465,7 +464,7 @@ export default async function AccountPage({
                   <form action={syncSchwabAccountAction}>
                     <button
                       type="submit"
-                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black transition hover:bg-emerald-300"
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-on-accent transition hover:bg-emerald-300"
                     >
                       <RefreshCw className="size-4" aria-hidden />
                       Brokerage Sync
@@ -694,7 +693,7 @@ export default async function AccountPage({
           </div>
           <button
             type="submit"
-            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-black hover:bg-emerald-300"
+            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-on-accent hover:bg-emerald-300"
           >
             <Save className="size-4" aria-hidden />
             Update Password
@@ -793,7 +792,7 @@ export default async function AccountPage({
 function ConnectionDatum({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs text-zinc-500">{label}</dt>
       <dd className="mt-1 break-words font-medium text-zinc-100">{value}</dd>
     </div>
   );
@@ -828,11 +827,11 @@ function SyncDiagnosticsDetails({ diagnostics }: { diagnostics: SchwabSyncDiagno
 
   return (
     <details className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-sm">
-      <summary className="cursor-pointer text-xs font-medium uppercase tracking-normal text-zinc-400">Last sync details</summary>
+      <summary className="cursor-pointer text-xs font-medium text-zinc-400">Last sync details</summary>
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-4">
         {rows.map((row) => (
           <div key={row.label}>
-            <dt className="text-[11px] uppercase tracking-normal text-zinc-500">{row.label}</dt>
+            <dt className="text-[11px] text-zinc-500">{row.label}</dt>
             <dd className="mt-0.5 font-medium text-zinc-100">
               {row.value}
               {row.status === "ERROR" ? <span className="ml-1.5 text-xs font-semibold text-red-300">ERROR</span> : null}
@@ -900,7 +899,7 @@ function ConnectionHealthDetails({ health }: { health: SchwabConnectionHealth })
       <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
         <ConnectionDatum label="Developer credential source" value={CREDENTIAL_SOURCE_LABEL[health.credentialSource]} />
         <div>
-          <dt className="text-xs uppercase tracking-normal text-zinc-500">OAuth status</dt>
+          <dt className="text-xs text-zinc-500">OAuth status</dt>
           <dd className="mt-1">
             <Badge tone={OAUTH_STATUS_TONE[health.oauthStatus]}>{OAUTH_STATUS_LABEL[health.oauthStatus]}</Badge>
           </dd>
@@ -926,7 +925,7 @@ function ConnectionHealthDetails({ health }: { health: SchwabConnectionHealth })
       </dl>
       {health.sync ? (
         <div className="mt-4 border-t border-zinc-800 pt-3">
-          <p className="mb-2 text-xs font-medium uppercase tracking-normal text-zinc-500">Most recent sync, by stage</p>
+          <p className="mb-2 text-xs font-medium text-zinc-500">Most recent sync, by stage</p>
           <SyncStageList sync={health.sync} />
         </div>
       ) : null}
@@ -1080,7 +1079,7 @@ function schwabMessage(status: string | undefined) {
 function AlphaVantageStat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</div>
+      <div className="text-[11px] text-zinc-500">{label}</div>
       <div className="font-medium text-zinc-100">{value}</div>
     </div>
   );

@@ -235,7 +235,7 @@ export function DashboardPositionSections({ rows, now, limit }: { rows: readonly
   return (
     <>
       <div>
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Attention Now</h3>
+        <h3 className="mb-1.5 text-[13px] font-semibold text-zinc-400">Attention Now</h3>
         {attention.length === 0 ? (
           <p className="text-xs text-zinc-500">No new attention items.</p>
         ) : (
@@ -251,19 +251,19 @@ export function DashboardPositionSections({ rows, now, limit }: { rows: readonly
 
       {rows.length === 0 ? (
         <div>
-          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
+          <h3 className="mb-1.5 text-[13px] font-semibold text-zinc-400">Open Positions</h3>
           <EmptyState>No open positions yet.</EmptyState>
         </div>
       ) : open.length === 0 ? (
         <div>
-          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Open Positions</h3>
+          <h3 className="mb-1.5 text-[13px] font-semibold text-zinc-400">Open Positions</h3>
           <EmptyState>Every open position is already listed above in Attention Now.</EmptyState>
         </div>
       ) : (
         <>
           {activeNow.length > 0 ? (
             <div>
-              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Active Now</h3>
+              <h3 className="mb-1.5 text-[13px] font-semibold text-zinc-400">Active Now</h3>
               <div className="space-y-1.5">
                 {activeNow.map((row) => (
                   <PositionToReviewRowView key={row.campaignId} row={row} now={now} />
@@ -273,7 +273,7 @@ export function DashboardPositionSections({ rows, now, limit }: { rows: readonly
           ) : null}
           {awaitingSettlement.length > 0 ? (
             <div>
-              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">Awaiting Settlement ({awaitingSettlement.length})</h3>
+              <h3 className="mb-1.5 text-[13px] font-semibold text-zinc-400">Awaiting Settlement ({awaitingSettlement.length})</h3>
               <div className="space-y-1.5">
                 {awaitingSettlement.map((row) => (
                   <PositionToReviewRowView key={row.campaignId} row={row} now={now} />

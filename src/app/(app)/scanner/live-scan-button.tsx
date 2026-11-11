@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { describeActionFailure } from "@/lib/action-failure-message";
 import { runLiveSchwabScannerAction, type RunLiveScanResult } from "../actions";
+import { primaryButtonClass } from "@/components/ui";
 
 type LiveScanButtonState =
   | { status: "idle" }
@@ -94,7 +95,7 @@ export function LiveScanButton() {
         disabled={pending}
         aria-describedby="live-scan-status"
         data-testid="run-live-scan-button"
-        className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-sky-400/40 bg-sky-400/10 px-3 text-sm font-medium text-sky-100 transition hover:border-sky-300 hover:bg-sky-400/15 disabled:cursor-wait disabled:opacity-75"
+        className={`${primaryButtonClass} disabled:cursor-wait`}
       >
         <RefreshCw className={`size-3.5 ${pending ? "motion-safe:animate-spin" : ""}`} aria-hidden />
         {pending ? "Scanning…" : "Run Live Scan"}

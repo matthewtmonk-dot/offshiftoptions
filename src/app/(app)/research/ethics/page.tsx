@@ -39,7 +39,7 @@ function Section({ title, items, selected }: { title: string; items: EthicsSumma
   if (items.length === 0) return null;
   return (
     <section className="space-y-1.5">
-      <h2 className="text-xs font-semibold uppercase tracking-normal text-zinc-500">
+      <h2 className="text-xs font-semibold text-zinc-500">
         {title} ({items.length})
       </h2>
       <ul className="space-y-1.5">
@@ -105,7 +105,7 @@ export default async function EthicsPage({ searchParams }: { searchParams: Promi
                   {detail.summary.recheckNeeded ? <p className="text-amber-300">{detail.summary.recheckReason}</p> : null}
 
                   <div>
-                    <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Categories</h3>
+                    <h3 className="text-xs font-semibold text-zinc-500">Categories</h3>
                     <ul className="mt-1 space-y-1.5">
                       {detail.summary.assessments.map((a) => (
                         <li key={a.category} className="rounded border border-zinc-800 px-2 py-1.5">
@@ -124,7 +124,7 @@ export default async function EthicsPage({ searchParams }: { searchParams: Promi
 
                   {detail.evidence.length > 0 ? (
                     <div>
-                      <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Sources</h3>
+                      <h3 className="text-xs font-semibold text-zinc-500">Sources</h3>
                       <ul className="mt-1 space-y-1 text-xs">
                         {detail.evidence.map((item, index) => (
                           <li key={`${item.sourceUrl}-${index}`} className="text-zinc-400">
@@ -140,7 +140,7 @@ export default async function EthicsPage({ searchParams }: { searchParams: Promi
                   ) : null}
 
                   <div>
-                    <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-500">Your decision</h3>
+                    <h3 className="text-xs font-semibold text-zinc-500">Your decision</h3>
                     {detail.summary.decisionNote ? <p className="mt-1 text-xs text-zinc-400">Note: {detail.summary.decisionNote}</p> : null}
                     <div className="mt-1">
                       <EthicsDecisionForm ticker={detail.summary.ticker} current={detail.summary.decision} />

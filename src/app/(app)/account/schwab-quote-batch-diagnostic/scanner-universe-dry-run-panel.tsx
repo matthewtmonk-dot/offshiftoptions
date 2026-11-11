@@ -103,7 +103,7 @@ function DryRunResult({ result, onRetry }: { result: ScannerUniverseDryRunAction
 function Datum({ label, value }: { label: string; value: number }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-normal text-zinc-500">{label}</dt>
+      <dt className="text-xs text-zinc-500">{label}</dt>
       <dd className="mt-1 font-medium text-zinc-100">{value.toLocaleString()}</dd>
     </div>
   );

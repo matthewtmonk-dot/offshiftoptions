@@ -23,6 +23,9 @@ import { getNextLstCheckpointLabel } from "@/domain/finance/lstCheckpoint";
 import { underlyingPositionReviewResult } from "@/domain/finance/positionReviewAssessment";
 import { attachPositionAssessmentDisplays, sortPositionToReviewDisplayRows } from "@/domain/finance/positionReviewRows";
 import { getPositionEarningsNotes } from "@/lib/position-earnings";
+import { dashboardSyncNotice } from "@/lib/dashboard-sync-notice";
+import { describeScheduledCaptureStatus, getLatestScheduledCaptureStatusForUser, type LatestScheduledCaptureStatus } from "@/lib/scheduled-capture";
+import { getScannerInsightHoldBacksForUser } from "@/lib/scanner-insight-holdbacks";
 import {
   accountValueCard,
   activeSettlementBreakdown,
@@ -51,14 +54,21 @@ export default async function DashboardPage() {
 
   // Fees Schwab didn't report (or this code couldn't parse) must never silently present as a
   // confirmed $0 in a Trading P/L figure - see getCampaignIdsWithUnknownFees.
-  const [unknownFeeCampaignIds, schwabConnection, unreadChatCount, neverTradeTickers] = await Promise.all([
+  const [unknownFeeCampaignIds, schwabConnection, unreadChatCount, neverTradeTickers, captureStatus] = await Promise.all([
     getCampaignIdsWithUnknownFees(data.completedCampaigns.map((campaign) => campaign.id)),
     // Read-only: the same persisted BrokerConnection.lastAccountSyncAt the Tracker's "Your
     // brokerage last synced" already shows (see positions/page.tsx) - never triggers a sync.
     getSchwabConnectionSummaryForUser(user.id),
     getUnreadChatCount(user.id),
     getNeverTradeTickersForUser(user.id),
+    // Read-only: the same latest-capture row the Account page shows. A failure here must never take the Dashboard down.
+    getLatestScheduledCaptureStatusForUser(user.id).catch((): LatestScheduledCaptureStatus => ({ known: false })),
   ]);
+  const syncNotice = dashboardSyncNotice({
+    capture: captureStatus.known ? { ...describeScheduledCaptureStatus(captureStatus), at: captureStatus.at } : null,
+    lastAccountSyncAt: schwabConnection ? (schwabConnection.lastAccountSyncAt ? new Date(schwabConnection.lastAccountSyncAt) : null) : undefined,
+    now: asOf,
+  });
 
   const completedPLByAccount = new Map<string, number>();
   const completedForPerformance = data.completedCampaigns.map((campaign) => {
@@ -143,9 +153,11 @@ export default async function DashboardPage() {
   const reviewAccounts = data.ownAccounts.map((account) => ({ id: account.id, userId: account.userId, externalAccountId: account.externalAccountId, source: account.source }));
   // "Credit kept" is read-only enrichment from already-stored broker/mark data (no Schwab call) and
   // runs alongside the assessment resolution; it never feeds status, priority, or attention logic.
-  const [resolvedDisplays, creditKeptByCampaignId] = await Promise.all([
+  const [resolvedDisplays, creditKeptByCampaignId, insightHoldBacks] = await Promise.all([
     allReviewRows.length === 0 ? Promise.resolve([]) : resolvePositionAssessmentDisplaysForUser(user.id, data.openCampaigns, reviewAccounts, rollBufferPercent, asOf, () => new Date()),
     getOpenPutCreditKeptForUser(user.id, data.openCampaigns, asOf),
+    // Why each PASS/NEAR name in the scan preview would be held back from the Scanner's picks (null = unavailable).
+    getScannerInsightHoldBacksForUser(user.id, scannerInsight.items.map((item) => item.planRow), report.currentAccountValue),
   ]);
   const displaysByCampaignId = new Map(resolvedDisplays.map((entry) => [entry.campaignId, entry.display]));
   // Earnings warnings come from the cached earnings calendar (no provider call); a failure just means no note.
@@ -174,27 +186,37 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-3">
-      {/* 1. Compact header */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-400">
-        <span>
-          <span className="font-semibold text-zinc-100">Hey {user.name}</span> -{" "}
-          <Badge tone={scannerIsLiveSchwab ? "info" : "warn"}>{scannerIsLiveSchwab ? "SCHWAB SCAN" : "DEMO SCANNER"}</Badge>{" "}
-          {/* The open-campaign exposure summary and win rate live in the cards directly below; repeating
-              them here only added noise. */}
-        </span>
-        <span className="flex flex-col items-end gap-0.5 text-right">
-          <span className="text-xs font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
+      {/* 1. Page header */}
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-1">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <h1 className="text-2xl font-semibold text-zinc-50">Hey {user.name}</h1>
+          {/* Only the exception is worth a badge: a live Schwab scan is the normal state. */}
+          {scannerIsLiveSchwab ? null : <Badge tone="warn">Demo scanner data</Badge>}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[13px] text-zinc-500">
+          <span className="font-medium text-zinc-300" title="Timing aid only - not an instruction to place a trade. Execution stays in Schwab/Thinkorswim.">
             {checkpointLabel}
           </span>
           {schwabConnection?.lastAccountSyncAt ? (
-            <span className="text-xs">
-              Brokerage synced: <EventTime value={new Date(schwabConnection.lastAccountSyncAt)} asOf={asOf} />
+            <span>
+              Brokerage synced <EventTime value={new Date(schwabConnection.lastAccountSyncAt)} asOf={asOf} />
             </span>
           ) : (
-            <span className="text-xs">Brokerage synced: never</span>
+            <span>Brokerage synced: never</span>
           )}
-        </span>
+        </div>
       </div>
+
+      {syncNotice ? (
+        <IntentPrefetchLink
+          href="/account"
+          data-testid="dashboard-sync-notice"
+          className="block rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100 transition hover:border-amber-300/60"
+        >
+          <span className="font-semibold">{syncNotice.title}</span>
+          <span className="block text-[13px] text-amber-200/90">{syncNotice.detail}</span>
+        </IntentPrefetchLink>
+      ) : null}
 
       {/* 2. Four summary cards */}
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="How am I doing?" data-testid="dashboard-summary-cards">
@@ -327,18 +349,36 @@ export default async function DashboardPage() {
           }
         >
           <div className="space-y-1.5">
-            {scannerInsight.items.map((item) => (
-              <div key={item.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2">
-                <div>
-                  <div className="text-sm font-semibold text-zinc-100">{item.ticker}</div>
-                  <div className="text-xs text-zinc-400">{item.explanation}</div>
+            {scannerInsight.items.map((item) => {
+              // null = the hold-back checks could not be read; the row then shows only the technical result.
+              const heldBack = insightHoldBacks ? (insightHoldBacks[item.ticker] ?? []) : null;
+              const isHeldBack = heldBack !== null && heldBack.length > 0;
+              return (
+                <div key={item.id} className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2" data-testid="scanner-insight-item">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-100">{item.ticker}</div>
+                      <div className="text-xs text-zinc-400">
+                        {item.readiness === "PASS" ? "Passes the scan" : "Near miss on the scan"} - {item.explanation}
+                      </div>
+                    </div>
+                    {isHeldBack ? (
+                      <Badge tone="warn">Held back</Badge>
+                    ) : (
+                      <Badge tone={item.readiness === "PASS" ? "good" : "neutral"}>{item.readiness} - {item.label}</Badge>
+                    )}
+                  </div>
+                  {isHeldBack ? (
+                    <p className="mt-1 text-xs text-amber-300" data-testid="scanner-insight-held-back">
+                      Not a pick: {heldBack.join("; ")}
+                    </p>
+                  ) : null}
                 </div>
-                <Badge tone={item.readiness === "PASS" ? "good" : "neutral"}>{item.readiness} - {item.label}</Badge>
-              </div>
-            ))}
+              );
+            })}
             {scannerInsight.hasRun ? (
               <p className="text-xs text-zinc-500" data-testid="dashboard-scan-time">
-                Scan run <EventTime value={scannerInsight.runAt!} asOf={asOf} />. Saved results - check Scanner for current readiness.
+                Scan run <EventTime value={scannerInsight.runAt!} asOf={asOf} />. Saved results; hold-backs use the default limits - the Scanner has the final picks.
               </p>
             ) : (
               <p className="text-xs text-zinc-500">Scanner run: never</p>
@@ -410,16 +450,16 @@ function SummaryCard({
   const toneClass = tone === undefined ? "text-zinc-50" : tone > 0 ? "text-emerald-300" : tone < 0 ? "text-red-300" : "text-zinc-50";
   const accentClass = tone === undefined || tone === 0 ? "bg-zinc-700" : tone > 0 ? "bg-emerald-400" : "bg-red-400";
   return (
-    <IntentPrefetchLink href={href} className="group relative block overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400/50 hover:bg-zinc-900/80">
+    <IntentPrefetchLink href={href} className="group relative block overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-4 shadow-[0_1px_2px_rgba(16,24,40,0.05)] transition hover:border-zinc-600">
       <span aria-hidden className={`absolute inset-x-0 top-0 h-0.5 ${accentClass}`} />
-      <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+      <div className="flex items-center justify-between gap-2 text-[13px] font-medium text-zinc-500">
         <span className="inline-flex items-center gap-0.5">
           {label}
           {help ? <InfoTip label={label} align="start">{help}</InfoTip> : null}
         </span>
-        <Icon aria-hidden size={15} className="text-zinc-600 transition group-hover:text-sky-300" />
+        <Icon aria-hidden size={15} className="text-zinc-600 transition group-hover:text-zinc-300" />
       </div>
-      <div className={`mt-1.5 text-[28px] font-bold leading-tight tabular-nums ${toneClass}`}>{value}</div>
+      <div className={`mt-1 text-[28px] font-semibold leading-tight tracking-tight tabular-nums ${toneClass}`}>{value}</div>
       {detail ? <div className="mt-1 text-[13px] text-zinc-400">{detail}</div> : null}
       {reason ? <div className="mt-1 text-[13px] text-amber-300">{reason}</div> : null}
       {footer ? <div className="mt-1.5 border-t border-zinc-800 pt-1.5">{footer}</div> : null}
