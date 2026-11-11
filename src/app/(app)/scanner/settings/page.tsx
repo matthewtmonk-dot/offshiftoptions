@@ -13,7 +13,9 @@ import { DEFAULT_ROLL_BUFFER_PERCENT } from "@/domain/finance/rollStatus";
 import { requireCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { ensureMyLstScannerProfileForUser, MAX_ROLL_BUFFER_PERCENT, MIN_ROLL_BUFFER_PERCENT } from "@/lib/workflows";
-import { resetScannerSettingsAction, saveRollBufferAction, saveScannerSettingsAction } from "../../actions";
+import { PLAN_LIMIT_FIELDS } from "@/domain/portfolio/portfolioPlan";
+import { getPlanLimitsForUser } from "@/lib/plan-limits";
+import { resetScannerSettingsAction, savePlanLimitsAction, saveRollBufferAction, saveScannerSettingsAction } from "../../actions";
 import { SettingsActionForm, SettingsStatusBanner, SettingsStatusProvider } from "./settings-action-form";
 
 export const dynamic = "force-dynamic";
@@ -35,6 +37,7 @@ export default async function ScannerSettingsPage({
     select: { rollBufferPercent: true },
   });
   const rollBufferPercent = Number(settings?.rollBufferPercent ?? DEFAULT_ROLL_BUFFER_PERCENT);
+  const planLimits = await getPlanLimitsForUser(user.id);
   // Changes whenever the saved settings do, so the (uncontrolled) fields below remount with the new values.
   const revision = profile.updatedAt.getTime() + Math.round(rollBufferPercent * 1000);
   const rulesByKey = new Map(rules.map((rule) => [rule.key, rule]));
@@ -122,6 +125,48 @@ export default async function ScannerSettingsPage({
               Controls the amber &quot;Near Strike&quot; zone on your open cash-secured puts (Dashboard and Tracker).
               Yours alone - your buddy can set a different value.
             </p>
+          </div>
+        </Panel>
+      </SettingsActionForm>
+
+      <SettingsActionForm action={savePlanLimitsAction} revision={revision + PLAN_LIMIT_FIELDS.reduce((sum, field) => sum + planLimits[field.key], 0)}>
+        <Panel
+          title="Portfolio limits"
+          action={
+            <button
+              type="submit"
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 text-sm font-semibold text-on-accent hover:bg-emerald-300"
+            >
+              <Save className="size-4" aria-hidden />
+              Save limits
+            </button>
+          }
+        >
+          <div id="portfolio-limits" className="space-y-4" data-testid="portfolio-limits-form">
+            <p className="max-w-3xl text-sm text-zinc-400">
+              How much of the account the Scanner&apos;s picks may use. Saved to your account, so every device and the Dashboard use the
+              same numbers. Yours alone - your buddy sets his own. These never change which stocks pass the scan; they only decide which
+              passing trades are offered as picks.
+            </p>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {PLAN_LIMIT_FIELDS.map((field) => (
+                <label key={field.key} className="block space-y-1.5">
+                  <FieldLabel>{field.label}</FieldLabel>
+                  <input
+                    name={field.key}
+                    type="number"
+                    inputMode="decimal"
+                    step={field.integer ? 1 : 0.1}
+                    min={field.min}
+                    max={field.max}
+                    defaultValue={planLimits[field.key]}
+                    required
+                    className="min-h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50 outline-none focus:border-emerald-400"
+                  />
+                  <span className="block text-xs text-zinc-500">{field.help}</span>
+                </label>
+              ))}
+            </div>
           </div>
         </Panel>
       </SettingsActionForm>

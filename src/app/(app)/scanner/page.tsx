@@ -29,6 +29,7 @@ import { getTechnicalCacheFreshnessBreakdownForUser } from "@/lib/technical-indi
 import { ensureMyLstScannerProfileForUser, MAX_DISPLAYED_STOCK_STAGE_RESULTS } from "@/lib/workflows";
 import { getCoveredCallScanForUser } from "@/lib/covered-call-scanner";
 import { MAX_SCAN_AGE_MS } from "@/lib/scanner-option-check";
+import { getPlanLimitsForUser } from "@/lib/plan-limits";
 import { buildPlanCandidates } from "@/domain/portfolio/candidates";
 import { getClassificationForTickers, getPlanExposureForUser } from "@/lib/portfolio-plan";
 import { runDemoScannerAction } from "../actions";
@@ -262,6 +263,7 @@ export default async function ScannerPage({
   const staleQualityTickers = qualityState.configured
     ? await tickersNeedingQualityRefresh(allResults.filter((result) => isWorthALook(funnelInputOf(result))).map((result) => result.record.ticker)).catch(() => [] as string[])
     : [];
+  const planLimits = await getPlanLimitsForUser(user.id);
   const planData = await loadPlanData(user.id, allResults, ethics, qualityState.configured ? Object.fromEntries(Object.entries(qualityState.byTicker).map(([ticker, view]) => [ticker, view.gate ? { eligible: view.gate.eligible, reason: view.gate.reason } : null])) : {});
   const diagnostics = buildExclusionDiagnostics(
     allResults.map((result) => ({ ticker: result.record.ticker, summary: result.summary })),
@@ -387,7 +389,7 @@ export default async function ScannerPage({
         </div>
       ) : null}
 
-      {planData ? <PortfolioPlanPanel candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete && !tooOldToFinish ? scanIncomplete.detail : null} priceAgeNote={isLiveSchwabRun ? picksPriceAgeNote(run?.createdAt ?? null) : null} /> : null}
+      {planData ? <PortfolioPlanPanel limits={planLimits} candidates={planData.candidates} existing={planData.existing} unknownExposureCount={planData.unknownCount} scanIncompleteNote={isLiveSchwabRun && scanIncomplete && !tooOldToFinish ? scanIncomplete.detail : null} priceAgeNote={isLiveSchwabRun ? picksPriceAgeNote(run?.createdAt ?? null) : null} /> : null}
 
       <details data-testid="scan-details" className="group rounded-md border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-sm text-zinc-300">
         <summary className="cursor-pointer list-none text-zinc-400 hover:text-zinc-200">

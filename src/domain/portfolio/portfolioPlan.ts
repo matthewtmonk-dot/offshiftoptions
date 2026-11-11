@@ -28,6 +28,14 @@ export type PlanLimits = {
   warnPerSector: number;
   /** A trade whose bid-based return on collateral is below this is not eligible (a floor, not a target). */
   minReturnPct: number;
+  /**
+   * The per-company size limits (maxPerCompanyPct and maxLargePositionPct) only BLOCK a trade once the account is
+   * worth at least this many dollars; below it they are shown as a concentration warning instead. 0 = always enforce.
+   * Why: on a small account one contract is a large share of equity no matter what is picked, so a percentage cap
+   * mostly decides which stock PRICES are allowed rather than adding diversification. Cash, the total-committed
+   * ceiling, the theme limit and every company check (ethics, quality, earnings) are NOT affected by this.
+   */
+  sizeLimitsFromAccountValue: number;
 };
 
 export const DEFAULT_PLAN_LIMITS: PlanLimits = {
@@ -43,7 +51,42 @@ export const DEFAULT_PLAN_LIMITS: PlanLimits = {
   maxPerTheme: 1,
   warnPerSector: 2,
   minReturnPct: 0.6,
+  // Nov 11 2026 (Matt: "maybe those would only start to apply when I have more money"). $25,000 is the account size at
+  // which the 20% per-company limit stops excluding part of the scanner's own price range: one $50 contract is $5,000,
+  // exactly 20% of $25,000. Below that the size limits warn instead of block.
+  sizeLimitsFromAccountValue: 25_000,
 };
+
+/** The keys, in display order, with the bounds a saved value must sit inside. Shared by the settings form and the store. */
+export const PLAN_LIMIT_FIELDS: readonly { key: keyof PlanLimits; label: string; help: string; min: number; max: number; integer: boolean }[] = [
+  { key: "maxCommittedPct", label: "Most of the account in use at once (%)", help: "Put collateral plus shares held, as a share of the account. Always enforced.", min: 1, max: 100, integer: false },
+  { key: "maxPerTheme", label: "Companies per theme", help: "How many companies in the same theme (for example miners) may be held together. Always enforced.", min: 1, max: 20, integer: true },
+  { key: "warnPerSector", label: "Warn above this many per sector", help: "A warning only - never blocks a pick.", min: 1, max: 20, integer: true },
+  { key: "minReturnPct", label: "Minimum return per trade (%)", help: "A trade paying less than this on its collateral is not offered.", min: 0, max: 20, integer: false },
+  { key: "maxPerCompanyPct", label: "Normal limit per company (%)", help: "Size limit. Applies only once the account reaches the amount below.", min: 1, max: 100, integer: false },
+  { key: "maxLargePositionPct", label: "One larger position, up to (%)", help: "Size limit. One company at a time may go above the normal limit, up to this. Applies only once the account reaches the amount below.", min: 1, max: 100, integer: false },
+  { key: "sizeLimitsFromAccountValue", label: "Size limits start when the account reaches ($)", help: "Below this the two size limits above only warn. Enter 0 to always enforce them.", min: 0, max: 100_000_000, integer: true },
+];
+
+/** Fills any missing / invalid field from the defaults and clamps each value to its allowed range. Never throws. */
+export function sanitizePlanLimits(value: Partial<Record<keyof PlanLimits, unknown>> | null | undefined): PlanLimits {
+  const result = { ...DEFAULT_PLAN_LIMITS };
+  for (const field of PLAN_LIMIT_FIELDS) {
+    const raw = value?.[field.key];
+    const parsed = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(parsed)) continue;
+    const clamped = Math.min(field.max, Math.max(field.min, parsed));
+    result[field.key] = field.integer ? Math.round(clamped) : clamped;
+  }
+  return result;
+}
+
+/** True when the per-company size limits block trades for an account of this value (see sizeLimitsFromAccountValue). */
+export function sizeLimitsApply(accountValue: number | null, limits: PlanLimits): boolean {
+  return accountValue !== null && accountValue >= limits.sizeLimitsFromAccountValue;
+}
+
+const usd0 = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
 export type EthicsGateValue = "OK" | "REVIEW" | "BLOCKED" | "UNREVIEWED";
 
@@ -180,25 +223,36 @@ export function evaluatePlan(selected: PlanCandidate[], existing: ExistingExposu
   const companyPct: Record<string, number> = {};
   for (const [ticker, amount] of exposureByTicker) companyPct[ticker] = pct(amount);
   // Per-company size: everything at or under maxPerCompanyPct is fine; ONE company may sit above it, up to
-  // maxLargePositionPct. A company above the larger cap, or a second company above the normal limit, is a violation.
+  // maxLargePositionPct. A company above the larger cap, or a second company above the normal limit, is a violation -
+  // but only once the account is big enough for the size limits to apply (sizeLimitsFromAccountValue); below that the
+  // same situations are reported as concentration warnings and never block.
+  const enforceSize = sizeLimitsApply(capital.accountValue, limits);
   const largeCap = Math.max(limits.maxLargePositionPct, limits.maxPerCompanyPct);
   const overNormal = Object.entries(companyPct)
     .filter(([, value]) => value > limits.maxPerCompanyPct)
     .sort(([left], [right]) => left.localeCompare(right));
-  for (const [ticker, value] of overNormal) {
-    if (value > largeCap) {
-      violations.push({ code: "COMPANY", message: `${ticker} would be ${value.toFixed(1)}% of the account (limit ${largeCap}%${largeCap > limits.maxPerCompanyPct ? " for the one larger position" : ""}).` });
+  const selectedTickers = new Set(selected.map((candidate) => candidate.ticker));
+  if (!enforceSize) {
+    for (const [ticker, value] of overNormal) {
+      if (!selectedTickers.has(ticker)) continue;
+      warnings.push(`${ticker} would be ${value.toFixed(1)}% of the account. A 20% drop in it alone is about ${(value * 0.2).toFixed(1)}% of the account. (Per-company size limits start at ${usd0.format(limits.sizeLimitsFromAccountValue)}.)`);
     }
-  }
-  const usingLargeSlot = overNormal.filter(([, value]) => value <= largeCap);
-  if (usingLargeSlot.length > 1) {
-    violations.push({
-      code: "COMPANY",
-      message: `Only one position may be above ${limits.maxPerCompanyPct}% of the account; this would make ${usingLargeSlot.length}: ${usingLargeSlot.map(([ticker, value]) => `${ticker} (${value.toFixed(1)}%)`).join(", ")}.`,
-    });
-  } else if (usingLargeSlot.length === 1 && selected.some((candidate) => candidate.ticker === usingLargeSlot[0][0])) {
-    const [ticker, value] = usingLargeSlot[0];
-    warnings.push(`${ticker} would be ${value.toFixed(1)}% of the account - your one larger position (normal limit ${limits.maxPerCompanyPct}%). A 20% drop in it alone is about ${(value * 0.2).toFixed(1)}% of the account.`);
+  } else {
+    for (const [ticker, value] of overNormal) {
+      if (value > largeCap) {
+        violations.push({ code: "COMPANY", message: `${ticker} would be ${value.toFixed(1)}% of the account (limit ${largeCap}%${largeCap > limits.maxPerCompanyPct ? " for the one larger position" : ""}).` });
+      }
+    }
+    const usingLargeSlot = overNormal.filter(([, value]) => value <= largeCap);
+    if (usingLargeSlot.length > 1) {
+      violations.push({
+        code: "COMPANY",
+        message: `Only one position may be above ${limits.maxPerCompanyPct}% of the account; this would make ${usingLargeSlot.length}: ${usingLargeSlot.map(([ticker, value]) => `${ticker} (${value.toFixed(1)}%)`).join(", ")}.`,
+      });
+    } else if (usingLargeSlot.length === 1 && selectedTickers.has(usingLargeSlot[0][0])) {
+      const [ticker, value] = usingLargeSlot[0];
+      warnings.push(`${ticker} would be ${value.toFixed(1)}% of the account - your one larger position (normal limit ${limits.maxPerCompanyPct}%). A 20% drop in it alone is about ${(value * 0.2).toFixed(1)}% of the account.`);
+    }
   }
 
   // Distinct companies per theme / sector across what is already held and what is being added.
@@ -218,7 +272,6 @@ export function evaluatePlan(selected: PlanCandidate[], existing: ExistingExposu
     add(themeMembers, themeKeyOf(candidate), candidate.ticker);
     add(sectorMembers, candidate.sector, candidate.ticker);
   }
-  const selectedTickers = new Set(selected.map((candidate) => candidate.ticker));
   for (const [theme, members] of themeMembers) {
     if (members.size > limits.maxPerTheme && [...members].some((ticker) => selectedTickers.has(ticker))) {
       violations.push({ code: "THEME", message: `Theme "${theme}" would hold ${members.size} companies (${[...members].sort().join(", ")}); limit is ${limits.maxPerTheme}.` });

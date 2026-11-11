@@ -2,6 +2,8 @@
 
 import type { ReactionTargetType } from "@/generated/prisma/enums";
 import { revalidatePath } from "next/cache";
+import { PLAN_LIMIT_FIELDS } from "@/domain/portfolio/portfolioPlan";
+import { savePlanLimitsForUser } from "@/lib/plan-limits";
 import { redirect } from "next/navigation";
 import { getCurrentSessionTokenHash, requireCurrentUser, signOut } from "@/lib/auth";
 import { changePasswordForUser } from "@/lib/account";
@@ -415,6 +417,13 @@ export async function saveScannerSettingsAction(formData: FormData): Promise<Set
 export async function saveRollBufferAction(formData: FormData): Promise<SettingsActionResult> {
   const user = await requireCurrentUser();
   return timedSettingsAction("save roll buffer", () => runSettingsMutation("save your roll buffer", "Roll Buffer saved.", () => updateRollBufferPercentForUser(user.id, formData.get("rollBufferPercent"))));
+}
+
+export async function savePlanLimitsAction(formData: FormData): Promise<SettingsActionResult> {
+  const user = await requireCurrentUser();
+  return timedSettingsAction("save portfolio limits", () =>
+    runSettingsMutation("save your portfolio limits", "Portfolio limits saved.", () => savePlanLimitsForUser(user.id, Object.fromEntries(PLAN_LIMIT_FIELDS.map((field) => [field.key, formData.get(field.key)])))),
+  );
 }
 
 export async function resetScannerSettingsAction(): Promise<SettingsActionResult> {

@@ -1,4 +1,4 @@
-import { candidateBlockers, collateralOf, type PlanCandidate, type PlanLimits } from "./portfolioPlan";
+import { candidateBlockers, collateralOf, sizeLimitsApply, type PlanCandidate, type PlanLimits } from "./portfolioPlan";
 
 const usd0 = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
@@ -18,7 +18,8 @@ const usd0 = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD"
 export function pickHoldBackReasons(candidate: PlanCandidate, limits: PlanLimits, accountValue: number | null): string[] {
   const reasons = candidateBlockers(candidate, limits);
   const collateral = collateralOf(candidate);
-  if (collateral !== null && accountValue !== null && accountValue > 0) {
+  // Size limits only block once the account is large enough (PlanLimits.sizeLimitsFromAccountValue).
+  if (collateral !== null && accountValue !== null && accountValue > 0 && sizeLimitsApply(accountValue, limits)) {
     const pct = (collateral / accountValue) * 100;
     // One company may exceed the normal limit, up to the larger-position cap (see PlanLimits.maxLargePositionPct).
     const largeCap = Math.max(limits.maxLargePositionPct, limits.maxPerCompanyPct);
