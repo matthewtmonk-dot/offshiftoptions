@@ -6,7 +6,7 @@ Email/password authentication with database-backed sessions.
 
 - Password hashes use `bcryptjs` (cost 10), consistently across sign-up-equivalent flows (`prisma/seed.ts`, `prisma/bootstrap-production.ts`, and `src/lib/account.ts`).
 - Session cookies are HTTP-only, `SameSite=Lax`, and `Secure` when `NODE_ENV === "production"` (Next.js sets this automatically for `next build`/`next start`, which is how Hostinger runs the app).
-- Database session tokens are opaque random values in the cookie, HMAC-hashed with `LST_SESSION_SECRET` before being stored/looked up — the raw token is never persisted.
+- Database session tokens are opaque random values in the cookie, HMAC-hashed with the session secret (`OSO_SESSION_SECRET`, or the older `LST_SESSION_SECRET`) before being stored/looked up — the raw token is never persisted.
 - A new session token is always minted on successful sign-in (never reused from an existing cookie), which prevents session fixation.
 - Seeded demo/bootstrap users are Matt and Eric; their initial passwords come from `DEV_SEED_PASSWORD`. There is no public signup — this remains a private two-user application.
 - Authenticated users can change their own password at `/account` (`src/lib/account.ts`): requires the correct current password, enforces a minimum length plus letter+number complexity, hashes with the same `bcryptjs` settings, and deletes every other session for that user (keeping only the session that made the change) so a changed password immediately signs out other devices/browsers.

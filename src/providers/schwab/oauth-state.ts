@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { readSessionSecretFromEnv, resolveSessionSecret } from "@/lib/session-secret";
 
 const STATE_MAX_AGE_MS = 10 * 60 * 1000;
 export const SCHWAB_OAUTH_STATE_COOKIE = "oso_schwab_oauth_state";
@@ -98,6 +99,11 @@ function sign(unsigned: string) {
   return createHmac("sha256", getStateSecret()).update(unsigned).digest("base64url");
 }
 
+/**
+ * Same secret and same fail-closed rule as the session layer (see lib/session-secret.ts). This used to fall back to
+ * the publicly-known development secret whenever the variable was missing - including in production - which would
+ * have let anyone forge a signed OAuth state if the host ever started the app without it.
+ */
 function getStateSecret() {
-  return process.env.LST_SESSION_SECRET ?? "local-development-session-secret";
+  return resolveSessionSecret(readSessionSecretFromEnv(), process.env.NODE_ENV);
 }

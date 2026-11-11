@@ -27,6 +27,10 @@ describe("GET /api/health", () => {
     expect(body.buildTime).toBe("2026-09-19T18:00:00.000Z");
     expect(typeof body.latencyMs).toBe("number");
     expect(typeof body.checkedAt).toBe("string");
+    // Names of settings the running process cannot see - never a value.
+    expect(["ok", "missing-required"]).toContain(body.config.status);
+    expect(Array.isArray(body.config.missingRequired)).toBe(true);
+    expect(Array.isArray(body.config.missingOptional)).toBe(true);
   });
 
   it("keeps existing database-error semantics unchanged - 503, database: 'error', no raw error detail - while still including commit", async () => {
@@ -60,6 +64,8 @@ describe("GET /api/health", () => {
 
   it("never leaks secrets, env values, or a raw environment dump through the response", async () => {
     process.env.OSO_TEST_SECRET_SENTINEL = "sk-should-never-appear-here";
+    const previousSessionSecret = process.env.OSO_SESSION_SECRET;
+    process.env.OSO_SESSION_SECRET = "session-secret-value-must-not-leak";
     queryRawMock.mockResolvedValue([{ "?column?": 1 }]);
     getBuildInfoMock.mockReturnValue({ commit: "123bcc5abcde", buildTime: "2026-09-19T18:00:00.000Z" });
 
@@ -67,8 +73,14 @@ describe("GET /api/health", () => {
     const body = await response.json();
     const text = JSON.stringify(body);
 
-    expect(Object.keys(body).sort()).toEqual(["app", "buildTime", "checkedAt", "commit", "database", "latencyMs"].sort());
+    expect(Object.keys(body).sort()).toEqual(["app", "buildTime", "checkedAt", "commit", "config", "database", "latencyMs"].sort());
+    // `config` lists only the NAMES of expected settings that are missing - a configured value never appears.
+    expect(Object.keys(body.config).sort()).toEqual(["missingOptional", "missingRequired", "status"]);
+    expect(body.config.missingRequired).not.toContain("OSO_SESSION_SECRET|LST_SESSION_SECRET");
     expect(text).not.toContain("sk-should-never-appear-here");
+    expect(text).not.toContain("session-secret-value-must-not-leak");
     delete process.env.OSO_TEST_SECRET_SENTINEL;
+    if (previousSessionSecret === undefined) delete process.env.OSO_SESSION_SECRET;
+    else process.env.OSO_SESSION_SECRET = previousSessionSecret;
   });
 });
