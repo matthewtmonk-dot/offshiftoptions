@@ -16,7 +16,6 @@ import { money, percent } from "@/lib/format";
 import { classifyReadiness, honestSetupLabel, honestSetupScore, isActionableReadiness, type CriterionResult, type ScanSummary } from "@/domain/scanner/scanner";
 import { GATING_RULE_KEYS, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
 import { contractReasonCodeFromSnapshot, optionEnrichmentFromSnapshot } from "@/domain/scanner/option-enrichment";
-import type { ScannerRowForPlan } from "@/domain/portfolio/candidates";
 
 /**
  * Dashboard V2 Phase 1 - presentation-ready view model built ONLY from already-computed
@@ -379,10 +378,6 @@ export type ScannerInsightItem = {
   readiness: "PASS" | "NEAR";
   label: string;
   explanation: string;
-  /** The slice of this row the picks planner needs, read from the saved scan exactly as the Scanner page reads it
-   * (see toViewResult / loadPlanData in scanner/page.tsx). Lets the Dashboard apply the Scanner's own hold-back checks
-   * to this preview without re-deriving the row. */
-  planRow: ScannerRowForPlan;
 };
 
 export type ScannerInsightViewModel = {
@@ -434,7 +429,6 @@ export function scannerInsightViewModel(
     const contractReasonCode = contractReasonCodeFromSnapshot(result.snapshotJson);
     return {
       result,
-      summary,
       score: honestSetupScore(summary, GATING_RULE_KEYS),
       label: honestSetupLabel(summary, GATING_RULE_KEYS),
       readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment, contractReasonCode),
@@ -450,21 +444,6 @@ export function scannerInsightViewModel(
       readiness: setup.readiness as "PASS" | "NEAR",
       label: setup.label,
       explanation: `${setup.result.passedCriteria} / ${setup.result.totalCriteria} criteria`,
-      planRow: {
-        ticker: setup.result.ticker,
-        readiness: setup.readiness,
-        // Same definition as ScannerViewResult.gatingClear (scanner/page.tsx).
-        gatingClear: !setup.summary.results.some((criterion) => GATING_RULE_KEYS.has(criterion.key) && criterion.status !== "PASS"),
-        score: setup.score,
-        values: {
-          strike: snapshotNumber(setup.result.snapshotJson, "strike"),
-          expiration: snapshotString(setup.result.snapshotJson, "expiration"),
-          dte: snapshotNumber(setup.result.snapshotJson, "dte"),
-          bidProceedsPerContract: snapshotNumber(setup.result.snapshotJson, "bidProceedsPerContract"),
-          ror: snapshotNumber(setup.result.snapshotJson, "ror"),
-          earningsVerifyReason: snapshotString(setup.result.snapshotJson, "earningsVerifyReason"),
-        },
-      },
     }));
   return {
     hasRun: true,
@@ -486,21 +465,6 @@ function toDomainSummary(result: ScannerResultLike): ScanSummary {
     explanation: criterion.explanation,
   }));
   return { status: result.summaryStatus as ScanSummary["status"], passed: result.passedCriteria, total: result.totalCriteria, results };
-}
-
-/** Same reading rules as scanner/page.tsx's snapshotNumber / snapshotString (missing, empty or non-numeric = null). */
-function snapshotNumber(snapshot: unknown, key: string): number | null {
-  if (!snapshot || typeof snapshot !== "object" || !(key in snapshot)) return null;
-  const value = (snapshot as Record<string, unknown>)[key];
-  if (value === null || value === undefined || value === "") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function snapshotString(snapshot: unknown, key: string): string | null {
-  if (!snapshot || typeof snapshot !== "object" || !(key in snapshot)) return null;
-  const value = (snapshot as Record<string, unknown>)[key];
-  return value ? String(value) : null;
 }
 
 function safeParse(value: string) {

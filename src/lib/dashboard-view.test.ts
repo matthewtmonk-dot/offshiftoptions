@@ -540,42 +540,6 @@ describe("scannerInsightViewModel - personal exclusion (Astra review, P2 blockin
   });
 });
 
-describe("scannerInsightViewModel - planRow for the Scanner's hold-back checks", () => {
-  it("reads the contract values from the saved snapshot the same way the Scanner page does", () => {
-    const vm = scannerInsightViewModel({
-      createdAt: commonInstant,
-      source: "LIVE:SCHWAB",
-      results: [
-        {
-          id: "1",
-          ticker: "WORK",
-          passedCriteria: 13,
-          totalCriteria: 13,
-          summaryStatus: "PASS",
-          snapshotJson: { strike: 44, expiration: "2026-11-13", dte: 4, bidProceedsPerContract: 45, ror: 1.02, earningsVerifyReason: "" },
-          criterionResults: [],
-        },
-      ],
-    });
-    expect(vm.items[0]?.planRow).toEqual({
-      ticker: "WORK",
-      readiness: "PASS",
-      gatingClear: true,
-      score: vm.items[0]?.planRow.score,
-      values: { strike: 44, expiration: "2026-11-13", dte: 4, bidProceedsPerContract: 45, ror: 1.02, earningsVerifyReason: null },
-    });
-  });
-
-  it("leaves every contract value null when the scan saved no snapshot", () => {
-    const vm = scannerInsightViewModel({
-      createdAt: commonInstant,
-      source: "LIVE:SCHWAB",
-      results: [{ id: "1", ticker: "TOOL", passedCriteria: 5, totalCriteria: 5, summaryStatus: "PASS", snapshotJson: null, criterionResults: [] }],
-    });
-    expect(vm.items[0]?.planRow.values).toEqual({ strike: null, expiration: null, dte: null, bidProceedsPerContract: null, ror: null, earningsVerifyReason: null });
-  });
-});
-
 describe("positionsToReviewRows", () => {
   it("never invents a money field, and reports lifecycle facts only", () => {
     const rows = positionsToReviewRows([
