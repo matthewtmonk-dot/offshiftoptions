@@ -27,12 +27,30 @@ export type FunnelRowInput = {
   gatingClear: boolean;
   /** A real option contract was selected for this row (no "no contract" reason code). */
   contractSelected: boolean;
+  /** The stock screen has no FAIL and its ONLY unknown is the earnings date (a company whose next report is not in the
+   * earnings calendar yet). The server prices such a row (isStockScreenOptionCheckable in live-scan.ts), so the page must
+   * count it as waiting too - otherwise nothing ever starts the pricing and the scan reads "all priced" while most
+   * qualified names were never looked up. */
+  earningsOnlyStockUnknown: boolean;
+  /** No criterion FAILs at all and every UNKNOWN is an earnings criterion: once a person confirms the earnings date,
+   * nothing else stands between this row and a PASS. Never a PASS itself. */
+  earningsOnlyGap: boolean;
 };
+
+/** The criteria that read UNKNOWN when a stock's next earnings date is not known. */
+export const EARNINGS_CRITERION_KEYS: ReadonlySet<string> = new Set(["earningsDistance", "earningsFreeDaysAfterExpiry", "earningsExitSessions"]);
+
+/** True when nothing FAILs and the only missing evidence is the earnings date. False when nothing is missing. */
+export function isEarningsOnlyGap(criteria: readonly { key: string; status: string }[]): boolean {
+  if (criteria.some((criterion) => criterion.status === "FAIL")) return false;
+  const unknown = criteria.filter((criterion) => criterion.status === "UNKNOWN");
+  return unknown.length > 0 && unknown.every((criterion) => EARNINGS_CRITERION_KEYS.has(criterion.key));
+}
 
 export type ScannerFunnel = {
   /** Rows persisted for this run (not the whole universe - see MAX_DISPLAYED_STOCK_STAGE_RESULTS). */
   total: number;
-  /** Passed every enabled stock-level criterion with complete evidence. */
+  /** No stock-level criterion fails and the evidence is complete, except that the earnings date may be unknown. */
   stockQualified: number;
   /** Stock-qualified AND had their options priced. */
   optionChecked: number;
@@ -43,6 +61,8 @@ export type ScannerFunnel = {
   bestAvailable: number;
   /** Stock-qualified but options not priced yet - the bottleneck the "Check options" action clears. */
   awaitingOptionCheck: number;
+  /** Priced with a real contract, nothing fails, and only the earnings date is unconfirmed (see isVerifyEarningsOnly). */
+  verifyEarnings: number;
   /** Failed the stock screen (RSI/%B/price/earnings...) - never worth a user's time. */
   stockScreenFailed: number;
   /** RSI/Bollinger or other stock evidence missing - can't be judged yet. */
@@ -52,7 +72,7 @@ export type ScannerFunnel = {
 };
 
 export function isStockQualified(row: FunnelRowInput): boolean {
-  return row.stockScreen === "PASS" && !row.technicalIncomplete && row.optionEnrichment !== "NOT_ENRICHED_STOCK_FILTER" && row.optionEnrichment !== "NOT_ENRICHED_DATA_UNAVAILABLE";
+  return (row.stockScreen === "PASS" || row.earningsOnlyStockUnknown) && !row.technicalIncomplete && row.optionEnrichment !== "NOT_ENRICHED_STOCK_FILTER" && row.optionEnrichment !== "NOT_ENRICHED_DATA_UNAVAILABLE";
 }
 
 /** A qualified stock whose options have not been priced yet. */
@@ -61,12 +81,21 @@ export function isAwaitingOptionCheck(row: FunnelRowInput): boolean {
 }
 
 /**
+ * Priced, a real contract selected, nothing fails, and the only thing missing is the earnings date. Shown for review
+ * (badge VERIFY, "Verify earnings date") because a person can settle it in a minute; it is never a PASS, never a pick.
+ */
+export function isVerifyEarningsOnly(row: FunnelRowInput): boolean {
+  return row.optionEnrichment === "ENRICHED" && row.contractSelected && row.earningsOnlyGap && row.readiness !== "PASS" && row.readiness !== "NEAR";
+}
+
+/**
  * The default Scanner view: only what deserves a human's time - a PASS or NEAR with real option
- * evidence, or a stock-qualified name still waiting for its option check. Everything else (failed
- * the stock screen, data unavailable, priced but not close) stays one click away under "All".
+ * evidence, a stock-qualified name still waiting for its option check, or a priced name whose only
+ * gap is an unconfirmed earnings date. Everything else (failed the stock screen, data unavailable,
+ * priced but not close) stays one click away under "All".
  */
 export function isWorthALook(row: FunnelRowInput): boolean {
-  return row.readiness === "PASS" || row.readiness === "NEAR" || isAwaitingOptionCheck(row);
+  return row.readiness === "PASS" || row.readiness === "NEAR" || isAwaitingOptionCheck(row) || isVerifyEarningsOnly(row);
 }
 
 /**
@@ -88,6 +117,7 @@ export function buildScannerFunnel(rows: readonly FunnelRowInput[]): ScannerFunn
     pass: 0,
     near: 0,
     awaitingOptionCheck: 0,
+    verifyEarnings: 0,
     stockScreenFailed: 0,
     incompleteEvidence: 0,
     legacy: 0,
@@ -97,6 +127,7 @@ export function buildScannerFunnel(rows: readonly FunnelRowInput[]): ScannerFunn
     if (isBestAvailable(row)) funnel.bestAvailable += 1;
     if (row.readiness === "PASS") funnel.pass += 1;
     if (row.readiness === "NEAR") funnel.near += 1;
+    if (isVerifyEarningsOnly(row)) funnel.verifyEarnings += 1;
     if (isStockQualified(row)) {
       funnel.stockQualified += 1;
       if (row.optionEnrichment === "ENRICHED") funnel.optionChecked += 1;
@@ -119,6 +150,7 @@ export function describeScannerFunnel(funnel: ScannerFunnel, options: { truncate
     parts.push(`${funnel.optionChecked} had options priced`);
     parts.push(`${funnel.pass} pass, ${funnel.near} near`);
     if (funnel.awaitingOptionCheck > 0) parts.push(`${funnel.awaitingOptionCheck}${plus} still waiting for an option check`);
+    if (funnel.verifyEarnings > 0) parts.push(`${funnel.verifyEarnings} pass everything except an unconfirmed earnings date`);
     if (funnel.pass === 0 && funnel.bestAvailable > 0) parts.push(`${funnel.bestAvailable} clear every hard rule (see Best available)`);
   }
   return parts.join(" - ");
@@ -147,6 +179,8 @@ export function funnelInputOf(result: {
   stockScreen: StockScreenVerdict;
   technicalReasonCode: string | null;
   gatingClear: boolean;
+  earningsOnlyStockUnknown: boolean;
+  summary: { results: readonly { key: string; status: string }[] };
   values: { optionEnrichment: string | null; rsi: number | null; bbPercent: number | null; strike: number | null };
   contractReasonCode: string | null;
 }): FunnelRowInput {
@@ -157,6 +191,8 @@ export function funnelInputOf(result: {
     technicalIncomplete: result.technicalReasonCode !== null || (result.values.rsi === null && result.values.bbPercent === null),
     gatingClear: result.gatingClear,
     contractSelected: result.contractReasonCode === null && result.values.strike !== null,
+    earningsOnlyStockUnknown: result.earningsOnlyStockUnknown,
+    earningsOnlyGap: isEarningsOnlyGap(result.summary.results),
   };
 }
 

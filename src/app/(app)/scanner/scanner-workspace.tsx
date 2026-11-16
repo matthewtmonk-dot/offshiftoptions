@@ -1241,7 +1241,7 @@ function resultBorder(result: ScannerViewResult) {
 
 function emptyViewMessage(quick: QuickKey): string {
   return quick === "worth"
-    ? "Nothing in this scan is worth a look right now: no PASS or NEAR candidates, and no qualified stock still waiting for an option check. Try Best available (priced names that clear every hard rule but miss a preference), choose All to see everything screened, or run a fresh scan after the next data update."
+    ? "Nothing in this scan is worth a look right now: no PASS or NEAR candidates, no qualified stock still waiting for an option check, and no priced name that only needs its earnings date confirmed. Try Best available (priced names that clear every hard rule but miss a preference), choose All to see everything screened, or run a fresh scan after the next data update."
     : quick === "best"
       ? "No priced candidate clears every hard rule (price, volume, open interest, bid, spread, delta, earnings) in this scan. Use Check options to price more names, or run a fresh scan."
       : "No scanner candidates match this view.";
