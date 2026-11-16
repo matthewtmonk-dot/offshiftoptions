@@ -77,6 +77,9 @@ export type AiAdvisorCandidatePacket = {
   riskContext: {
     earningsDate: string | null;
     earningsDistance: number | null;
+    /** No announced earnings date, but SEC filings prove the next report cannot come before this day. When set,
+     * earningsDistance is a MINIMUM (days to this floor), not the distance to a known date. */
+    earningsNotBefore: string | null;
     earningsWithinHoldingPeriod: boolean | null;
     /** Machine-readable OptionEnrichmentState (live-scan.ts) - whether an option-chain request was
      * actually spent on this candidate, and if not, why not - never silently omitted. */
@@ -257,6 +260,7 @@ export function buildAiAdvisorPacket(source: AiAdvisorPacketSource): AiAdvisorCa
     riskContext: {
       earningsDate: snapshotString(snapshot, "earningsDate"),
       earningsDistance: snapshotNumber(snapshot, "earningsDistance"),
+      earningsNotBefore: snapshotString(snapshot, "earningsNotBefore"),
       earningsWithinHoldingPeriod: snapshotBoolean(snapshot, "earningsWithinHoldingPeriod"),
       optionEnrichment,
       scanNote: snapshotString(snapshot, "scanNote"),

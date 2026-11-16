@@ -9,7 +9,8 @@ import {
   round,
   wilderRsi,
 } from "@/domain/finance/calculations";
-import { earningsVerifyReason, putEarningsValues, type EarningsEvidenceState } from "@/domain/finance/earningsBuffer";
+import { earningsFloorVerifyReason, earningsVerifyReason, parseCalendarDate, putEarningsValues, type EarningsEvidenceState } from "@/domain/finance/earningsBuffer";
+import { daysUntilFloor, type EarningsFloor } from "@/domain/finance/earningsFloor";
 import { isNyseMarketDay, marketDate } from "@/domain/finance/marketCalendar";
 import type { MarketDataProvider, MarketQuote, OptionContractSnapshot, PriceCandle, QuoteFundamentals } from "@/providers/market-data/types";
 import { mapWithConcurrency } from "@/lib/concurrency";
@@ -82,7 +83,13 @@ export type LiveScanEarningsLookup =
       evidence?: EarningsEvidenceState;
     }
   /** The earnings cache has no usable single date for this ticker (none on file, or conflicting dates). */
-  | { unavailable: true; evidence: "NO_EVIDENCE" | "AMBIGUOUS" };
+  | {
+      unavailable: true;
+      evidence: "NO_EVIDENCE" | "AMBIGUOUS";
+      /** No announced date, but SEC filings prove the next report cannot come before this day (earningsFloor.ts).
+       * Only ever read for NO_EVIDENCE: conflicting announced dates are a different problem a floor cannot settle. */
+      floor?: EarningsFloor;
+    };
 
 export type LiveScanOptions = {
   provider: MarketDataProvider;
@@ -239,7 +246,7 @@ export async function evaluateLiveMarketScan({
     // exclusively from the caller-supplied cache (see LiveScanOptions.technicalCache's own doc
     // comment). Never used for a broad universe without this being true.
     stockStage = quoteEligible.map((candidate) =>
-      mergeTechnicalCacheValues(candidate, technicalCache.get(candidate.ticker), earningsEntryFor(earningsLookup, candidate.ticker)),
+      mergeTechnicalCacheValues(candidate, technicalCache.get(candidate.ticker), earningsEntryFor(earningsLookup, candidate.ticker), rules, asOf),
     );
     historyFailedTickers = new Set(); // no live fetch exists in this mode, so nothing can fail this way
   } else {
@@ -261,6 +268,8 @@ export async function evaluateLiveMarketScan({
               candles,
               candidate.verifiedFundamentals,
               earningsEntryFor(earningsLookup, candidate.ticker),
+              rules,
+              asOf,
             ),
           };
         } catch (error) {
@@ -487,16 +496,77 @@ function earningsEntryFor(lookup: Map<string, LiveScanEarningsLookup> | undefine
   return lookup.get(ticker) ?? { unavailable: true, evidence: "NO_EVIDENCE" };
 }
 
-function earningsValuesFor(entry: LiveScanEarningsLookup | undefined): {
+/** What a GTE rule requires: null when the rule is switched off; Infinity (can never be met) when the rule is not a
+ * plain numeric minimum, so a lower bound is never used to pass a rule it cannot soundly prove. */
+function ruleMinimum(rules: ScannerRule[], key: string): number | null {
+  const rule = rules.find((candidate) => candidate.key === key);
+  if (!rule) return null;
+  return rule.operator === "GTE" && typeof rule.desired === "number" && Number.isFinite(rule.desired) ? rule.desired : Number.POSITIVE_INFINITY;
+}
+
+function earningsFloorMinimums(rules: ScannerRule[]) {
+  return { freeDaysAfterExpiry: ruleMinimum(rules, "earningsFreeDaysAfterExpiry"), exitSessions: ruleMinimum(rules, "earningsExitSessions") };
+}
+
+/**
+ * Stock-level earnings values for a ticker with NO announced date but a "no earnings before" floor from its SEC
+ * filings (earningsFloor.ts). The floor is a lower bound on the real date, so "days until the floor" is a MINIMUM
+ * distance: it is recorded as earningsDistance only when it already meets the Earnings distance rule (then the real
+ * date meets it too). A floor that is too close leaves the rule UNKNOWN with a reason - never FAIL. Returns null when
+ * the floor has already passed (it then says nothing), so the caller keeps its plain "no date on file" values.
+ * earningsDate stays null on purpose: a floor is not a date and must never be displayed as one.
+ */
+export function earningsFloorValues(floor: EarningsFloor, rules: ScannerRule[], asOf: Date) {
+  const days = daysUntilFloor(floor, marketDate(asOf));
+  if (days === null || days <= 0) return null;
+  const minimum = ruleMinimum(rules, "earningsDistance");
+  const earningsDistance = minimum === null || days >= minimum ? days : null;
+  return {
+    earningsDate: null,
+    earningsDistance,
+    earningsNotBefore: floor.notBefore,
+    earningsFloorSource: floor.source,
+    earningsEvidence: "NOT_BEFORE" as const,
+    earningsVerifyReason: earningsDistance === null ? earningsFloorVerifyReason(floor.notBefore) : null,
+  };
+}
+
+/** Option-stage earnings values for one expiration judged against a floor instead of an announced date. */
+function putEarningsValuesFromFloor(
+  stockValues: Record<string, number | string | boolean | null | undefined>,
+  expiration: Date,
+  rules: ScannerRule[],
+) {
+  const notBefore = typeof stockValues.earningsNotBefore === "string" ? stockValues.earningsNotBefore : null;
+  const put = putEarningsValues({ expiration, reportDate: null, evidence: "NOT_BEFORE", notBefore, floorMinimums: earningsFloorMinimums(rules) });
+  const distanceUnresolved = numericValue(stockValues.earningsDistance) === null;
+  return {
+    ...put,
+    // Keep saying why when the buffer rules clear but the stock-level distance rule could not be proven.
+    earningsVerifyReason: put.earningsVerifyReason ?? (distanceUnresolved && notBefore ? earningsFloorVerifyReason(notBefore) : null),
+    // Known "not within the holding period" only when the floor itself falls after expiration; otherwise unknown.
+    earningsWithinHoldingPeriod: put.earningsFreeDaysAfterExpiry !== null ? false : null,
+  };
+}
+
+function earningsValuesFor(
+  entry: LiveScanEarningsLookup | undefined,
+  rules: ScannerRule[],
+  asOf: Date,
+): {
   earningsDate: string | null;
   earningsDistance: number | null;
   earningsEvidence?: EarningsEvidenceState;
   earningsVerifyReason?: string | null;
+  earningsNotBefore?: string;
+  earningsFloorSource?: string;
 } {
   if (!entry) {
     return { earningsDate: null, earningsDistance: null };
   }
   if ("unavailable" in entry) {
+    const floorValues = entry.evidence === "NO_EVIDENCE" && entry.floor ? earningsFloorValues(entry.floor, rules, asOf) : null;
+    if (floorValues) return floorValues;
     return { earningsDate: null, earningsDistance: null, earningsEvidence: entry.evidence, earningsVerifyReason: earningsVerifyReason(entry.evidence) };
   }
   // A date is never read as "safe" just because it exists: a stale date keeps feeding the distance rule as before, but the
@@ -519,6 +589,8 @@ function mergeHistoryValues(
   candles: PriceCandle[],
   verifiedFundamentals: QuoteFundamentals | null,
   earningsEntry: LiveScanEarningsLookup | undefined,
+  rules: ScannerRule[],
+  asOf: Date,
 ): StockStageCandidate {
   const closes = candles.map((candle) => candle.close);
   const rsi = wilderRsi(closes);
@@ -530,7 +602,7 @@ function mergeHistoryValues(
     candles,
     values: {
       ...quoteValues,
-      ...earningsValuesFor(earningsEntry),
+      ...earningsValuesFor(earningsEntry, rules, asOf),
       stockVolume: quoteValues.stockVolume ?? candles.at(-1)?.volume ?? null,
       rsi,
       bbPercent: bands ? bollingerPositionPercent(quote.price, bands) : null,
@@ -557,6 +629,8 @@ function mergeTechnicalCacheValues(
   candidate: QuoteStageOutcome & { ok: true },
   technical: LiveScanTechnicalLookup | undefined,
   earningsEntry: LiveScanEarningsLookup | undefined,
+  rules: ScannerRule[],
+  asOf: Date,
 ): StockStageCandidate {
   const base = {
     ticker: candidate.ticker,
@@ -564,7 +638,7 @@ function mergeTechnicalCacheValues(
     candles: [] as PriceCandle[],
     verifiedFundamentals: candidate.verifiedFundamentals,
   };
-  const earnings = earningsValuesFor(earningsEntry);
+  const earnings = earningsValuesFor(earningsEntry, rules, asOf);
   // Volume basis: the 20-day average when cached (what the rule is judged on), else today's quote volume.
   const averageVolume = cachedAverageVolume(technical);
   const volumeValues =
@@ -783,7 +857,7 @@ function bestPutValues(
     retrievedOnNonTradingDay: !isNyseMarketDay(marketDate(asOf)),
   });
 
-  const puts = options.filter((option) => option.optionType === "PUT").map((option) => candidateValues(candidate, option, asOf));
+  const puts = options.filter((option) => option.optionType === "PUT").map((option) => candidateValues(candidate, option, asOf, rules));
   if (!puts.length) {
     return blank("NO_PUT_CONTRACTS");
   }
@@ -948,7 +1022,7 @@ export function passesEnabledGate(values: Record<string, number | string | boole
  *    when that retrieval fell on a day the exchange was closed - a request made Sunday does not
  *    make Friday's last-known quote a live Sunday quote.
  */
-function candidateValues(candidate: OptionStageCandidate, option: OptionContractSnapshot, asOf: Date) {
+function candidateValues(candidate: OptionStageCandidate, option: OptionContractSnapshot, asOf: Date, rules: ScannerRule[]) {
   const dte = daysToExpiration(option.expiration, asOf);
   const premium = option.mark || midpoint(option.bid, option.ask);
   const ror = cashSecuredReturnOnRisk(option.bid, option.strike, 1);
@@ -984,6 +1058,8 @@ function candidateValues(candidate: OptionStageCandidate, option: OptionContract
       reportDate: typeof candidate.values.earningsDate === "string" ? candidate.values.earningsDate : null,
       evidence: candidate.values.earningsEvidence as EarningsEvidenceState | null | undefined,
     }),
+    // No announced date but an SEC-filing floor: judged per expiration against the floor (a lower bound), see above.
+    ...(candidate.values.earningsEvidence === "NOT_BEFORE" ? putEarningsValuesFromFloor(candidate.values, option.expiration, rules) : {}),
     optionQuotedAt: null as string | null,
     retrievedAt: asOf.toISOString(),
     retrievedOnNonTradingDay: !isNyseMarketDay(marketDate(asOf)),
@@ -1155,6 +1231,46 @@ export function enrichPersistedStockStageRow({
     optionEnrichment: "ENRICHED",
   };
   return { values: enriched, summary: evaluateCandidate(rules, enriched) };
+}
+
+type PersistedValues = Record<string, number | string | boolean | null | undefined>;
+
+/** A persisted row with no earnings date on file and no SEC-filing floor applied yet. */
+export function persistedRowLacksEarningsDate(values: PersistedValues): boolean {
+  return values.earningsEvidence === "NO_EVIDENCE" && !values.earningsDate;
+}
+
+/** A not-yet-priced persisted row's values with the floor applied (unchanged when there is no usable floor, or the
+ * row already has earnings evidence). Feed the result to enrichPersistedStockStageRow. */
+export function applyEarningsFloorToStockValues(values: PersistedValues, floor: EarningsFloor | undefined, rules: ScannerRule[], asOf: Date): PersistedValues {
+  if (!floor || !persistedRowLacksEarningsDate(values)) return values;
+  const floorValues = earningsFloorValues(floor, rules, asOf);
+  return floorValues ? { ...values, ...floorValues } : values;
+}
+
+/**
+ * An ALREADY-priced row that had no earnings date, re-judged now that a floor is known: only the earnings values
+ * change (for the contract already selected - no new chain request, no new contract selection), then the same
+ * criterion evaluation runs. Null when nothing would change (not priced, already has evidence, or the floor has passed).
+ */
+export function reevaluateEnrichedRowWithEarningsFloor({
+  values,
+  floor,
+  rules,
+  asOf,
+}: {
+  values: PersistedValues;
+  floor: EarningsFloor;
+  rules: ScannerRule[];
+  asOf: Date;
+}) {
+  if (values.optionEnrichment !== "ENRICHED" || !persistedRowLacksEarningsDate(values)) return null;
+  const floorValues = earningsFloorValues(floor, rules, asOf);
+  if (!floorValues) return null;
+  const stock: PersistedValues = { ...values, ...floorValues };
+  const expiration = parseCalendarDate(typeof values.expiration === "string" ? values.expiration : null);
+  const next: PersistedValues = expiration ? { ...stock, ...putEarningsValuesFromFloor(stock, expiration, rules) } : stock;
+  return { values: next, summary: evaluateCandidate(rules, next) };
 }
 
 /**

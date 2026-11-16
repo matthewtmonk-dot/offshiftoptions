@@ -53,6 +53,7 @@ import { resolveRelevantCampaignLegs, tickersNeedingReviewQuotes, type PositionR
 import { clearRefreshGuardsForTests, runGuarded, type RefreshDisposition } from "./refresh-guard";
 import { getTechnicalIndicatorSnapshotsForUser } from "./technical-indicator-cache";
 import { EARNINGS_SCANNER_TRUST_WINDOW_MS, getEarningsEvidenceLookup } from "./earnings-calendar-cache";
+import { getEarningsFloorLookup } from "./sec-earnings-floor";
 import { OCC_OPTIONABLE_UNIVERSE_SOURCE } from "./occ-optionable-universe-refresh";
 import {
   prepareChatImageAttachments,
@@ -2510,6 +2511,8 @@ async function ensureMissingDefaultScannerRules(profileId: string) {
 /** One entry per ticker, always: a current date, a stale date, or an explicit "unavailable" - never an omitted ticker. */
 async function buildLiveScanEarningsLookup(universe: string[]): Promise<Map<string, LiveScanEarningsLookup>> {
   const evidence = await getEarningsEvidenceLookup(universe, new Date(), EARNINGS_SCANNER_TRUST_WINDOW_MS);
+  // Already-stored SEC filing floors only (no SEC request on the scan path); empty when the table is not set up.
+  const floors = await getEarningsFloorLookup(universe, new Date());
   const today = marketDate(new Date());
   return new Map(
     universe.map((ticker): [string, LiveScanEarningsLookup] => {
@@ -2524,7 +2527,9 @@ async function buildLiveScanEarningsLookup(universe: string[]): Promise<Map<stri
           },
         ];
       }
-      return [ticker, { unavailable: true, evidence: entry?.status === "AMBIGUOUS" ? "AMBIGUOUS" : "NO_EVIDENCE" }];
+      if (entry?.status === "AMBIGUOUS") return [ticker, { unavailable: true, evidence: "AMBIGUOUS" }];
+      const floor = floors.get(ticker.trim().toUpperCase());
+      return [ticker, { unavailable: true, evidence: "NO_EVIDENCE", ...(floor ? { floor } : {}) }];
     }),
   );
 }

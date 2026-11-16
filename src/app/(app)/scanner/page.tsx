@@ -128,6 +128,11 @@ export type ScannerViewResult = {
     earningsExitSessions: number | null;
     /** Why the earnings date itself needs checking (none on file, out of date, or conflicting); null when it is current. */
     earningsVerifyReason: string | null;
+    /** No announced date, but SEC filings prove the next report cannot come before this day (YYYY-MM-DD). When set,
+     * earningsDistance and the two buffer numbers are MINIMUMS measured to this floor, not to a real date. */
+    earningsNotBefore: string | null;
+    /** Plain-language basis of the floor (which filing, which period). */
+    earningsFloorSource: string | null;
     /** No option-chain provider used here has ever supplied a verified per-quote pricing
      * timestamp (same finding as Tickets 4/5's valuationAsOf) - always null today, kept explicit
      * so its absence is machine-readable rather than silently omitted. */
@@ -500,6 +505,8 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
       earningsFreeDaysAfterExpiry: snapshotNumber(result.snapshotJson, "earningsFreeDaysAfterExpiry"),
       earningsExitSessions: snapshotNumber(result.snapshotJson, "earningsExitSessions"),
       earningsVerifyReason: snapshotString(result.snapshotJson, "earningsVerifyReason"),
+      earningsNotBefore: snapshotString(result.snapshotJson, "earningsNotBefore"),
+      earningsFloorSource: snapshotString(result.snapshotJson, "earningsFloorSource"),
       optionQuotedAt: snapshotString(result.snapshotJson, "optionQuotedAt"),
       retrievedAt: snapshotString(result.snapshotJson, "retrievedAt"),
       retrievedOnNonTradingDay: snapshotBoolean(result.snapshotJson, "retrievedOnNonTradingDay"),

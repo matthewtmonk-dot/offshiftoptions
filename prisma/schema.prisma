@@ -1791,6 +1791,19 @@ model CompanyQualitySnapshot {
   updatedAt      DateTime @updatedAt
 }
 
+/// The latest fiscal period for which a company has filed a quarterly (10-Q) or annual (10-K) report with the SEC.
+/// Shared, keyed by ticker, public data only. Used for the "no earnings before" floor (domain/finance/earningsFloor.ts).
+/// form/periodEnd/filedAt are all null when the SEC has no such report for the ticker (a fund or a foreign filer).
+model SecReportedPeriod {
+  ticker    String    @id
+  cik       String?
+  form      String?
+  periodEnd DateTime? @db.Date
+  filedAt   DateTime? @db.Date
+  fetchedAt DateTime
+  updatedAt DateTime  @updatedAt
+}
+
 /// "I've looked at this": the signed-in owner's written reason for letting a CAUTION or VERIFY company be recommended.
 /// A REJECT can never be overridden. One row per owner and ticker.
 model CompanyQualityReview {

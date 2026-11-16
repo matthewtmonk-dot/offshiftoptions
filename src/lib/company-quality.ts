@@ -118,7 +118,7 @@ export async function tickersNeedingQualityRefresh(tickers: string[], now = new 
 let tickerMap: { at: number; byTicker: Map<string, string> } | null = null;
 let lastRequestAt = 0;
 
-async function secFetchJson(url: string, userAgent: string): Promise<{ ok: true; json: unknown } | { ok: false; status: number | "TIMEOUT" | "ERROR" }> {
+export async function secFetchJson(url: string, userAgent: string): Promise<{ ok: true; json: unknown } | { ok: false; status: number | "TIMEOUT" | "ERROR" }> {
   const wait = REQUEST_SPACING_MS - (Date.now() - lastRequestAt);
   if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
   lastRequestAt = Date.now();
@@ -135,7 +135,7 @@ async function secFetchJson(url: string, userAgent: string): Promise<{ ok: true;
   }
 }
 
-async function cikFor(ticker: string, userAgent: string, now: number): Promise<string | null | "UNAVAILABLE"> {
+export async function cikFor(ticker: string, userAgent: string, now: number): Promise<string | null | "UNAVAILABLE"> {
   if (!tickerMap || now - tickerMap.at > TICKER_MAP_TTL_MS) {
     const result = await secFetchJson("https://www.sec.gov/files/company_tickers.json", userAgent);
     if (!result.ok) return "UNAVAILABLE";

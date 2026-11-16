@@ -1,9 +1,13 @@
 import "server-only";
 
+import type { EarningsFloor } from "@/domain/finance/earningsFloor";
 import {
+  applyEarningsFloorToStockValues,
   enrichPersistedStockStageRow,
   expirationWindowFor,
   isPersistedRowOptionCheckable,
+  persistedRowLacksEarningsDate,
+  reevaluateEnrichedRowWithEarningsFloor,
   weeklyHorizonFor,
 } from "@/domain/scanner/live-scan";
 import { GATING_RULE_KEYS, resultsPredateCurrentSettings, scannerRulesFromRecords } from "@/domain/scanner/profile";
@@ -12,6 +16,7 @@ import type { MarketDataProvider } from "@/providers/market-data/types";
 import { getSchwabMarketDataProviderForUser } from "./broker-connections";
 import { mapWithConcurrency } from "./concurrency";
 import { prisma } from "./prisma";
+import { ensureEarningsFloors } from "./sec-earnings-floor";
 import { ensureMyLstScannerProfileForUser } from "./workflows";
 
 /**
@@ -30,6 +35,9 @@ import { ensureMyLstScannerProfileForUser } from "./workflows";
  *    older than MAX_SCAN_AGE_MS, because the stored stock price/RSI/Bollinger come from scan time.
  *  - Bounded provider usage: at most `batchSize` chain requests per call, concurrency capped.
  *  - Read-only toward the brokerage: only option-chain market data is requested; no order/account APIs.
+ *  - Earnings floor: a row with NO announced earnings date gets its "no earnings before" floor looked up from the
+ *    company's SEC filings (sec-earnings-floor.ts; time-boxed, never blocks pricing). Rows priced earlier without one
+ *    are re-judged in place when a floor becomes available - earnings values only, no new chain request.
  */
 export const OPTION_CHECK_BATCH_SIZE = 12;
 /** Conservative: Schwab publishes no per-connection limit, and the provider has no 429 backoff. */
@@ -152,20 +160,40 @@ export async function checkMoreScannerOptionsForUser(
     return { ok: false, error: "LIVE DATA UNAVAILABLE: connect Schwab in Account settings first." };
   }
 
-  const chainRequest = { ...expirationWindowFor(weeklyHorizonFor(rules), now), contractType: "PUT" as const };
-  const fetched = await mapWithConcurrency(batch, OPTION_CHECK_CONCURRENCY, async (row) => {
-    try {
-      return { row, options: await provider.getOptionChain(row.ticker, chainRequest), ok: true as const };
-    } catch {
-      return { row, options: [], ok: false as const };
-    }
+  // Rows already priced (by the scan itself or an earlier batch) that still have no earnings date: re-judged below if
+  // a floor is now known. This batch's own rows come first so the time-boxed SEC lookup serves them first.
+  const pricedWithoutEarningsDate = (run.results as StoredRow[]).filter((row) => {
+    const values = asValues(row.snapshotJson);
+    return values.optionEnrichment === "ENRICHED" && persistedRowLacksEarningsDate(values);
   });
+  const floorTickers = [...batch.filter((row) => persistedRowLacksEarningsDate(asValues(row.snapshotJson))), ...pricedWithoutEarningsDate].map((row) => row.ticker);
 
-  const updates = fetched.flatMap((entry) => {
+  const chainRequest = { ...expirationWindowFor(weeklyHorizonFor(rules), now), contractType: "PUT" as const };
+  const [fetched, floors] = await Promise.all([
+    mapWithConcurrency(batch, OPTION_CHECK_CONCURRENCY, async (row) => {
+      try {
+        return { row, options: await provider.getOptionChain(row.ticker, chainRequest), ok: true as const };
+      } catch {
+        return { row, options: [], ok: false as const };
+      }
+    }),
+    // An optimization of the evidence only - a failed or slow SEC lookup must never stop options being priced.
+    ensureEarningsFloors(floorTickers, now).catch(() => new Map<string, EarningsFloor>()),
+  ]);
+  const floorFor = (ticker: string) => floors.get(ticker.trim().toUpperCase());
+
+  const pricedUpdates = fetched.flatMap((entry) => {
     if (!entry.ok) return [];
-    const result = enrichPersistedStockStageRow({ values: asValues(entry.row.snapshotJson), options: entry.options, rules, asOf: now });
+    const values = applyEarningsFloorToStockValues(asValues(entry.row.snapshotJson), floorFor(entry.row.ticker), rules, now);
+    const result = enrichPersistedStockStageRow({ values, options: entry.options, rules, asOf: now });
     return result ? [{ id: entry.row.id, ...result }] : [];
   });
+  const floorUpdates = pricedWithoutEarningsDate.flatMap((row) => {
+    const floor = floorFor(row.ticker);
+    const result = floor ? reevaluateEnrichedRowWithEarningsFloor({ values: asValues(row.snapshotJson), floor, rules, asOf: now }) : null;
+    return result ? [{ id: row.id, ...result }] : [];
+  });
+  const updates = [...pricedUpdates, ...floorUpdates];
 
   let newPass = 0;
   let newNear = 0;
@@ -204,9 +232,9 @@ export async function checkMoreScannerOptionsForUser(
 
   return {
     ok: true,
-    checked: updates.length,
+    checked: pricedUpdates.length,
     failedLookups: fetched.filter((entry) => !entry.ok).length,
-    remaining: awaiting.length - updates.length,
+    remaining: awaiting.length - pricedUpdates.length,
     newPass,
     newNear,
   };
