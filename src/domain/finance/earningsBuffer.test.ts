@@ -104,3 +104,43 @@ describe("parseCalendarDate", () => {
     expect(parseCalendarDate("nope")).toBeNull();
   });
 });
+
+describe("putEarningsValues with a 'no earnings before' floor (NOT_BEFORE)", () => {
+  const expiration = d("2026-10-30"); // Friday
+  const minimums = { freeDaysAfterExpiry: 3, exitSessions: 1 };
+  const withFloor = (notBefore: string | null, floorMinimums: typeof minimums | { freeDaysAfterExpiry: null; exitSessions: null } | undefined = minimums) =>
+    putEarningsValues({ expiration, reportDate: null, evidence: "NOT_BEFORE", notBefore, floorMinimums });
+
+  it("returns the minimum gap when the floor itself already satisfies both rules", () => {
+    expect(withFloor("2026-12-23")).toEqual({ earningsFreeDaysAfterExpiry: 53, earningsExitSessions: 36, earningsVerifyReason: null });
+    // Exactly at the limit: Tue Nov 3 = 3 free days, 1 session.
+    expect(withFloor("2026-11-03")).toEqual({ earningsFreeDaysAfterExpiry: 3, earningsExitSessions: 1, earningsVerifyReason: null });
+  });
+
+  it("stays unknown - never a failing number - when the floor is too close, on, or before expiration", () => {
+    for (const notBefore of ["2026-11-02", "2026-10-31", "2026-10-30", "2026-10-01"]) {
+      const result = withFloor(notBefore);
+      expect(result.earningsFreeDaysAfterExpiry).toBeNull();
+      expect(result.earningsExitSessions).toBeNull();
+      expect(result.earningsVerifyReason).toContain(notBefore);
+    }
+  });
+
+  it("never reports a floor that falls on or before expiration as clear, even with both rules switched off", () => {
+    expect(withFloor("2026-10-30", { freeDaysAfterExpiry: null, exitSessions: null }).earningsFreeDaysAfterExpiry).toBeNull();
+    expect(withFloor("2026-10-31", { freeDaysAfterExpiry: null, exitSessions: null }).earningsFreeDaysAfterExpiry).toBe(0);
+  });
+
+  it("stays unknown when the floor date, the rule minimums or the expiration are missing", () => {
+    expect(withFloor(null).earningsFreeDaysAfterExpiry).toBeNull();
+    expect(withFloor(null).earningsVerifyReason).toBeTruthy();
+    expect(withFloor("not a date").earningsFreeDaysAfterExpiry).toBeNull();
+    expect(putEarningsValues({ expiration, reportDate: null, evidence: "NOT_BEFORE", notBefore: "2026-12-23" }).earningsFreeDaysAfterExpiry).toBeNull();
+    expect(putEarningsValues({ expiration: null, reportDate: null, evidence: "NOT_BEFORE", notBefore: "2026-12-23", floorMinimums: minimums }).earningsFreeDaysAfterExpiry).toBeNull();
+  });
+
+  it("ignores a report date passed alongside a floor: a floor never borrows an unverified date", () => {
+    const result = putEarningsValues({ expiration, reportDate: "2026-12-01", evidence: "NOT_BEFORE", notBefore: "2026-10-31", floorMinimums: minimums });
+    expect(result.earningsFreeDaysAfterExpiry).toBeNull();
+  });
+});

@@ -81,8 +81,15 @@ export function evaluatePutEarningsBuffer(
   return { status: "CLEAR", message: `${freeDaysAfterExpiry + 1} days and ${exitSessions} trading session${exitSessions === 1 ? "" : "s"} after expiration.` };
 }
 
-/** How much the earnings DATE itself can be trusted (mirrors earningsEvidence.ts's status names). */
-export type EarningsEvidenceState = "SCHEDULED" | "STALE" | "AMBIGUOUS" | "NO_EVIDENCE";
+/** How much the earnings DATE itself can be trusted (mirrors earningsEvidence.ts's status names), plus NOT_BEFORE: no
+ * announced date, but the company's own SEC filings prove the next report cannot come before a known day
+ * (see earningsFloor.ts). */
+export type EarningsEvidenceState = "SCHEDULED" | "STALE" | "AMBIGUOUS" | "NO_EVIDENCE" | "NOT_BEFORE";
+
+/** Shown when a "no earnings before" floor exists but is too close to this trade to prove anything. */
+export function earningsFloorVerifyReason(notBefore: string): string {
+  return `No announced earnings date. SEC filings only rule out earnings before ${notBefore}, which is too close to clear this trade - confirm before trading.`;
+}
 
 /**
  * Why the earnings date needs to be checked by a person, or null when the cached date is current and unique.
@@ -109,7 +116,31 @@ export function putEarningsValues(input: {
   expiration: Date | null;
   reportDate: string | null;
   evidence: EarningsEvidenceState | null | undefined;
+  /** NOT_BEFORE only: the "no earnings before" floor date (YYYY-MM-DD). */
+  notBefore?: string | null;
+  /** NOT_BEFORE only: what each earnings rule requires (null = that rule is switched off). The floor is a LOWER BOUND
+   * on the real date, so its gap numbers are minimums: they are returned only when they already satisfy every enabled
+   * rule (then the real date satisfies them too). Otherwise they stay null - UNKNOWN, never a FAIL, never a guess. */
+  floorMinimums?: { freeDaysAfterExpiry: number | null; exitSessions: number | null };
 }): { earningsFreeDaysAfterExpiry: number | null; earningsExitSessions: number | null; earningsVerifyReason: string | null } {
+  if (input.evidence === "NOT_BEFORE") {
+    const floor = parseCalendarDate(input.notBefore);
+    const unresolved = {
+      earningsFreeDaysAfterExpiry: null,
+      earningsExitSessions: null,
+      earningsVerifyReason: input.notBefore ? earningsFloorVerifyReason(input.notBefore) : earningsVerifyReason("NO_EVIDENCE"),
+    };
+    if (!input.expiration || !floor || !input.floorMinimums) return unresolved;
+    const floorGap = earningsGapAfterExpiry(input.expiration, floor);
+    const { freeDaysAfterExpiry: minFreeDays, exitSessions: minSessions } = input.floorMinimums;
+    const clears =
+      floorGap.freeDaysAfterExpiry >= 0 &&
+      (minFreeDays === null || floorGap.freeDaysAfterExpiry >= minFreeDays) &&
+      (minSessions === null || floorGap.exitSessions >= minSessions);
+    return clears
+      ? { earningsFreeDaysAfterExpiry: floorGap.freeDaysAfterExpiry, earningsExitSessions: floorGap.exitSessions, earningsVerifyReason: null }
+      : unresolved;
+  }
   const verify = earningsVerifyReason(input.evidence);
   const report = parseCalendarDate(input.reportDate);
   // `evidence` omitted entirely means a legacy/demo caller that never supplied evidence: treat a present date as current.

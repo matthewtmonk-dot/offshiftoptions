@@ -16,7 +16,9 @@ const mocks = vi.hoisted(() => ({
   },
   ensureProfile: vi.fn(),
   getProvider: vi.fn(),
+  ensureFloors: vi.fn(),
 }));
+vi.mock("./sec-earnings-floor", () => ({ ensureEarningsFloors: mocks.ensureFloors }));
 vi.mock("./prisma", () => ({ prisma: mocks.db }));
 vi.mock("./workflows", () => ({ ensureMyLstScannerProfileForUser: mocks.ensureProfile }));
 vi.mock("./broker-connections", () => ({ getSchwabMarketDataProviderForUser: mocks.getProvider }));
@@ -42,18 +44,18 @@ function put(overrides: Partial<OptionContractSnapshot> = {}): OptionContractSna
 }
 
 /** A real budget-limited row from the real scan engine, shaped exactly as persisted (undefined -> null). */
-async function storedRow(ticker: string, overrides: { rsi?: number; volume?: number } = {}) {
+async function storedRow(ticker: string, overrides: { rsi?: number; volume?: number; noEarningsDate?: boolean; priced?: boolean } = {}) {
   const provider: MarketDataProvider = {
     async getQuote(symbol) { return { symbol, price: 20, volume: overrides.volume ?? 2_000_000, asOf: SCAN_TIME }; },
     async getPriceHistory() { throw new Error("n/a"); },
-    async getOptionChain() { return []; },
+    async getOptionChain() { return overrides.priced ? [put()] : []; },
     async getInstrument(symbol) { return { symbol, description: symbol, assetType: "EQUITY" }; },
     async getMarketHours() { return { isOpen: true }; },
   };
   const [row] = await evaluateLiveMarketScan({
-    provider, rules: engineRules, universe: [ticker], asOf: SCAN_TIME, maxOptionChainLookups: 0,
+    provider, rules: engineRules, universe: [ticker], asOf: SCAN_TIME, maxOptionChainLookups: overrides.priced ? 1 : 0,
     technicalCache: new Map<string, LiveScanTechnicalLookup>([[ticker, { ...ready, rsi: overrides.rsi ?? ready.rsi }]]),
-    earningsLookup: new Map([[ticker, earnings]]),
+    earningsLookup: new Map<string, LiveScanEarningsLookup>([[ticker, overrides.noEarningsDate ? { unavailable: true, evidence: "NO_EVIDENCE" } : earnings]]),
   });
   const values = { ...row.values, settingsRevisionAsOf: "2026-09-01T00:00:00.000Z" };
   return { id: `result-${ticker}`, ticker, snapshotJson: JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v ?? null])))) };
@@ -78,6 +80,7 @@ beforeEach(() => {
   mocks.db.scannerRule.findMany.mockResolvedValue(ruleRecords);
   mocks.db.scanResult.findMany.mockResolvedValue([]);
   mocks.db.$transaction.mockImplementation(async (ops: unknown[]) => ops);
+  mocks.ensureFloors.mockResolvedValue(new Map());
 });
 
 describe("checkMoreScannerOptionsForUser", () => {
@@ -208,5 +211,53 @@ describe("checkMoreScannerOptionsForUser", () => {
     expect(request.contractType).toBe("PUT");
     const days = (request.toDate.getTime() - request.fromDate.getTime()) / 86_400_000;
     expect(days).toBe(8); // default hard DTE range 3-11
+  });
+});
+
+describe("earnings floor from SEC filings during Check options", () => {
+  const FLOOR = { notBefore: "2026-12-23", source: "SEC quarterly report (10-Q) for the period ended 2026-09-30 was filed 2026-11-06." };
+  type Op = { op: string; args: { data?: { summaryStatus?: string; snapshotJson?: Record<string, unknown> }; where?: { id?: string } } };
+  const updatesOf = () => (mocks.db.$transaction.mock.calls[0][0] as Op[]).filter((op) => op.op === "update");
+
+  it("a waiting row with no announced earnings date is only VERIFY without a floor", async () => {
+    mockRun([await storedRow("AAA", { noEarningsDate: true })]);
+    const outcome = await checkMoreScannerOptionsForUser("matt-id", { provider: fakeProvider().provider, now: NOW });
+    expect(outcome).toMatchObject({ ok: true, checked: 1, newPass: 0 });
+    expect(mocks.ensureFloors).toHaveBeenCalledWith(["AAA"], NOW);
+  });
+
+  it("prices that row as a PASS when its SEC floor clears the trade", async () => {
+    mockRun([await storedRow("AAA", { noEarningsDate: true }), await storedRow("BBB")]);
+    mocks.ensureFloors.mockResolvedValue(new Map([["AAA", FLOOR]]));
+    const outcome = await checkMoreScannerOptionsForUser("matt-id", { provider: fakeProvider().provider, now: NOW });
+
+    expect(outcome).toEqual({ ok: true, checked: 2, failedLookups: 0, remaining: 0, newPass: 2, newNear: 0 });
+    expect(mocks.ensureFloors).toHaveBeenCalledWith(["AAA"], NOW); // BBB has an announced date: no SEC lookup for it
+    const aaa = updatesOf().find((op) => op.args.where?.id === "result-AAA")!.args.data!;
+    expect(aaa.summaryStatus).toBe("PASS");
+    expect(aaa.snapshotJson).toMatchObject({ earningsNotBefore: "2026-12-23", earningsEvidence: "NOT_BEFORE", earningsDate: null, earningsVerifyReason: null });
+  });
+
+  it("re-judges a row the scan already priced without an earnings date, without a new chain request for it", async () => {
+    const priced = await storedRow("OLD", { noEarningsDate: true, priced: true });
+    expect(priced.snapshotJson.optionEnrichment).toBe("ENRICHED");
+    mockRun([priced, await storedRow("AAA")]);
+    mocks.ensureFloors.mockResolvedValue(new Map([["OLD", FLOOR]]));
+    const fake = fakeProvider();
+    const outcome = await checkMoreScannerOptionsForUser("matt-id", { provider: fake.provider, now: NOW });
+
+    // "checked"/"remaining" count only newly priced rows; the re-judged row is reported through newPass.
+    expect(outcome).toEqual({ ok: true, checked: 1, failedLookups: 0, remaining: 0, newPass: 2, newNear: 0 });
+    expect(fake.getOptionChain.mock.calls.map((call) => call[0])).toEqual(["AAA"]);
+    const old = updatesOf().find((op) => op.args.where?.id === "result-OLD")!.args.data!;
+    expect(old.summaryStatus).toBe("PASS");
+    expect(old.snapshotJson).toMatchObject({ optionSymbol: priced.snapshotJson.optionSymbol, earningsNotBefore: "2026-12-23" });
+  });
+
+  it("still prices everything when the SEC lookup fails", async () => {
+    mockRun([await storedRow("AAA", { noEarningsDate: true }), await storedRow("BBB")]);
+    mocks.ensureFloors.mockRejectedValue(new Error("SEC unreachable"));
+    const outcome = await checkMoreScannerOptionsForUser("matt-id", { provider: fakeProvider().provider, now: NOW });
+    expect(outcome).toEqual({ ok: true, checked: 2, failedLookups: 0, remaining: 0, newPass: 1, newNear: 0 });
   });
 });

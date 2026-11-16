@@ -582,7 +582,8 @@ export function ScannerWorkspace({
                           {result.values.earningsDistance !== null ? `${result.values.earningsDistance}d?` : "Verify"}
                         </span>
                       ) : (
-                        coloredCell(result.values.earningsDistance, (value) => `${value}d`, ruleSeverityTone(criterionFor(result, "earningsDistance")))
+                        // "37d+" = at least 37 days: no announced date, measured to the SEC-filing floor.
+                        coloredCell(result.values.earningsDistance, (value) => (result.values.earningsNotBefore ? `${value}d+` : `${value}d`), ruleSeverityTone(criterionFor(result, "earningsDistance")))
                       )}
                     </td>
                     {activeOptionalColumns.map((column) => (
@@ -825,6 +826,10 @@ function CandidateInspector({
                       </span>
                     ) : null}
                   </>
+                ) : v.earningsNotBefore ? (
+                  <span title={v.earningsFloorSource ?? undefined} data-testid="earnings-not-before">
+                    No date announced · not before {shortCalendarDate(v.earningsNotBefore)}
+                  </span>
                 ) : (
                   dash()
                 )
@@ -852,6 +857,7 @@ function CandidateInspector({
                     className={v.earningsExitSessions < 1 || v.earningsFreeDaysAfterExpiry < 3 ? "text-amber-300" : undefined}
                     title="Earnings-free calendar days after expiration, and full trading sessions to sell assigned shares before earnings"
                   >
+                    {v.earningsNotBefore ? "At least " : ""}
                     {v.earningsFreeDaysAfterExpiry + 1}d after · {v.earningsExitSessions} {v.earningsExitSessions === 1 ? "session" : "sessions"} to exit
                   </span>
                 )
