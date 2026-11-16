@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScannerFunnel, describeScanIncomplete, describeScannerFunnel, isAwaitingOptionCheck, isBestAvailable, isStockQualified, isWorthALook, summarizeOptionOutcomes, describeOptionOutcomes, type FunnelRowInput } from "./scannerFunnel";
+import { buildScannerFunnel, describeScanIncomplete, describeScannerFunnel, funnelInputOf, isAwaitingOptionCheck, isBestAvailable, isEarningsOnlyGap, isStockQualified, isVerifyEarningsOnly, isWorthALook, summarizeOptionOutcomes, describeOptionOutcomes, type FunnelRowInput } from "./scannerFunnel";
 
 const row = (overrides: Partial<FunnelRowInput> = {}): FunnelRowInput => ({
   readiness: "FAIL",
@@ -8,6 +8,8 @@ const row = (overrides: Partial<FunnelRowInput> = {}): FunnelRowInput => ({
   technicalIncomplete: false,
   gatingClear: true,
   contractSelected: true,
+  earningsOnlyStockUnknown: false,
+  earningsOnlyGap: false,
   ...overrides,
 });
 
@@ -165,5 +167,67 @@ describe("describeScanIncomplete", () => {
   it("does not count stocks that failed the screen or have no usable data", () => {
     const funnel = buildScannerFunnel([row({ stockScreen: "FAIL", optionEnrichment: "NOT_ENRICHED_BUDGET" }), row({ optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" })]);
     expect(describeScanIncomplete(funnel)).toBeNull();
+  });
+});
+
+describe("a stock whose only unknown is its earnings date (Nov 16 empty-scan regression)", () => {
+  // Live: ~80 of 114 rows had no earnings date in the calendar. The page called them "not stock-qualified", counted 0
+  // waiting, never started pricing and said "all qualifying options priced" - while the server would have priced them.
+  const waiting = row({ readiness: "NEEDS_DATA", optionEnrichment: "NOT_ENRICHED_BUDGET", stockScreen: "UNKNOWN", earningsOnlyStockUnknown: true });
+
+  it("counts as waiting for its option check, so the page starts pricing", () => {
+    expect(isStockQualified(waiting)).toBe(true);
+    expect(isAwaitingOptionCheck(waiting)).toBe(true);
+    expect(isWorthALook(waiting)).toBe(true);
+    const funnel = buildScannerFunnel([waiting, waiting, row({ readiness: "FAIL" })]);
+    expect(funnel.awaitingOptionCheck).toBe(2);
+    expect(funnel.incompleteEvidence).toBe(0);
+    expect(describeScanIncomplete(funnel)?.headline).toBe("SCAN INCOMPLETE");
+  });
+
+  it("still does not count when another stock rule is unknown or RSI/Bollinger are missing", () => {
+    expect(isAwaitingOptionCheck(row({ readiness: "NEEDS_DATA", optionEnrichment: "NOT_ENRICHED_BUDGET", stockScreen: "UNKNOWN" }))).toBe(false);
+    expect(isAwaitingOptionCheck({ ...waiting, technicalIncomplete: true })).toBe(false);
+    expect(isAwaitingOptionCheck({ ...waiting, optionEnrichment: "NOT_ENRICHED_STOCK_FILTER" })).toBe(false);
+  });
+
+  it("once priced with nothing failing, is shown for an earnings check - never as a PASS", () => {
+    const priced = row({ readiness: "NEEDS_DATA", stockScreen: "UNKNOWN", earningsOnlyStockUnknown: true, earningsOnlyGap: true, gatingClear: false });
+    expect(isVerifyEarningsOnly(priced)).toBe(true);
+    expect(isWorthALook(priced)).toBe(true);
+    expect(isBestAvailable(priced)).toBe(false); // an unknown hard rule is never "clear"
+    const funnel = buildScannerFunnel([priced]);
+    expect(funnel.verifyEarnings).toBe(1);
+    expect(funnel.pass).toBe(0);
+    expect(describeScannerFunnel(funnel)).toContain("1 pass everything except an unconfirmed earnings date");
+  });
+
+  it("is not shown when no contract was selected or the options were never priced", () => {
+    expect(isVerifyEarningsOnly(row({ readiness: "NEEDS_DATA", earningsOnlyGap: true, contractSelected: false }))).toBe(false);
+    expect(isVerifyEarningsOnly(row({ readiness: "NEEDS_DATA", earningsOnlyGap: true, optionEnrichment: "NOT_ENRICHED_BUDGET" }))).toBe(false);
+  });
+
+  it("isEarningsOnlyGap: nothing fails and every unknown is an earnings criterion", () => {
+    const pass = { key: "ror", status: "PASS" };
+    const earnings = ["earningsDistance", "earningsFreeDaysAfterExpiry", "earningsExitSessions"].map((key) => ({ key, status: "UNKNOWN" }));
+    expect(isEarningsOnlyGap([pass, ...earnings])).toBe(true);
+    expect(isEarningsOnlyGap([pass])).toBe(false); // nothing missing: that is a PASS, not a gap
+    expect(isEarningsOnlyGap([{ key: "delta", status: "FAIL" }, ...earnings])).toBe(false);
+    expect(isEarningsOnlyGap([{ key: "optionBid", status: "UNKNOWN" }, ...earnings])).toBe(false);
+  });
+
+  it("funnelInputOf derives the earnings gap from the row's own criteria", () => {
+    const input = funnelInputOf({
+      readiness: "NEEDS_DATA",
+      stockScreen: "UNKNOWN",
+      technicalReasonCode: null,
+      gatingClear: false,
+      earningsOnlyStockUnknown: true,
+      summary: { results: [{ key: "ror", status: "PASS" }, { key: "earningsDistance", status: "UNKNOWN" }] },
+      values: { optionEnrichment: "ENRICHED", rsi: 30, bbPercent: 5, strike: 32 },
+      contractReasonCode: null,
+    });
+    expect(input.earningsOnlyGap).toBe(true);
+    expect(isVerifyEarningsOnly(input)).toBe(true);
   });
 });

@@ -15,7 +15,7 @@ import {
   type ScannerRule,
 } from "@/domain/scanner/scanner";
 import { GATING_RULE_KEYS, resultsPredateCurrentSettings, SCANNER_RULE_DEFINITIONS } from "@/domain/scanner/profile";
-import { STOCK_STAGE_RULE_KEYS } from "@/domain/scanner/live-scan";
+import { OPTION_CHECK_TOLERATED_UNKNOWN_KEYS, STOCK_STAGE_RULE_KEYS } from "@/domain/scanner/live-scan";
 import { buildScannerFunnel, describeOptionOutcomes, describeScanIncomplete, describeScannerFunnel, funnelInputOf, isWorthALook, summarizeOptionOutcomes, type StockScreenVerdict } from "@/domain/scanner/scannerFunnel";
 import { scannerTimingGuide, technicalReadyHint } from "@/domain/scanner/timingGuide";
 import type { ResearchStatus } from "@/generated/prisma/enums";
@@ -74,6 +74,9 @@ export type ScannerViewResult = {
   /** Verdict over ONLY the enabled stock-level rules (price, volume, RSI, %B, earnings...) - lets the
    * funnel tell "failed the stock screen" apart from "qualified but options not priced yet". */
   stockScreen: StockScreenVerdict;
+  /** No stock-level rule fails and the only unknown one is the earnings date - the server prices such a row, so the
+   * funnel counts it as waiting for its option check (see FunnelRowInput in scannerFunnel.ts). */
+  earningsOnlyStockUnknown: boolean;
   /** Every enabled hard (gating) rule is a definite PASS - see isBestAvailable in scannerFunnel.ts. */
   gatingClear: boolean;
   /** Why no option contract was selected for this row, if none was (see live-scan.ts). */
@@ -462,6 +465,7 @@ function toViewResult(result: ScannerResult, researchByTicker: Map<string, Resea
     scoreLabel: honestSetupLabel(summary, GATING_RULE_KEYS),
     readiness: classifyReadiness(summary, GATING_RULE_KEYS, optionEnrichment, contractReasonCode),
     stockScreen: stockScreenVerdictOf(summary),
+    earningsOnlyStockUnknown: earningsOnlyStockUnknownOf(summary),
     gatingClear: !summary.results.some((criterion) => GATING_RULE_KEYS.has(criterion.key) && criterion.status !== "PASS"),
     contractReasonCode,
     technicalReasonCode: snapshotString(result.snapshotJson, "technicalReasonCode"),
@@ -550,6 +554,15 @@ function stockScreenVerdictOf(summary: ScanSummary): StockScreenVerdict {
   if (stock.some((criterion) => criterion.status === "FAIL")) return "FAIL";
   if (stock.some((criterion) => criterion.status === "UNKNOWN")) return "UNKNOWN";
   return "PASS";
+}
+
+/** Mirrors isStockScreenOptionCheckable (live-scan.ts) over the persisted criteria: no stock-level FAIL, at least one
+ * UNKNOWN, and every UNKNOWN is one the option check tolerates (the earnings date). */
+function earningsOnlyStockUnknownOf(summary: ScanSummary): boolean {
+  const stock = summary.results.filter((criterion) => STOCK_STAGE_RULE_KEYS.has(criterion.key));
+  if (stock.some((criterion) => criterion.status === "FAIL")) return false;
+  const unknown = stock.filter((criterion) => criterion.status === "UNKNOWN");
+  return unknown.length > 0 && unknown.every((criterion) => OPTION_CHECK_TOLERATED_UNKNOWN_KEYS.has(criterion.key));
 }
 
 function toDomainSummary(result: ScannerResult): ScanSummary {

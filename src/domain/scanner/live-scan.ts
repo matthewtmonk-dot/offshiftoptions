@@ -1098,7 +1098,7 @@ function persistedStockValues(values: Record<string, number | string | boolean |
  * (an ETF, or a stock the 25-request/day earnings cache has not reached yet) is the single most
  * common UNKNOWN on a broad scan. Pricing such a row is still honest: the row's own earnings
  * criteria stay UNKNOWN, so it can only ever land as VERIFY - never PASS - until the date is known. */
-const OPTION_CHECK_TOLERATED_UNKNOWN_KEYS = new Set(["earningsDistance"]);
+export const OPTION_CHECK_TOLERATED_UNKNOWN_KEYS: ReadonlySet<string> = new Set(["earningsDistance"]);
 
 /** Whether a stock-stage screen is good enough to spend an option-chain request on: no enabled
  * stock rule FAILs, and every UNKNOWN is one of OPTION_CHECK_TOLERATED_UNKNOWN_KEYS. Matches the
